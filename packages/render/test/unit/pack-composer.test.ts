@@ -109,8 +109,24 @@ describe("Fable §7.3 budget buckets", () => {
 
 describe("stable-prefix composition", () => {
   test("stops at the first non-fitting item, so a larger bucket extends rather than skips", () => {
-    const small = composePack(input());
-    const larger = composePack(input({ requested_max_tokens: 1_500 }));
+    const candidates = [
+      candidate("S-1", 0, 300),
+      candidate("PD-1", 1, 450, {
+        kind: "protocol-digest",
+        scope: "system",
+        untrusted: false,
+      }),
+      candidate("SC-1", 2, 100, { kind: "standing-context" }),
+      candidate("C-2", 10, 80),
+      candidate("C-1", 10, 80),
+      candidate("W-fellow-1", 11, 60, {
+        kind: "workshop-note",
+        scope: "workshop",
+        requires: ["workshop:read"],
+      }),
+    ];
+    const small = composePack(input({ candidates }));
+    const larger = composePack(input({ requested_max_tokens: 1_500, candidates }));
 
     expect(small.items.map((item) => item.id)).toEqual(["S-1"]);
     expect(larger.items.map((item) => item.id)).toEqual([
@@ -588,6 +604,9 @@ describe("hostile and malformed composer inputs", () => {
     expect(semanticJsonFace.budget_tokens).toBe(composed.budget_tokens);
     expect(semanticJsonFace.tokens_estimate).toBe(composed.tokens_estimate);
     expect(semanticJsonFace.items[0]?.tokens).toBe(composed.items[0]?.tokens);
+    expect(composed.items[0]?.tokens).toBeGreaterThanOrEqual(
+      Math.ceil(new TextEncoder().encode(JSON.stringify(semanticJsonFace.items[0])).length / 4),
+    );
     expect(faces.md.body).toContain(`session=${composed.session}`);
     expect(faces.md.body).toContain(`budget_tokens=${composed.budget_tokens}`);
     expect(faces.md.body).toContain(`tokens_estimate=${composed.tokens_estimate}`);
@@ -598,6 +617,34 @@ describe("hostile and malformed composer inputs", () => {
       `data-tokens-estimate="${composed.tokens_estimate}"`,
     );
     expect(faces["html-fragment"].body).toContain(`data-tokens="${composed.items[0]?.tokens}"`);
+    expect(composed.tokens_estimate).toBeGreaterThanOrEqual(
+      composed.items.reduce((total, item) => total + item.tokens, 0),
+    );
+    expect(composed.tokens_estimate).toBeGreaterThanOrEqual(Math.ceil(faces.json.bytes / 4));
+  });
+
+  test("accounts for declared selector omissions in deterministic face budgeting", () => {
+    const composed = composePack(
+      input({
+        requested_max_tokens: 1_500,
+        candidates: [candidate("S-1", 0, 100)],
+        omitted: [
+          { reason: "profile_section_not_composed", detail: "rubric" },
+          { reason: "profile_excludes_workshop", detail: "workshop-heads" },
+        ],
+      }),
+    );
+    const face = renderAllFaces(composedPackToProjection(composed)).json;
+
+    expect(composed.omitted).toEqual([
+      { reason: "profile_excludes_workshop", detail: "workshop-heads" },
+      { reason: "profile_section_not_composed", detail: "rubric" },
+    ]);
+    expect(composed.tokens_estimate).toBeGreaterThanOrEqual(
+      composed.items.reduce((total, item) => total + item.tokens, 0),
+    );
+    expect(composed.tokens_estimate).toBeGreaterThanOrEqual(Math.ceil(face.bytes / 4));
+    expect(composed.tokens_estimate).toBeLessThanOrEqual(composed.budget_tokens);
   });
 
   test("the renderer refuses partial or dishonest pack-accounting metadata", () => {
@@ -649,13 +696,13 @@ describe("hostile and malformed composer inputs", () => {
     if (item === undefined) throw new Error("expected the bounded item to be selected");
     expect(item.tokens).toBeGreaterThan(1);
     expect(item.tokens).toBeGreaterThanOrEqual(
-      new TextEncoder().encode(JSON.stringify(item)).length,
+      Math.ceil(new TextEncoder().encode(JSON.stringify(item)).length / 4),
     );
     expect(pack.tokens_estimate).toBeLessThanOrEqual(pack.budget_tokens);
   });
 
   test("a multibyte Unicode body labeled one token cannot mint an over-budget pack", () => {
-    const hostileBody = "\u{1f4a5}".repeat(300);
+    const hostileBody = "\u{1f4a5}".repeat(1_000);
     const pack = composePack(
       input({
         candidates: [candidate("C-unicode", 0, 1, { body: hostileBody })],
@@ -685,7 +732,7 @@ describe("hostile and malformed composer inputs", () => {
     expect(
       errorCode(() =>
         composePack(
-          input({ candidates: [], action_candidates: [], degraded: ["x".repeat(1_000)] }),
+          input({ candidates: [], action_candidates: [], degraded: ["x".repeat(4_000)] }),
         ),
       ),
     ).toBe("MANDATORY_OVERHEAD_EXCEEDS_BUDGET");

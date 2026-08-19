@@ -1,4 +1,4 @@
-import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
+import type { Ai, D1Database, R2Bucket } from "@cloudflare/workers-types";
 import type { KraterOutboxNamespace } from "./krater/outbox-do";
 
 /**
@@ -58,6 +58,20 @@ export interface Env {
    * stack build; absent or untrusted disables enrollment with a typed 503.
    */
   AGORA_ORIGIN?: string;
+  /**
+   * Workers AI binding for the S-4 staging screening surface
+   * (asimposiumorg-xeg). Optional in the topology: only staging declares it,
+   * and `POST /internal/screen` fails closed with a typed 503 wherever it is
+   * absent rather than falling back to another classifier.
+   */
+  AI?: Ai;
+  /**
+   * Bearer token gating `POST /internal/screen` (wrangler secret, staging
+   * only). Absent or shorter than the runner's own minimum disables the
+   * screening surface with a typed 503; a wrong token is a flat 401 that
+   * teaches nothing about the expected value.
+   */
+  S4_SCREENING_BEARER?: string;
 }
 
 export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "KRATER_OUTBOX"] as const;

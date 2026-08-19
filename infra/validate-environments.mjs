@@ -266,11 +266,13 @@ const ENVIRONMENT_KEYS = [
   "r2",
   "durable_objects",
   "outbox",
+  "ai",
   "keys",
 ];
 const D1_KEYS = ["binding", "database_name", "database_id"];
 const R2_KEYS = ["binding", "role", "bucket_name", "custom_domain"];
 const DURABLE_OBJECT_KEYS = ["binding", "class_name", "script_namespace", "storage"];
+const AI_KEYS = ["binding"];
 const OUTBOX_KEYS = ["binding", "class_name", "storage"];
 /**
  * Durable Object storage backends Cloudflare accepts in an `[exports.<class>]`
@@ -640,6 +642,23 @@ function validateOutbox(outbox, source) {
   };
 }
 
+/**
+ * The optional Workers AI binding (S-4 staging screening, asimposiumorg-xeg).
+ *
+ * Unlike the required roster, an environment may omit this table entirely: the
+ * route it powers fails closed with a typed 503 when the binding is absent, so
+ * a local dev topology without a Workers AI account must still validate. When
+ * declared, the table carries exactly a binding name — there is nothing
+ * environment-specific to configure, and a second configurable knob would be a
+ * place for environments to silently diverge.
+ */
+function validateAi(ai, source) {
+  assertExactKeys(ai, AI_KEYS, source);
+  return {
+    binding: requireString(ai, "binding", source, BINDING_NAME, "an uppercase binding name"),
+  };
+}
+
 function validateKeys(keys, name, source, registry, isPreview, mayHoldProductionKeys) {
   assertExactKeys(keys, KEY_KEYS, source);
   const currentKid = requireString(keys, "current_kid", source, KID, "a lowercase key id");
@@ -977,6 +996,10 @@ export function validateEnvironments(
       registry,
     );
     const outbox = validateOutbox(requireRecord(entry, "outbox", source), `${source}.outbox`);
+    const ai =
+      entry.ai === undefined
+        ? undefined
+        : validateAi(requireRecord(entry, "ai", source), `${source}.ai`);
     const keys = validateKeys(
       requireRecord(entry, "keys", source),
       name,
@@ -1029,8 +1052,27 @@ export function validateEnvironments(
       r2,
       durable_objects: durableObjects,
       outbox,
+      ai,
       keys,
     };
+  }
+
+  // The optional AI binding is outside the required roster, but the binding
+  // NAME parity rule still applies to every environment that declares it: the
+  // Worker's code path reads exactly one binding name, so two declaring
+  // environments with two names would be the same divergence the required
+  // roster exists to prevent.
+  {
+    const declaring = Object.entries(environments).filter(([, e]) => e.ai !== undefined);
+    const referenceBinding = declaring[0]?.[1].ai?.binding;
+    for (const [name, environment] of declaring) {
+      if (environment.ai.binding !== referenceBinding) {
+        fail(
+          "BINDING_PARITY_MISMATCH",
+          `${configWorkspacePath} [env.${name}] binds AI as ${environment.ai.binding}, but ${declaring[0][0]} binds it as ${referenceBinding}; binding names must match.`,
+        );
+      }
+    }
   }
 
   // Deferral is only honest if it agrees with what the Worker exports today.
@@ -1159,6 +1201,7 @@ export function validateEnvironments(
           durable_objects: environment.durable_objects,
           durable_object_binding: environment.durable_objects.binding,
           outbox: environment.outbox,
+          ai: environment.ai ?? null,
           key_ids: [environment.keys.current_kid, environment.keys.previous_kid].filter(Boolean),
           service_envelope_key_ids: [
             environment.keys.service_envelope_current_kid,

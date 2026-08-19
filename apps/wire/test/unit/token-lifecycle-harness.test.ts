@@ -407,7 +407,7 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain('[[ "$1" == "--self-test" ]]');
   expect(script).toContain("source_closure_manifest()");
   expect(script).toContain('"scripts/e2e-token-lifecycle.sh"');
-  expect(script).toContain("migration closure is not exactly 0001 through 0016");
+  expect(script).toContain("migration closure is not exactly 0001 through 0020");
   expect(script).toContain('"wrangler_started\\":false');
   expect(script).toContain("assert_migration_journal || exit 1");
   expect(script).toContain("assert_source_closure_unchanged || exit 1");
@@ -467,7 +467,9 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("TOKEN_LIFECYCLE_BARRIER_CAPABILITY");
   expect(script).toContain('"deterministic_barrier":true');
   expect(script).toContain("panic-leaves-no-active-minted-credential");
-  expect(script).toContain("W4_FELLOW_MUTATION_NOT_IMPLEMENTED");
+  expect(script).toContain("real_workerd_d1_session_open_workshop_promote_close_same_key_races");
+  expect(script).toContain("revoked_credential_refused_before_effectful_session_write");
+  expect(script).toContain('"assertion":"revoke_vs_effectful_domain_write","status":"pass"');
   expect(script.indexOf("if (( SELF_TEST == 1 ))")).toBeLessThan(
     script.indexOf(`[[ -x "\${WRANGLER}" ]]`),
   );
@@ -477,6 +479,9 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(config).toContain("workers_dev = false");
   const localWorker = readFileSync(LOCAL_WORKER, "utf8");
   expect(localWorker).toContain("await barrier.awaitRevoke()");
+  expect(localWorker).toContain("await sessionReplayBarrier.awaitBatch(scope)");
+  expect(localWorker).toContain("`${CONTROL_" + "PREFIX}session-replay/`");
+  expect(localWorker).toContain("rawStatementByWrapper");
   expect(localWorker).toContain('const CONTROL_PREFIX = "/__token-lifecycle/"');
   expect(localWorker).toContain("createApp({ createEnrollmentStore: barrierStore })");
   expect(readFileSync(PRODUCTION_CONFIG, "utf8")).not.toContain("TOKEN_LIFECYCLE_LOCAL_HARNESS");
@@ -691,7 +696,7 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   const authorizationRecord = records.find((record) => record.record === "authorization-decision");
   expect(authorizationRecord).toBeDefined();
   expect(authorizationRecord?.assertion).toBe(
-    "central_policy_post_revoke_refusal_no_mounted_effectful_route",
+    "central_policy_post_revoke_refusal_matches_mounted_effectful_route",
   );
   expect(authorizationRecord?.credential_id).toMatch(/^cred-[0-9A-HJKMNP-TV-Z]{26}$/);
   expect(authorizationRecord?.fellow_id).toMatch(/^F-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -710,7 +715,15 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   expect(authorizationLatencyMs).toBeLessThanOrEqual(60_000);
   expect(authorizationRecord?.assertion_diff).toContain("operator=credential_revoked");
   expect(authorizationRecord?.assertion_diff).toContain("canary=<redacted>");
-  expect(result.stdout).toContain('"code":"W4_FELLOW_MUTATION_NOT_IMPLEMENTED"');
+  for (const scope of ["session_open", "workshop_push", "promote", "session_close"]) {
+    expect(result.stdout).toContain(
+      `"assertion":"concurrent_http_same_key_${scope}_exact_replay","deterministic_barrier":true`,
+    );
+  }
+  expect(result.stdout).toContain(
+    '"assertion":"revoked_credential_refused_before_effectful_session_write","status":"pass"',
+  );
+  expect(result.stdout).toContain('"assertion":"revoke_vs_effectful_domain_write","status":"pass"');
   expect(result.stdout).toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
 });
 
@@ -787,12 +800,11 @@ test("PLANTED: the evidence canary enters that record and must be changed by red
   expect(record).toContain("process.stdout.write(`$" + "{authorizationLine}\\n`)");
 });
 
-test("the still-blocked boundaries are declared, not quietly asserted", () => {
+test("the local proof boundary is declared without deployed or browser overclaim", () => {
   const script = readFileSync(SCRIPT, "utf8");
-  // W4 effectful writes are not implemented, so revoke-versus-write cannot be
-  // proven by HTTP here. The central policy diagnostic is labeled accordingly.
-  expect(script).toContain("W4_FELLOW_MUTATION_NOT_IMPLEMENTED");
-  expect(script).toContain("central_policy_post_revoke_refusal_no_mounted_effectful_route");
+  expect(script).toContain("revoked_credential_refused_before_effectful_session_write");
+  expect(script).toContain("central_policy_post_revoke_refusal_matches_mounted_effectful_route");
+  expect(script).not.toContain("W4_FELLOW_MUTATION_NOT_IMPLEMENTED");
   // No browser UI, no deployed D1, no alert delivery is claimed by this lane.
   for (const fabricated of ["oauth", "chromium", "playwright", "pagerduty", "alertmanager"]) {
     expect(script.toLowerCase()).not.toContain(fabricated);

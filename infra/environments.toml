@@ -158,6 +158,14 @@ binding = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
 storage = "sqlite"
 
+# S-4 staging screening (asimposiumorg-xeg). This is an OPTIONAL table, not a
+# member of policy.required_bindings: the local dev topology must keep
+# validating without a Workers AI account, and the screening route fails closed
+# with a typed 503 wherever the binding is absent. An environment that declares
+# it must use the same binding name as every other declaring environment.
+[env.staging.ai]
+binding = "AI"
+
 [env.staging.keys]
 current_kid = "staging-2026-08"
 previous_kid = "staging-2026-07"

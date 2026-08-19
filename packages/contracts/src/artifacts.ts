@@ -90,6 +90,8 @@ import {
   type NextAction,
   type PackBudget,
   type PackItem,
+  type PackNeutralization,
+  type PackNeutralizationMarker,
   type PackProfile,
   type PackResponse,
   type ProblemId,
@@ -103,6 +105,9 @@ import {
   type SessionOpenResponse,
   type SessionsContracts,
   SessionsContractsSchema,
+  type SponsorWorkshopObject,
+  type SponsorWorkshopRequest,
+  type SponsorWorkshopView,
   type WorkshopObjectId,
   type WorkshopPushRequest,
   type WorkshopPushResponse,
@@ -399,6 +404,8 @@ function generatedSessionsTypes(): string {
     "NextAction",
     "PackBudget",
     "PackItem",
+    "PackNeutralization",
+    "PackNeutralizationMarker",
     "PackProfile",
     "PackResponse",
     "ProblemId",
@@ -410,6 +417,9 @@ function generatedSessionsTypes(): string {
     "SessionIntent",
     "SessionOpenRequest",
     "SessionOpenResponse",
+    "SponsorWorkshopObject",
+    "SponsorWorkshopRequest",
+    "SponsorWorkshopView",
     "SessionsContracts",
     "WorkshopObjectId",
     "WorkshopPushRequest",
@@ -422,6 +432,8 @@ function generatedSessionsTypes(): string {
     NextAction: NextAction;
     PackBudget: PackBudget;
     PackItem: PackItem;
+    PackNeutralization: PackNeutralization;
+    PackNeutralizationMarker: PackNeutralizationMarker;
     PackProfile: PackProfile;
     PackResponse: PackResponse;
     ProblemId: ProblemId;
@@ -433,6 +445,9 @@ function generatedSessionsTypes(): string {
     SessionIntent: SessionIntent;
     SessionOpenRequest: SessionOpenRequest;
     SessionOpenResponse: SessionOpenResponse;
+    SponsorWorkshopObject: SponsorWorkshopObject;
+    SponsorWorkshopRequest: SponsorWorkshopRequest;
+    SponsorWorkshopView: SponsorWorkshopView;
     SessionsContracts: SessionsContracts;
     WorkshopObjectId: WorkshopObjectId;
     WorkshopPushRequest: WorkshopPushRequest;

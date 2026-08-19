@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# W3.7 local Fellow-token lifecycle proof (bead asimposiumorg-9p4).
+# W3.7 Fellow-token lifecycle plus W4 session replay atomicity proof
+# (beads asimposiumorg-9p4 and asimposiumorg-zdz.2).
 #
 # This starts the production Worker entrypoint through Wrangler's local workerd
 # runtime with the real D1 migration chain. It intentionally uses HTTP routes
@@ -39,6 +40,7 @@ readonly READY_DEADLINE_SECONDS=35
 readonly CLEANUP_GRACE_SECONDS=10
 readonly SCRIPT_DEADLINE=$((SECONDS + TOTAL_DEADLINE_SECONDS))
 readonly HTTP_TIMEOUT_MS=3000
+readonly SESSION_PROBLEM_ID="P-TOKENLIFECYCLE"
 readonly -a EXPECTED_MIGRATIONS=(
   "0001_krater_v0.sql"
   "0002_enrollment_g0.sql"
@@ -56,6 +58,10 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0014_sponsor_enrollment_rate_limit.sql"
   "0015_sponsor_enrollment_bootstrap_invariant.sql"
   "0016_operator_fellow_cap_override.sql"
+  "0017_sessions_workshop_cursor.sql"
+  "0018_session_write_replays.sql"
+  "0019_problem_memberships.sql"
+  "0020_session_replay_atomic_claim.sql"
 )
 
 STATE_DIR=""
@@ -142,13 +148,17 @@ source_closure_manifest() {
         "0014_sponsor_enrollment_rate_limit.sql",
         "0015_sponsor_enrollment_bootstrap_invariant.sql",
         "0016_operator_fellow_cap_override.sql",
+        "0017_sessions_workshop_cursor.sql",
+        "0018_session_write_replays.sql",
+        "0019_problem_memberships.sql",
+        "0020_session_replay_atomic_claim.sql",
       ];
       const migrationDirectory = resolve(root, "db/migrations");
       const discovered = readdirSync(migrationDirectory)
         .filter((name) => /^\d{4}_.+\.sql$/.test(name))
         .sort();
       if (JSON.stringify(discovered) !== JSON.stringify(migrations)) {
-        throw new Error("migration closure is not exactly 0001 through 0016");
+        throw new Error("migration closure is not exactly 0001 through 0020");
       }
       const extensions = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".json"];
       const fileFor = (candidate) => {
@@ -686,12 +696,41 @@ assert_migration_journal() {
       fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_MISMATCH"
       return 1
     }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0016\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0020\",\"status\":\"pass\"}"
+}
+
+seed_session_problem() {
+  local genesis now
+  genesis="$(TOKEN_LIFECYCLE_SESSION_PROBLEM_ID="${SESSION_PROBLEM_ID}" "${BUN}" --eval '
+    import { genesisChainDigest } from "./apps/wire/src/krater/krater.ts";
+    const problemId = process.env.TOKEN_LIFECYCLE_SESSION_PROBLEM_ID;
+    if (problemId === undefined) process.exit(1);
+    console.log(await genesisChainDigest(problemId));
+  ')" || {
+    fail "TOKEN_LIFECYCLE_SESSION_GENESIS_UNAVAILABLE"
+    return 1
+  }
+  [[ "${genesis}" =~ ^[a-f0-9]{64}$ ]] || {
+    fail "TOKEN_LIFECYCLE_SESSION_GENESIS_INVALID"
+    return 1
+  }
+  now="$("${BUN}" --eval 'console.log(new Date().toISOString())')"
+  [[ "${now}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]] || {
+    fail "TOKEN_LIFECYCLE_SESSION_TIME_INVALID"
+    return 1
+  }
+  "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+    --command "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}'); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at) VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}');" \
+    --json >"${SESSION_SEED_LOG}" 2>"${SESSION_SEED_ERROR_LOG}" || {
+    fail "TOKEN_LIFECYCLE_SESSION_SEED_FAILED"
+    return 1
+  }
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"real_d1_session_problem_seeded_with_genesis_head\",\"status\":\"pass\"}"
 }
 
 assert_post_stop_d1_counts() {
   "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-    --command "SELECT (SELECT COUNT(*) FROM fellow_lifecycle_events WHERE action = 'credential-revoked') AS credential_revoked_events, (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'credential-revoke') AS credential_replays" \
+    --command "SELECT (SELECT COUNT(*) FROM fellow_lifecycle_events WHERE action = 'credential-revoked') AS credential_revoked_events, (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'credential-revoke') AS credential_replays, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_rows, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}' AND closed_at IS NOT NULL) AS closed_session_rows, (SELECT COUNT(*) FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_rows, (SELECT COUNT(*) FROM session_write_replays WHERE scope IN ('session_open', 'workshop_push', 'promote', 'session_close')) AS session_replays, (SELECT COUNT(*) FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_rows, (SELECT COUNT(*) FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_projection_rows, (SELECT COUNT(*) FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_rows, (SELECT COUNT(*) FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_rows, (SELECT COUNT(*) FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_idempotency_rows, (SELECT COUNT(*) FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_rows, (SELECT COUNT(*) FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_rows, (SELECT COUNT(*) FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_rows, (SELECT public_seq FROM problems WHERE id = '${SESSION_PROBLEM_ID}') AS public_seq, (SELECT cursor FROM public_cursor WHERE singleton = 1) AS public_cursor" \
     --json >"${POST_STOP_D1_LOG}" 2>"${POST_STOP_D1_ERROR_LOG}" || {
       fail "TOKEN_LIFECYCLE_POST_STOP_D1_UNREADABLE"
       return 1
@@ -703,19 +742,38 @@ assert_post_stop_d1_counts() {
       ? payload.flatMap((entry) => Array.isArray(entry?.results) ? entry.results : [])
       : Array.isArray(payload?.results) ? payload.results : [];
     const row = rows[0];
-    if (rows.length !== 1 || row?.credential_revoked_events !== 2 || row?.credential_replays !== 2) {
+    if (
+      rows.length !== 1 ||
+      row?.credential_revoked_events !== 2 ||
+      row?.credential_replays !== 2 ||
+      row?.session_rows !== 1 ||
+      row?.closed_session_rows !== 1 ||
+      row?.workshop_rows !== 1 ||
+      row?.session_replays !== 4 ||
+      row?.claim_rows !== 1 ||
+      row?.claim_projection_rows !== 1 ||
+      row?.event_rows !== 1 ||
+      row?.event_content_rows !== 1 ||
+      row?.claim_idempotency_rows !== 1 ||
+      row?.outbox_rows !== 1 ||
+      row?.checkpoint_rows !== 1 ||
+      row?.fts_rows !== 1 ||
+      row?.public_seq !== 1 ||
+      row?.public_cursor !== 1
+    ) {
       process.exit(1);
     }
   ' || {
     fail "TOKEN_LIFECYCLE_POST_STOP_D1_COUNTS_MISMATCH"
     return 1
   }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"post_stop_d1_two_barrier_revoke_events_and_replays\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"post_stop_d1_exact_revoke_and_session_replay_side_effect_counts\",\"status\":\"pass\"}"
 }
 
 scan_retained_logs() {
   local log
   for log in "${MIGRATION_LOG}" "${MIGRATION_JOURNAL_LOG}" "${MIGRATION_JOURNAL_ERROR_LOG}" \
+    "${SESSION_SEED_LOG}" "${SESSION_SEED_ERROR_LOG}" \
     "${SERVER_LOG}" "${CLIENT_LOG}" "${CLIENT_ERROR_LOG}" "${POST_STOP_D1_LOG}" "${POST_STOP_D1_ERROR_LOG}"; do
     [[ -f "${log}" ]] || continue
     if grep -Fq -- "${LOG_CANARY_BEARER}" "${log}" || \
@@ -1131,6 +1189,8 @@ readonly PROBE_DIR
 readonly MIGRATION_LOG="${STATE_DIR}/migrations.log"
 readonly MIGRATION_JOURNAL_LOG="${STATE_DIR}/migration-journal.json"
 readonly MIGRATION_JOURNAL_ERROR_LOG="${STATE_DIR}/migration-journal.stderr"
+readonly SESSION_SEED_LOG="${STATE_DIR}/session-seed.json"
+readonly SESSION_SEED_ERROR_LOG="${STATE_DIR}/session-seed.stderr"
 readonly SERVER_LOG="${STATE_DIR}/workerd.log"
 readonly CLIENT_LOG="${STATE_DIR}/client.jsonl"
 readonly CLIENT_ERROR_LOG="${STATE_DIR}/client.stderr"
@@ -1217,6 +1277,7 @@ require_remaining
 "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
   --env-file /dev/null >"${MIGRATION_LOG}" 2>&1 || { fail "TOKEN_LIFECYCLE_MIGRATIONS_FAILED"; exit 1; }
 assert_migration_journal || exit 1
+seed_session_problem || exit 1
 
 # The nonce-bearing supervisor is the stable process-group leader. It cannot
 # launch Wrangler until the parent validates its private ready record and opens
@@ -1585,9 +1646,14 @@ import {
   EnrollmentHelloResponseSchema,
   MintEnrollmentResponseSchema,
   ProblemDocumentSchema,
+  PromoteResponseSchema,
+  type RequestedScope,
+  SessionCloseResponseSchema,
+  SessionOpenResponseSchema,
   SponsorCredentialRevokeResponseSchema,
   SponsorFellowListResponseSchema,
   SponsorPanicResponseSchema,
+  WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { REDACTED_TOKEN, redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./apps/web/lib/service-envelope.ts";
@@ -1699,6 +1765,72 @@ async function releaseRevokeBarrier(label: string): Promise<void> {
       (released.payload as Record<string, unknown>).arrivals === 2 &&
       (released.payload as Record<string, unknown>).released === true,
     `${label}-barrier-release-after-both-arrivals`,
+  );
+}
+
+type SessionReplayScope = "session_open" | "workshop_push" | "promote" | "session_close";
+
+async function sessionReplayBarrierControl(
+  method: "GET" | "POST",
+  path: "arm" | "release" | "status",
+  payload?: Record<string, unknown>,
+): Promise<{ readonly response: Response; readonly payload: unknown }> {
+  const response = await boundedFetch(`${origin}/__token-lifecycle/session-replay/${path}`, {
+    method,
+    headers: {
+      connection: "close",
+      "content-type": "application/json",
+      "x-token-lifecycle-barrier-cap": barrierCapability,
+    },
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+  });
+  return { response, payload: json(response, await response.text()) };
+}
+
+function sessionReplayBarrierPayload(
+  payload: unknown,
+  scope: SessionReplayScope,
+  arrivals: number,
+  released: boolean,
+): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    Object.keys(payload).length === 4 &&
+    (payload as Record<string, unknown>).scope === scope &&
+    (payload as Record<string, unknown>).expected === 2 &&
+    (payload as Record<string, unknown>).arrivals === arrivals &&
+    (payload as Record<string, unknown>).released === released
+  );
+}
+
+async function armSessionReplayBarrier(scope: SessionReplayScope): Promise<void> {
+  const armed = await sessionReplayBarrierControl("POST", "arm", { scope });
+  assert(armed.response.status === 200, `${scope}-session-barrier-arm`);
+  assert(
+    sessionReplayBarrierPayload(armed.payload, scope, 0, false),
+    `${scope}-session-barrier-armed-exactly-two`,
+  );
+}
+
+async function awaitBothSessionReplayArrivals(scope: SessionReplayScope): Promise<void> {
+  const deadline = Date.now() + httpTimeoutMs;
+  while (Date.now() < deadline) {
+    const status = await sessionReplayBarrierControl("GET", "status");
+    assert(status.response.status === 200, `${scope}-session-barrier-status`);
+    if (sessionReplayBarrierPayload(status.payload, scope, 2, false)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`${scope}-session-barrier-did-not-observe-both-real-d1-batches`);
+}
+
+async function releaseSessionReplayBarrier(scope: SessionReplayScope): Promise<void> {
+  const released = await sessionReplayBarrierControl("POST", "release");
+  assert(released.response.status === 200, `${scope}-session-barrier-release`);
+  assert(
+    sessionReplayBarrierPayload(released.payload, scope, 2, true),
+    `${scope}-session-barrier-release-after-both-arrivals`,
   );
 }
 
@@ -1842,6 +1974,61 @@ async function fellowPost(path: string, body: Record<string, unknown>, idempoten
   return { response, payload: json(response, text) };
 }
 
+async function sessionPost(
+  token: string,
+  path: string,
+  body: Record<string, unknown>,
+  idempotencyKey: string,
+) {
+  const response = await boundedFetch(`${origin}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      connection: "close",
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return { response, payload: json(response, text), text };
+}
+
+async function sessionReplayRace(
+  scope: SessionReplayScope,
+  token: string,
+  path: string,
+  body: Record<string, unknown>,
+  idempotencyKey: string,
+) {
+  await armSessionReplayBarrier(scope);
+  const requests = Promise.all([
+    sessionPost(token, path, body, idempotencyKey),
+    sessionPost(token, path, body, idempotencyKey),
+  ]);
+  await awaitBothSessionReplayArrivals(scope);
+  await releaseSessionReplayBarrier(scope);
+  const results = await requests;
+  const statuses = results.map((result) => result.response.status).sort((left, right) => left - right);
+  assert(
+    statuses.length === 2 && statuses[0] === 200 && statuses[1] === 201,
+    `${scope}-one-commit-one-replay`,
+  );
+  assert(results[0]?.text === results[1]?.text, `${scope}-exact-response-replay`);
+  const committed = results.find((result) => result.response.status === 201);
+  assert(committed !== undefined, `${scope}-committed-response-present`);
+  process.stdout.write(
+    `${JSON.stringify({
+      suite: "token-lifecycle-local",
+      assertion: `concurrent_http_same_key_${scope}_exact_replay`,
+      deterministic_barrier: true,
+      store_gate: "immediately_before_real_d1_batch",
+      status: "pass",
+    })}\n`,
+  );
+  return committed.payload;
+}
+
 function expectProblem(result: { response: Response; payload: unknown }, status: number, code: string) {
   assert(result.response.status === status, `problem-status-${code}`);
   const problem = ProblemDocumentSchema.parse(result.payload);
@@ -1932,10 +2119,14 @@ type Flow = { enrollmentId: string; fellowId: string; token: string };
 
 async function mintClaimApprove(
   name: string,
-  options: { expiresInMs?: number; proveScopeRefusal?: boolean } = {},
+  options: {
+    expiresInMs?: number;
+    proveScopeRefusal?: boolean;
+    requestedScopes?: readonly RequestedScope[];
+  } = {},
 ): Promise<Flow> {
   const mintBody: Record<string, unknown> = {
-    requested_scopes: ["review"],
+    requested_scopes: options.requestedScopes ?? ["review"],
     ...(options.expiresInMs === undefined
       ? {}
       : { fellow_grant_expires_in_ms: options.expiresInMs }),
@@ -2035,7 +2226,9 @@ await assertTokenRejected(expiring.token, "grant-expiry");
 
 const charlie = await mintClaimApprove("lifecycle-charlie");
 const delta = await mintClaimApprove("lifecycle-delta");
-const echo = await mintClaimApprove("lifecycle-echo");
+const echo = await mintClaimApprove("lifecycle-echo", {
+  requestedScopes: ["promote", "review"],
+});
 
 const capMint = await sponsorRequest(
   sponsorA,
@@ -2088,6 +2281,63 @@ const alphaRecord = fellows.fellows.find((fellow) => fellow.fellow_id === alpha.
 assert(alphaRecord !== undefined, "alpha-listed");
 const alphaCredential = alphaRecord.credentials.find((credential) => credential.active);
 assert(alphaCredential !== undefined, "alpha-active-credential");
+
+const sessionOpen = SessionOpenResponseSchema.parse(
+  await sessionReplayRace(
+    "session_open",
+    echo.token,
+    "/v1/sessions",
+    { problem_id: "P-TOKENLIFECYCLE", intent: "prove" },
+    key("session-open-race"),
+  ),
+);
+const workshopPush = WorkshopPushResponseSchema.parse(
+  await sessionReplayRace(
+    "workshop_push",
+    echo.token,
+    `/v1/sessions/${sessionOpen.session_id}/workshop`,
+    {
+      type: "draft",
+      title: "Real D1 replay collision witness",
+      body_md: "Two independent HTTP requests reached the same real D1 transaction boundary.",
+      relates_to: [],
+    },
+    key("workshop-push-race"),
+  ),
+);
+const promoted = PromoteResponseSchema.parse(
+  await sessionReplayRace(
+    "promote",
+    echo.token,
+    `/v1/sessions/${sessionOpen.session_id}/promote`,
+    {
+      workshop_id: workshopPush.workshop_id,
+      kind: "theorem",
+      statement: "The planted same-key real-D1 session mutation commits exactly once.",
+      relates_to: [],
+    },
+    key("promote-race"),
+  ),
+);
+assert(promoted.problem_id === "P-TOKENLIFECYCLE", "promote-race-problem");
+assert(promoted.seq === 1, "promote-race-first-sequence");
+const closed = SessionCloseResponseSchema.parse(
+  await sessionReplayRace(
+    "session_close",
+    echo.token,
+    `/v1/sessions/${sessionOpen.session_id}/close`,
+    {
+      handback: "Real D1 replay collision proof completed.",
+      promote: [],
+      keep: [workshopPush.workshop_id],
+      discard: [],
+    },
+    key("session-close-race"),
+  ),
+);
+assert(closed.session_id === sessionOpen.session_id, "session-close-race-target");
+assert(closed.promoted.length === 0, "session-close-race-no-implicit-promotion");
+console.log('{"suite":"token-lifecycle-local","assertion":"real_workerd_d1_session_open_workshop_promote_close_same_key_races","status":"pass"}');
 
 function missingId(value: string): string {
   const tail = value.at(-1);
@@ -2165,11 +2415,20 @@ assert(replayed.text === revoked.text, "revoke-alpha-exact-replay");
 console.log('{"suite":"token-lifecycle-local","assertion":"concurrent_http_same_key_revoke_exact_replay","deterministic_barrier":true,"store_gate":"after_replay_preflight_before_d1_revoke","status":"pass"}');
 await assertTokenRejected(alpha.token, "individual-revoke");
 
-// OPS.2a source/local boundary: no Fellow effectful-write route is mounted yet,
-// so this cannot claim an HTTP refusal. It does invoke the one central policy
-// evaluator with identities and the durable event returned by the real D1
-// revoke above. The request id is the exact idempotency key that caused that
-// event, not a second correlation id generated for the log line.
+const revokedSessionWrite = await sessionPost(
+  alpha.token,
+  "/v1/sessions",
+  { problem_id: "P-TOKENLIFECYCLE", intent: "review" },
+  key("post-revoke-session-open"),
+);
+expectProblem(revokedSessionWrite, 401, "FELLOW_TOKEN_INVALID");
+console.log('{"suite":"token-lifecycle-local","assertion":"revoked_credential_refused_before_effectful_session_write","status":"pass"}');
+
+// The HTTP assertion above reaches the mounted Fellow write path. This
+// additional central-policy record binds the operator-only refusal reason to
+// the durable revoke event without exposing it to the caller. The request id
+// is the exact idempotency key that caused that event, not a second correlation
+// id generated for the log line.
 const postRevokeNow = revokedReceipt.effective_at;
 const postRevokeCredential = {
   fellowId: alpha.fellowId,
@@ -2211,7 +2470,7 @@ const postRevokeAuthorization = inspectFellowWriteAuthorization({
   credential: postRevokeCredential,
   target: {
     kind: "existing-problem",
-    problemId: "P-TOKEN-LIFECYCLE",
+    problemId: "P-TOKENLIFECYCLE",
     publication: "published",
     unlisted: false,
     membershipRole: "observer",
@@ -2229,7 +2488,7 @@ assert(
   "central-authz-caller-problem-opaque",
 );
 const authorizationLine = authorizationEvidence({
-  assertion: "central_policy_post_revoke_refusal_no_mounted_effectful_route",
+  assertion: "central_policy_post_revoke_refusal_matches_mounted_effectful_route",
   credentialId: alphaCredential.credential_id,
   sponsorId: sponsorA,
   fellowId: alpha.fellowId,
@@ -2345,7 +2604,7 @@ assert(
 );
 
 console.log('{"suite":"token-lifecycle-local","assertion":"mint_use_scope_refusal_active_cap_expiry_individual_revoke_panic_zero_active_credentials_cross_principal_exact_replay","status":"pass"}');
-console.log('{"suite":"token-lifecycle-local","assertion":"revoke_vs_effectful_domain_write","status":"blocked","code":"W4_FELLOW_MUTATION_NOT_IMPLEMENTED","detail":"No production Fellow mutation is mounted; hello only proves after-revoke opaque 401."}');
+console.log('{"suite":"token-lifecycle-local","assertion":"revoke_vs_effectful_domain_write","status":"pass","route":"POST /v1/sessions","code":"FELLOW_TOKEN_INVALID"}');
 BUN
 
 require_remaining

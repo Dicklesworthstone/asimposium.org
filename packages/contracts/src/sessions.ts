@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { FellowIdSchema } from "./enrollment.ts";
 
 /**
  * Session-protocol contracts (Fable §7). The session is the unit of work; a
@@ -88,16 +89,42 @@ export const PackBudgetSchema = z.union([
 ]);
 export type PackBudget = z.infer<typeof PackBudgetSchema>;
 
-export const PackItemSchema = z
+export const PackNeutralizationMarkerSchema = z.enum([
+  "asimp-control-comment",
+  "envelope-key-forgery",
+  "fence-extended",
+  "active-html",
+]);
+export type PackNeutralizationMarker = z.infer<typeof PackNeutralizationMarkerSchema>;
+
+export const PackNeutralizationSchema = z
   .object({
-    /** Stable key within the profile (statement, falsifier, handback, …). */
-    key: z.string().min(1).max(64),
-    kind: z.enum(["markdown", "json"]),
-    body: z.string(),
-    /** Content hash so a harness can diff items across polls. */
-    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    marker: PackNeutralizationMarkerSchema,
+    count: z.number().int().positive(),
   })
   .strict();
+export type PackNeutralization = z.infer<typeof PackNeutralizationSchema>;
+
+const PackItemContentsSchema = z.object({
+  kind: z.string().min(1).max(64),
+  /** Problem-scoped object id; system items use the same boring grammar. */
+  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/),
+  tokens: z.number().int().positive(),
+  body: z.string(),
+  why_included: z.string().min(1),
+  neutralized: z.array(PackNeutralizationSchema),
+});
+
+export const PackItemSchema = z.union([
+  PackItemContentsSchema.extend({
+    scope: z.literal("system"),
+    untrusted: z.literal(false),
+  }).strict(),
+  PackItemContentsSchema.extend({
+    scope: z.enum(["ledger", "workshop"]),
+    untrusted: z.literal(true),
+  }).strict(),
+]);
 export type PackItem = z.infer<typeof PackItemSchema>;
 
 export const NextActionSchema = z
@@ -109,23 +136,57 @@ export const NextActionSchema = z
   .strict();
 export type NextAction = z.infer<typeof NextActionSchema>;
 
+const PackResponseContentsSchema = z.object({
+  schema: z.literal("asimposium.pack.v1"),
+  face: z.literal("json"),
+  kind: z.literal("pack"),
+  session: SessionIdSchema,
+  problem: ProblemIdSchema,
+  profile: PackProfileSchema,
+  cursor: z.number().int().nonnegative(),
+  /** Non-cryptographic renderer fingerprint. HTTP integrity uses the route ETag. */
+  fingerprint: z.string().regex(/^fnv1a64:[0-9a-f]{16}$/),
+  title: z.string().min(1),
+  preamble: z.string().min(1),
+  /** Stable-prefix-first (§7.3): standing context before deltas. */
+  items: z.array(PackItemSchema),
+  /** What the pack left out and by what rule. Mandatory, never silent. */
+  omitted: z.array(
+    z.object({ reason: z.string().min(1), detail: z.string().min(1).optional() }).strict(),
+  ),
+  next_actions: z.array(NextActionSchema),
+  degraded: z.array(z.string().min(1)),
+});
+
+/** The union keeps each token ceiling visible in generated JSON Schema. */
+function packResponseForBudget<const Budget extends 800 | 1500 | 2500 | 4000 | 8000>(
+  budget: Budget,
+) {
+  return PackResponseContentsSchema.extend({
+    budget_tokens: z.literal(budget),
+    /** Deterministic UTF-8-bytes/4 estimate over this exact canonical JSON face. */
+    tokens_estimate: z.number().int().positive().max(budget),
+  }).strict();
+}
+
 export const PackResponseSchema = z
-  .object({
-    session_id: SessionIdSchema,
-    problem_id: ProblemIdSchema,
-    profile: PackProfileSchema,
-    budget_tokens: z.number().int().positive(),
-    /** Estimated tokens of the assembled pack; never exceeds budget. */
-    tokens: z.number().int().nonnegative(),
-    /** Stable-prefix-first (§7.3): standing context before deltas. */
-    items: z.array(PackItemSchema),
-    /** What the pack left out and by what rule. Mandatory, never silent. */
-    omitted: z.array(z.object({ key: z.string(), reason: z.string() }).strict()),
-    next_actions: z.array(NextActionSchema),
-    /** The per-problem public cursor this pack was composed at. */
-    cursor: z.number().int().nonnegative(),
-  })
-  .strict();
+  .union([
+    packResponseForBudget(800),
+    packResponseForBudget(1500),
+    packResponseForBudget(2500),
+    packResponseForBudget(4000),
+    packResponseForBudget(8000),
+  ])
+  .superRefine((pack, context) => {
+    const itemTokens = pack.items.reduce((total, item) => total + item.tokens, 0);
+    if (itemTokens > pack.tokens_estimate) {
+      context.addIssue({
+        code: "custom",
+        path: ["items"],
+        message: "item token bounds must fit within tokens_estimate",
+      });
+    }
+  });
 export type PackResponse = z.infer<typeof PackResponseSchema>;
 
 /** §7.4 workshop push. Policy screening applies; structural rules do not. */
@@ -164,6 +225,41 @@ export const WorkshopPushResponseSchema = z
   })
   .strict();
 export type WorkshopPushResponse = z.infer<typeof WorkshopPushResponseSchema>;
+
+/** Rule A2: complete private workshop bytes are visible only to the Fellow and sponsor. */
+export const SponsorWorkshopObjectSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema,
+    type: WorkshopPushTypeSchema,
+    title: z.string().min(1).max(200),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
+    relates_to: z.array(z.string().min(1).max(64)).max(16),
+    workshop_seq: z.number().int().positive(),
+    created_at: z.string().datetime(),
+  })
+  .strict();
+export type SponsorWorkshopObject = z.infer<typeof SponsorWorkshopObjectSchema>;
+
+export const SponsorWorkshopRequestSchema = z
+  .object({
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+  })
+  .strict();
+export type SponsorWorkshopRequest = z.infer<typeof SponsorWorkshopRequestSchema>;
+
+export const SponsorWorkshopViewSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+    objects: z.array(SponsorWorkshopObjectSchema).max(200),
+  })
+  .strict();
+export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
 
 /** §6.1/§7.2: the promoted object kinds the validator accepts in v1. */
 export const ClaimKindSchema = z.enum([
@@ -249,6 +345,8 @@ export const SessionsContractsSchema = z
     pack_response: PackResponseSchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
+    sponsor_workshop_request: SponsorWorkshopRequestSchema,
+    sponsor_workshop_view: SponsorWorkshopViewSchema,
     promote_request: PromoteRequestSchema,
     promote_response: PromoteResponseSchema,
     session_close_request: SessionCloseRequestSchema,

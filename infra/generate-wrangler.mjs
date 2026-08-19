@@ -161,6 +161,14 @@ export function renderEnvironment(name, environment, policy) {
     );
   }
 
+  // The optional Workers AI binding is emitted only where the topology
+  // declares it (staging, for the S-4 screening surface). An environment
+  // without the table must not grow one here: the screening route fails closed
+  // on a missing binding, and a phantom entry would hide that refusal.
+  if (environment.ai) {
+    lines.push("[ai]", `binding = ${tomlString(environment.ai.binding)}`, "");
+  }
+
   lines.push(
     // Non-secret, and the only origin the Worker may claim for itself. It is
     // projected from this environment's declared `worker_origin`, never derived

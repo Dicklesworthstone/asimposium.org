@@ -70,7 +70,7 @@ function parseEnvelopeHeader(value: string): unknown | undefined {
   }
 }
 
-type BoundedBodyRead =
+export type BoundedBodyRead =
   | { readonly ok: true; readonly bytes: Uint8Array }
   | { readonly ok: false; readonly reason: "malformed" | "too-large" };
 
@@ -89,10 +89,16 @@ function cancelUnconsumedRequestBody(request: Request): void {
   }
 }
 
-async function readBoundedRequestBody(request: Request): Promise<BoundedBodyRead> {
+export async function readBoundedRequestBody(
+  request: Request,
+  maxBytes = MAX_SERVICE_ENVELOPE_BODY_BYTES,
+): Promise<BoundedBodyRead> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new TypeError("bounded request-body limit must be a nonnegative safe integer");
+  }
   const contentEncoding = request.headers.get("content-encoding");
   if (contentEncoding !== null && contentEncoding.trim().toLowerCase() !== "identity") {
-    // Sponsor JSON routes do not accept compressed request bodies. Refusing the
+    // JSON ingress routes do not accept compressed request bodies. Refusing the
     // encoding avoids making a compressed-size header stand in for the actual
     // bytes that the route would parse.
     cancelUnconsumedRequestBody(request);
@@ -110,7 +116,7 @@ async function readBoundedRequestBody(request: Request): Promise<BoundedBodyRead
       cancelUnconsumedRequestBody(request);
       return { ok: false, reason: "malformed" };
     }
-    if (declaredLength > MAX_SERVICE_ENVELOPE_BODY_BYTES) {
+    if (declaredLength > maxBytes) {
       cancelUnconsumedRequestBody(request);
       return { ok: false, reason: "too-large" };
     }
@@ -128,7 +134,7 @@ async function readBoundedRequestBody(request: Request): Promise<BoundedBodyRead
   // prevents an upstream producer from choosing an attacker-sized JavaScript
   // chunk. Bun's Request stream is not currently BYOB, so the fallback copies
   // only accepted bytes and never retains or duplicates an oversized chunk.
-  const bytes = new Uint8Array(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1);
+  const bytes = new Uint8Array(maxBytes + 1);
   let total = 0;
   let reader: BoundedBodyReader;
   let byob = true;
@@ -158,7 +164,7 @@ async function readBoundedRequestBody(request: Request): Promise<BoundedBodyRead
       const chunk = next.value;
       if (chunk === undefined) throw new Error("request body reader omitted a chunk");
       total += chunk.byteLength;
-      if (total > MAX_SERVICE_ENVELOPE_BODY_BYTES) {
+      if (total > maxBytes) {
         cancel();
         return { ok: false, reason: "too-large" };
       }

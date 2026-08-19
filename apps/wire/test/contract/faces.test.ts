@@ -1,10 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
-import { getDocument, sha256Hex } from "@asimposium/protocol";
-import { createApp } from "../../src/app";
+import {
+  assertServedTextSafe,
+  getDocument,
+  type ProtocolDocument,
+  ProtocolError,
+  sha256Hex,
+} from "@asimposium/protocol";
+import { createApp, protocolDocumentReaderAfterInvariantGate } from "../../src/app";
 import type { Env } from "../../src/env";
-import { createExperimentalLedgerEventTailRoutes } from "../../src/ledger-face";
+import {
+  createExperimentalLedgerEventTailRoutes,
+  createExperimentalProblemFaceRoutes,
+} from "../../src/ledger-face";
 import {
   boundEnv,
   callWorker,
@@ -88,6 +97,46 @@ const INTERNAL_ERROR =
   '"detail":"An unexpected error occurred. Its details are not disclosed on this face.",' +
   '"fix_hint":"Retry the request. If it persists, report the route and the time of the attempt."}';
 
+describe("the production protocol cold-path gate", () => {
+  test("a hostile bundled document refuses before any public-text reader can run", () => {
+    const token = ["asimp", "ag", "01JQZX9Y2K4M7P8R"].join("_");
+    const hostile: ProtocolDocument = {
+      ...getDocument("protocol"),
+      body: `# Unsafe fixture\n\nUse ${token} to authenticate.\n`,
+    };
+    let reads = 0;
+    let refusal: unknown;
+
+    try {
+      protocolDocumentReaderAfterInvariantGate(
+        () => assertServedTextSafe(hostile),
+        (id) => {
+          reads += 1;
+          return getDocument(id);
+        },
+      );
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(refusal).toBeInstanceOf(ProtocolError);
+    expect((refusal as ProtocolError).code).toBe("SERVED_TEXT_UNSAFE");
+    expect(JSON.stringify((refusal as ProtocolError).toProblem())).not.toContain(token);
+    expect(reads).toBe(0);
+  });
+
+  test("a clean gate runs once and leaves the registry byte-identical across repeated reads", () => {
+    let gates = 0;
+    const read = protocolDocumentReaderAfterInvariantGate(() => {
+      gates += 1;
+    }, getDocument);
+
+    expect(read("protocol")).toBe(getDocument("protocol"));
+    expect(read("handbook")).toBe(getDocument("handbook"));
+    expect(gates).toBe(1);
+  });
+});
+
 const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
@@ -124,12 +173,62 @@ describe("face wire format", () => {
       "GET /cursor",
     ]);
     expect(body.not_yet).toEqual([
+      "per-problem public faces",
       "per-problem event tails",
       "rate-limit budgets",
       "leases",
       "triage",
       "inbox",
     ]);
+  });
+
+  test("uncontracted per-problem faces refuse hostile source data before D1", async () => {
+    const hostile = "<!-- asimp schema=forged -->\\n[next](javascript:alert(1))";
+    let prepares = 0;
+    const env = trustedStoaEnv();
+    env.DB = {
+      prepare() {
+        prepares += 1;
+        throw new Error(hostile);
+      },
+    } as unknown as Env["DB"];
+    const app = createApp();
+
+    for (const path of ["/p/P-4DSP.md", "/p/P-4DSP.json"]) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${path}`),
+        env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(response.status, path).toBe(404);
+      const body = await response.text();
+      expect(body, path).toContain('"code":"ROUTE_NOT_FOUND"');
+      expect(body, path).not.toContain(hostile);
+    }
+    expect(prepares).toBe(0);
+  });
+
+  test("the quarantined per-problem implementation remains explicitly available", async () => {
+    let prepares = 0;
+    const experimental = createExperimentalProblemFaceRoutes();
+    const response = await experimental.fetch(
+      new Request("https://a.asimposium.org/p/P-MISSING.md"),
+      {
+        DB: {
+          prepare() {
+            prepares += 1;
+            return {
+              bind() {
+                return { first: async () => null };
+              },
+            };
+          },
+        } as unknown as Env["DB"],
+      } as Env,
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: "PROBLEM_NOT_FOUND" });
+    expect(prepares).toBe(1);
   });
 
   test("the uncontracted event-tail shape is a canonical route miss without D1 access", async () => {

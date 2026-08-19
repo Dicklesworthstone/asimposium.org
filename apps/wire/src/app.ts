@@ -1,6 +1,12 @@
 import { isTrustedAgoraOrigin, isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
 import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
-import { type DocumentId, getDocument, sha256Hex } from "@asimposium/protocol";
+import {
+  assertProtocolInvariants,
+  type DocumentId,
+  getDocument,
+  type ProtocolDocument,
+  sha256Hex,
+} from "@asimposium/protocol";
 import { Hono } from "hono";
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
@@ -20,6 +26,7 @@ import { problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createLedgerFaceRoutes } from "./ledger-face";
+import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSessionRouter } from "./sessions/router";
 
 /**
@@ -82,6 +89,27 @@ const EXACT_ENROLLMENT_PATHS = new Set([
 ]);
 
 const PUBLIC_TEXT_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
+
+type ProtocolDocumentReader = (id: DocumentId) => ProtocolDocument;
+
+/**
+ * Mint the only reader the public-text routes accept after the complete
+ * bundled protocol registry passes its invariant gate. Construction happens
+ * once at module cold start; requests neither rescan nor retain an unchecked
+ * fallback reader.
+ */
+export function protocolDocumentReaderAfterInvariantGate(
+  gate: () => void,
+  reader: ProtocolDocumentReader,
+): ProtocolDocumentReader {
+  gate();
+  return reader;
+}
+
+const readSafeProtocolDocument = protocolDocumentReaderAfterInvariantGate(
+  assertProtocolInvariants,
+  getDocument,
+);
 
 const PUBLIC_TEXT_ROUTES: readonly {
   readonly path: string;
@@ -149,7 +177,14 @@ const capabilitiesBody = (origin: string): string =>
       ],
       sponsor_writes: "signed service envelope only; minted in the Agora console",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
-      not_yet: ["per-problem event tails", "rate-limit budgets", "leases", "triage", "inbox"],
+      not_yet: [
+        "per-problem public faces",
+        "per-problem event tails",
+        "rate-limit budgets",
+        "leases",
+        "triage",
+        "inbox",
+      ],
     },
     null,
     2,
@@ -225,7 +260,7 @@ function servePublicRepresentation(
 
 /** Site-authored discovery texts, bundled from the protocol registry. */
 function servePublicText(request: Request, id: DocumentId, format: "md" | "txt"): Response {
-  const document = getDocument(id);
+  const document = readSafeProtocolDocument(id);
   return servePublicRepresentation(request, {
     body: document.body,
     contentType: document.media_type,
@@ -611,10 +646,21 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
 
   app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
 
+  // The S-4 staging screening surface: bearer-gated, fail-closed, and absent
+  // from the public capabilities document by design — it is an operator
+  // attestation endpoint, not an agent face.
+  app.post(SCREENING_ROUTE_PATH, (c) => handleScreeningRequest(c.req.raw, c.env));
+
   // W6.4 source exists, but its response contract and dependencies do not.
   // Refuse this shape before the broader /p/<id>.json face can reinterpret an
   // event-tail request as a problem id ending in `.events` and touch D1.
   app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", (c) => routeNotFound(c.req.url));
+
+  // W6.1 source also remains experimental until its contract and shared
+  // projection/neutralization pipeline land. These guards keep both suffixes
+  // fail-closed before any ledger route can read D1.
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", (c) => routeNotFound(c.req.url));
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.md$}", (c) => routeNotFound(c.req.url));
 
   // The public ledger faces (no auth, ever).
   app.route("/", createLedgerFaceRoutes());

@@ -1,5 +1,4 @@
 import {
-  type PackItem,
   type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
@@ -8,10 +7,20 @@ import {
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
+  SponsorWorkshopRequestSchema,
+  SponsorWorkshopViewSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
+import {
+  composedPackToProjection,
+  composePack,
+  PACK_BUDGET_BUCKETS,
+  type PackCandidate,
+  renderProjection,
+} from "@asimposium/render";
 import { Hono } from "hono";
+import { readBoundedRequestBody } from "../auth/http";
 import type {
   EncryptedEnrollmentReplay,
   EnrollmentService,
@@ -19,7 +28,7 @@ import type {
 } from "../enrollment/service";
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
-import { problem } from "../http/envelope";
+import { problem, validatedProblem } from "../http/envelope";
 import { KraterProblemNotFoundError, readCursor, writeClaim } from "../krater/krater";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
@@ -33,7 +42,7 @@ import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../s
 const ID_PREFIX_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1_000;
 const REPLAY_TTL_MS = 24 * 60 * 60 * 1_000;
-const PACK_BUCKETS = [800, 1500, 2500, 4000, 8000] as const;
+export const MAX_SESSION_REQUEST_BODY_BYTES = 512 * 1024;
 const PROFILES: readonly PackProfile[] = [
   "hello",
   "orient",
@@ -48,6 +57,22 @@ const PROFILES: readonly PackProfile[] = [
   "claim-graph",
   "full",
 ];
+const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
+  hello: 400,
+  orient: 1500,
+  working: 4000,
+  claim: 2500,
+  review: 2500,
+  digest: 800,
+  graveyard: 2000,
+  literature: 2000,
+  formal: 2000,
+  "review-queue": 1500,
+  "claim-graph": 2000,
+  full: 8000,
+};
+/** One extra row distinguishes a complete candidate set from a bounded prefix. */
+const PACK_CLAIM_CANDIDATE_LIMIT = 128;
 
 export interface SessionRouterOptions {
   readonly service: EnrollmentService;
@@ -103,17 +128,82 @@ function idempotencyKeyOrRefusal(request: Request, path: string): string | Respo
   return key;
 }
 
-async function readJsonBody(request: Request): Promise<unknown | undefined> {
+const SESSION_BODY_TOO_LARGE = Symbol("session-body-too-large");
+
+async function readJsonBody(
+  request: Request,
+): Promise<unknown | undefined | typeof SESSION_BODY_TOO_LARGE> {
+  const body = await readBoundedRequestBody(request, MAX_SESSION_REQUEST_BODY_BYTES);
+  if (!body.ok) return body.reason === "too-large" ? SESSION_BODY_TOO_LARGE : undefined;
   try {
-    return await request.json();
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body.bytes));
   } catch {
     return undefined;
   }
 }
 
+function sessionBodyTooLargeProblem(): Response {
+  return validatedProblem({
+    status: 413,
+    code: "REQUEST_BODY_TOO_LARGE",
+    title: "The session request body is too large",
+    detail: `Session write bodies are bounded at ${MAX_SESSION_REQUEST_BODY_BYTES} bytes.`,
+    fixHint: "Send only the contracted fields and keep large artifacts in the artifact store.",
+  });
+}
+
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function writeRequestDigest(target: string, value: unknown): Promise<string> {
+  const body = JSON.stringify(value);
+  return sha256Text(`${target.length}:${target}${body.length}:${body}`);
+}
+
+function idempotencyConflictProblem(): Response {
+  return problem({
+    status: 409,
+    code: "IDEMPOTENCY_CONFLICT",
+    title: "The Idempotency-Key was used for a different request",
+    detail: "This key was first used with a different body or target resource.",
+    fixHint: "Retry with a fresh Idempotency-Key for a new request.",
+    extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+  });
+}
+
+function packBudgetOrRefusal(raw: string | null, profile: PackProfile): number | Response {
+  if (raw === null) return DEFAULT_PACK_TOKENS[profile];
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    return problem({
+      status: 400,
+      code: "INVALID_PACK_BUDGET",
+      title: "The pack token budget is invalid",
+      detail: "max_tokens must be a positive base-10 safe integer.",
+      fixHint: `Request at most ${PACK_BUDGET_BUCKETS.at(-1)} tokens; the server rounds upward to a fixed cache bucket.`,
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        allowed_buckets: PACK_BUDGET_BUCKETS,
+      },
+    });
+  }
+  const requested = Number(raw);
+  const maximum = PACK_BUDGET_BUCKETS.at(-1);
+  if (!Number.isSafeInteger(requested) || maximum === undefined || requested > maximum) {
+    return problem({
+      status: 400,
+      code: "INVALID_PACK_BUDGET",
+      title: "The pack token budget is invalid",
+      detail: `max_tokens must be no greater than ${maximum ?? 8000}.`,
+      fixHint: `Use one of the fixed buckets directly, or request a positive value that rounds up to one: ${PACK_BUDGET_BUCKETS.join(", ")}.`,
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        allowed_buckets: PACK_BUDGET_BUCKETS,
+      },
+    });
+  }
+  return requested;
 }
 
 interface SessionRow {
@@ -129,65 +219,129 @@ interface SessionRow {
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
-  /** 24h exact-response replay for writes (Rule A5). */
-  async function replayOrRun<T>(
+  type ReplayScope = "session_open" | "workshop_push" | "promote" | "session_close";
+
+  type SessionPreparedStatement = ReturnType<Env["DB"]["prepare"]>;
+
+  interface ReplayRecord {
+    readonly plaintext: string;
+    readonly claimToken: string | null;
+  }
+
+  interface ReplayMutation<T> {
+    readonly value: T;
+    readonly statements: (
+      sealed: EncryptedEnrollmentReplay,
+      claimToken: string,
+    ) => readonly SessionPreparedStatement[];
+  }
+
+  async function readReplayRecord(
     db: Env["DB"],
-    scope: "session_open" | "workshop_push" | "promote" | "session_close",
+    scope: ReplayScope,
     principal: string,
     key: string,
     requestDigest: string,
-    run: () => Promise<T>,
-    commitWith?: readonly ReturnType<Env["DB"]["prepare"]>[],
-  ): Promise<{ replayed: boolean; value: T }> {
-    const now = Math.floor(Date.now() / 1_000);
+  ): Promise<ReplayRecord | undefined> {
     const existing = await db
       .prepare(
-        `SELECT request_digest, response_ciphertext, response_initialization_vector
+        `SELECT request_digest, response_ciphertext, response_initialization_vector, expires_at,
+                claim_token
          FROM session_write_replays
-         WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at > ?`,
+         WHERE scope = ? AND principal_scope = ? AND idempotency_key = ?`,
       )
-      .bind(scope, principal, key, now)
+      .bind(scope, principal, key)
       .first<{
         request_digest: string;
         response_ciphertext: string;
         response_initialization_vector: string;
+        expires_at: number;
+        claim_token: string | null;
       }>();
-    if (existing !== undefined && existing !== null) {
-      if (existing.request_digest !== requestDigest) {
-        throw new ReplayConflictError();
-      }
-      const plaintext = await options.replayProtector.open({
+    if (existing === undefined || existing === null) return undefined;
+    const now = Math.floor(Date.now() / 1_000);
+    if (existing.expires_at <= now) {
+      // An expired row still owns the table's primary key. Remove exactly the
+      // version we observed so the key can satisfy its documented 24h reuse
+      // boundary without deleting a concurrently refreshed row.
+      await db
+        .prepare(
+          `DELETE FROM session_write_replays
+           WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at = ?`,
+        )
+        .bind(scope, principal, key, existing.expires_at)
+        .run();
+      return undefined;
+    }
+    if (existing.request_digest !== requestDigest) throw new ReplayConflictError();
+    return {
+      plaintext: await options.replayProtector.open({
         ciphertext: existing.response_ciphertext,
         initializationVector: existing.response_initialization_vector,
-      });
-      return { replayed: true, value: JSON.parse(plaintext) as T };
+      }),
+      claimToken: existing.claim_token,
+    };
+  }
+
+  async function replayResponseBeforeMutablePreconditions(
+    db: Env["DB"],
+    scope: ReplayScope,
+    principal: string,
+    key: string,
+    requestDigest: string,
+  ): Promise<Response | undefined> {
+    const replay = await readReplayRecord(db, scope, principal, key, requestDigest);
+    return replay === undefined
+      ? undefined
+      : new Response(replay.plaintext, {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+  }
+
+  /**
+   * 24h exact-response replay whose row also owns the mutation transaction.
+   *
+   * The first statement supplied by every caller inserts the replay row with
+   * `claimToken`; every side effect is conditional on that exact token. D1's
+   * batch is the transaction boundary. A same-key loser therefore decrypts
+   * the winner's bytes but cannot execute a second mutation.
+   */
+  async function replayOrCommit<T>(
+    db: Env["DB"],
+    scope: ReplayScope,
+    principal: string,
+    key: string,
+    requestDigest: string,
+    prepare: (claimToken: string) => Promise<ReplayMutation<T>>,
+    retryAfterRollback?: (error: unknown) => boolean,
+  ): Promise<{ replayed: boolean; value: T }> {
+    for (let attempt = 0; attempt <= 16; attempt += 1) {
+      const existing = await readReplayRecord(db, scope, principal, key, requestDigest);
+      if (existing !== undefined) {
+        return { replayed: true, value: JSON.parse(existing.plaintext) as T };
+      }
+      const claimToken = mintId("R");
+      const mutation = await prepare(claimToken);
+      const sealed = await options.replayProtector.seal(JSON.stringify(mutation.value));
+      try {
+        await db.batch([...mutation.statements(sealed, claimToken)]);
+      } catch (error) {
+        const winner = await readReplayRecord(db, scope, principal, key, requestDigest);
+        if (winner !== undefined) {
+          return { replayed: true, value: JSON.parse(winner.plaintext) as T };
+        }
+        if (attempt < 16 && retryAfterRollback?.(error) === true) continue;
+        throw error;
+      }
+      const settled = await readReplayRecord(db, scope, principal, key, requestDigest);
+      if (settled === undefined) throw new ReplayClaimNotCommittedError();
+      return {
+        replayed: settled.claimToken !== claimToken,
+        value: JSON.parse(settled.plaintext) as T,
+      };
     }
-    const value = await run();
-    const sealed = await options.replayProtector.seal(JSON.stringify(value));
-    // The replay record and any caller-supplied writes commit in ONE batch:
-    // a promote's public-cursor increment and its replay row land together or
-    // not at all. The event log remains the truth (Rule A6); on a crash
-    // before this batch, the retry re-executes and krater's own idempotency
-    // dedupes the ledger write.
-    await db.batch([
-      ...(commitWith ?? []),
-      db
-        .prepare(
-          `INSERT INTO session_write_replays
-             (scope, principal_scope, idempotency_key, request_digest, response_ciphertext, response_initialization_vector, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          scope,
-          principal,
-          key,
-          requestDigest,
-          sealed.ciphertext,
-          sealed.initializationVector,
-          now + Math.floor(REPLAY_TTL_MS / 1_000),
-        ),
-    ]);
-    return { replayed: false, value };
+    throw new Error("session replay retry budget exhausted");
   }
 
   async function authenticate(
@@ -276,6 +430,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const key = idempotencyKeyOrRefusal(c.req.raw, "/v1/sessions");
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = SessionOpenRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
       return problem({
@@ -291,9 +446,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     const db = c.env.DB;
-    const digest = await sha256Text(JSON.stringify(parsed.data));
+    const digest = await writeRequestDigest("POST /v1/sessions", parsed.data);
     try {
-      const result = await replayOrRun(
+      const result = await replayOrCommit(
         db,
         "session_open",
         auth.binding.fellowId,
@@ -318,40 +473,78 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
           const now = new Date();
           const sessionId = mintId("S");
-          // Opening a session on a problem IS joining it (§6.8): the
-          // membership is a durable fact the authorization path reads, never
-          // a route-level assumption.
-          await db.batch([
-            db
-              .prepare(
-                `INSERT INTO sessions
-                   (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              )
-              .bind(
-                sessionId,
-                auth.binding.fellowId,
-                parsed.data.problem_id,
-                parsed.data.intent ?? null,
-                now.toISOString(),
-                now.toISOString(),
-                new Date(now.getTime() + SESSION_IDLE_MS).toISOString(),
-              ),
-            db
-              .prepare(
-                `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
-                 VALUES (?, ?, 'contributor', ?)
-                 ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
-              )
-              .bind(parsed.data.problem_id, auth.binding.fellowId, now.toISOString()),
-          ]);
-          return SessionOpenResponseSchema.parse({
+          const openedAt = now.toISOString();
+          const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
+          const value = SessionOpenResponseSchema.parse({
             session_id: sessionId,
             problem_id: parsed.data.problem_id,
             intent: parsed.data.intent ?? null,
-            opened_at: now.toISOString(),
-            idle_close_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString(),
+            opened_at: openedAt,
+            idle_close_at: idleCloseAt,
           });
+          return {
+            value,
+            statements: (sealed, claimToken) => [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'session_open', ?, ?, ?, ?, ?, ?, ?
+                   WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+                     AND NOT EXISTS (
+                       SELECT 1 FROM sessions
+                       WHERE fellow_id = ? AND problem_id = ? AND closed_at IS NULL
+                     )
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                  claimToken,
+                  parsed.data.problem_id,
+                  auth.binding.fellowId,
+                  parsed.data.problem_id,
+                ),
+              db
+                .prepare(
+                  `INSERT INTO sessions
+                     (session_id, fellow_id, problem_id, intent, opened_at,
+                      last_heartbeat_at, idle_close_at)
+                   SELECT ?, ?, ?, ?, ?, ?, ?
+                   FROM session_write_replays
+                   WHERE scope = 'session_open' AND principal_scope = ?
+                     AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
+                )
+                .bind(
+                  sessionId,
+                  auth.binding.fellowId,
+                  parsed.data.problem_id,
+                  parsed.data.intent ?? null,
+                  openedAt,
+                  openedAt,
+                  idleCloseAt,
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                ),
+              // Opening a session on a problem IS joining it (§6.8): the
+              // membership and replay become durable with the session.
+              db
+                .prepare(
+                  `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+                   SELECT problem_id, fellow_id, 'contributor', ? FROM sessions
+                   WHERE session_id = ?
+                   ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
+                )
+                .bind(openedAt, sessionId),
+            ],
+          };
         },
       );
       return c.json(result.value, result.replayed ? 200 : 201);
@@ -379,16 +572,38 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
-      if (error instanceof ReplayConflictError) {
-        return problem({
-          status: 409,
-          code: "IDEMPOTENCY_CONFLICT",
-          title: "The Idempotency-Key was used for a different request",
-          detail: "This key was first used with a different body.",
-          fixHint: "Retry with a fresh Idempotency-Key for a new request.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
-        });
+      if (error instanceof ReplayClaimNotCommittedError) {
+        const problemRow = await db
+          .prepare("SELECT id FROM problems WHERE id = ?")
+          .bind(parsed.data.problem_id)
+          .first<{ id: string }>();
+        if (problemRow === null || problemRow === undefined) {
+          return problem({
+            status: 404,
+            code: "PROBLEM_NOT_FOUND",
+            title: "No such problem",
+            detail: `No problem named ${parsed.data.problem_id} exists on this ledger.`,
+            fixHint: "Check the problem id against GET /problems.json and retry.",
+          });
+        }
+        const existing = await db
+          .prepare(
+            "SELECT session_id FROM sessions WHERE fellow_id = ? AND problem_id = ? AND closed_at IS NULL",
+          )
+          .bind(auth.binding.fellowId, parsed.data.problem_id)
+          .first<{ session_id: string }>();
+        if (existing !== null && existing !== undefined) {
+          return problem({
+            status: 409,
+            code: "SESSION_EXISTS",
+            title: "An open session already exists for this problem",
+            detail: "Each Fellow keeps at most one open session per problem.",
+            fixHint: `Resume or close session ${existing.session_id} first.`,
+            extensions: { existing_session_id: existing.session_id },
+          });
+        }
       }
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
   });
@@ -416,59 +631,94 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     const profile = profileParam as PackProfile;
-    const maxTokensParam = url.searchParams.get("max_tokens");
-    const requested = maxTokensParam === null ? undefined : Number.parseInt(maxTokensParam, 10);
-    const budget =
-      requested === undefined || !Number.isSafeInteger(requested) || requested <= 0
-        ? profile === "hello"
-          ? 800
-          : profile === "orient"
-            ? 1500
-            : 4000
-        : (PACK_BUCKETS.find((bucket) => requested <= bucket) ?? 8000);
+    const requestedMaxTokens = packBudgetOrRefusal(url.searchParams.get("max_tokens"), profile);
+    if (requestedMaxTokens instanceof Response) return requestedMaxTokens;
 
     const cursor = await readCursor(db, session.problem_id);
-    const items: PackItem[] = [];
-    const omitted: { key: string; reason: string }[] = [];
-
-    const push = async (key: string, body: string, kind: "markdown" | "json" = "markdown") => {
-      items.push({ key, kind, body, sha256: await sha256Text(body) });
-    };
+    const candidates: PackCandidate[] = [];
+    let claimsTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
-    await push(
-      "identity",
-      `fellow=${auth.binding.name} model=${auth.binding.model} harness=${auth.binding.harness} problem=${session.problem_id} session=${session.session_id}`,
-    );
+    candidates.push({
+      kind: "identity",
+      id: "SYS-identity",
+      scope: "system",
+      tokens: 1,
+      untrusted: false,
+      body: `fellow=${auth.binding.name} model=${auth.binding.model} harness=${auth.binding.harness} problem=${session.problem_id} session=${session.session_id}`,
+      why_included: "bind this pack to its Fellow, harness, problem and session",
+      stable_prefix: 0,
+    });
 
     if (profile !== "hello") {
       const claims = await db
         .prepare(
-          "SELECT id, statement, source_seq, created_at FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
+          `SELECT id, statement, source_seq FROM claims
+           WHERE problem_id = ? ORDER BY source_seq ASC
+           LIMIT ?`,
         )
-        .bind(session.problem_id)
-        .all<{ id: string; statement: string; source_seq: number; created_at: string }>();
-      const claimLines = (claims.results ?? []).map(
-        (claim) => `${claim.id} (seq ${claim.source_seq}): ${claim.statement}`,
-      );
-      await push(
-        "claims",
-        claimLines.length === 0
-          ? `No claims on ${session.problem_id} yet. The board is open.`
-          : `## Live claims\n\n${claimLines.join("\n")}`,
-      );
+        .bind(session.problem_id, PACK_CLAIM_CANDIDATE_LIMIT + 1)
+        .all<{ id: string; statement: string; source_seq: number }>();
+      const claimRows = claims.results ?? [];
+      claimsTruncated = claimRows.length > PACK_CLAIM_CANDIDATE_LIMIT;
+      if (claimRows.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-claims-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: `No claims on ${session.problem_id} yet. The board is open.`,
+          why_included: "state the current public ledger baseline",
+          stable_prefix: 10,
+        });
+      } else {
+        for (const [index, claim] of claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT).entries()) {
+          candidates.push({
+            kind: "claim",
+            id: claim.id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${claim.id} (seq ${claim.source_seq}): ${claim.statement}`,
+            why_included: "include a live public claim in ledger sequence order",
+            stable_prefix: 100 + index,
+          });
+        }
+      }
 
       const handback = await db
         .prepare(
-          `SELECT handback FROM sessions
-           WHERE problem_id = ? AND closed_at IS NOT NULL AND handback IS NOT NULL
+          `SELECT session_id, handback FROM sessions
+           WHERE problem_id = ? AND fellow_id = ?
+             AND closed_at IS NOT NULL AND handback IS NOT NULL
            ORDER BY closed_at DESC LIMIT 1`,
         )
-        .bind(session.problem_id)
-        .first<{ handback: string }>();
-      await push(
-        "handback",
-        handback?.handback ?? "No handback yet — you are the first session on this problem.",
+        .bind(session.problem_id, auth.binding.fellowId)
+        .first<{ session_id: string; handback: string }>();
+      candidates.push(
+        handback === null || handback === undefined
+          ? {
+              kind: "standing-context",
+              id: "SYS-handback-empty",
+              scope: "system",
+              tokens: 1,
+              untrusted: false,
+              body: "You have no prior handback on this problem.",
+              why_included: "state the Fellow's prior-session baseline",
+              stable_prefix: 200,
+            }
+          : {
+              kind: "handback",
+              id: `HB-${handback.session_id}`,
+              scope: "workshop",
+              tokens: 1,
+              untrusted: true,
+              body: handback.handback,
+              why_included: "resume this Fellow's most recent closed session",
+              stable_prefix: 200,
+              requires: ["workshop:read"],
+            },
       );
     }
 
@@ -486,15 +736,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           workshop_seq: number;
           created_at: string;
         }>();
-      const lines = (heads.results ?? []).map(
-        (head) => `${head.workshop_id} [${head.type}] ${head.title}`,
-      );
-      await push(
-        "workshop-heads",
-        lines.length === 0 ? "Your workshop is empty." : `## Your workshop\n\n${lines.join("\n")}`,
-      );
-    } else {
-      omitted.push({ key: "workshop-heads", reason: "profile does not include workshop state" });
+      const headRows = heads.results ?? [];
+      if (headRows.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-workshop-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "Your workshop is empty.",
+          why_included: "state the private workshop baseline",
+          stable_prefix: 300,
+        });
+      } else {
+        for (const [index, head] of headRows.entries()) {
+          candidates.push({
+            kind: "workshop-head",
+            id: head.workshop_id,
+            scope: "workshop",
+            tokens: 1,
+            untrusted: true,
+            body: `[${head.type}] ${head.title}`,
+            why_included: "resume a recent object in this Fellow's private workshop",
+            stable_prefix: 300 + index,
+            requires: ["workshop:read"],
+          });
+        }
+      }
     }
 
     // Profiles whose dedicated sections are not yet composed say so in
@@ -511,37 +779,89 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       "claim-graph": ["typed-relations"],
       full: ["paginated-export"],
     };
-    for (const key of UNCOMPOSED[profile] ?? []) {
-      omitted.push({ key, reason: "not yet composed on this surface (W6 follow-on)" });
+    const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const actionPermissions = ["workshop:read"];
+    const authorizationTarget = {
+      kind: "existing-problem" as const,
+      problemId: session.problem_id,
+      publication: "published" as const,
+      unlisted: false,
+      membershipRole: membership,
+    };
+    const authorizationUsage = { eventsRecorded: 0, artifactBytesRecorded: 0 };
+    const authorizationObservedAt = Date.now();
+    if (
+      authorizeFellowWrite({
+        effect: "workshop.push",
+        credential: auth.binding,
+        target: authorizationTarget,
+        usage: authorizationUsage,
+        now: authorizationObservedAt,
+      }).decision === "allow"
+    ) {
+      actionPermissions.push("workshop:write");
     }
-
-    const nextActions = [
-      {
-        method: "POST" as const,
-        url: `/v1/sessions/${session.session_id}/workshop`,
-        why: "push a note or draft to your private workshop as you work",
+    if (
+      authorizeFellowWrite({
+        effect: "promote",
+        credential: auth.binding,
+        target: authorizationTarget,
+        usage: authorizationUsage,
+        now: authorizationObservedAt,
+      }).decision === "allow"
+    ) {
+      actionPermissions.push("promote:write");
+    }
+    const composed = composePack({
+      schema: "asimposium.pack.v1",
+      session: session.session_id,
+      problem: session.problem_id,
+      profile,
+      cursor,
+      requested_max_tokens: requestedMaxTokens,
+      viewer: {
+        audience: "session",
+        membership: membership ?? "none",
+        effective_permissions: actionPermissions,
       },
-      {
-        method: "POST" as const,
-        url: `/v1/sessions/${session.session_id}/promote`,
-        why: "promote a finished object to the public ledger (runs the validator)",
-      },
-    ];
-    const body = JSON.stringify(
-      PackResponseSchema.parse({
-        session_id: session.session_id,
-        problem_id: session.problem_id,
-        profile,
-        budget_tokens: budget,
-        tokens: Math.ceil(JSON.stringify(items).length / 4),
-        items,
-        omitted,
-        next_actions: nextActions,
-        cursor,
-      }),
-      null,
-      2,
-    );
+      candidates,
+      action_candidates: [
+        {
+          method: "POST",
+          url: `/v1/sessions/${session.session_id}/workshop`,
+          why: "push a note or draft to your private workshop as you work",
+          public_read: false,
+          requires: ["workshop:write"],
+        },
+        {
+          method: "POST",
+          url: `/v1/sessions/${session.session_id}/promote`,
+          why: "promote a finished object to the public ledger (runs the validator)",
+          public_read: false,
+          requires: ["promote:write"],
+        },
+      ],
+      omitted: [
+        ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
+        ...(profile === "working"
+          ? []
+          : [{ reason: "profile_excludes_workshop", detail: "workshop-heads" }]),
+        ...(UNCOMPOSED[profile] ?? []).map((key) => ({
+          reason: "profile_section_not_composed",
+          detail: key,
+        })),
+      ],
+    });
+    const rendered = renderProjection(composedPackToProjection(composed), "json");
+    const itemTokenTotal = composed.items.reduce((total, item) => total + item.tokens, 0);
+    if (
+      itemTokenTotal > composed.tokens_estimate ||
+      Math.ceil(rendered.bytes / 4) > composed.tokens_estimate
+    ) {
+      throw new Error("pack composer token estimate diverged from the canonical JSON face");
+    }
+    PackResponseSchema.parse(JSON.parse(rendered.body));
+    const body = rendered.body;
     const etag = `"${await sha256Text(body)}"`;
     const headers = {
       "cache-control": "private, no-store",
@@ -560,11 +880,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
     const db = c.env.DB;
-    const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
-    if (session instanceof Response) return session;
+    const sessionId = c.req.param("id");
     const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = WorkshopPushRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
       return problem({
@@ -584,6 +904,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/workshop`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "workshop_push",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
       effect: "workshop.push",
@@ -607,9 +943,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Check the console for the credential state or contact your sponsor.",
       });
     }
-    const digest = await sha256Text(JSON.stringify(parsed.data));
     try {
-      const result = await replayOrRun(
+      const result = await replayOrCommit(
         db,
         "workshop_push",
         auth.binding.fellowId,
@@ -617,53 +952,93 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         digest,
         async () => {
           const workshopId = mintId("W");
-          const batch = [
-            db
-              .prepare(
-                `INSERT INTO workshop_objects
-                   (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title, body_md, relates_to_json, force_note, created_at)
-                 SELECT ?, ?, ?, ?,
-                   (SELECT COALESCE(MAX(workshop_seq), 0) + 1 FROM workshop_objects
-                     WHERE problem_id = ? AND fellow_id = ?),
-                   ?, ?, ?, ?, ?, ?`,
-              )
-              .bind(
-                workshopId,
-                session.problem_id,
-                auth.binding.fellowId,
-                session.session_id,
-                session.problem_id,
-                auth.binding.fellowId,
-                parsed.data.type,
-                parsed.data.title,
-                parsed.data.body_md,
-                JSON.stringify(parsed.data.relates_to),
-                parsed.data.force_note === true ? 1 : 0,
-                new Date().toISOString(),
-              ),
-          ];
-          await db.batch(batch);
-          const row = await db
-            .prepare("SELECT workshop_seq FROM workshop_objects WHERE workshop_id = ?")
-            .bind(workshopId)
+          const head = await db
+            .prepare(
+              `SELECT COALESCE(MAX(workshop_seq), 0) AS workshop_seq
+               FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?`,
+            )
+            .bind(session.problem_id, auth.binding.fellowId)
             .first<{ workshop_seq: number }>();
-          return WorkshopPushResponseSchema.parse({
+          const priorSequence = head?.workshop_seq ?? 0;
+          if (
+            !Number.isSafeInteger(priorSequence) ||
+            priorSequence < 0 ||
+            priorSequence >= Number.MAX_SAFE_INTEGER
+          ) {
+            throw new Error("workshop sequence is not a safe nonnegative integer");
+          }
+          const workshopSequence = priorSequence + 1;
+          const createdAt = new Date().toISOString();
+          const value = WorkshopPushResponseSchema.parse({
             workshop_id: workshopId,
-            workshop_seq: row?.workshop_seq ?? 1,
+            workshop_seq: workshopSequence,
           });
+          return {
+            value,
+            statements: (sealed, claimToken) => [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'workshop_push', ?, ?, ?, ?, ?, ?, ?
+                   WHERE EXISTS (
+                     SELECT 1 FROM sessions
+                     WHERE session_id = ? AND fellow_id = ? AND problem_id = ?
+                       AND closed_at IS NULL
+                   )
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                  claimToken,
+                  session.session_id,
+                  auth.binding.fellowId,
+                  session.problem_id,
+                ),
+              db
+                .prepare(
+                  `INSERT INTO workshop_objects
+                     (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title,
+                      body_md, relates_to_json, force_note, created_at)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                   FROM session_write_replays
+                   WHERE scope = 'workshop_push' AND principal_scope = ?
+                     AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
+                )
+                .bind(
+                  workshopId,
+                  session.problem_id,
+                  auth.binding.fellowId,
+                  session.session_id,
+                  workshopSequence,
+                  parsed.data.type,
+                  parsed.data.title,
+                  parsed.data.body_md,
+                  JSON.stringify(parsed.data.relates_to),
+                  parsed.data.force_note === true ? 1 : 0,
+                  createdAt,
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                ),
+            ],
+          };
         },
+        isWorkshopSequenceConflict,
       );
       return c.json(result.value, result.replayed ? 200 : 201);
     } catch (error) {
-      if (error instanceof ReplayConflictError) {
-        return problem({
-          status: 409,
-          code: "IDEMPOTENCY_CONFLICT",
-          title: "The Idempotency-Key was used for a different request",
-          detail: "This key was first used with a different body.",
-          fixHint: "Retry with a fresh Idempotency-Key for a new request.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
-        });
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      if (error instanceof ReplayClaimNotCommittedError) {
+        const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
+        if (current instanceof Response) return current;
       }
       throw error;
     }
@@ -674,11 +1049,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
     const db = c.env.DB;
-    const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
-    if (session instanceof Response) return session;
+    const sessionId = c.req.param("id");
     const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     // The validator (P-rules; W5.4 extends this seam). P2/P4 first: a promote
     // carrying author-writable disposition/proof/certification fields is a
     // self-certification attempt and refuses with the rule citation, before
@@ -732,6 +1107,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/promote`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "promote",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
 
     // The workshop object must belong to this session and this Fellow —
     // promotion of another's draft is a contract violation, not a validator
@@ -802,52 +1194,139 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const digest = await sha256Text(JSON.stringify(parsed.data));
     try {
-      const result = await replayOrRun(
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const write = await writeClaim(
         db,
-        "promote",
-        auth.binding.fellowId,
-        key,
-        digest,
-        async () => {
-          const now = new Date().toISOString();
-          // The seq is allocated by the write transaction; the claim id derives
-          // from the durable cursor so retries mint the same identity.
-          const preCursor = await readCursor(db, session.problem_id);
-          const claimId = `C-${preCursor + 1}`;
-          const write = await writeClaim(db, {
-            problemId: session.problem_id,
-            claimId,
-            eventId: mintId("E"),
-            idempotencyKey: key,
-            statement: parsed.data.statement,
-            createdAt: now,
-          });
-          return PromoteResponseSchema.parse({
-            claim_id: claimId,
-            problem_id: session.problem_id,
-            seq: write.seq,
-            queue_position: 0,
-          });
+        {
+          problemId: session.problem_id,
+          // The atomic companion derives the real C-<seq> identity from the
+          // durable head on every Krater retry. This placeholder is validated
+          // but never reaches a composed session promotion statement.
+          claimId: "C-1",
+          eventId,
+          idempotencyKey: key,
+          statement: parsed.data.statement,
+          createdAt: new Date().toISOString(),
         },
-        // The public cursor moves exactly once per public-visible commit, in
-        // the same batch as the replay record — never for workshop/rejected/
-        // rolled-back writes (c52's law).
-        [db.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1")],
+        {},
+        {
+          requestDigest: digest,
+          claimIdForSequence: (sequence) => `C-${sequence}`,
+          statementsForAttempt: async (attempt) => {
+            const value = PromoteResponseSchema.parse({
+              claim_id: attempt.claimId,
+              problem_id: session.problem_id,
+              seq: attempt.sequence,
+              queue_position: 0,
+            });
+            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              // If this event won Krater's idempotency row but the session
+              // closed meanwhile, request_digest becomes NULL and 0018's
+              // NOT NULL constraint aborts the whole event/projection batch.
+              // A same-key loser has a different event id, selects no row,
+              // and cannot overwrite the winner's replay.
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'promote', ?, ?,
+                     CASE WHEN EXISTS (
+                       SELECT 1 FROM sessions
+                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                     ) THEN ? ELSE NULL END,
+                     ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  session.session_id,
+                  auth.binding.fellowId,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  claimToken,
+                  session.problem_id,
+                  key,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
+              // The anonymous cursor is a projection of the same winning
+              // event and advances only when this attempt owns the replay.
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'promote' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest, claimToken),
+            ];
+          },
+        },
       );
-      return c.json(result.value, result.replayed ? 200 : 201);
-    } catch (error) {
-      if (error instanceof ReplayConflictError) {
-        return problem({
-          status: 409,
-          code: "IDEMPOTENCY_CONFLICT",
-          title: "The Idempotency-Key was used for a different request",
-          detail: "This key was first used with a different body.",
-          fixHint: "Retry with a fresh Idempotency-Key for a new request.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      let replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
+      if (replay === undefined) {
+        if (write.eventId === eventId) {
+          throw new Error("Krater promotion committed without its atomic replay");
+        }
+        // Repair only legacy pre-0020 events that Krater already proves
+        // idempotent. The write cannot repeat; this batch restores its exact
+        // response and the cursor update the old post-write batch omitted.
+        const value = PromoteResponseSchema.parse({
+          claim_id: write.claimId,
+          problem_id: session.problem_id,
+          seq: write.seq,
+          queue_position: 0,
         });
+        const sealed = await options.replayProtector.seal(JSON.stringify(value));
+        const recoveryToken = mintId("R");
+        await db.batch([
+          db
+            .prepare(
+              `INSERT INTO session_write_replays
+                 (scope, principal_scope, idempotency_key, request_digest,
+                  response_ciphertext, response_initialization_vector, expires_at, claim_token)
+               VALUES ('promote', ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+            )
+            .bind(
+              auth.binding.fellowId,
+              key,
+              digest,
+              sealed.ciphertext,
+              sealed.initializationVector,
+              Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+              recoveryToken,
+            ),
+          db
+            .prepare(
+              `UPDATE public_cursor SET cursor = cursor + 1
+               WHERE singleton = 1 AND EXISTS (
+                 SELECT 1 FROM session_write_replays
+                 WHERE scope = 'promote' AND principal_scope = ?
+                   AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+               )`,
+            )
+            .bind(auth.binding.fellowId, key, digest, recoveryToken),
+        ]);
+        replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
       }
+      if (replay === undefined) throw new Error("promotion replay recovery did not settle");
+      return c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200);
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       if (error instanceof KraterProblemNotFoundError) {
         return problem({
           status: 404,
@@ -870,6 +1349,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = SessionCloseRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
       return problem({
@@ -881,9 +1361,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
       });
     }
-    const digest = await sha256Text(JSON.stringify(parsed.data));
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${c.req.param("id")}/close`,
+      parsed.data,
+    );
     try {
-      const result = await replayOrRun(
+      const result = await replayOrCommit(
         db,
         "session_close",
         auth.binding.fellowId,
@@ -896,47 +1379,80 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
           if (session instanceof Response) throw new SessionRouteRefusalError(session);
           const closedAt = new Date().toISOString();
-          await db
-            .prepare(
-              `UPDATE sessions SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?
-               WHERE session_id = ? AND closed_at IS NULL`,
-            )
-            .bind(
-              closedAt,
-              parsed.data.handback,
-              JSON.stringify(parsed.data.keep),
-              JSON.stringify(parsed.data.discard),
-              session.session_id,
-            )
-            .run();
-          return SessionCloseResponseSchema.parse({
+          const value = SessionCloseResponseSchema.parse({
             session_id: session.session_id,
             closed_at: closedAt,
             promoted: [],
           });
+          return {
+            value,
+            statements: (sealed, claimToken) => [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'session_close', ?, ?, ?, ?, ?, ?, ?
+                   WHERE EXISTS (
+                     SELECT 1 FROM sessions
+                     WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                   )
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                  claimToken,
+                  session.session_id,
+                  auth.binding.fellowId,
+                ),
+              db
+                .prepare(
+                  `UPDATE sessions
+                   SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?
+                   WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                     AND EXISTS (
+                       SELECT 1 FROM session_write_replays
+                       WHERE scope = 'session_close' AND principal_scope = ?
+                         AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                     )`,
+                )
+                .bind(
+                  closedAt,
+                  parsed.data.handback,
+                  JSON.stringify(parsed.data.keep),
+                  JSON.stringify(parsed.data.discard),
+                  session.session_id,
+                  auth.binding.fellowId,
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                ),
+            ],
+          };
         },
       );
       return c.json(result.value, result.replayed ? 200 : 201);
     } catch (error) {
-      if (error instanceof ReplayConflictError) {
-        return problem({
-          status: 409,
-          code: "IDEMPOTENCY_CONFLICT",
-          title: "The Idempotency-Key was used for a different request",
-          detail: "This key was first used with a different body.",
-          fixHint: "Retry with a fresh Idempotency-Key for a new request.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
-        });
-      }
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       if (error instanceof SessionRouteRefusalError) return error.response;
+      if (error instanceof ReplayClaimNotCommittedError) {
+        const current = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
+        if (current instanceof Response) return current;
+      }
       throw error;
     }
   });
 
-  // --- GET /v1/sponsors/workshop -----------------------------------------
+  // --- POST /v1/sponsors/workshop ----------------------------------------
   // The sponsor's live workshop view (Rule A2: only the sponsor of record
   // reads a Fellow's workshop). Verified by the signed service envelope.
-  app.get("/v1/sponsors/workshop", async (c) => {
+  app.post("/v1/sponsors/workshop", async (c) => {
     if (options.verifiedSponsor === undefined) {
       return problem({
         status: 503,
@@ -952,19 +1468,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       "workshop.read",
     );
     if (verified instanceof Response) return verified;
-    const url = new URL(c.req.url);
-    const problemId = url.searchParams.get("problem_id");
-    const fellowId = url.searchParams.get("fellow_id");
-    if (problemId === null || fellowId === null) {
+    let requestBody: unknown;
+    try {
+      requestBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(verified.rawBody));
+    } catch {
+      requestBody = undefined;
+    }
+    const parsedRequest = SponsorWorkshopRequestSchema.safeParse(requestBody);
+    if (!parsedRequest.success) {
       return problem({
-        status: 400,
-        code: "WORKSHOP_READ_QUERY_INVALID",
-        title: "problem_id and fellow_id are required",
-        detail: "The sponsor workshop view scopes to one Fellow on one problem.",
-        fixHint: "Send ?problem_id=P-…&fellow_id=….",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        status: 422,
+        code: "WORKSHOP_READ_BODY_INVALID",
+        title: "Workshop read body is invalid",
+        detail: "The signed JSON body must contain exactly problem_id and fellow_id.",
+        fixHint: "Send the problem and one of your own Fellows in the signed JSON body.",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { problem_id: "P-4DSP", fellow_id: "fellow-01JXYZ" },
+        },
       });
     }
+    const { problem_id: problemId, fellow_id: fellowId } = parsedRequest.data;
     // The sponsor may only read THEIR OWN fellows' workshops.
     const fellow = await c.env.DB.prepare(
       "SELECT fellow_id, sponsor_id FROM enrollment_fellows WHERE fellow_id = ?",
@@ -987,7 +1511,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const objects = await c.env.DB.prepare(
       `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at
          FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
-         ORDER BY workshop_seq ASC LIMIT 200`,
+         ORDER BY workshop_seq DESC LIMIT 200`,
     )
       .bind(problemId, fellowId)
       .all<{
@@ -1000,7 +1524,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         created_at: string;
       }>();
     return c.json(
-      {
+      SponsorWorkshopViewSchema.parse({
         schema: "https://a.asimposium.org/schemas/sessions.v1.json",
         problem_id: problemId,
         fellow_id: fellowId,
@@ -1013,7 +1537,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           workshop_seq: row.workshop_seq,
           created_at: row.created_at,
         })),
-      },
+      }),
       200,
       { "cache-control": "private, no-store" },
     );
@@ -1046,6 +1570,20 @@ class ReplayConflictError extends Error {
     super("idempotency key conflict");
     this.name = "ReplayConflictError";
   }
+}
+
+class ReplayClaimNotCommittedError extends Error {
+  constructor() {
+    super("session replay claim did not commit");
+    this.name = "ReplayClaimNotCommittedError";
+  }
+}
+
+function isWorkshopSequenceConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /UNIQUE constraint failed:\s*workshop_objects\.problem_id,\s*workshop_objects\.fellow_id,\s*workshop_objects\.workshop_seq/i.test(
+    message,
+  );
 }
 
 class SessionRouteRefusalError extends Error {

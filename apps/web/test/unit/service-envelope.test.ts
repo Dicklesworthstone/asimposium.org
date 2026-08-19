@@ -38,6 +38,7 @@ const {
   stoaOperatorFellowCapAudit,
   stoaOperatorOverrideFellowCap,
   stoaPendingProposals,
+  stoaSponsorWorkshop,
 } = await import("../../lib/stoa.ts");
 
 /**
@@ -74,6 +75,12 @@ interface Corpus {
 
 const corpus = JSON.parse(readFileSync(CORPUS_PATH, "utf8")) as Corpus;
 const vectorNames = Object.keys(corpus.vectors);
+
+function corpusVector(name: string): Corpus["vectors"][string] {
+  const vector = corpus.vectors[name];
+  if (vector === undefined) throw new Error(`Missing service-envelope corpus vector: ${name}`);
+  return vector;
+}
 
 const NOW = 1786000000;
 const BODY = '{"focus":"the simply-connected case"}';
@@ -160,9 +167,8 @@ describe("canonicalization agrees with the Worker, byte for byte", () => {
   });
 
   test.each(vectorNames)("vector %s canonicalizes to the pinned digest", async (name) => {
-    const vector = corpus.vectors[name];
-    expect(vector).toBeDefined();
-    expect(await sha256Hex(canonicalBytes(vector!.claims))).toBe(vector!.canonical_sha256);
+    const vector = corpusVector(name);
+    expect(await sha256Hex(canonicalBytes(vector.claims))).toBe(vector.canonical_sha256);
   });
 
   test("the field list and version match the Worker's", () => {
@@ -186,17 +192,16 @@ describe("canonicalization agrees with the Worker, byte for byte", () => {
   });
 
   test("key order in the claims object does not change the bytes", async () => {
-    const vector = corpus.vectors.minimal;
-    expect(vector).toBeDefined();
+    const vector = corpusVector("minimal");
     const reversed = Object.fromEntries(
-      Object.entries(vector!.claims).reverse(),
+      Object.entries(vector.claims).reverse(),
     ) as unknown as ServiceEnvelopeClaims;
-    expect(await sha256Hex(canonicalBytes(reversed))).toBe(vector!.canonical_sha256);
+    expect(await sha256Hex(canonicalBytes(reversed))).toBe(vector.canonical_sha256);
   });
 
   test("a non-integer timestamp is refused rather than silently rendered", () => {
-    const vector = corpus.vectors.minimal;
-    expect(() => canonicalBytes({ ...vector!.claims, iat: 1.5 })).toThrow(/safe integer/);
+    const vector = corpusVector("minimal");
+    expect(() => canonicalBytes({ ...vector.claims, iat: 1.5 })).toThrow(/safe integer/);
   });
 });
 
@@ -771,6 +776,58 @@ describe("public Agora Stoa origin binding", () => {
       });
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: the sponsor workshop client refuses a malformed private-data response", async () => {
+    const valid = {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      problem_id: "P-4DSP",
+      fellow_id: "fellow-01JXYZ",
+      objects: [
+        {
+          workshop_id: `W-${"A".repeat(26)}`,
+          type: "note",
+          title: "Private note",
+          body_md: "Private bytes",
+          relates_to: [],
+          workshop_seq: 1,
+          created_at: "2026-08-19T00:00:00.000Z",
+        },
+      ],
+    };
+
+    for (const [body, expected] of [
+      [valid, true],
+      [{ ...valid, unexpected_public_field: true }, false],
+    ] as const) {
+      const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      try {
+        await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+          const result = await stoaSponsorWorkshop(
+            "usr_origin-runtime-test",
+            "P-4DSP",
+            "fellow-01JXYZ",
+          );
+          expect(result.ok).toBe(expected);
+          if (!expected) expect(result).toEqual({ ok: false, reason: "unreachable" });
+          if (expected) {
+            const call = fetchSpy.mock.calls[0];
+            expect(String(call?.[0])).toBe(`${staging}/v1/sponsors/workshop`);
+            expect((call?.[1] as RequestInit | undefined)?.method).toBe("POST");
+            expect((call?.[1] as RequestInit | undefined)?.body).toBe(
+              JSON.stringify({ problem_id: "P-4DSP", fellow_id: "fellow-01JXYZ" }),
+            );
+          }
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
     }
   });
 

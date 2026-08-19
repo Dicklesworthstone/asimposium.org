@@ -131,7 +131,9 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
   return app;
 }
 
-export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
+function createLedgerFaceRoutesWithExperimentalProblemFaces(
+  includeExperimentalProblemFaces: boolean,
+): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   app.on(["GET", "HEAD"], "/problems.json", async (c) => {
@@ -165,8 +167,11 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  // W6.1: the per-problem public face. Anonymous reads only ever see public
-  // projection rows — workshop content has no path here (Rule A2).
+  if (!includeExperimentalProblemFaces) return app;
+
+  // W6.1 experimental source. These hand-written faces remain available to
+  // focused development tests, but production cannot mount them before their
+  // contracts and the shared renderer's quarantine boundary land.
   app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".json".length);
     const problemRow = await c.env.DB.prepare(
@@ -252,4 +257,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   return app;
+}
+
+/** Contracted production ledger faces only. */
+export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
+  return createLedgerFaceRoutesWithExperimentalProblemFaces(false);
+}
+
+/** Retained W6.1 experiment; never mount this constructor in createApp. */
+export function createExperimentalProblemFaceRoutes(): Hono<{ Bindings: Env }> {
+  return createLedgerFaceRoutesWithExperimentalProblemFaces(true);
 }

@@ -142,6 +142,24 @@ const cases = [
     },
   },
   {
+    // The optional AI binding is deliberately outside the required roster
+    // above, so it reconciles here instead: present exactly where the topology
+    // declares it, under the declared name, and nowhere else. The staging
+    // declaration is load-bearing — it is the reason this binding exists.
+    name: "ai-binding-reconciles-exactly",
+    execute() {
+      assert.ok(report.environments.staging.ai, "staging declares no AI binding");
+      for (const [name, environment] of Object.entries(report.environments)) {
+        const rendered = parsed[name].ai;
+        if (!environment.ai) {
+          assert.equal(rendered, undefined, name);
+          continue;
+        }
+        assert.deepEqual(rendered, { binding: environment.ai.binding }, name);
+      }
+    },
+  },
+  {
     // Cloudflare refuses a Durable Object binding whose class the entrypoint
     // does not export. Set equality (not a count) is what makes this causal: an
     // added binding and a dropped export each fail, and in opposite directions.

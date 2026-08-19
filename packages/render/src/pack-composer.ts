@@ -2,17 +2,21 @@
  * Pure, deterministic composition for Fable §7.3 packs.
  *
  * The Worker decides which projections exist and what the caller may do. This
- * module does not reach D1, inspect a request, or render a face: it applies a
- * fixed token bucket, permission and audience rules, then produces a canonical
- * semantic envelope. Keeping that seam pure is what makes deterministic packs
- * a testable promise rather than an incidental property of one route.
+ * module does not reach D1 or inspect a request: it applies a fixed token
+ * bucket, permission and audience rules, and measures the exact canonical JSON
+ * face before producing a semantic envelope. Keeping that seam pure is what
+ * makes deterministic packs a testable promise rather than an incidental
+ * property of one route.
  */
 
 import { byteLength, contentFingerprint, stableStringify } from "./canonical.ts";
+import { renderProjection } from "./render.ts";
 import {
+  fenceFor,
   firstUnpairedUtf16SurrogateOffset,
   isSafeHeaderValue,
   isSafeWorkerPath,
+  neutralizeUntrustedBody,
 } from "./sanitize.ts";
 import {
   ITEM_SCOPES,
@@ -93,6 +97,8 @@ export interface PackComposerInput {
   readonly viewer: PackViewer;
   readonly candidates: readonly PackCandidate[];
   readonly action_candidates: readonly PackActionCandidate[];
+  /** Server-authored selector omissions known before budget selection. */
+  readonly omitted?: readonly OmittedEntry[];
   readonly degraded?: readonly string[];
 }
 
@@ -121,6 +127,7 @@ export interface ComposedPack {
   readonly profile: string;
   readonly cursor: number;
   readonly budget_tokens: PackBudgetBucket;
+  /** UTF-8-bytes/4 heuristic over the exact rendered JSON face plus conservative item bounds. */
   readonly tokens_estimate: number;
   readonly preamble: string;
   readonly items: readonly ComposedPackItem[];
@@ -177,30 +184,7 @@ interface ValidatedActions {
  * returned Projection through `prepareProjection` / `renderAllFaces`.
  */
 export function composedPackToProjection(pack: ComposedPack): Projection {
-  return {
-    schema: pack.schema,
-    kind: "pack",
-    session: pack.session,
-    problem: pack.problem,
-    profile: pack.profile,
-    cursor: pack.cursor,
-    budget_tokens: pack.budget_tokens,
-    tokens_estimate: pack.tokens_estimate,
-    title: "ASImposium pack",
-    preamble: pack.preamble,
-    items: pack.items.map((item) => ({
-      kind: item.kind,
-      id: item.id,
-      scope: item.scope,
-      untrusted: item.untrusted,
-      body: item.body,
-      why_included: item.why_included,
-      tokens: item.tokens,
-    })),
-    omitted: pack.omitted,
-    next_actions: pack.next_actions,
-    degraded: pack.degraded,
-  };
+  return packProjection(pack, pack.tokens_estimate);
 }
 
 /** The server-authored trust boundary required in every Fable §7.3 pack. */
@@ -439,6 +423,31 @@ function assertDegraded(value: unknown): readonly string[] {
   ].sort(compareText);
 }
 
+function assertDeclaredOmissions(value: unknown): readonly OmittedEntry[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value))
+    return refuse("INVALID_INPUT", "omitted must be an array when provided");
+  const entries = value.map((raw, index) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return refuse("INVALID_INPUT", `omitted[${index}] must be an object`);
+    }
+    const entry = raw as Record<string, unknown>;
+    const keys = Object.keys(entry).sort(compareText);
+    if (keys.some((key) => key !== "detail" && key !== "reason")) {
+      return refuse("INVALID_INPUT", `omitted[${index}] contains an unknown field`);
+    }
+    const reason = assertScalarText(entry.reason, `omitted[${index}].reason`);
+    return entry.detail === undefined
+      ? { reason }
+      : { reason, detail: assertScalarText(entry.detail, `omitted[${index}].detail`) };
+  });
+  return entries.sort((left, right) => {
+    const reason = compareText(left.reason, right.reason);
+    if (reason !== 0) return reason;
+    return compareText(left.detail ?? "", right.detail ?? "");
+  });
+}
+
 function isAuthorized(requires: readonly string[], permissions: ReadonlySet<string>): boolean {
   return requires.every((permission) => permissions.has(permission));
 }
@@ -447,42 +456,76 @@ function omission(reason: string, detail?: string): OmittedEntry {
   return detail === undefined ? { reason } : { reason, detail };
 }
 
+function packProjection(pack: PackContents, tokensEstimate: number): Projection {
+  return {
+    schema: pack.schema,
+    kind: "pack",
+    session: pack.session,
+    problem: pack.problem,
+    profile: pack.profile,
+    cursor: pack.cursor,
+    budget_tokens: pack.budget_tokens,
+    tokens_estimate: tokensEstimate,
+    title: "ASImposium pack",
+    preamble: pack.preamble,
+    items: pack.items.map((item) => ({
+      kind: item.kind,
+      id: item.id,
+      scope: item.scope,
+      untrusted: item.untrusted,
+      body: item.body,
+      why_included: item.why_included,
+      tokens: item.tokens,
+    })),
+    omitted: pack.omitted,
+    next_actions: pack.next_actions,
+    degraded: pack.degraded,
+  };
+}
+
 /**
- * The item estimates supplied by the Worker cover item bytes. This independent,
- * deliberately conservative byte upper bound covers the mandatory envelope,
- * preamble, actions, omitted explanations and diagnostics which otherwise make
- * an apparently 800-token item-only pack exceed its advertised budget.
+ * Use the exact canonical JSON agent face as the source for the repository's
+ * documented UTF-8-bytes/4 token heuristic. More importantly, this accounts
+ * for the real wrapper, neutralization expansion and reports instead of
+ * budgeting an internal object the Worker never serves.
+ *
+ * The estimate is serialized into the face it measures. Its decimal width can
+ * therefore change the measurement once or twice; iterate to the fixed point.
+ * An over-budget intermediate may return immediately because selection needs
+ * only the proof that this candidate prefix cannot fit.
  */
-function estimateMandatoryEnvelopeTokens(pack: PackContents): number {
-  return byteLength(
-    stableStringify({
-      ...pack,
-      items: [],
-      // Reserve the longest decimal spelling instead of allowing the field
-      // itself to make a nearly-full result exceed its own stated estimate.
-      tokens_estimate: Number.MAX_SAFE_INTEGER,
-      // The eventual public envelope also carries these deterministic metadata
-      // fields. They are not free merely because their actual values depend on
-      // the completed pack, so reserve their maximum wire spellings here.
-      bytes: Number.MAX_SAFE_INTEGER,
-      canonical_fingerprint: "fnv1a64:ffffffffffffffff",
-    }),
-  );
+function renderedFaceTokenEstimate(pack: PackContents, floor: number): number {
+  let estimate = Math.max(1, floor);
+  if (estimate > pack.budget_tokens) return estimate;
+
+  while (true) {
+    const renderedBytes = renderProjection(packProjection(pack, estimate), "json").bytes;
+    const renderedEstimate = Math.max(floor, Math.ceil(renderedBytes / 4));
+    if (renderedEstimate > pack.budget_tokens || renderedEstimate === estimate) {
+      return renderedEstimate;
+    }
+    estimate = renderedEstimate;
+  }
 }
 
 function estimatePackTokens(pack: PackContents): number {
-  return (
-    estimateMandatoryEnvelopeTokens(pack) +
-    pack.items.reduce((total, item) => total + item.tokens, 0)
-  );
+  const itemTokenTotal = pack.items.reduce((total, item) => total + item.tokens, 0);
+  const emptyPack: PackContents = {
+    ...pack,
+    items: [],
+    omitted: pack.omitted.length === 0 ? [omission("budget_exceeded")] : pack.omitted,
+  };
+  const mandatoryEnvelopeTokens = renderedFaceTokenEstimate(emptyPack, 0);
+  return renderedFaceTokenEstimate(pack, itemTokenTotal + mandatoryEnvelopeTokens);
 }
 
 /**
- * Derive a non-forgeable whole-item upper bound from the exact canonical item
- * representation. `tokens` is caller-provided planning metadata, so treating
- * it as authoritative would let a very large Unicode body masquerade as one
- * token. The fixed point matters because the bound itself is serialized in
- * the item's `tokens` member.
+ * Derive a non-forgeable whole-item estimate from the exact canonical item
+ * representation using the same UTF-8-bytes/4 heuristic as the complete face.
+ * `tokens` is caller-provided planning metadata, so treating it as authoritative
+ * would let a very large Unicode body masquerade as one token. The fixed point
+ * matters because the estimate itself is serialized in the item's `tokens`
+ * member.
  *
  * The extra byte reserves the item's array delimiter. This makes the sum of
  * individual bounds conservative for a multi-item `items` array as well as
@@ -494,8 +537,26 @@ function wholeItemTokenUpperBound(
 ): number {
   let effectiveEstimate = suppliedEstimate;
   while (true) {
-    const serializedBytes = byteLength(stableStringify({ ...item, tokens: effectiveEstimate }));
-    const nextEstimate = Math.max(suppliedEstimate, serializedBytes + 1);
+    const neutralized = item.untrusted
+      ? neutralizeUntrustedBody(item.body)
+      : { text: item.body, findings: [] };
+    const findings =
+      item.untrusted && fenceFor(neutralized.text).extended
+        ? [...neutralized.findings, { marker: "fence-extended" as const, count: 1 }]
+        : neutralized.findings;
+    const serializedBytes = byteLength(
+      stableStringify({
+        kind: item.kind,
+        id: item.id,
+        scope: item.scope,
+        untrusted: item.untrusted,
+        why_included: item.why_included,
+        tokens: effectiveEstimate,
+        body: neutralized.text,
+        neutralized: findings,
+      }),
+    );
+    const nextEstimate = Math.max(suppliedEstimate, Math.ceil((serializedBytes + 1) / 4));
     if (nextEstimate === effectiveEstimate) return effectiveEstimate;
     effectiveEstimate = nextEstimate;
   }
@@ -601,7 +662,7 @@ export function composePack(input: PackComposerInput): ComposedPack {
     }
   }
 
-  const staticOmitted: OmittedEntry[] = [];
+  const staticOmitted: OmittedEntry[] = [...assertDeclaredOmissions(source.omitted)];
   if (itemPermissionExcluded > 0) {
     staticOmitted.push(omission("item_permission_filtered"));
   }

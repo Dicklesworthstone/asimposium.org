@@ -4,8 +4,9 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
-# This file is the only configuration that mounts the revoke-race witness.
-# infra/wrangler.toml keeps the production entrypoint and has no local control route.
+# This file is the only configuration that mounts the revoke and session-replay
+# race witnesses. infra/wrangler.toml keeps the production entrypoint and has
+# no local control route.
 [vars]
 TOKEN_LIFECYCLE_LOCAL_HARNESS = "enabled"
 

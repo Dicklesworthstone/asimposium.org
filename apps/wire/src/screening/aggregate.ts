@@ -437,16 +437,19 @@ const MAX_PROVIDER_LATENCY_MS = 60_000;
 function validScoreBands(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort(asciiCompare);
-  const expectedKeys = [...POLICY_CATEGORIES].sort(asciiCompare);
-  if (keys.length !== POLICY_CATEGORIES.length) return false;
-  for (let index = 0; index < POLICY_CATEGORIES.length; index += 1) {
-    if (keys[index] !== expectedKeys[index]) return false;
+  // Absent keys are admitted: an undefined band is unrepresentable in the JSON
+  // a live staging screen returns over HTTPS, so its wire form is the absent
+  // key. (The provider boundary in provider.ts still demands every key from
+  // the provider itself; this boundary validates what survived the wire.) What
+  // remains load-bearing here: a present key must name exactly the policy
+  // vocabulary — a staging response inventing a category is still refused —
+  // and a present value must be a real band or an explicit undefined.
+  for (const key of Object.keys(record)) {
+    if (!(POLICY_CATEGORIES as readonly string[]).includes(key)) return false;
   }
-  return POLICY_CATEGORIES.every((category) => {
-    const band = record[category];
-    return band === undefined || (SCORE_BANDS as readonly string[]).includes(band as string);
-  });
+  return Object.values(record).every(
+    (band) => band === undefined || (SCORE_BANDS as readonly string[]).includes(band as string),
+  );
 }
 
 function validDecisionMetadata(observation: ScreeningObservation): boolean {

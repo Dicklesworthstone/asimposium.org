@@ -15,6 +15,7 @@ import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schem
 import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "text" };
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
+import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 
 export const PUBLIC_SCHEMA_IDS = [
   "enrollment",
@@ -22,6 +23,7 @@ export const PUBLIC_SCHEMA_IDS = [
   "ledger",
   "problem",
   "screening",
+  "sessions",
 ] as const;
 
 export type PublicSchemaId = (typeof PUBLIC_SCHEMA_IDS)[number];
@@ -73,6 +75,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/screening.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(screeningSchemaModule, "generated/screening.schema.json"),
+  }),
+  Object.freeze({
+    id: "sessions",
+    served_at: "/schemas/sessions.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(sessionsSchemaModule, "generated/sessions.schema.json"),
   }),
 ]);
 

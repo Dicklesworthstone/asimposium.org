@@ -40,7 +40,12 @@ import {
   SponsorPanicResponseSchema,
   type SponsorProposalListResponse,
   SponsorProposalListResponseSchema,
+  type SponsorWorkshopView as SponsorWorkshopViewContract,
+  SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
+
+export type { SponsorWorkshopObject, SponsorWorkshopView } from "@asimposium/contracts";
+
 import {
   enrollmentRecoveryConfigurationIsValid,
   enrollmentRecoveryOwner,
@@ -111,6 +116,8 @@ interface StoaSigningConfig {
 export const MAX_STOA_SUCCESS_RESPONSE_BYTES = 262_144;
 /** 100 approval cards can each carry two independently bounded resource grants. */
 export const MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES = 8 * 1024 * 1024;
+/** Bounded stopgap; e7j.2 owns byte-exact pagination for worst-case valid rows. */
+export const MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES = 16 * 1024 * 1024;
 /** 500 Fellow summaries can each carry bounded grants plus three credentials. */
 export const MAX_STOA_FELLOW_LIST_RESPONSE_BYTES = 16 * 1024 * 1024;
 /** 100 immutable operator receipts can each carry a 1,000-code-point reason. */
@@ -436,37 +443,21 @@ export function stoaPendingProposals(
   });
 }
 
-export interface SponsorWorkshopObject {
-  readonly workshop_id: string;
-  readonly type: string;
-  readonly title: string;
-  readonly body_md: string;
-  readonly relates_to: readonly string[];
-  readonly workshop_seq: number;
-  readonly created_at: string;
-}
-
-export interface SponsorWorkshopView {
-  readonly problem_id: string;
-  readonly fellow_id: string;
-  readonly objects: readonly SponsorWorkshopObject[];
-}
-
 /** The sponsor's live workshop view (Rule A2): envelope-verified, own fellows only. */
 export function stoaSponsorWorkshop(
   principalId: string,
   problemId: string,
   fellowId: string,
-): Promise<StoaCall<SponsorWorkshopView>> {
+): Promise<StoaCall<SponsorWorkshopViewContract>> {
   return callStoa({
-    method: "GET",
+    method: "POST",
     route: ROUTE_SPONSOR_WORKSHOP,
-    path: `${ROUTE_SPONSOR_WORKSHOP}?problem_id=${encodeURIComponent(problemId)}&fellow_id=${encodeURIComponent(fellowId)}`,
+    path: ROUTE_SPONSOR_WORKSHOP,
     action: ACTION_WORKSHOP_READ,
     principalId,
-    body: "",
-    responseMaxBytes: MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES,
-    parse: (value) => value as SponsorWorkshopView,
+    body: JSON.stringify({ problem_id: problemId, fellow_id: fellowId }),
+    responseMaxBytes: MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES,
+    parse: (value) => SponsorWorkshopViewSchema.parse(value),
   });
 }
 

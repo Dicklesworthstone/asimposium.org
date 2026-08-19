@@ -22,6 +22,7 @@ test("the public schema registry serves the exact generated artifacts", () => {
     "ledger",
     "problem",
     "screening",
+    "sessions",
   ]);
   expect(listPublicSchemas().map((document) => document.id)).toEqual([...PUBLIC_SCHEMA_IDS]);
 

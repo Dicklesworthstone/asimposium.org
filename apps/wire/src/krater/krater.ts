@@ -18,6 +18,7 @@ export interface KraterWriteInput {
 
 export interface KraterWriteResult {
   eventId: string;
+  claimId: string;
   seq: number;
   idempotent: boolean;
   preCursor: number;
@@ -69,6 +70,24 @@ export interface KraterWriteResult {
  */
 export interface KraterWriteHooks {
   afterReadHead?: (head: Readonly<{ publicSeq: number; chainDigest: string }>) => Promise<void>;
+}
+
+/**
+ * Statements a higher-level write needs committed with the Krater envelope.
+ *
+ * The callback runs after the durable head has supplied the candidate sequence
+ * and before the single D1 batch. It may prepare statements only; it must not
+ * execute them. Session promotion uses this seam to persist its sealed exact
+ * response in the same transaction as the claim, projection, event and outbox.
+ */
+export interface KraterAtomicCompanion {
+  readonly requestDigest?: string;
+  readonly claimIdForSequence?: (sequence: number) => string;
+  readonly statementsForAttempt: (attempt: {
+    readonly sequence: number;
+    readonly claimId: string;
+    readonly eventId: string;
+  }) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[];
 }
 
 export interface KraterEvent {
@@ -915,15 +934,16 @@ export async function writeClaim(
   db: D1Database,
   input: KraterWriteInput,
   hooks: KraterWriteHooks = {},
+  companion?: KraterAtomicCompanion,
 ): Promise<KraterWriteResult> {
   const writeClaimStartedAt = performance.now();
   validateWriteInput(input);
   const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt);
-  const payloadJson = payloadFor(input);
-  const [payloadSha256, requestDigest] = await Promise.all([
-    sha256Hex(payloadJson),
-    sha256Hex(requestFor(input)),
-  ]);
+  const companionRequestDigest = companion?.requestDigest;
+  const claimIdForSequence = companion?.claimIdForSequence;
+  if (companionRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(companionRequestDigest)) {
+    inputError("an atomic companion request digest must be lowercase SHA-256 hex.");
+  }
   const writePhaseStartedAt = performance.now();
   let retryCount = 0;
 
@@ -942,15 +962,33 @@ export async function writeClaim(
     // This candidate is cryptographic input derived from a durable predecessor.
     // SQLite, not this value, allocates the stored sequence below.
     const candidateSeq = before.public_seq + 1;
+    const attemptInput =
+      claimIdForSequence === undefined
+        ? input
+        : { ...input, claimId: claimIdForSequence(candidateSeq) };
+    requireIdentifier("claimId", attemptInput.claimId);
+    const payloadJson = payloadFor(attemptInput);
+    const [payloadSha256, requestDigest] = await Promise.all([
+      sha256Hex(payloadJson),
+      companionRequestDigest === undefined
+        ? sha256Hex(requestFor(attemptInput))
+        : Promise.resolve(companionRequestDigest),
+    ]);
     const [nextChainDigest, nextRowDigest] = await Promise.all([
       eventChainDigest(input.problemId, candidateSeq, payloadSha256, before.chain_digest),
-      eventRowDigest(input, candidateSeq, payloadSha256),
+      eventRowDigest(attemptInput, candidateSeq, payloadSha256),
     ]);
     const [nextBuildDigest, nextCheckpointDigest] = await Promise.all([
       projectionBuildDigest(payloadSha256, nextRowDigest),
       checkpointDigest(input.problemId, candidateSeq, nextChainDigest),
     ]);
 
+    const companionStatements =
+      (await companion?.statementsForAttempt({
+        sequence: candidateSeq,
+        claimId: attemptInput.claimId,
+        eventId: input.eventId,
+      })) ?? [];
     let results: D1Result<SequenceRow>[];
     try {
       results = await db.batch<SequenceRow>([
@@ -988,8 +1026,8 @@ export async function writeClaim(
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
-          input.claimId,
-          input.statement,
+          attemptInput.claimId,
+          attemptInput.statement,
           payloadSha256,
           input.createdAt,
           input.idempotencyKey,
@@ -1003,7 +1041,7 @@ export async function writeClaim(
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
-          input.claimId,
+          attemptInput.claimId,
           nextBuildDigest,
           input.createdAt,
           input.idempotencyKey,
@@ -1019,7 +1057,7 @@ export async function writeClaim(
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
           input.eventId,
-          input.claimId,
+          attemptInput.claimId,
           payloadSha256,
           nextRowDigest,
           nextChainDigest,
@@ -1047,7 +1085,7 @@ export async function writeClaim(
            JOIN idempotency i ON i.problem_id = c.problem_id AND i.idempotency_key = ?
            WHERE c.id = ? AND i.event_id IS NULL`,
           input.idempotencyKey,
-          input.claimId,
+          attemptInput.claimId,
         ),
         statement(
           db,
@@ -1089,6 +1127,7 @@ export async function writeClaim(
           input.idempotencyKey,
           input.eventId,
         ),
+        ...companionStatements,
       ]);
     } catch (error) {
       const latestHead = await readProblemHead(db, input.problemId);
@@ -1150,6 +1189,7 @@ export async function writeClaim(
     const writePhaseMs = Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000;
     return {
       eventId: settled.event_id,
+      claimId: event.object_id,
       seq: settledEventSeq,
       idempotent: allocated === undefined,
       preCursor: before.public_seq,
