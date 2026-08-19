@@ -342,10 +342,18 @@ describe("session protocol routes", () => {
       await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
     ).toEqual({ count: 1 });
     expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM idempotency").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
       await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first<{
         cursor: number;
       }>(),
     ).toEqual({ cursor: 1 });
+    expect(
+      await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+        public_seq: number;
+      }>(),
+    ).toEqual({ public_seq: 1 });
 
     barrier.arm([/FROM session_write_replays/]);
     await race(
@@ -365,6 +373,180 @@ describe("session protocol routes", () => {
         )
         .first<{ count: number }>(),
     ).toEqual({ count: 4 });
+  });
+
+  test("concurrent same-key promotions with different bodies return a typed conflict", async () => {
+    const barrier = stagedReadBarrier();
+    const { call, db } = await fixture({
+      afterFirstRead: barrier.afterFirstRead,
+      serializeBatches: true,
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "conflict-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = (await opened.json()) as { session_id: string };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "conflict-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Concurrent conflict witness",
+        body_md: "One key cannot identify two different promotion requests.",
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+    const workshop = (await pushed.json()) as { workshop_id: string };
+    const promote = (statement: string) =>
+      call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "conflict-promote" },
+        body: JSON.stringify({
+          workshop_id: workshop.workshop_id,
+          kind: "theorem",
+          statement,
+          relates_to: [],
+        }),
+      });
+
+    barrier.arm([
+      /FROM session_write_replays/,
+      /SELECT public_seq, chain_digest FROM problems/,
+      /SELECT public_seq, chain_digest FROM problems/,
+    ]);
+    const responses = await Promise.all([
+      promote("The first concurrent body may own this key."),
+      promote("The second concurrent body must receive a typed conflict."),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+    const conflict = responses.find((response) => response.status === 409);
+    if (conflict === undefined) throw new Error("the conflicting promotion response is missing");
+    expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM idempotency").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote'")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
+      await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first<{
+        cursor: number;
+      }>(),
+    ).toEqual({ cursor: 1 });
+    expect(
+      await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+        public_seq: number;
+      }>(),
+    ).toEqual({ public_seq: 1 });
+  });
+
+  test("a session closed after promotion preflight aborts every public companion", async () => {
+    let armed = false;
+    let observedHead = false;
+    let releaseHead: () => void = () => undefined;
+    let markHeadReached: () => void = () => undefined;
+    const headReached = new Promise<void>((resolve) => {
+      markHeadReached = resolve;
+    });
+    const headRelease = new Promise<void>((resolve) => {
+      releaseHead = resolve;
+    });
+    const { call, db } = await fixture({
+      afterFirstRead: async (query) => {
+        if (
+          armed &&
+          !observedHead &&
+          /SELECT public_seq, chain_digest FROM problems/.test(query)
+        ) {
+          observedHead = true;
+          markHeadReached();
+          await headRelease;
+        }
+      },
+      serializeBatches: true,
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "close-race-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = (await opened.json()) as { session_id: string };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "close-race-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Close-race witness",
+        body_md: "Closing after preflight must abort the promotion transaction.",
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+    const workshop = (await pushed.json()) as { workshop_id: string };
+
+    armed = true;
+    const pendingPromotion = call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "close-race-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "theorem",
+        statement: "A post-preflight close leaves no public promotion companion.",
+        relates_to: [],
+      }),
+    });
+    await headReached;
+    const closed = await call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "close-race-close" },
+      body: JSON.stringify({ handback: "Promotion lost the close race.", promote: [] }),
+    });
+    releaseHead();
+    expect(closed.status).toBe(201);
+    const refused = await pendingPromotion;
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "SESSION_CLOSED" });
+    for (const table of [
+      "claims",
+      "claim_projections",
+      "events",
+      "event_content",
+      "idempotency",
+      "outbox",
+      "integrity_checkpoints",
+      "public_claim_fts",
+    ] as const) {
+      expect(
+        await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+    }
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote'")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first<{
+        cursor: number;
+      }>(),
+    ).toEqual({ cursor: 0 });
+    expect(
+      await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+        public_seq: number;
+      }>(),
+    ).toEqual({ public_seq: 0 });
   });
 
   test("a replay persistence failure rolls the whole promotion batch back", async () => {
@@ -456,6 +638,7 @@ describe("session protocol routes", () => {
         }),
       }),
     );
+    expect(registration.status).toBe(202);
     const { flow_handle: flowHandle } = (await registration.json()) as { flow_handle: string };
     await service.decide(sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
@@ -469,9 +652,11 @@ describe("session protocol routes", () => {
         body: JSON.stringify({ flow_handle: flowHandle }),
       }),
     );
+    expect(issued.status).toBe(200);
     const issuedBody = (await issued.json()) as { token?: string };
-    if (issuedBody.token === undefined) throw new Error("second fixture token was not issued");
-    const secondBinding = await service.credentialBinding(issuedBody.token);
+    const secondToken = issuedBody.token;
+    if (secondToken === undefined) throw new Error("second fixture token was not issued");
+    const secondBinding = await service.credentialBinding(secondToken);
     if (secondBinding === undefined) throw new Error("second fixture binding missing");
     await db
       .prepare(
@@ -491,7 +676,7 @@ describe("session protocol routes", () => {
         new Request(`https://a-staging.asimposium.org${path}`, {
           ...init,
           headers: {
-            authorization: `Bearer ${issuedBody.token}`,
+            authorization: `Bearer ${secondToken}`,
             ...(init.headers ?? {}),
           },
         }),
@@ -570,13 +755,18 @@ describe("session protocol routes", () => {
         cursor: number;
       }>(),
     ).toEqual({ cursor: 2 });
+    expect(
+      await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+        public_seq: number;
+      }>(),
+    ).toEqual({ public_seq: 2 });
     const kraterKeys = await db
       .prepare("SELECT idempotency_key FROM idempotency ORDER BY idempotency_key")
       .all<{ idempotency_key: string }>();
     expect(kraterKeys.results).toHaveLength(2);
     expect(new Set(kraterKeys.results.map((row) => row.idempotency_key)).size).toBe(2);
     for (const row of kraterKeys.results) {
-      expect(row.idempotency_key).toMatch(/^session-promote:[0-9a-f]{64}$/);
+      expect(row.idempotency_key).toMatch(/^session-promote-v2:[0-9a-f]{64}$/);
       expect(row.idempotency_key).not.toBe(sharedExternalKey);
     }
     expect(
@@ -587,6 +777,94 @@ describe("session protocol routes", () => {
         .bind(sharedExternalKey)
         .first<{ count: number }>(),
     ).toEqual({ count: 2 });
+  });
+
+  test("an expired promotion replay key can identify a new operation", async () => {
+    const { call, db, binding } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "expiry-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = (await opened.json()) as { session_id: string };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "expiry-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Promotion replay expiry witness",
+        body_md: "The caller key may identify a new operation after the replay boundary.",
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+    const workshop = (await pushed.json()) as { workshop_id: string };
+    const promote = (statement: string) =>
+      call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "expiring-promote" },
+        body: JSON.stringify({
+          workshop_id: workshop.workshop_id,
+          kind: "theorem",
+          statement,
+          relates_to: [],
+        }),
+      });
+
+    const first = await promote("The first operation owns the initial replay generation.");
+    expect(first.status).toBe(201);
+    expect(await first.json()).toMatchObject({ claim_id: "C-1", seq: 1 });
+    await db
+      .prepare(
+        `UPDATE session_write_replays SET expires_at = 0
+         WHERE scope = 'promote' AND principal_scope = ? AND idempotency_key = ?`,
+      )
+      .bind(binding.fellowId, "expiring-promote")
+      .run();
+    const second = await promote("The second operation begins after the replay generation expires.");
+    expect(second.status).toBe(201);
+    const secondBytes = await second.text();
+    expect(JSON.parse(secondBytes)).toMatchObject({ claim_id: "C-2", seq: 2 });
+    const secondReplay = await promote(
+      "The second operation begins after the replay generation expires.",
+    );
+    expect(secondReplay.status).toBe(200);
+    expect(await secondReplay.text()).toBe(secondBytes);
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM idempotency").first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    const kraterKeys = await db
+      .prepare("SELECT idempotency_key FROM idempotency ORDER BY idempotency_key")
+      .all<{ idempotency_key: string }>();
+    expect(kraterKeys.results).toHaveLength(2);
+    for (const row of kraterKeys.results) {
+      expect(row.idempotency_key).toMatch(/^session-promote-v2:[0-9a-f]{64}$/);
+    }
+    expect(
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote' AND principal_scope = ? AND idempotency_key = ?",
+        )
+        .bind(binding.fellowId, "expiring-promote")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
+      await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first<{
+        cursor: number;
+      }>(),
+    ).toEqual({ cursor: 2 });
+    expect(
+      await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+        public_seq: number;
+      }>(),
+    ).toEqual({ public_seq: 2 });
   });
 
   test("open → pack → workshop → promote → close runs the loop with cursors correct", async () => {

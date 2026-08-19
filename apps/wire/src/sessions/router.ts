@@ -29,7 +29,12 @@ import type {
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
-import { KraterProblemNotFoundError, readCursor, writeClaim } from "../krater/krater";
+import {
+  KraterIdempotencyConflictError,
+  KraterProblemNotFoundError,
+  readCursor,
+  writeClaim,
+} from "../krater/krater";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
 /**
@@ -162,9 +167,8 @@ async function writeRequestDigest(target: string, value: unknown): Promise<strin
   return sha256Text(`${target.length}:${target}${body.length}:${body}`);
 }
 
-async function promoteKraterIdempotencyKey(principal: string, externalKey: string): Promise<string> {
-  const identity = `${principal.length}:${principal}${externalKey.length}:${externalKey}`;
-  return `session-promote:${await sha256Text(`session-promote-v1\0${identity}`)}`;
+async function promoteKraterIdempotencyKey(claimToken: string): Promise<string> {
+  return `session-promote-v2:${await sha256Text(`session-promote-v2\0${claimToken}`)}`;
 }
 
 function idempotencyConflictProblem(): Response {
@@ -1202,13 +1206,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       const eventId = mintId("E");
       const claimToken = mintId("R");
-      // Krater's idempotency table is problem-scoped, while the public session
-      // replay contract is principal-scoped. Never let two Fellows who choose
-      // the same caller key alias one another's event or recovery cursor.
-      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(
-        auth.binding.fellowId,
-        key,
-      );
+      // Krater's idempotency rows are durable, while the public caller key is
+      // reusable after its 24h replay expires. Give this replay-election
+      // attempt a fresh internal key; the atomic ownership guard below aborts
+      // its entire Krater batch unless this exact claim token wins the public
+      // (scope, Fellow, caller key) replay row.
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
       const write = await writeClaim(
         db,
         {
@@ -1239,8 +1242,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               // If this event won Krater's idempotency row but the session
               // closed meanwhile, request_digest becomes NULL and 0018's
               // NOT NULL constraint aborts the whole event/projection batch.
-              // A same-key loser has a different event id, selects no row,
-              // and cannot overwrite the winner's replay.
+              // A same-caller-key loser cannot overwrite the winner's replay;
+              // the ownership guard below then aborts its separate event.
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -1284,61 +1287,54 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    )`,
                 )
                 .bind(auth.binding.fellowId, key, digest, claimToken),
+              // A different internal Krater key must not let a same-caller-key
+              // loser commit a second event. Deliberately violate the durable
+              // NOT NULL invariant when this attempt does not own the exact
+              // replay row; D1 then rolls the whole event/projection batch back.
+              db
+                .prepare(
+                  `UPDATE idempotency
+                   SET request_digest = CASE WHEN EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'promote' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   ) THEN request_digest ELSE NULL END
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
             ];
           },
         },
       );
-      let replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
+      const replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
       if (replay === undefined) {
-        if (write.eventId === eventId) {
-          throw new Error("Krater promotion committed without its atomic replay");
-        }
-        // Repair only legacy pre-0020 events that Krater already proves
-        // idempotent. The write cannot repeat; this batch restores its exact
-        // response and the cursor update the old post-write batch omitted.
-        const value = PromoteResponseSchema.parse({
-          claim_id: write.claimId,
-          problem_id: session.problem_id,
-          seq: write.seq,
-          queue_position: 0,
-        });
-        const sealed = await options.replayProtector.seal(JSON.stringify(value));
-        const recoveryToken = mintId("R");
-        await db.batch([
-          db
-            .prepare(
-              `INSERT INTO session_write_replays
-                 (scope, principal_scope, idempotency_key, request_digest,
-                  response_ciphertext, response_initialization_vector, expires_at, claim_token)
-               VALUES ('promote', ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
-            )
-            .bind(
-              auth.binding.fellowId,
-              key,
-              digest,
-              sealed.ciphertext,
-              sealed.initializationVector,
-              Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
-              recoveryToken,
-            ),
-          db
-            .prepare(
-              `UPDATE public_cursor SET cursor = cursor + 1
-               WHERE singleton = 1 AND EXISTS (
-                 SELECT 1 FROM session_write_replays
-                 WHERE scope = 'promote' AND principal_scope = ?
-                   AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-               )`,
-            )
-            .bind(auth.binding.fellowId, key, digest, recoveryToken),
-        ]);
-        replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
+        throw new Error("Krater promotion committed without its atomic replay");
       }
-      if (replay === undefined) throw new Error("promotion replay recovery did not settle");
       return c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200);
     } catch (error) {
-      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      try {
+        const winner = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
+        if (winner !== undefined) return c.json(JSON.parse(winner.plaintext), 200);
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (
+        error instanceof ReplayConflictError ||
+        error instanceof KraterIdempotencyConflictError
+      ) {
+        return idempotencyConflictProblem();
+      }
       if (error instanceof KraterProblemNotFoundError) {
         return problem({
           status: 404,
@@ -1349,6 +1345,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
         });
       }
+      const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
+      if (current instanceof Response) return current;
       throw error;
     }
   });
