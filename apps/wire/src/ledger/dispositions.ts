@@ -172,12 +172,45 @@ function bestTier(reviews: readonly VerifiedReview[]): IndependenceTier | undefi
   return best;
 }
 
+function sameVerifiedReview(left: VerifiedReview, right: VerifiedReview): boolean {
+  return (
+    left.review_id === right.review_id &&
+    left.reviewer_id === right.reviewer_id &&
+    left.tier === right.tier &&
+    left.cross_family === right.cross_family &&
+    left.full_write_up === right.full_write_up &&
+    left.finding === right.finding
+  );
+}
+
+/**
+ * Only supporting reviews can be affirmative evidence for corroboration or
+ * strong support. Identical replayed rows count once; conflicting rows with
+ * the same review id count zero rather than letting storage corruption choose
+ * whichever copy grants the stronger transition.
+ */
+function distinctSupportingReviews(reviews: readonly VerifiedReview[]): VerifiedReview[] {
+  const firstById = new Map<string, VerifiedReview>();
+  const conflictedIds = new Set<string>();
+  for (const review of reviews) {
+    const first = firstById.get(review.review_id);
+    if (first === undefined) {
+      firstById.set(review.review_id, review);
+    } else if (!sameVerifiedReview(first, review)) {
+      conflictedIds.add(review.review_id);
+    }
+  }
+  return [...firstById.values()].filter(
+    (review) => review.finding === "support" && !conflictedIds.has(review.review_id),
+  );
+}
+
 function corroborationUnmet(
   reviews: readonly VerifiedReview[],
   context: ClaimTransitionContext,
 ): string[] {
   const unmet: string[] = [];
-  if (!reviews.some((review) => tierAtLeast(review.tier, "T1"))) {
+  if (!distinctSupportingReviews(reviews).some((review) => tierAtLeast(review.tier, "T1"))) {
     unmet.push("requires ≥1 independent verified review (tier ≥ T1)");
   }
   if (context.recorded_refutation_attempts < 1) {
@@ -191,7 +224,8 @@ function strongSupportUnmet(
   context: ClaimTransitionContext,
 ): string[] {
   const unmet: string[] = [];
-  const crossFamilyFullWriteUps = reviews.filter(
+  const supportingReviews = distinctSupportingReviews(reviews);
+  const crossFamilyFullWriteUps = supportingReviews.filter(
     (review) => review.cross_family && review.full_write_up,
   ).length;
   if (!context.has_certified_artifact && crossFamilyFullWriteUps < 2) {
@@ -199,7 +233,7 @@ function strongSupportUnmet(
       "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
     );
   }
-  const best = bestTier(reviews);
+  const best = bestTier(supportingReviews);
   if (best === undefined || !tierAtLeast(best, "T2")) {
     unmet.push(`requires independence tier ≥ T2, got ${best ?? "none"}`);
   }

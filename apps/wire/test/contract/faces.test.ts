@@ -4,6 +4,7 @@ import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { getDocument, sha256Hex } from "@asimposium/protocol";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
+import { createExperimentalLedgerEventTailRoutes } from "../../src/ledger-face";
 import {
   boundEnv,
   callWorker,
@@ -122,7 +123,71 @@ describe("face wire format", () => {
       "GET /v1/sessions/<id>/pack?profile=… (bearer)",
       "GET /cursor",
     ]);
-    expect(body.not_yet).toEqual(["rate-limit budgets", "leases", "triage", "inbox"]);
+    expect(body.not_yet).toEqual([
+      "per-problem event tails",
+      "rate-limit budgets",
+      "leases",
+      "triage",
+      "inbox",
+    ]);
+  });
+
+  test("the uncontracted event-tail shape is a canonical route miss without D1 access", async () => {
+    let prepares = 0;
+    const env = trustedStoaEnv();
+    env.DB = {
+      prepare() {
+        prepares += 1;
+        throw new Error("the quarantined route must not touch D1");
+      },
+    } as unknown as Env["DB"];
+    const app = createApp();
+    const response = await app.fetch(
+      new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=0"),
+      env,
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({
+      code: "ROUTE_NOT_FOUND",
+      detail: "This Worker serves no route at /p/P-4DSP.events.json.",
+    });
+    expect(prepares).toBe(0);
+  });
+
+  test("the retained event-tail experiment accepts only canonical decimal cursors", async () => {
+    let prepares = 0;
+    const env = {
+      DB: {
+        prepare() {
+          prepares += 1;
+          return {
+            bind() {
+              return { first: async () => null };
+            },
+          };
+        },
+      } as unknown as Env["DB"],
+    } as Env;
+    const experimental = createExperimentalLedgerEventTailRoutes();
+
+    for (const since of ["01", "1junk", "1.0", "+1", "-0", "9007199254740992"]) {
+      const response = await experimental.fetch(
+        new Request(`https://a.asimposium.org/p/P-4DSP.events.json?since=${since}`),
+        env,
+      );
+      expect(response.status, since).toBe(400);
+      expect(await response.json(), since).toMatchObject({ code: "CURSOR_INVALID" });
+    }
+    expect(prepares).toBe(0);
+
+    const canonical = await experimental.fetch(
+      new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=1"),
+      env,
+    );
+    expect(canonical.status).toBe(404);
+    expect(await canonical.json()).toMatchObject({ code: "PROBLEM_NOT_FOUND" });
+    expect(prepares).toBe(1);
   });
 
   test("session and cursor routes are mounted and refuse unauthenticated writes", async () => {

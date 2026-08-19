@@ -149,7 +149,7 @@ const capabilitiesBody = (origin: string): string =>
       ],
       sponsor_writes: "signed service envelope only; minted in the Agora console",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
-      not_yet: ["rate-limit budgets", "leases", "triage", "inbox"],
+      not_yet: ["per-problem event tails", "rate-limit budgets", "leases", "triage", "inbox"],
     },
     null,
     2,
@@ -610,6 +610,11 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   });
 
   app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
+
+  // W6.4 source exists, but its response contract and dependencies do not.
+  // Refuse this shape before the broader /p/<id>.json face can reinterpret an
+  // event-tail request as a problem id ending in `.events` and touch D1.
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", (c) => routeNotFound(c.req.url));
 
   // The public ledger faces (no auth, ever).
   app.route("/", createLedgerFaceRoutes());

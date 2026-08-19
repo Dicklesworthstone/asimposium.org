@@ -58,6 +58,79 @@ async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   });
 }
 
+const CANONICAL_PUBLIC_CURSOR = /^(?:0|[1-9][0-9]*)$/;
+
+function parsePublicCursor(value: string | null): number | undefined {
+  if (value === null) return 0;
+  if (!CANONICAL_PUBLIC_CURSOR.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * W6.4 experimental source, deliberately kept outside createLedgerFaceRoutes.
+ * Its response has not landed in @asimposium/contracts yet, so mounting it on
+ * the public Worker would create a second, hand-written protocol surface.
+ */
+export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env }> {
+  const app = new Hono<{ Bindings: Env }>();
+
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", async (c) => {
+    const full = c.req.param("id");
+    const problemId = full.slice(0, -".events.json".length);
+    const since = parsePublicCursor(new URL(c.req.url).searchParams.get("since"));
+    if (since === undefined) {
+      return problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "The since parameter is not a valid cursor",
+        detail: "since must be a canonical non-negative integer event seq.",
+        fixHint: "Use ?since=0 for the full public tail or a cursor from a previous page.",
+      });
+    }
+    const problemRow = await c.env.DB.prepare("SELECT id FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{ id: string }>();
+    if (problemRow === null || problemRow === undefined) {
+      return problemDocument({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "No such problem",
+        detail: "No public problem with this id exists.",
+        fixHint: "Check the id against GET /problems.json.",
+      });
+    }
+    const events = await readEvents(c.env.DB, problemId, since, 200);
+    const body = JSON.stringify(
+      {
+        schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+        problem_id: problemId,
+        since,
+        events: events.map((event) => ({
+          id: event.eventId,
+          seq: event.seq,
+          type: event.type,
+          object_id: event.objectId,
+          created_at: event.createdAt,
+        })),
+        has_more: events.length === 200,
+      },
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": PUBLIC_CACHE_CONTROL,
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  return app;
+}
+
 export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -94,61 +167,6 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   // W6.1: the per-problem public face. Anonymous reads only ever see public
   // projection rows — workshop content has no path here (Rule A2).
-  // The agent delta read (§7.8): events after a cursor, NDJSON-style paged.
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", async (c) => {
-    const full = c.req.param("id");
-    const problemId = full.slice(0, -".events.json".length);
-    const problemRow = await c.env.DB.prepare("SELECT id FROM problems WHERE id = ?")
-      .bind(problemId)
-      .first<{ id: string }>();
-    if (problemRow === null || problemRow === undefined) {
-      return problemDocument({
-        status: 404,
-        code: "PROBLEM_NOT_FOUND",
-        title: "No such problem",
-        detail: "No public problem with this id exists.",
-        fixHint: "Check the id against GET /problems.json.",
-      });
-    }
-    const sinceParam = new URL(c.req.url).searchParams.get("since");
-    const since = sinceParam === null ? 0 : Number.parseInt(sinceParam, 10);
-    if (!Number.isSafeInteger(since) || since < 0) {
-      return problemDocument({
-        status: 400,
-        code: "CURSOR_INVALID",
-        title: "The since parameter is not a valid cursor",
-        detail: "since must be a non-negative integer event seq.",
-        fixHint: "Use ?since=0 for the full public tail or a cursor from a previous page.",
-      });
-    }
-    const events = await readEvents(c.env.DB, problemId, since, 200);
-    const body = JSON.stringify(
-      {
-        schema: "https://a.asimposium.org/schemas/ledger.v1.json",
-        problem_id: problemId,
-        since,
-        events: events.map((event) => ({
-          id: event.eventId,
-          seq: event.seq,
-          type: event.type,
-          object_id: event.objectId,
-          created_at: event.createdAt,
-        })),
-        has_more: events.length === 200,
-      },
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
-      etag,
-    };
-    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
-  });
-
   app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".json".length);
     const problemRow = await c.env.DB.prepare(

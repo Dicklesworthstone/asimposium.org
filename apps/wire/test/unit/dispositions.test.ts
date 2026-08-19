@@ -280,6 +280,16 @@ describe("claim machine: illegal transitions refuse with exact unmet conditions"
       ],
     ],
     [
+      "a high-tier dispute cannot lend independence to a same-sponsor supporting review",
+      "open",
+      { kind: "review-verified", review: T0_REVIEW },
+      context({
+        recorded_refutation_attempts: 1,
+        verified_reviews: [review({ tier: "T3", finding: "dispute" })],
+      }),
+      ["requires ≥1 independent verified review (tier ≥ T1)"],
+    ],
+    [
       "strongly-supported refuses corroborated without artifact or two cross-family full-write-up reviews",
       "corroborated",
       { kind: "review-verified", review: review({ tier: "T2", full_write_up: false }) },
@@ -304,6 +314,44 @@ describe("claim machine: illegal transitions refuse with exact unmet conditions"
       { kind: "review-verified", review: T1_REVIEW },
       context({ has_certified_artifact: true, recorded_refutation_attempts: 1 }),
       ["requires independence tier ≥ T2, got T1"],
+    ],
+    [
+      "a dispute cannot complete the two-review strong-support leg",
+      "corroborated",
+      { kind: "review-verified", review: review({ tier: "T2" }) },
+      context({
+        recorded_refutation_attempts: 1,
+        verified_reviews: [review({ tier: "T3", finding: "dispute" })],
+      }),
+      [
+        "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
+      ],
+    ],
+    [
+      "one review id cannot be counted twice toward strong support",
+      "corroborated",
+      {
+        kind: "review-verified",
+        review: review({ review_id: "R-DUPLICATE", reviewer_id: "F-DUPLICATE" }),
+      },
+      context({
+        recorded_refutation_attempts: 1,
+        verified_reviews: [review({ review_id: "R-DUPLICATE", reviewer_id: "F-DUPLICATE" })],
+      }),
+      [
+        "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
+      ],
+    ],
+    [
+      "conflicting copies of one review id provide no supporting tier",
+      "corroborated",
+      { kind: "review-verified", review: review({ review_id: "R-CONFLICT", tier: "T1" }) },
+      context({
+        has_certified_artifact: true,
+        recorded_refutation_attempts: 1,
+        verified_reviews: [review({ review_id: "R-CONFLICT", tier: "T3" })],
+      }),
+      ["requires independence tier ≥ T2, got none"],
     ],
     [
       "disputed refuses refuted while the refutation is unconfirmed",
