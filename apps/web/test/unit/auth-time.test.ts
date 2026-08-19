@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { authTimeFromIdToken, validAuthTime } from "../../auth";
+import { authTimeFromIdToken, validAuthTime } from "../../lib/auth-time";
 
 /**
  * The step-up gate's evidence source: Google's `auth_time` is an ID-token-only
