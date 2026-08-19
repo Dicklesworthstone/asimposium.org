@@ -6,6 +6,7 @@ import {
   OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideResponseSchema,
   PRODUCTION_STOA_ORIGIN,
+  STAGING_AGORA_ORIGIN,
   STAGING_STOA_ORIGIN,
   stoaHelloUrl,
 } from "@asimposium/contracts";
@@ -54,7 +55,7 @@ const ctx = {
 } as never;
 
 function envWith(stoaOrigin: unknown): never {
-  return { STOA_ORIGIN: stoaOrigin } as never;
+  return { STOA_ORIGIN: stoaOrigin, AGORA_ORIGIN: STAGING_AGORA_ORIGIN } as never;
 }
 
 async function capabilities(stoaOrigin: unknown, requestUrl: string, headers: TestHeaders = {}) {
@@ -133,7 +134,11 @@ describe("the service origin is immutable and required", () => {
   test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
     "%s is retained verbatim",
     (origin) => {
-      const service = new EnrollmentService({ stoaOrigin: origin, replayProtector } as never);
+      const service = new EnrollmentService({
+        stoaOrigin: origin,
+        agoraOrigin: STAGING_AGORA_ORIGIN,
+        replayProtector,
+      } as never);
       expect(service.stoaOrigin).toBe(origin);
     },
   );
@@ -346,7 +351,7 @@ describe("the isolate cache is keyed on the Stoa origin", () => {
       new Request(`https://a.asimposium.org/join/${ENROLLMENT_ID}`, {
         headers: { accept: "text/markdown" },
       }),
-      { DB: db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: origin } as never,
+      { DB: db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: origin, AGORA_ORIGIN: STAGING_AGORA_ORIGIN } as never,
       ctx,
     );
     return { status: response.status, text: await response.text() };
@@ -519,6 +524,7 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       DB: db,
       ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
       STOA_ORIGIN: LOOPBACK,
+      AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
       SERVICE_ENVELOPE_KEYS: keyring,
       OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
     };
@@ -600,6 +606,8 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
         DB: db,
         ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
         STOA_ORIGIN: LOOPBACK,
+        AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+      AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
         SERVICE_ENVELOPE_KEYS: keyring,
         OPERATOR_PRINCIPAL_IDS: `${OPERATOR_ID},${OPERATOR_ID}`,
       } as never,
