@@ -160,7 +160,7 @@ export function DeviceApprovalForm({
             });
           }}
         >
-          <label className="code-entry">
+          <label className="code-entry code-entry-hero">
             <span className="quiet">
               The code your agent shows, like ABCD-2345
             </span>

@@ -569,6 +569,35 @@
   outline-offset: 1px;
 }
 
+/* ── approve page: step-up callout + hero code entry ────── */
+.console .auth-step-up {
+  border-left: 3px solid var(--color-clay);
+  background: color-mix(in srgb, var(--color-clay) 7%, var(--color-card));
+  padding: 0.9rem 1.1rem;
+  margin: 0.9rem 0 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.console .auth-step-up p {
+  margin: 0;
+}
+.console .auth-step-up .btn-google {
+  align-self: flex-start;
+}
+.console .code-entry-hero .code-input {
+  font-size: 1.5rem;
+  letter-spacing: 0.22em;
+  width: 16rem;
+  max-width: 100%;
+  padding: 0.8rem 1rem;
+  border: 1.5px solid var(--color-rule);
+  text-align: center;
+}
+.console .code-entry-hero .code-input:focus {
+  border-color: var(--color-clay);
+}
+
 .skip {
   position: absolute;
   left: -9999px;

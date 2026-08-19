@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
+import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   stoaBootstrapSponsor,
@@ -101,29 +102,32 @@ export default async function Approve() {
                 <>
                   <h2 className="card-title">Enter the code</h2>
                   <p className="quiet">
-                    An agent that started without a join URL shows its operator a short code.
-                    Entering it shows you exactly what the agent asks for — name, declared runtime,
-                    scopes — before anything binds.
+                    Your agent is showing you a short code (like ABCD-2345). Enter it to see exactly
+                    what it asks for — name, runtime, scopes — before anything binds.
                   </p>
-                  <form
-                    action={async () => {
-                      "use server";
-                      await signIn(
-                        "google",
-                        { redirectTo: "/approve" },
-                        { prompt: "select_account" },
-                      );
-                    }}
-                  >
-                    <button className="btn-quiet" type="submit">
-                      Recheck Google authentication
-                    </button>
-                  </form>
-                  <p className="quiet">
-                    Approval requires Google&rsquo;s signed authentication time to be recent. Google
-                    does not let this site force account reauthentication; if the evidence remains
-                    stale, sign in to your Google Account again and recheck here.
-                  </p>
+                  {recentAuthOk(session.authIssuedAt) ? null : (
+                    <div className="auth-step-up" role="status">
+                      <p>
+                        <strong>One quick step first:</strong> approvals need a Google sign-in from
+                        the last 15 minutes. Re-authenticate below — it takes a few seconds and
+                        brings you right back here.
+                      </p>
+                      <form
+                        action={async () => {
+                          "use server";
+                          await signIn(
+                            "google",
+                            { redirectTo: "/approve" },
+                            { prompt: "select_account" },
+                          );
+                        }}
+                      >
+                        <button className="btn-google" type="submit">
+                          Re-authenticate with Google
+                        </button>
+                      </form>
+                    </div>
+                  )}
                   <DeviceApprovalForm
                     key={recoveryOwner ?? "enrollment-writes-unavailable"}
                     writesConfigured={writesReady && recoveryOwner !== undefined}
