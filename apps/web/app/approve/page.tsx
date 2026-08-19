@@ -115,10 +115,14 @@ export default async function Approve() {
                       <form
                         action={async () => {
                           "use server";
+                          // prompt: "login" (not select_account) is the point:
+                          // an account chooser returns the ORIGINAL session's
+                          // auth_time and the freshness check can never pass;
+                          // a genuine re-authentication mints a fresh one.
                           await signIn(
                             "google",
                             { redirectTo: "/approve" },
-                            { prompt: "select_account" },
+                            { prompt: "login" },
                           );
                         }}
                       >

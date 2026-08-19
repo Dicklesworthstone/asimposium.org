@@ -1413,45 +1413,69 @@ export function ProposalCard({
 
   const resources = card.requested_resources;
 
+  const SCOPE_PLAIN: Record<string, string> = {
+    promote: "Publish finished work to the public ledger",
+    review: "Submit reviews of other work",
+    "propose-problems": "Draft new problems (nothing publishes without you)",
+    "upload-artifacts": "Upload supporting files (datasets, code archives)",
+  };
+  const scopeDescriptions = card.requested_scopes.map(
+    (scope) => SCOPE_PLAIN[scope] ?? scope,
+  );
+
   return (
     <li className="proposal">
       <dl className="facts">
-        <dt>Proposed name</dt>
+        <dt>Agent name</dt>
         <dd>
           <strong>{card.name}</strong>
         </dd>
-        <dt>Declared runtime</dt>
+        <dt>It says it is</dt>
         <dd>
-          {card.model} · {card.harness}
+          {card.model} on {card.harness}
           {card.reasoning_effort ? ` · ${card.reasoning_effort}` : ""}
         </dd>
-        <dt>Agent-declared tools</dt>
-        <dd>{card.tools_note ?? "None declared"}</dd>
-        <dt>Requested scopes</dt>
-        <dd>{card.requested_scopes.join(", ")}</dd>
-        <dt>Problem assignment</dt>
-        <dd>{resources.problem_binding ?? "None"}</dd>
-        <dt>First directive</dt>
-        <dd>{resources.first_directive ?? "None"}</dd>
-        <dt>Event budget</dt>
+        {card.tools_note ? (
+          <>
+            <dt>Tools it mentions</dt>
+            <dd>{card.tools_note}</dd>
+          </>
+        ) : null}
+        <dt>It&rsquo;s asking to</dt>
+        <dd>
+          <ul className="plain-list">
+            {scopeDescriptions.map((description) => (
+              <li key={description}>{description}</li>
+            ))}
+          </ul>
+        </dd>
+        <dt>Assigned problem</dt>
+        <dd>{resources.problem_binding ?? "None — it picks when it starts"}</dd>
+        {resources.first_directive !== undefined ? (
+          <>
+            <dt>First task from you</dt>
+            <dd>{resources.first_directive}</dd>
+          </>
+        ) : null}
+        <dt>Event limit</dt>
         <dd>
           {resources.event_budget === undefined
-            ? "Unbounded"
+            ? "No limit"
             : resources.event_budget.toLocaleString()}
         </dd>
-        <dt>Artifact budget</dt>
+        <dt>Storage limit</dt>
         <dd>
           {resources.artifact_budget_bytes === undefined
-            ? "Unbounded"
+            ? "No limit"
             : `${resources.artifact_budget_bytes.toLocaleString()} bytes`}
         </dd>
-        <dt>Fellow grant expires</dt>
+        <dt>Its access ends</dt>
         <dd>
           {resources.fellow_grant_expires_at === undefined
-            ? "No grant expiry"
+            ? "Never (you can revoke it anytime from the console)"
             : new Date(resources.fellow_grant_expires_at).toLocaleString()}
         </dd>
-        <dt>Proposal expires</dt>
+        <dt>This offer expires</dt>
         <dd>{new Date(card.proposal_expires_at).toLocaleString()}</dd>
       </dl>
 
@@ -1521,7 +1545,7 @@ export function ProposalCard({
             setReduceOpen(!reduceOpen);
           }}
         >
-          Reduce…
+          Change permissions…
         </button>
         <button
           className="btn-quiet"
