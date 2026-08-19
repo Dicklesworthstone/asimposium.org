@@ -119,11 +119,7 @@ export default async function Approve() {
                           // an account chooser returns the ORIGINAL session's
                           // auth_time and the freshness check can never pass;
                           // a genuine re-authentication mints a fresh one.
-                          await signIn(
-                            "google",
-                            { redirectTo: "/approve" },
-                            { prompt: "login" },
-                          );
+                          await signIn("google", { redirectTo: "/approve" }, { prompt: "login" });
                         }}
                       >
                         <button className="btn-google" type="submit">

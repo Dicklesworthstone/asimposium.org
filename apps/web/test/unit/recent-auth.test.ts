@@ -12,16 +12,10 @@ describe("sponsor decision recent-auth boundary", () => {
   test("accepts the inclusive window plus bounded inter-plane clock skew", () => {
     expect(recentAuthOk(now, now)).toBe(true);
     expect(
-      recentAuthOk(
-        now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS,
-        now,
-      ),
+      recentAuthOk(now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS, now),
     ).toBe(true);
     expect(
-      recentAuthOk(
-        now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS - 1,
-        now,
-      ),
+      recentAuthOk(now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS - 1, now),
     ).toBe(false);
     expect(recentAuthOk(now + RECENT_AUTH_CLOCK_SKEW_SECONDS, now)).toBe(true);
     expect(recentAuthOk(now + RECENT_AUTH_CLOCK_SKEW_SECONDS + 1, now)).toBe(false);
@@ -43,8 +37,7 @@ describe("sponsor decision recent-auth boundary", () => {
   });
 
   test("an ordinary later session read cannot make an old claim fresh", () => {
-    const signedInAt =
-      now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS - 1;
+    const signedInAt = now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS - 1;
     expect(recentAuthOk(signedInAt, now)).toBe(false);
     expect(recentAuthOk(signedInAt, now + 60)).toBe(false);
   });

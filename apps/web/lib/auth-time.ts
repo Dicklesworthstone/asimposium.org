@@ -12,9 +12,7 @@
  * (the same bar the step-up check applies downstream).
  */
 export function validAuthTime(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**
@@ -28,9 +26,7 @@ export function authTimeFromIdToken(idToken: unknown): number | undefined {
   const segment = idToken.split(".")[1];
   if (segment === undefined) return undefined;
   try {
-    const payload: unknown = JSON.parse(
-      Buffer.from(segment, "base64url").toString("utf8"),
-    );
+    const payload: unknown = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
     if (typeof payload !== "object" || payload === null) return undefined;
     return validAuthTime((payload as Record<string, unknown>).auth_time);
   } catch {

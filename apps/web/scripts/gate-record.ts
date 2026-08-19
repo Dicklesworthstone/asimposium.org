@@ -61,10 +61,7 @@ const WEB_CONTEXT_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
     "$1=<redacted>",
   ],
   // POSIX absolute paths that identify a machine or a home directory.
-  [
-    /(?<![\w:/])\/(?:Users|home|root|private|var|tmp|opt)\/[^\s"'`,;)\]]*/g,
-    "<path>",
-  ],
+  [/(?<![\w:/])\/(?:Users|home|root|private|var|tmp|opt)\/[^\s"'`,;)\]]*/g, "<path>"],
   // Windows absolute paths.
   [/\b[A-Za-z]:\\[^\s"'`,;)\]]*/g, "<path>"],
 ];

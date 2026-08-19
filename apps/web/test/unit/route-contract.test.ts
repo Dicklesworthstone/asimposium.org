@@ -32,13 +32,7 @@ describe("readExportSurface", () => {
       ].join("\n"),
       "route.ts",
     );
-    expect([...surface.names].sort()).toEqual([
-      "DELETE",
-      "GET",
-      "PATCH",
-      "POST",
-      "dynamic",
-    ]);
+    expect([...surface.names].sort()).toEqual(["DELETE", "GET", "PATCH", "POST", "dynamic"]);
     expect(surface.hasDefault).toBe(false);
   });
 
@@ -57,18 +51,15 @@ describe("readExportSurface", () => {
   });
 
   test("detects both forms of default export and not `export =`", () => {
+    expect(readExportSurface("export default function Page() {}", "page.tsx").hasDefault).toBe(
+      true,
+    );
     expect(
-      readExportSurface("export default function Page() {}", "page.tsx")
-        .hasDefault,
+      readExportSurface("function Page() {}\nexport default Page;", "page.tsx").hasDefault,
     ).toBe(true);
-    expect(
-      readExportSurface("function Page() {}\nexport default Page;", "page.tsx")
-        .hasDefault,
-    ).toBe(true);
-    expect(
-      readExportSurface("declare const x: number;\nexport = x;", "legacy.ts")
-        .hasDefault,
-    ).toBe(false);
+    expect(readExportSurface("declare const x: number;\nexport = x;", "legacy.ts").hasDefault).toBe(
+      false,
+    );
   });
 });
 
@@ -108,9 +99,7 @@ describe("planted negatives — each rule must be able to fail", () => {
     expect(hit?.file).toBe("app/api/thing/route.ts");
     expect(hit?.detail).toContain("formatThing");
     // The type export is erased and must not be reported.
-    expect(
-      violations.filter((v) => v.detail.includes("`Thing`")),
-    ).toHaveLength(0);
+    expect(violations.filter((v) => v.detail.includes("`Thing`"))).toHaveLength(0);
   });
 
   test("MISSING_ROOT_LAYOUT: the App Router requires a root layout", () => {
@@ -181,12 +170,8 @@ describe("reported paths", () => {
 
 describe("write-path exemptions", () => {
   test("the only exemption is the Auth.js endpoint, with its reason", () => {
-    expect([...WRITE_PATH_EXEMPTIONS.keys()]).toEqual([
-      "app/api/auth/[...nextauth]/route.ts",
-    ]);
-    const reason = WRITE_PATH_EXEMPTIONS.get(
-      "app/api/auth/[...nextauth]/route.ts",
-    );
+    expect([...WRITE_PATH_EXEMPTIONS.keys()]).toEqual(["app/api/auth/[...nextauth]/route.ts"]);
+    const reason = WRITE_PATH_EXEMPTIONS.get("app/api/auth/[...nextauth]/route.ts");
     expect(reason).toContain("session cookie");
     expect(reason).toContain("never reaches D1");
   });

@@ -17,9 +17,7 @@ const gateRecordSource = readFileSync(
 
 describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
   test("masks Fellow bearer tokens", () => {
-    const scrubbed = scrubDiagnostic(
-      "authorization: Bearer asimp_ag_9f2b1c4d5e6f7a8b9c0d1e2f",
-    );
+    const scrubbed = scrubDiagnostic("authorization: Bearer asimp_ag_9f2b1c4d5e6f7a8b9c0d1e2f");
     expect(scrubbed).not.toContain("9f2b1c4d5e6f7a8b9c0d1e2f");
     expect(scrubbed).toContain("<redacted>");
   });
@@ -46,22 +44,17 @@ describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
   });
 
   test.each([
-    [
-      "double-quoted",
-      `AUTH_SECRET="${String.raw`hunter\"2 tail`}" status=fail`,
-      "status=fail",
-    ],
-    [
-      "single-quoted",
-      `AUTH_SECRET='${String.raw`hunter\'2 tail`}' status=pass`,
-      "status=pass",
-    ],
-  ] as const)("PLANTED: %s escaped assignment redacts its complete value", (_label, input, status) => {
-    const scrubbed = scrubDiagnostic(input);
-    expect(scrubbed).toBe(`AUTH_SECRET=<redacted> ${status}`);
-    expect(scrubbed).not.toContain("hunter");
-    expect(scrubbed).not.toContain("2 tail");
-  });
+    ["double-quoted", `AUTH_SECRET="${String.raw`hunter\"2 tail`}" status=fail`, "status=fail"],
+    ["single-quoted", `AUTH_SECRET='${String.raw`hunter\'2 tail`}' status=pass`, "status=pass"],
+  ] as const)(
+    "PLANTED: %s escaped assignment redacts its complete value",
+    (_label, input, status) => {
+      const scrubbed = scrubDiagnostic(input);
+      expect(scrubbed).toBe(`AUTH_SECRET=<redacted> ${status}`);
+      expect(scrubbed).not.toContain("hunter");
+      expect(scrubbed).not.toContain("2 tail");
+    },
+  );
 
   test("PLANTED: an undelimited quoted-value suffix remains redacted", () => {
     const input = `AUTH_SECRET="${String.raw`hunter\"2 tail`}"status=fail PORT=3000`;
@@ -103,9 +96,7 @@ describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
     expect(scrubDiagnostic("Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l status=ok")).toBe(
       "Authorization: <redacted>",
     );
-    expect(scrubDiagnostic("Cookie: sid=abc; other=secret; Path=/")).toBe(
-      "Cookie: <redacted>",
-    );
+    expect(scrubDiagnostic("Cookie: sid=abc; other=secret; Path=/")).toBe("Cookie: <redacted>");
   });
 
   test("leaves safe prose and short version identifiers intact", () => {

@@ -53,8 +53,7 @@ const RULES: Record<ViolationCode, { rule: string; fix_hint: string }> = {
   },
   MISSING_ROOT_LAYOUT: {
     rule: "NEXT-APP-1",
-    fix_hint:
-      "Add `app/layout.tsx` exporting a default component that renders <html> and <body>.",
+    fix_hint: "Add `app/layout.tsx` exporting a default component that renders <html> and <body>.",
   },
   ROUTE_PAGE_COLLISION: {
     rule: "NEXT-APP-2",
@@ -104,12 +103,7 @@ const HTTP_METHOD_EXPORTS: ReadonlySet<string> = new Set([
 ]);
 
 /** Methods that mutate. Their presence in Agora is a doctrine violation. */
-const WRITE_METHOD_EXPORTS: ReadonlySet<string> = new Set([
-  "POST",
-  "PUT",
-  "PATCH",
-  "DELETE",
-]);
+const WRITE_METHOD_EXPORTS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /** https://nextjs.org/docs — route segment config, allowed alongside handlers. */
 const ROUTE_SEGMENT_CONFIG_EXPORTS: ReadonlySet<string> = new Set([
@@ -153,11 +147,7 @@ interface ExportSurface {
   hasDefault: boolean;
 }
 
-function violation(
-  code: ViolationCode,
-  file: string,
-  detail: string,
-): Violation {
+function violation(code: ViolationCode, file: string, detail: string): Violation {
   const spec = RULES[code];
   return { code, rule: spec.rule, file, detail, fix_hint: spec.fix_hint };
 }
@@ -186,10 +176,7 @@ function findFile(dir: string, base: string): string | undefined {
   return undefined;
 }
 
-function collectBindingNames(
-  name: ts.BindingName,
-  into: Set<string>,
-): void {
+function collectBindingNames(name: ts.BindingName, into: Set<string>): void {
   if (ts.isIdentifier(name)) {
     into.add(name.text);
     return;
@@ -204,18 +191,13 @@ function collectBindingNames(
  * declarations (`export const { GET, POST } = handlers`) and export clauses.
  * Type-only exports are erased and therefore ignored.
  */
-export function readExportSurface(
-  source: string,
-  fileName: string,
-): ExportSurface {
+export function readExportSurface(source: string, fileName: string): ExportSurface {
   const sourceFile = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.ESNext,
     true,
-    fileName.endsWith(".tsx") || fileName.endsWith(".jsx")
-      ? ts.ScriptKind.TSX
-      : ts.ScriptKind.TS,
+    fileName.endsWith(".tsx") || fileName.endsWith(".jsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
 
   const names = new Set<string>();
@@ -241,12 +223,8 @@ export function readExportSurface(
       continue;
     }
 
-    const modifiers = ts.canHaveModifiers(statement)
-      ? (ts.getModifiers(statement) ?? [])
-      : [];
-    const exported = modifiers.some(
-      (m) => m.kind === ts.SyntaxKind.ExportKeyword,
-    );
+    const modifiers = ts.canHaveModifiers(statement) ? (ts.getModifiers(statement) ?? []) : [];
+    const exported = modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
     if (!exported) continue;
 
     if (modifiers.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) {
@@ -299,11 +277,7 @@ function checkDefaultExport(
   }
 }
 
-function checkRouteFile(
-  filePath: string,
-  relative: string,
-  out: Violation[],
-): void {
+function checkRouteFile(filePath: string, relative: string, out: Violation[]): void {
   const surface = readExportSurface(readFileSync(filePath, "utf8"), filePath);
 
   const methods: string[] = [];
@@ -345,11 +319,7 @@ function checkRouteFile(
   }
 }
 
-function walkSegment(
-  dir: string,
-  relativeDir: string,
-  out: Violation[],
-): void {
+function walkSegment(dir: string, relativeDir: string, out: Violation[]): void {
   const entries = readdirSync(dir, { withFileTypes: true });
 
   const pageFile = findFile(dir, "page");
@@ -373,11 +343,7 @@ function walkSegment(
   }
 
   if (routeFile) {
-    checkRouteFile(
-      routeFile,
-      toPosix(relativeToRoot(routeFile, dir, relativeDir)),
-      out,
-    );
+    checkRouteFile(routeFile, toPosix(relativeToRoot(routeFile, dir, relativeDir)), out);
   }
 
   const dynamicNames = new Set<string>();
@@ -406,11 +372,7 @@ function walkSegment(
   }
 }
 
-function relativeToRoot(
-  filePath: string,
-  dir: string,
-  relativeDir: string,
-): string {
+function relativeToRoot(filePath: string, dir: string, relativeDir: string): string {
   const fileName = filePath.slice(dir.length + 1);
   return join("app", relativeDir, fileName);
 }
@@ -423,9 +385,7 @@ export function validateAppRouterTree(appDir: string): Violation[] {
   const out: Violation[] = [];
 
   if (!isDirectory(appDir)) {
-    out.push(
-      violation("MISSING_APP_DIR", "app", "No `app/` directory in this package."),
-    );
+    out.push(violation("MISSING_APP_DIR", "app", "No `app/` directory in this package."));
     return out;
   }
 

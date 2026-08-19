@@ -13,13 +13,8 @@ const RECOVERY_SCOPES: ReadonlySet<EnrollmentRecoveryScope> = new Set([
   "sponsor-panic",
 ]);
 
-export function isEnrollmentRecoveryScope(
-  value: unknown,
-): value is EnrollmentRecoveryScope {
-  return (
-    typeof value === "string" &&
-    RECOVERY_SCOPES.has(value as EnrollmentRecoveryScope)
-  );
+export function isEnrollmentRecoveryScope(value: unknown): value is EnrollmentRecoveryScope {
+  return typeof value === "string" && RECOVERY_SCOPES.has(value as EnrollmentRecoveryScope);
 }
 
 const RECOVERY_KEY = /^[0-9a-f]{64}$/;
@@ -79,9 +74,7 @@ export function enrollmentRecoveryDisposition(
 }
 
 /** A committed Worker result must never be hidden by ancillary UI cache work. */
-export function bestEffortEnrollmentCacheInvalidation(
-  invalidate: () => void,
-): void {
+export function bestEffortEnrollmentCacheInvalidation(invalidate: () => void): void {
   try {
     invalidate();
   } catch {
@@ -105,15 +98,11 @@ function decodeHexKey(hex: string): ArrayBuffer {
 function encodeBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
-  if (!/^[A-Za-z0-9_-]+$/.test(value))
-    throw new Error("invalid recovery payload encoding");
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid recovery payload encoding");
   const standard = value.replaceAll("-", "+").replaceAll("_", "/");
   const padding = "=".repeat((4 - (standard.length % 4)) % 4);
   const binary = atob(`${standard}${padding}`);
@@ -121,19 +110,14 @@ function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
-  if (encodeBase64Url(bytes) !== value)
-    throw new Error("invalid recovery payload encoding");
+  if (encodeBase64Url(bytes) !== value) throw new Error("invalid recovery payload encoding");
   return bytes;
 }
 
 async function recoveryPayloadKey(keyHex: string): Promise<CryptoKey> {
-  const root = await crypto.subtle.importKey(
-    "raw",
-    decodeHexKey(keyHex),
-    "HKDF",
-    false,
-    ["deriveKey"],
-  );
+  const root = await crypto.subtle.importKey("raw", decodeHexKey(keyHex), "HKDF", false, [
+    "deriveKey",
+  ]);
   return crypto.subtle.deriveKey(
     {
       name: "HKDF",
@@ -148,9 +132,7 @@ async function recoveryPayloadKey(keyHex: string): Promise<CryptoKey> {
   );
 }
 
-export function enrollmentRecoveryPayloadIsValid(
-  value: unknown,
-): value is string {
+export function enrollmentRecoveryPayloadIsValid(value: unknown): value is string {
   return typeof value === "string" && RECOVERY_PAYLOAD.test(value);
 }
 
@@ -169,11 +151,8 @@ export async function sealEnrollmentRecoveryPayload(
   ) {
     throw new Error("invalid enrollment recovery payload");
   }
-  const plaintext = new TextEncoder().encode(
-    JSON.stringify({ version: 1, ...payload }),
-  );
-  if (plaintext.length > 12_000)
-    throw new Error("enrollment recovery payload is too large");
+  const plaintext = new TextEncoder().encode(JSON.stringify({ version: 1, ...payload }));
+  if (plaintext.length > 12_000) throw new Error("enrollment recovery payload is too large");
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt(
@@ -197,11 +176,7 @@ export async function openEnrollmentRecoveryPayload(
   expectedScope: EnrollmentRecoveryScope,
   now: number,
 ): Promise<EnrollmentRecoveryPayloadData> {
-  if (
-    !enrollmentRecoveryPayloadIsValid(envelope) ||
-    !Number.isSafeInteger(now) ||
-    now <= 0
-  ) {
+  if (!enrollmentRecoveryPayloadIsValid(envelope) || !Number.isSafeInteger(now) || now <= 0) {
     throw new Error("invalid enrollment recovery payload");
   }
   const [, ivPart, ciphertextPart] = envelope.split(".");
@@ -284,10 +259,7 @@ export async function enrollmentRecoveryFingerprint(
  * this value again immediately before dispatch so a same-origin session change
  * cannot move a prepared write to another principal.
  */
-export function enrollmentRecoveryOwner(
-  keyHex: string,
-  sponsorId: string,
-): Promise<string> {
+export function enrollmentRecoveryOwner(keyHex: string, sponsorId: string): Promise<string> {
   return enrollmentRecoveryFingerprint(keyHex, sponsorId, "mint", {
     purpose: "client-memory-owner-v1",
   });

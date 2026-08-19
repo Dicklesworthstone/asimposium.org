@@ -23,6 +23,8 @@ describe("join paste block origin binding", () => {
   });
 
   test("PLANTED: a foreign join origin emits no executable paste block", () => {
-    expect(buildJoinPasteBlock(joinUrl("https://a-staging.asimposium.org.evil.invalid"))).toBeUndefined();
+    expect(
+      buildJoinPasteBlock(joinUrl("https://a-staging.asimposium.org.evil.invalid")),
+    ).toBeUndefined();
   });
 });

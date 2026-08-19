@@ -64,18 +64,14 @@ describe("blocked gates are distinguishable from failures", () => {
     expect(run.stderr).toContain("no implementation");
   });
 
-  test(
-    "a passing suite still exits 0",
-    async () => {
-      const run = await runGate("typecheck");
-      expect(run.exitCode).toBe(0);
-      expect(run.record?.status).toBe("pass");
-    },
-    // This launches the real compiler. Five seconds is below its observed
-    // clean-run latency on a contended CI or swarm host and made the test kill
-    // a healthy child before it could emit the gate record.
-    30_000,
-  );
+  test("a passing suite still exits 0", async () => {
+    const run = await runGate("typecheck");
+    expect(run.exitCode).toBe(0);
+    expect(run.record?.status).toBe("pass");
+  }, // This launches the real compiler. Five seconds is below its observed
+  // clean-run latency on a contended CI or swarm host and made the test kill
+  // a healthy child before it could emit the gate record.
+  30_000);
 
   test("an unknown gate is a usage error, distinct from both", async () => {
     const run = await runGate("nonsuch");
@@ -93,17 +89,13 @@ describe("blocked gates are distinguishable from failures", () => {
     }
   });
 
-  test(
-    "no gate run leaks an absolute path into its record",
-    async () => {
-      for (const suite of ["security", "typecheck"]) {
-        const run = await runGate(suite);
-        const serialized = JSON.stringify(run.record ?? {});
-        expect(serialized).not.toContain("/Users/");
-        expect(serialized).not.toContain("/home/");
-        expect(run.record?.packagePath).toBe("apps/web");
-      }
-    },
-    30_000,
-  );
+  test("no gate run leaks an absolute path into its record", async () => {
+    for (const suite of ["security", "typecheck"]) {
+      const run = await runGate(suite);
+      const serialized = JSON.stringify(run.record ?? {});
+      expect(serialized).not.toContain("/Users/");
+      expect(serialized).not.toContain("/home/");
+      expect(run.record?.packagePath).toBe("apps/web");
+    }
+  }, 30_000);
 });

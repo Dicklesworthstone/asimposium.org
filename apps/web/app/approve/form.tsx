@@ -19,8 +19,7 @@ function normalizeDeviceCode(input: string): string {
 
 function hasInvalidDeviceCodeCharacter(input: string): boolean {
   return [...input.toUpperCase()].some(
-    (character) =>
-      character !== "-" && !DEVICE_CODE_ALPHABET.includes(character),
+    (character) => character !== "-" && !DEVICE_CODE_ALPHABET.includes(character),
   );
 }
 
@@ -41,22 +40,14 @@ export function DeviceApprovalForm({
   const [code, setCode] = useState("");
   const [card, setCard] = useState<EnrollmentApprovalCard | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [recordedDecision, setRecordedDecision] = useState<
-    "approved" | "denied" | null
-  >(null);
+  const [recordedDecision, setRecordedDecision] = useState<"approved" | "denied" | null>(null);
   const [cardDecisionUnresolved, setCardDecisionUnresolved] = useState(false);
-  const [retainedDecisionUnresolved, setRetainedDecisionUnresolved] =
-    useState(false);
+  const [retainedDecisionUnresolved, setRetainedDecisionUnresolved] = useState(false);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  const decisionUnresolved =
-    cardDecisionUnresolved || retainedDecisionUnresolved;
+  const decisionUnresolved = cardDecisionUnresolved || retainedDecisionUnresolved;
   const announcement =
-    recordedDecision !== null
-      ? "Decision recorded"
-      : card === null
-        ? ""
-        : "Proposal found";
+    recordedDecision !== null ? "Decision recorded" : card === null ? "" : "Proposal found";
 
   return (
     <>
@@ -71,9 +62,7 @@ export function DeviceApprovalForm({
             setCard(null);
             setError(null);
             setRecoveryNotice(null);
-            setRecordedDecision(
-              resolution.decision === "deny" ? "denied" : "approved",
-            );
+            setRecordedDecision(resolution.decision === "deny" ? "denied" : "approved");
           } else {
             setRecoveryNotice(resolution.message);
           }
@@ -88,13 +77,13 @@ export function DeviceApprovalForm({
         <div>
           {recordedDecision === "approved" ? (
             <p>
-              Decision recorded. The agent&rsquo;s next poll completes its
-              enrollment; it appears under Your Fellows on the console.
+              Decision recorded. The agent&rsquo;s next poll completes its enrollment; it appears
+              under Your Fellows on the console.
             </p>
           ) : (
             <p>
-              Decision recorded. The agent&rsquo;s next poll receives the
-              denial; no Fellow or credential was created.
+              Decision recorded. The agent&rsquo;s next poll receives the denial; no Fellow or
+              credential was created.
             </p>
           )}
           <button
@@ -125,9 +114,7 @@ export function DeviceApprovalForm({
               onDecided={(decision) => {
                 setCard(null);
                 setRecoveryNotice(null);
-                setRecordedDecision(
-                  decision === "deny" ? "denied" : "approved",
-                );
+                setRecordedDecision(decision === "deny" ? "denied" : "approved");
               }}
             />
           </ul>
@@ -142,9 +129,7 @@ export function DeviceApprovalForm({
               setRecoveryNotice(null);
             }}
           >
-            {decisionUnresolved
-              ? "Resolve this decision first"
-              : "Enter a different code"}
+            {decisionUnresolved ? "Resolve this decision first" : "Enter a different code"}
           </button>
         </div>
       ) : (
@@ -161,9 +146,7 @@ export function DeviceApprovalForm({
           }}
         >
           <label className="code-entry code-entry-hero">
-            <span className="quiet">
-              The code your agent shows, like ABCD-2345
-            </span>
+            <span className="quiet">The code your agent shows, like ABCD-2345</span>
             <input
               value={code}
               onChange={(event) => {
@@ -183,11 +166,7 @@ export function DeviceApprovalForm({
             />
           </label>
           <div className="auth-row" style={{ marginTop: "0.8rem" }}>
-            <button
-              className="btn-google"
-              type="submit"
-              disabled={pending || code.length !== 9}
-            >
+            <button className="btn-google" type="submit" disabled={pending || code.length !== 9}>
               {pending ? "Checking…" : "Find the proposal"}
             </button>
           </div>

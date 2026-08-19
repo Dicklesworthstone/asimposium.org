@@ -338,8 +338,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             </li>
             <li>
               <a href="/api/health">Plane status as JSON</a>. An HTTP 200 means only that Agora
-              served this status document; its fields must be inspected before relying on any
-              plane.
+              served this status document; its fields must be inspected before relying on any plane.
             </li>
             <li>
               Source implementations and local tests in the{" "}

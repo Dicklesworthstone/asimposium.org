@@ -113,19 +113,10 @@ export type EnrollmentAttemptFingerprintResult =
 
 const ENROLLMENT_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
-export type LifecycleAttemptScope =
-  | "credential-revoke"
-  | "fellow-lifecycle"
-  | "sponsor-panic";
+export type LifecycleAttemptScope = "credential-revoke" | "fellow-lifecycle" | "sponsor-panic";
 
-type CredentialRevokeIntent = Omit<
-  SponsorCredentialRevokeRequest,
-  "step_up_authenticated_at"
->;
-type FellowLifecycleIntent = Omit<
-  SponsorFellowLifecycleRequest,
-  "step_up_authenticated_at"
->;
+type CredentialRevokeIntent = Omit<SponsorCredentialRevokeRequest, "step_up_authenticated_at">;
+type FellowLifecycleIntent = Omit<SponsorFellowLifecycleRequest, "step_up_authenticated_at">;
 type SponsorPanicIntent = Omit<SponsorPanicRequest, "step_up_authenticated_at">;
 
 type LifecycleIntent =
@@ -167,11 +158,7 @@ export type LifecycleResult =
     };
 
 function isLifecycleAttemptScope(value: unknown): value is LifecycleAttemptScope {
-  return (
-    value === "credential-revoke" ||
-    value === "fellow-lifecycle" ||
-    value === "sponsor-panic"
-  );
+  return value === "credential-revoke" || value === "fellow-lifecycle" || value === "sponsor-panic";
 }
 
 function lifecycleIntent(
@@ -626,7 +613,8 @@ async function dispatchPreparedLifecycle(
     return {
       ok: false,
       recovery: "retain",
-      message: "This deployment cannot open the prepared lifecycle command. Do not start a replacement.",
+      message:
+        "This deployment cannot open the prepared lifecycle command. Do not start a replacement.",
     };
   }
   try {
@@ -641,12 +629,8 @@ async function dispatchPreparedLifecycle(
     if (
       intent === undefined ||
       opened.idempotencyKey !== idempotencyKey ||
-      (await enrollmentRecoveryFingerprint(
-        rootHex,
-        sponsor.sponsorId,
-        scope,
-        intent.request,
-      )) !== opened.fingerprint
+      (await enrollmentRecoveryFingerprint(rootHex, sponsor.sponsorId, scope, intent.request)) !==
+        opened.fingerprint
     ) {
       throw new Error("invalid recovery payload");
     }

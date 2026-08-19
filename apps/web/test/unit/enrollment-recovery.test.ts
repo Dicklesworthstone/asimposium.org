@@ -73,9 +73,9 @@ test("decision recovery fingerprints stable intent while Agora owns step-up evid
       step_up_authenticated_at: stepUpAuthenticatedAt,
     });
     expect(command.step_up_authenticated_at).toBe(stepUpAuthenticatedAt);
-    expect(
-      await enrollmentRecoveryFingerprint(ROOT_A, SPONSOR, "decision", intent),
-    ).toBe(firstFingerprint);
+    expect(await enrollmentRecoveryFingerprint(ROOT_A, SPONSOR, "decision", intent)).toBe(
+      firstFingerprint,
+    );
   }
 });
 
@@ -106,9 +106,9 @@ test("lifecycle recovery seals stable intent but refuses a different command sco
   await expect(
     openEnrollmentRecoveryPayload(ROOT_A, envelope, SPONSOR, "sponsor-panic", 1_999),
   ).rejects.toThrow("invalid enrollment recovery payload");
-  expect(
-    await enrollmentRecoveryFingerprint(ROOT_A, SPONSOR, "sponsor-panic", intent),
-  ).not.toBe(fingerprint);
+  expect(await enrollmentRecoveryFingerprint(ROOT_A, SPONSOR, "sponsor-panic", intent)).not.toBe(
+    fingerprint,
+  );
 });
 
 test("the page owner is a stable sponsor binding and changes across principals", async () => {
@@ -341,9 +341,9 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
     // Held in a variable so TypeScript does not try to resolve the query suffix
     // as a module path; the suffix is a runtime registry key, not a file.
     const hermeticSpecifier = "../../app/console/actions.ts?hermetic-composition";
-    const { mintJoinUrl } = (await import(hermeticSpecifier)) as typeof import(
-      "../../app/console/actions.ts"
-    );
+    const { mintJoinUrl } = (await import(
+      hermeticSpecifier
+    )) as typeof import("../../app/console/actions.ts");
     result = await mintJoinUrl(recoveryPayload, idempotencyKey, owner);
   } finally {
     mock.module("@/lib/stoa", () => realStoa);

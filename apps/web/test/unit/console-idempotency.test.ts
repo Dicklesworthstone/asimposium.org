@@ -112,55 +112,14 @@ test("editing away and back preserves each fingerprint key, while success clears
   let sequence = 0;
   const createKey = () => `console-key-${++sequence}`;
 
-  const a1 = enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_A,
-    NOW,
-    storage,
-    fallback,
-    createKey,
-  );
-  const b1 = enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_B,
-    NOW,
-    storage,
-    fallback,
-    createKey,
-  );
-  const a2 = enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_A,
-    NOW,
-    storage,
-    fallback,
-    createKey,
-  );
-  expect([a1.key, b1.key, a2.key]).toEqual([
-    "console-key-1",
-    "console-key-2",
-    "console-key-1",
-  ]);
+  const a1 = enrollmentAttemptKey("decision", FINGERPRINT_A, NOW, storage, fallback, createKey);
+  const b1 = enrollmentAttemptKey("decision", FINGERPRINT_B, NOW, storage, fallback, createKey);
+  const a2 = enrollmentAttemptKey("decision", FINGERPRINT_A, NOW, storage, fallback, createKey);
+  expect([a1.key, b1.key, a2.key]).toEqual(["console-key-1", "console-key-2", "console-key-1"]);
 
-  expect(
-    clearEnrollmentAttempt("decision", FINGERPRINT_A, storage, fallback),
-  ).toBe(true);
-  const b2 = enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_B,
-    NOW,
-    storage,
-    new Map(),
-    createKey,
-  );
-  const a3 = enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_A,
-    NOW,
-    storage,
-    new Map(),
-    createKey,
-  );
+  expect(clearEnrollmentAttempt("decision", FINGERPRINT_A, storage, fallback)).toBe(true);
+  const b2 = enrollmentAttemptKey("decision", FINGERPRINT_B, NOW, storage, new Map(), createKey);
+  const a3 = enrollmentAttemptKey("decision", FINGERPRINT_A, NOW, storage, new Map(), createKey);
   expect(b2.key).toBe("console-key-2");
   expect(a3.key).toBe("console-key-3");
 });
@@ -203,9 +162,7 @@ test("lifecycle recovery reuses only the exact command scope and key", () => {
   expect(
     clearEnrollmentAttempt("credential-revoke", FINGERPRINT_A, storage, new Map(), OWNER_A),
   ).toBe(true);
-  expect(
-    enrollmentAttemptsRemain("fellow-lifecycle", storage, new Map(), OWNER_A),
-  ).toBe(true);
+  expect(enrollmentAttemptsRemain("fellow-lifecycle", storage, new Map(), OWNER_A)).toBe(true);
 });
 
 test("an edit-back hit remains recoverable when the bounded cache is full", () => {
@@ -215,14 +172,7 @@ test("an edit-back hit remains recoverable when the bounded cache is full", () =
     index.toString(16).padStart(64, "0"),
   );
   for (const [index, fingerprint] of fingerprints.slice(0, 8).entries()) {
-    enrollmentAttemptKey(
-      "mint",
-      fingerprint,
-      NOW,
-      storage,
-      fallback,
-      () => `console-${index}`,
-    );
+    enrollmentAttemptKey("mint", fingerprint, NOW, storage, fallback, () => `console-${index}`);
   }
   enrollmentAttemptKey("mint", fingerprints[0] ?? "", NOW, storage, fallback);
   expect(() =>
@@ -237,16 +187,9 @@ test("an edit-back hit remains recoverable when the bounded cache is full", () =
   ).toThrow("Eight enrollment attempts still have unresolved recovery markers");
 
   expect(
-    enrollmentAttemptKey(
-      "mint",
-      fingerprints[0] ?? "",
-      NOW,
-      storage,
-      new Map(),
-      () => {
-        throw new Error("promoted entry was evicted");
-      },
-    ).key,
+    enrollmentAttemptKey("mint", fingerprints[0] ?? "", NOW, storage, new Map(), () => {
+      throw new Error("promoted entry was evicted");
+    }).key,
   ).toBe("console-0");
 });
 
@@ -261,16 +204,9 @@ test("new writes require durable tab storage while a trusted fallback can retry"
     fallback,
     () => "console-local",
   );
-  const second = enrollmentAttemptKey(
-    "mint",
-    FINGERPRINT_A,
-    NOW + 1,
-    undefined,
-    fallback,
-    () => {
-      throw new Error("fallback minted a replacement key");
-    },
-  );
+  const second = enrollmentAttemptKey("mint", FINGERPRINT_A, NOW + 1, undefined, fallback, () => {
+    throw new Error("fallback minted a replacement key");
+  });
   expect(second).toMatchObject({
     key: first.key,
     recoveryPayload: first.recoveryPayload,
@@ -288,18 +224,9 @@ test("new writes require durable tab storage while a trusted fallback can retry"
     },
   };
   expect(() =>
-    enrollmentAttemptKey(
-      "mint",
-      FINGERPRINT_B,
-      NOW,
-      throwing,
-      new Map(),
-      () => "console-volatile",
-    ),
+    enrollmentAttemptKey("mint", FINGERPRINT_B, NOW, throwing, new Map(), () => "console-volatile"),
   ).toThrow("No enrollment write was sent");
-  expect(
-    clearEnrollmentAttempt("mint", FINGERPRINT_B, throwing, new Map()),
-  ).toBe(false);
+  expect(clearEnrollmentAttempt("mint", FINGERPRINT_B, throwing, new Map())).toBe(false);
 });
 
 test("browser storage access failure is never reported as empty or durably cleared", () => {
@@ -312,9 +239,7 @@ test("browser storage access failure is never reported as empty or durably clear
   ).toThrow("Browser storage is temporarily unavailable");
   expect(createCalls).toBe(0);
   expect(enrollmentAttemptsRemain("mint", null, new Map())).toBe(true);
-  expect(clearEnrollmentAttempt("mint", FINGERPRINT_A, null, new Map())).toBe(
-    false,
-  );
+  expect(clearEnrollmentAttempt("mint", FINGERPRINT_A, null, new Map())).toBe(false);
 });
 
 test("the root-layout sentinel sees every retained namespace and fails closed on unreadable storage", () => {
@@ -360,15 +285,16 @@ test("PLANTED: each recovery fence remains owner-scoped through failed, stale, s
   try {
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(false);
     const generationA1 = beginEnrollmentRecoveryReconciliation();
-    if (generationA1 === undefined) throw new Error("mounted owner A1 did not start reconciliation");
+    if (generationA1 === undefined)
+      throw new Error("mounted owner A1 did not start reconciliation");
     // A signal scrubs every fence, including a sponsor page whose recovery
     // configuration temporarily produced no owner.
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
     const lateAResult = "https://a.asimposium.org/join/A#v1.secret";
-    expect(enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true), lateAResult)).not.toBe(
-      lateAResult,
-    );
+    expect(
+      enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true), lateAResult),
+    ).not.toBe(lateAResult);
 
     // A queued stale A2 and an unconfigured owner-less A2 both remain hidden
     // before the independently derived owner result arrives.
@@ -377,7 +303,9 @@ test("PLANTED: each recovery fence remains owner-scoped through failed, stale, s
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
 
-    expect(recordEnrollmentRecoveryOwner(generationA1, "usr_not-an-opaque-recovery-owner")).toBe(false);
+    expect(recordEnrollmentRecoveryOwner(generationA1, "usr_not-an-opaque-recovery-owner")).toBe(
+      false,
+    );
     expect(recordEnrollmentRecoveryOwner(generationA1, OWNER_B)).toBe(true);
     // Confirmation for B is per owner: both mounted A fences and a later A
     // promise stay hidden, while B can render without router.refresh granting
@@ -385,22 +313,23 @@ test("PLANTED: each recovery fence remains owner-scoped through failed, stale, s
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
     expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
-    expect(enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true), lateAResult)).not.toBe(
-      lateAResult,
-    );
+    expect(
+      enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true), lateAResult),
+    ).not.toBe(lateAResult);
     unmountB = mountEnrollmentRecoveryFence("server-render-b", true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
     unmountA3 = mountEnrollmentRecoveryFence("server-render-a3", true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
     const bSurface = "B recovery surface";
-    expect(enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true), bSurface)).toBe(
-      bSurface,
-    );
+    expect(
+      enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true), bSurface),
+    ).toBe(bSurface);
 
     // Transport/configuration failure remains scrubbed, but opens generation 2
     // for a later signal. A late generation-1 confirmation cannot settle it.
     const failedGeneration = beginEnrollmentRecoveryReconciliation();
-    if (failedGeneration === undefined) throw new Error("B did not start a retryable reconciliation");
+    if (failedGeneration === undefined)
+      throw new Error("B did not start a retryable reconciliation");
     expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
     expect(settleEnrollmentRecoveryFailure(failedGeneration)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
@@ -416,18 +345,21 @@ test("PLANTED: each recovery fence remains owner-scoped through failed, stale, s
     // Signed-out confirmation is an explicit null state, never an undefined
     // owner match. A future B requires another current-generation confirmation.
     const signedOutGeneration = beginEnrollmentRecoveryReconciliation();
-    if (signedOutGeneration === undefined) throw new Error("B did not start signed-out reconciliation");
+    if (signedOutGeneration === undefined)
+      throw new Error("B did not start signed-out reconciliation");
     expect(recordEnrollmentRecoveryOwner(signedOutGeneration, null)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
     const returnGeneration = beginEnrollmentRecoveryReconciliation();
-    if (returnGeneration === undefined) throw new Error("signed-out confirmation did not admit B retry");
+    if (returnGeneration === undefined)
+      throw new Error("signed-out confirmation did not admit B retry");
     expect(recordEnrollmentRecoveryOwner(returnGeneration, OWNER_B)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
 
     // The same owner is safe only after its own exact-generation confirmation.
     const sameOwnerGeneration = beginEnrollmentRecoveryReconciliation();
-    if (sameOwnerGeneration === undefined) throw new Error("B did not start same-owner reconciliation");
+    if (sameOwnerGeneration === undefined)
+      throw new Error("B did not start same-owner reconciliation");
     expect(recordEnrollmentRecoveryOwner(sameOwnerGeneration, OWNER_A)).toBe(true);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(false);
     expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
@@ -485,22 +417,13 @@ test("malformed persistent recovery state fails closed without replacing any key
     storage.values.set("asimposium.enrollment.mint-attempts.shared.v2", raw);
     let createCalls = 0;
     expect(() =>
-      enrollmentAttemptKey(
-        "mint",
-        FINGERPRINT_B,
-        NOW,
-        storage,
-        new Map(),
-        () => {
-          createCalls += 1;
-          return "console-replacement";
-        },
-      ),
+      enrollmentAttemptKey("mint", FINGERPRINT_B, NOW, storage, new Map(), () => {
+        createCalls += 1;
+        return "console-replacement";
+      }),
     ).toThrow("Browser storage is temporarily unavailable");
     expect(createCalls).toBe(0);
-    expect(
-      storage.values.get("asimposium.enrollment.mint-attempts.shared.v2"),
-    ).toBe(raw);
+    expect(storage.values.get("asimposium.enrollment.mint-attempts.shared.v2")).toBe(raw);
     expect(enrollmentAttemptsRemain("mint", storage, new Map())).toBe(true);
   }
 });
@@ -512,14 +435,7 @@ test("the component-local fallback refuses overflow without evicting unresolved 
     (index + 1).toString(16).padStart(64, "0"),
   );
   for (const [index, fingerprint] of fingerprints.slice(0, 8).entries()) {
-    enrollmentAttemptKey(
-      "mint",
-      fingerprint,
-      NOW,
-      storage,
-      fallback,
-      () => `console-${index}`,
-    );
+    enrollmentAttemptKey("mint", fingerprint, NOW, storage, fallback, () => `console-${index}`);
   }
   expect(() =>
     enrollmentAttemptKey(
@@ -532,26 +448,17 @@ test("the component-local fallback refuses overflow without evicting unresolved 
     ),
   ).toThrow("Eight enrollment attempts still have unresolved recovery markers");
   expect(fallback.size).toBe(8);
-  expect(
-    [...fallback.keys()].some((key) => key.endsWith(fingerprints[0] ?? "")),
-  ).toBe(true);
-  expect(() =>
-    enrollmentAttemptKey("mint", "not-a-fingerprint", NOW, undefined, fallback),
-  ).toThrow("enrollment attempt fingerprint is invalid");
+  expect([...fallback.keys()].some((key) => key.endsWith(fingerprints[0] ?? ""))).toBe(true);
+  expect(() => enrollmentAttemptKey("mint", "not-a-fingerprint", NOW, undefined, fallback)).toThrow(
+    "enrollment attempt fingerprint is invalid",
+  );
 });
 
 test("an elapsed recovery marker blocks replacement instead of risking a duplicate", () => {
   const storage = new MemoryStorage();
   const fallback: EnrollmentAttemptFallback = new Map();
   expect(
-    enrollmentAttemptKey(
-      "mint",
-      FINGERPRINT_A,
-      NOW,
-      storage,
-      fallback,
-      () => "console-old",
-    ).key,
+    enrollmentAttemptKey("mint", FINGERPRINT_A, NOW, storage, fallback, () => "console-old").key,
   ).toBe("console-old");
 
   expect(() =>
@@ -570,22 +477,8 @@ test("an elapsed recovery marker blocks replacement instead of risking a duplica
 test("a transient persistent read failure never erases unrelated recovery markers", () => {
   const storage = new MemoryStorage();
   const fallback: EnrollmentAttemptFallback = new Map();
-  enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_A,
-    NOW,
-    storage,
-    fallback,
-    () => "console-a",
-  );
-  enrollmentAttemptKey(
-    "decision",
-    FINGERPRINT_B,
-    NOW,
-    storage,
-    fallback,
-    () => "console-b",
-  );
+  enrollmentAttemptKey("decision", FINGERPRINT_A, NOW, storage, fallback, () => "console-a");
+  enrollmentAttemptKey("decision", FINGERPRINT_B, NOW, storage, fallback, () => "console-b");
   const persistedBefore = [...storage.values.values()].join("\n");
   let failNextRead = true;
   const oneShotFailure: EnrollmentAttemptStorage = {
@@ -600,15 +493,11 @@ test("a transient persistent read failure never erases unrelated recovery marker
     removeItem: (key) => storage.removeItem(key),
   };
 
-  expect(
-    clearEnrollmentAttempt("decision", FINGERPRINT_A, oneShotFailure, fallback),
-  ).toBe(false);
+  expect(clearEnrollmentAttempt("decision", FINGERPRINT_A, oneShotFailure, fallback)).toBe(false);
   expect([...storage.values.values()].join("\n")).toBe(persistedBefore);
   expect(fallback.has(`decision:${FINGERPRINT_A}`)).toBe(true);
 
-  expect(
-    clearEnrollmentAttempt("decision", FINGERPRINT_A, oneShotFailure, fallback),
-  ).toBe(true);
+  expect(clearEnrollmentAttempt("decision", FINGERPRINT_A, oneShotFailure, fallback)).toBe(true);
   const persistedAfter = [...storage.values.values()].join("\n");
   expect(persistedAfter).not.toContain("console-a");
   expect(persistedAfter).toContain("console-b");
@@ -616,14 +505,7 @@ test("a transient persistent read failure never erases unrelated recovery marker
 
 test("a transient persistent read failure cannot create or overwrite an unknown attempt", () => {
   const storage = new MemoryStorage();
-  enrollmentAttemptKey(
-    "mint",
-    FINGERPRINT_A,
-    NOW,
-    storage,
-    new Map(),
-    () => "console-existing",
-  );
+  enrollmentAttemptKey("mint", FINGERPRINT_A, NOW, storage, new Map(), () => "console-existing");
   const persistedBefore = [...storage.values.values()].join("\n");
   let createCalls = 0;
   const readFailure: EnrollmentAttemptStorage = {
@@ -639,17 +521,10 @@ test("a transient persistent read failure cannot create or overwrite an unknown 
   };
 
   expect(() =>
-    enrollmentAttemptKey(
-      "mint",
-      FINGERPRINT_B,
-      NOW,
-      readFailure,
-      new Map(),
-      () => {
-        createCalls += 1;
-        return "console-new";
-      },
-    ),
+    enrollmentAttemptKey("mint", FINGERPRINT_B, NOW, readFailure, new Map(), () => {
+      createCalls += 1;
+      return "console-new";
+    }),
   ).toThrow("Browser storage is temporarily unavailable");
   expect(createCalls).toBe(0);
   expect([...storage.values.values()].join("\n")).toBe(persistedBefore);
@@ -664,9 +539,7 @@ test("a transient persistent read failure cannot create or overwrite an unknown 
       },
     ],
   ]);
-  expect(
-    enrollmentAttemptKey("mint", FINGERPRINT_A, NOW + 1, readFailure, fallback),
-  ).toEqual({
+  expect(enrollmentAttemptKey("mint", FINGERPRINT_A, NOW + 1, readFailure, fallback)).toEqual({
     key: "console-existing",
     recoveryPayload: RECOVERY_PAYLOAD,
     keyReloadSafe: false,
@@ -676,30 +549,12 @@ test("a transient persistent read failure cannot create or overwrite an unknown 
 test("clearing one attempt keeps navigation guarded until every marker is resolved", () => {
   const storage = new MemoryStorage();
   const fallback: EnrollmentAttemptFallback = new Map();
-  enrollmentAttemptKey(
-    "mint",
-    FINGERPRINT_A,
-    NOW,
-    storage,
-    fallback,
-    () => "console-a",
-  );
-  enrollmentAttemptKey(
-    "mint",
-    FINGERPRINT_B,
-    NOW,
-    storage,
-    fallback,
-    () => "console-b",
-  );
+  enrollmentAttemptKey("mint", FINGERPRINT_A, NOW, storage, fallback, () => "console-a");
+  enrollmentAttemptKey("mint", FINGERPRINT_B, NOW, storage, fallback, () => "console-b");
   expect(enrollmentAttemptsRemain("mint", storage, fallback)).toBe(true);
-  expect(clearEnrollmentAttempt("mint", FINGERPRINT_B, storage, fallback)).toBe(
-    true,
-  );
+  expect(clearEnrollmentAttempt("mint", FINGERPRINT_B, storage, fallback)).toBe(true);
   expect(enrollmentAttemptsRemain("mint", storage, fallback)).toBe(true);
-  expect(clearEnrollmentAttempt("mint", FINGERPRINT_A, storage, fallback)).toBe(
-    true,
-  );
+  expect(clearEnrollmentAttempt("mint", FINGERPRINT_A, storage, fallback)).toBe(true);
   expect(enrollmentAttemptsRemain("mint", storage, fallback)).toBe(false);
 
   const uncertain: EnrollmentAttemptStorage = {
@@ -740,21 +595,11 @@ test("one sponsor cannot consume or clear another sponsor's recovery capacity", 
       OWNER_B,
     ).key,
   ).toBe("console-owner-b");
-  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_A)).toBe(
-    true,
-  );
-  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_B)).toBe(
-    true,
-  );
-  expect(
-    clearEnrollmentAttempt("mint", FINGERPRINT_B, storage, new Map(), OWNER_B),
-  ).toBe(true);
-  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_B)).toBe(
-    false,
-  );
-  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_A)).toBe(
-    true,
-  );
+  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_A)).toBe(true);
+  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_B)).toBe(true);
+  expect(clearEnrollmentAttempt("mint", FINGERPRINT_B, storage, new Map(), OWNER_B)).toBe(true);
+  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_B)).toBe(false);
+  expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_A)).toBe(true);
 });
 
 /**

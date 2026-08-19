@@ -81,8 +81,7 @@ const encoder = new TextEncoder();
 // the 32-byte seed. WebCrypto imports Ed25519 private keys as PKCS#8; `raw` is
 // the public-key format and therefore cannot portably import a signing seed.
 const ED25519_PKCS8_SEED_PREFIX = new Uint8Array([
-  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
-  0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ]);
 
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
@@ -158,13 +157,9 @@ export async function importEd25519PrivateSeedHex(seedHex: string): Promise<Cryp
       16,
     );
   }
-  return crypto.subtle.importKey(
-    "pkcs8",
-    exactBytesBuffer(pkcs8),
-    { name: "Ed25519" },
-    false,
-    ["sign"],
-  );
+  return crypto.subtle.importKey("pkcs8", exactBytesBuffer(pkcs8), { name: "Ed25519" }, false, [
+    "sign",
+  ]);
 }
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {

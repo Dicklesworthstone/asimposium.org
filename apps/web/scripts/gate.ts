@@ -22,11 +22,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import {
-  buildGateRecord,
-  formatGateRecord,
-  type GateStatus,
-} from "./gate-record.ts";
+import { buildGateRecord, formatGateRecord, type GateStatus } from "./gate-record.ts";
 
 const PACKAGE_DIR = dirname(import.meta.dir);
 
@@ -211,13 +207,6 @@ const child = Bun.spawnSync({
 const durationMs = performance.now() - started;
 const exitCode = child.exitCode ?? 1;
 
-emit(
-  suite,
-  spec.tool,
-  version,
-  exitCode === 0 ? "pass" : "fail",
-  exitCode,
-  durationMs,
-);
+emit(suite, spec.tool, version, exitCode === 0 ? "pass" : "fail", exitCode, durationMs);
 
 process.exit(exitCode);

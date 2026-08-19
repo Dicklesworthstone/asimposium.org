@@ -65,15 +65,12 @@ function retainedIdentityCount(
   const identities = new Set(retained.map((attempt) => attempt.fingerprint));
   const prefix = `${scope}:`;
   for (const identity of fallback.keys()) {
-    if (identity.startsWith(prefix))
-      identities.add(identity.slice(prefix.length));
+    if (identity.startsWith(prefix)) identities.add(identity.slice(prefix.length));
   }
   return identities.size;
 }
 
-function parsedAttempts(
-  raw: string | null,
-): readonly RetainedEnrollmentAttempt[] {
+function parsedAttempts(raw: string | null): readonly RetainedEnrollmentAttempt[] {
   if (raw === null) return [];
   const parsed = JSON.parse(raw) as Partial<StoredAttempts>;
   if (
@@ -142,11 +139,7 @@ function writeAttempts(
   if (storage === null || storage === undefined) return false;
   try {
     if (attempts.length === 0) storage.removeItem(storageKey(scope, namespace));
-    else
-      storage.setItem(
-        storageKey(scope, namespace),
-        JSON.stringify({ version: 2, attempts }),
-      );
+    else storage.setItem(storageKey(scope, namespace), JSON.stringify({ version: 2, attempts }));
     return true;
   } catch {
     return false;
@@ -200,9 +193,7 @@ export function enrollmentAttemptKey(
     };
   }
   const retained = read.attempts;
-  const retainedPrior = retained.find(
-    (attempt) => attempt.fingerprint === fingerprint,
-  );
+  const retainedPrior = retained.find((attempt) => attempt.fingerprint === fingerprint);
   const fallbackPrior = fallback.get(fallbackKey);
   const prior =
     retainedPrior === undefined
@@ -225,9 +216,7 @@ export function enrollmentAttemptKey(
       keyReloadSafe: retainedPrior !== undefined,
     };
   }
-  if (
-    retainedIdentityCount(scope, retained, fallback) >= MAX_RETAINED_ATTEMPTS
-  ) {
+  if (retainedIdentityCount(scope, retained, fallback) >= MAX_RETAINED_ATTEMPTS) {
     throw new Error(
       "Eight enrollment attempts still have unresolved recovery markers in this tab. Verify and finish one of them, or close this tab only if you intentionally want to reset those safeguards.",
     );
@@ -319,8 +308,7 @@ export function enrollmentAttemptsRemain(
   storageNamespace = "shared",
 ): boolean {
   const prefix = `${scope}:`;
-  if ([...fallback.keys()].some((identity) => identity.startsWith(prefix)))
-    return true;
+  if ([...fallback.keys()].some((identity) => identity.startsWith(prefix))) return true;
   if (storage === null) return true;
   if (storage === undefined) return false;
   const read = readAttempts(scope, storage, storageNamespace);
