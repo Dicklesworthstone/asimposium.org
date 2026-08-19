@@ -29,6 +29,11 @@ export const DEFAULT_STOA_TIMEOUT_MS = 10_000;
  */
 export const MAX_STOA_TIMEOUT_MS = 60_000;
 
+/** The console previews the newest five rows from Stoa's DESC workshop view. */
+export function newestWorkshopPreview<T>(objects: readonly T[]): readonly T[] {
+  return objects.slice(0, 5);
+}
+
 /**
  * Signed dispatch stays within the exact environment-configured Stoa origin.
  * Plaintext is permitted only for an explicitly matching local loopback Worker.

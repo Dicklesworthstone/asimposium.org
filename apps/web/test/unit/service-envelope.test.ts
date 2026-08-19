@@ -17,7 +17,7 @@ import {
   sha256Hex,
   toHex,
 } from "../../lib/service-envelope.ts";
-import { dispatchSignedSponsorRequest } from "../../lib/stoa-sponsor.ts";
+import { dispatchSignedSponsorRequest, newestWorkshopPreview } from "../../lib/stoa-sponsor.ts";
 
 // The production-only marker correctly rejects a direct Bun import. Replacing
 // only that marker lets this unit file exercise the unchanged public server
@@ -93,6 +93,14 @@ const STOA_ENVIRONMENT_KEYS = [
   "X_FORWARDED_PROTO",
   "OPERATOR_PRINCIPAL_IDS",
 ] as const;
+
+test("the sponsor workshop preview preserves newest-first rows", () => {
+  const descendingWorkshopSeqs = [6, 5, 4, 3, 2, 1].map((workshop_seq) => ({ workshop_seq }));
+  const preview = newestWorkshopPreview(descendingWorkshopSeqs);
+
+  expect(preview.map((object) => object.workshop_seq)).toEqual([6, 5, 4, 3, 2]);
+  expect(preview.map((object) => object.workshop_seq)).not.toContain(1);
+});
 
 type StoaEnvironmentKey = (typeof STOA_ENVIRONMENT_KEYS)[number];
 type StoaEnvironment = Partial<Record<StoaEnvironmentKey, string>>;

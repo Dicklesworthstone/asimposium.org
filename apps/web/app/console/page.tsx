@@ -25,6 +25,7 @@ import {
   type SponsorWorkshopObject,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
+import { newestWorkshopPreview } from "@/lib/stoa-sponsor";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
@@ -151,7 +152,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           fellow_id: fellow.fellow_id,
           fellowName: fellow.name,
           problem_id: problemBinding,
-          objects: view.data.objects.slice(-5),
+          objects: newestWorkshopPreview(view.data.objects),
         });
       }
     }
