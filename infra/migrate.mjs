@@ -143,8 +143,7 @@ export const LOCAL_D1_CLEANUP_RESERVE_MS =
 // remote HTTP request. With no caller deadline, localD1 keeps its standalone
 // fixed timeout.
 export const LOCAL_D1_EXECUTION_FLOOR_MS = 3_000;
-export const LOCAL_D1_COMMAND_WINDOW_MS =
-  LOCAL_D1_CLEANUP_RESERVE_MS + LOCAL_D1_EXECUTION_FLOOR_MS;
+export const LOCAL_D1_COMMAND_WINDOW_MS = LOCAL_D1_CLEANUP_RESERVE_MS + LOCAL_D1_EXECUTION_FLOOR_MS;
 const RESOLVED_STAGING_WRANGLER_CONFIG = "infra/deploy-resolved/staging.wrangler.toml";
 
 function immutableEmptyWranglerConfigOrRefuse() {
@@ -1349,7 +1348,13 @@ function captureBoundedPipe(stream, maximumBytes) {
       bytes.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    return { failed, overrun: exceeded, text: new TextDecoder().decode(bytes) };
+    let text = "";
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      markFailed();
+    }
+    return { failed, overrun: exceeded, text };
   })();
   return { cancel, done, failure, overrun, release, releaseHandleOrReport };
 }
@@ -1750,19 +1755,34 @@ function currentProcessLeadsOwnedGroup({
   }
 }
 
-function ownedProcessGroupExists(child) {
-  if (process.platform === "win32") return false;
+export function ownedProcessGroupExists(
+  child,
+  { platform = process.platform, signalGroup = process.kill } = {},
+) {
+  if (platform === "win32") return false;
   try {
-    process.kill(-child.pid, 0);
+    signalGroup(-child.pid, 0);
     return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+function processGroupExistsOrAssumePresent(child, groupExists) {
+  try {
+    // Only an explicit false is absence authority. An injected or platform
+    // census that throws, returns undefined, or otherwise cannot answer must
+    // keep ownership live and force a bounded containment refusal.
+    return groupExists(child) !== false;
   } catch {
-    return false;
+    return true;
   }
 }
 
 async function groupGoneWithin(child, groupExists, timeoutMs) {
   const deadline = performance.now() + timeoutMs;
-  while (groupExists(child)) {
+  while (processGroupExistsOrAssumePresent(child, groupExists)) {
     if (performance.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(10, timeoutMs)));
   }
@@ -2004,7 +2024,9 @@ export async function runBoundedCommand({
           // a grandchild which called setsid() has exited; in particular, a later
           // pipe close is not proof about that escaped process.
           const processGroupMemberRemains =
-            directChildOnly || leaseRetirementExpected ? false : groupExists(child);
+            directChildOnly || leaseRetirementExpected
+              ? false
+              : processGroupExistsOrAssumePresent(child, groupExists);
           if (!drained.settled || processGroupMemberRemains) {
             const cancellation = cancelPipes();
             const termination = await terminateOwnedProcessGroup(
@@ -2175,28 +2197,78 @@ export async function localD1(
     },
     { deadlineAtMs: localDeadlineAtMs, ownerLease: localOwnerLease },
   );
-  if (result.outcome === "timeout") {
-    fail("LOCAL_D1_COMMAND_TIMEOUT", "A local D1 command exceeded its fixed deadline.");
+  return localD1StdoutOrRefuse(result);
+}
+
+/**
+ * Accept one local D1 result only when execution and containment both proved
+ * the exact success pair. A zero process exit cannot upgrade an explicitly
+ * unproven cleanup outcome into a usable migration response.
+ */
+export function localD1StdoutOrRefuse(result) {
+  let refusal;
+  switch (result.outcome) {
+    case "timeout":
+      refusal = ["LOCAL_D1_COMMAND_TIMEOUT", "A local D1 command exceeded its fixed deadline."];
+      break;
+    case "output-overrun":
+      refusal = ["LOCAL_D1_OUTPUT_OVERRUN", "A local D1 command exceeded its fixed output limit."];
+      break;
+    case "pipe-drain-unproven":
+      refusal = [
+        "LOCAL_D1_PIPE_DRAIN_UNPROVEN",
+        "A local D1 command did not close its pipes after exit.",
+      ];
+      break;
+    case "process-reap-unproven":
+      refusal = [
+        "LOCAL_D1_PROCESS_REAP_UNPROVEN",
+        "A local D1 process group could not be reaped safely.",
+      ];
+      break;
+    case "direct-child-reap-unproven":
+      refusal = [
+        "LOCAL_D1_DIRECT_CHILD_REAP_UNPROVEN",
+        "A local D1 direct child could not be reaped safely.",
+      ];
+      break;
+    case "process-group-survivor-observed":
+      refusal = [
+        "LOCAL_D1_PROCESS_GROUP_SURVIVOR",
+        "A local D1 command left a process-group member after its direct child exited.",
+      ];
+      break;
+    case "aborted":
+      refusal = [
+        "LOCAL_D1_COMMAND_ABORTED",
+        "A local D1 command was aborted before a contained result was available.",
+      ];
+      break;
+    case "owner-lease-write-unproven":
+      refusal = [
+        "LOCAL_D1_OWNER_LEASE_WRITE_UNPROVEN",
+        "The local D1 owner lease could not be delivered before execution.",
+      ];
+      break;
+    case "owner-lease-close-unproven":
+      refusal = [
+        "LOCAL_D1_OWNER_LEASE_CLOSE_UNPROVEN",
+        "The local D1 owner lease did not close within its bounded window.",
+      ];
+      break;
+    case "owner-lease-retirement-unproven":
+      refusal = [
+        "LOCAL_D1_OWNER_LEASE_RETIREMENT_UNPROVEN",
+        "The local D1 owner watchdog did not retire its process group before receipt.",
+      ];
+      break;
   }
-  if (result.outcome === "output-overrun") {
-    fail("LOCAL_D1_OUTPUT_OVERRUN", "A local D1 command exceeded its fixed output limit.");
-  }
-  if (result.outcome === "pipe-drain-unproven") {
-    fail("LOCAL_D1_PIPE_DRAIN_UNPROVEN", "A local D1 command did not close its pipes after exit.");
-  }
-  if (result.outcome === "process-reap-unproven") {
-    fail("LOCAL_D1_PROCESS_REAP_UNPROVEN", "A local D1 process group could not be reaped safely.");
-  }
-  if (result.outcome === "direct-child-reap-unproven") {
+  if (refusal !== undefined) fail(refusal[0], refusal[1]);
+
+  if (result.outcome !== "exited" && result.outcome !== "spawn-failed") {
     fail(
-      "LOCAL_D1_DIRECT_CHILD_REAP_UNPROVEN",
-      "A local D1 direct child could not be reaped safely.",
-    );
-  }
-  if (result.outcome === "process-group-survivor-observed") {
-    fail(
-      "LOCAL_D1_PROCESS_GROUP_SURVIVOR",
-      "A local D1 command left a process-group member after its direct child exited.",
+      "LOCAL_D1_COMMAND_OUTCOME_UNRECOGNIZED",
+      "A local D1 command returned an unrecognized containment outcome.",
     );
   }
   if (result.outcome === "spawn-failed" || result.exitCode !== 0) {

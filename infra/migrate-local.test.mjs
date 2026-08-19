@@ -13,22 +13,21 @@ import {
   catalogFingerprint,
   classifySchemaLineage,
   digestOf,
-  LOCAL_D1_CLEANUP_RESERVE_MS as SHIPPED_LOCAL_CLEANUP_RESERVE_MS,
-  LOCAL_D1_COMMAND_WINDOW_MS as SHIPPED_LOCAL_COMMAND_WINDOW_MS,
-  LOCAL_D1_EXECUTION_FLOOR_MS as SHIPPED_LOCAL_EXECUTION_FLOOR_MS,
   LOCAL_D1_KILL_REAP_MS as KILL_REAP_MS,
-  LOCAL_D1_OWNER_LEASE_CLOSE_RESERVE_MS as OWNER_LEASE_CLOSE_RESERVE_MS,
-  LOCAL_OWNER_LEASE_HANDSHAKE_MS as OWNER_LEASE_HANDSHAKE_MS,
   LEDGER_TABLE,
   LINEAGE_TABLE,
+  localD1StdoutOrRefuse,
   MAX_CATALOG_ROWS,
   MAX_JOURNAL_ROWS,
   MAX_LINEAGE_ROWS,
   MigrationError,
   migrationCommandSql,
-  OWNED_PROCESS_GROUP,
-  PARENT_PROCESS_GROUP,
   LOCAL_D1_PIPE_DRAIN_MS as OUTPUT_DRAIN_MS,
+  OWNED_PROCESS_GROUP,
+  LOCAL_D1_OWNER_LEASE_CLOSE_RESERVE_MS as OWNER_LEASE_CLOSE_RESERVE_MS,
+  LOCAL_OWNER_LEASE_HANDSHAKE_MS as OWNER_LEASE_HANDSHAKE_MS,
+  ownedProcessGroupExists,
+  PARENT_PROCESS_GROUP,
   planMigrations,
   readBootstrapManifest,
   readMigrationDirectory,
@@ -37,6 +36,9 @@ import {
   runBoundedCommand,
   runLocalD1Command,
   runMigrationCli,
+  LOCAL_D1_CLEANUP_RESERVE_MS as SHIPPED_LOCAL_CLEANUP_RESERVE_MS,
+  LOCAL_D1_COMMAND_WINDOW_MS as SHIPPED_LOCAL_COMMAND_WINDOW_MS,
+  LOCAL_D1_EXECUTION_FLOOR_MS as SHIPPED_LOCAL_EXECUTION_FLOOR_MS,
   LOCAL_D1_TERM_GRACE_MS as TERMINATE_GRACE_MS,
 } from "./migrate.mjs";
 
@@ -62,10 +64,7 @@ const PER_COMMAND_TIMEOUT_MS = 15_000;
 // termination drain; direct-child reap; final pipe drain; and bounded
 // pipe-cancellation settlement.
 const COMMAND_CONTAINMENT_RESERVE_MS =
-  OWNER_LEASE_CLOSE_RESERVE_MS +
-  TERMINATE_GRACE_MS +
-  KILL_REAP_MS * 3 +
-  OUTPUT_DRAIN_MS * 2;
+  OWNER_LEASE_CLOSE_RESERVE_MS + TERMINATE_GRACE_MS + KILL_REAP_MS * 3 + OUTPUT_DRAIN_MS * 2;
 const COMMAND_REAP_RESERVE_MS = COMMAND_CONTAINMENT_RESERVE_MS + CLEANUP_SCHEDULING_MARGIN_MS;
 /**
  * The smallest execution window worth spawning a local D1 command into.
@@ -397,6 +396,7 @@ async function runShippedOwnerWatchdogPreauthPlant({
   let actualWatchdog;
   let ownerWriter;
   let writeSettled = Promise.resolve(undefined);
+  let writeFailure;
   let observedStdout = "";
   let refusal;
   try {
@@ -438,14 +438,14 @@ async function runShippedOwnerWatchdogPreauthPlant({
   } catch (error) {
     refusal = error;
   } finally {
-    const writeFailure = await writeSettled;
-    if (writeFailure instanceof Error && writeFailure?.code !== "EPIPE") throw writeFailure;
+    writeFailure = await writeSettled;
     if (!endAfterInput && ownerWriter !== undefined) {
       try {
         await ownerWriter.end();
       } catch {}
     }
   }
+  if (writeFailure instanceof Error && writeFailure?.code !== "EPIPE") throw writeFailure;
   assert.ok(refusal instanceof MigrationError);
   assert.equal(refusal.code, expectedCode);
   assert.equal(observedStdout, expectedFrame);
@@ -967,6 +967,176 @@ function assertSafeCause(error) {
 
 const cases = [
   {
+    name: "bounded-command-refuses-malformed-utf8-before-returning-child-output",
+    async execute() {
+      const closedPipe = (bytes = []) =>
+        new ReadableStream({
+          start(controller) {
+            for (const value of bytes) controller.enqueue(value);
+            controller.close();
+          },
+        });
+      const result = await runBoundedCommand({
+        cmd: ["fixture"],
+        cwd: root,
+        groupExists: () => false,
+        killReapMs: 1,
+        pipeDrainMs: 1,
+        signalGroup() {},
+        spawn() {
+          return {
+            exited: Promise.resolve(0),
+            pid: 40,
+            stderr: closedPipe(),
+            stdout: closedPipe([new Uint8Array([0x7b, 0xff, 0x7d])]),
+          };
+        },
+        termGraceMs: 1,
+        timeoutMs: 10,
+      });
+      assert.equal(result.outcome, "pipe-drain-unproven");
+      assert.equal(result.stdout, "");
+    },
+  },
+  {
+    name: "owned-process-group-absence-requires-esrch-and-inspection-errors-refuse",
+    async execute() {
+      const child = { pid: 41 };
+      assert.equal(
+        ownedProcessGroupExists(child, {
+          platform: "linux",
+          signalGroup(group, signal) {
+            assert.equal(group, -41);
+            assert.equal(signal, 0);
+          },
+        }),
+        true,
+      );
+      assert.equal(
+        ownedProcessGroupExists(child, {
+          platform: "linux",
+          signalGroup() {
+            const error = new Error("absent");
+            error.code = "ESRCH";
+            throw error;
+          },
+        }),
+        false,
+      );
+      assert.throws(
+        () =>
+          ownedProcessGroupExists(child, {
+            platform: "linux",
+            signalGroup() {
+              const error = new Error("inspection denied");
+              error.code = "EPERM";
+              throw error;
+            },
+          }),
+        (error) => error?.code === "EPERM",
+      );
+
+      const closedPipe = () =>
+        new ReadableStream({
+          start(controller) {
+            controller.close();
+          },
+        });
+      const signals = [];
+      const result = await runBoundedCommand({
+        cmd: ["fixture"],
+        cwd: root,
+        groupExists() {
+          const error = new Error("inspection unavailable");
+          error.code = "EPERM";
+          throw error;
+        },
+        killReapMs: 1,
+        pipeDrainMs: 1,
+        signalGroup(_child, signal) {
+          signals.push(signal);
+        },
+        spawn() {
+          return {
+            exited: new Promise(() => {}),
+            pid: 42,
+            stderr: closedPipe(),
+            stdout: closedPipe(),
+          };
+        },
+        termGraceMs: 1,
+        timeoutMs: 1,
+      });
+      assert.equal(result.outcome, "process-reap-unproven");
+      assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    },
+  },
+  {
+    name: "local-d1-result-classification-refuses-every-unproven-zero-exit-outcome",
+    execute() {
+      const refusals = [
+        ["timeout", "LOCAL_D1_COMMAND_TIMEOUT"],
+        ["output-overrun", "LOCAL_D1_OUTPUT_OVERRUN"],
+        ["pipe-drain-unproven", "LOCAL_D1_PIPE_DRAIN_UNPROVEN"],
+        ["process-reap-unproven", "LOCAL_D1_PROCESS_REAP_UNPROVEN"],
+        ["direct-child-reap-unproven", "LOCAL_D1_DIRECT_CHILD_REAP_UNPROVEN"],
+        ["process-group-survivor-observed", "LOCAL_D1_PROCESS_GROUP_SURVIVOR"],
+        ["aborted", "LOCAL_D1_COMMAND_ABORTED"],
+        ["owner-lease-write-unproven", "LOCAL_D1_OWNER_LEASE_WRITE_UNPROVEN"],
+        ["owner-lease-close-unproven", "LOCAL_D1_OWNER_LEASE_CLOSE_UNPROVEN"],
+        ["owner-lease-retirement-unproven", "LOCAL_D1_OWNER_LEASE_RETIREMENT_UNPROVEN"],
+        ["future-unrecognized-outcome", "LOCAL_D1_COMMAND_OUTCOME_UNRECOGNIZED"],
+      ];
+      for (const [outcome, expectedCode] of refusals) {
+        let refusal;
+        try {
+          localD1StdoutOrRefuse({
+            outcome,
+            exitCode: 0,
+            stderr: "",
+            stdout: '[{"results":[{"must_not_parse":1}]}]',
+          });
+          assert.fail(`${outcome} with exit zero must not become a local D1 success`);
+        } catch (error) {
+          refusal = error;
+        }
+        assert.ok(refusal instanceof MigrationError, outcome);
+        assert.equal(refusal.code, expectedCode, outcome);
+      }
+
+      let spawnRefusal;
+      try {
+        localD1StdoutOrRefuse({ outcome: "spawn-failed", stderr: "", stdout: "" });
+        assert.fail("spawn failure must refuse");
+      } catch (error) {
+        spawnRefusal = error;
+      }
+      assert.ok(spawnRefusal instanceof MigrationError);
+      assert.equal(spawnRefusal.code, "LOCAL_D1_COMMAND_FAILED");
+
+      let nonzeroRefusal;
+      try {
+        localD1StdoutOrRefuse({ outcome: "exited", exitCode: 7, stderr: "", stdout: "" });
+        assert.fail("a nonzero exit must refuse");
+      } catch (error) {
+        nonzeroRefusal = error;
+      }
+      assert.ok(nonzeroRefusal instanceof MigrationError);
+      assert.equal(nonzeroRefusal.code, "LOCAL_D1_COMMAND_FAILED");
+
+      const exactSuccess = '[{"results":[]}]';
+      assert.equal(
+        localD1StdoutOrRefuse({
+          outcome: "exited",
+          exitCode: 0,
+          stderr: "",
+          stdout: exactSuccess,
+        }),
+        exactSuccess,
+      );
+    },
+  },
+  {
     // PLANTED: a truncated execution window must never reach a child.
     //
     // The observed failure was `apply-6` reported as "did not complete through
@@ -1320,10 +1490,7 @@ const cases = [
       assert.equal(preauthExitCode, 1);
       assert.equal(preauthWatchdogEntries, 0);
       assert.equal(preauthLocalEntries, 0);
-      assert.equal(
-        JSON.parse(preauthStderr).code,
-        "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN",
-      );
+      assert.equal(JSON.parse(preauthStderr).code, "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN");
 
       // ACTUAL CLI ORCHESTRATION: the deadline parsed by runMigrationCli must
       // reach the nested local-D1 pre-spawn seam. The outer controller reserves
@@ -1391,10 +1558,7 @@ const cases = [
       );
       assert.equal(actualCliRefusal.exitCode, 1);
       assert.equal(nestedRunnerEntries, 0);
-      assert.equal(
-        actualCliRefusal.diagnostic.code,
-        "LOCAL_D1_ORCHESTRATION_BUDGET_EXHAUSTED",
-      );
+      assert.equal(actualCliRefusal.diagnostic.code, "LOCAL_D1_ORCHESTRATION_BUDGET_EXHAUSTED");
 
       // RECEIPT ORDER: runMigrationCli may emit only after the nested runner's
       // promise — the production cleanup-settlement boundary — has completed.
@@ -1490,8 +1654,7 @@ const cases = [
         );
         assert.ok(
           writeFailure.events.indexOf("stdout-cancel") < writeFailure.events.indexOf("SIGTERM") &&
-            writeFailure.events.indexOf("stderr-cancel") <
-              writeFailure.events.indexOf("SIGTERM"),
+            writeFailure.events.indexOf("stderr-cancel") < writeFailure.events.indexOf("SIGTERM"),
           `${failureMode} signalled before cancelling both owned readers`,
         );
         assert.equal(writeFailure.stdout.locked, false);
@@ -1537,10 +1700,7 @@ const cases = [
       assert.deepEqual(modeChildSignals, ["SIGTERM"]);
       assert.equal(modeGroupSignals, 0);
       assert.equal(parentOwnedModeResult.outcome, "timeout");
-      assert.equal(
-        parentOwnedModeResult.containment_scope,
-        "parent-process-group/direct-child",
-      );
+      assert.equal(parentOwnedModeResult.containment_scope, "parent-process-group/direct-child");
 
       // WATCHDOG-ONLY EOF RETIREMENT: the detached fixture authenticates the
       // real fd0 capability, proves its parent-owned local seam is admitted,
@@ -2336,7 +2496,9 @@ if (ownerLeaseEofFixtureIndex >= 0) {
       ? cases
       : cases.filter((testCase) => requestedCaseNames.includes(testCase.name));
   if (requestedCaseNames !== undefined && selectedCases.length !== requestedCaseNames.length) {
-    throw new Error("ASIMPOSIUM_MIGRATE_LOCAL_CASES must name existing exact local migration cases.");
+    throw new Error(
+      "ASIMPOSIUM_MIGRATE_LOCAL_CASES must name existing exact local migration cases.",
+    );
   }
 
   const failed = [];
