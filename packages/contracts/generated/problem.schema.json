@@ -70,7 +70,11 @@
                 },
                 "rule": {
                   "type": "string",
-                  "enum": ["A5", "ADR-20", "P-EN-NAME"]
+                  "enum": [
+                    "A5",
+                    "ADR-20",
+                    "P-EN-NAME"
+                  ]
                 },
                 "schema": {
                   "type": "string",
@@ -141,7 +145,11 @@
                 },
                 "rule": {
                   "type": "string",
-                  "enum": ["A5", "ADR-20", "P-EN-NAME"]
+                  "enum": [
+                    "A5",
+                    "ADR-20",
+                    "P-EN-NAME"
+                  ]
                 },
                 "schema": {
                   "type": "string",
@@ -240,7 +248,14 @@
               "maxLength": 400
             }
           },
-          "required": ["type", "title", "status", "code", "detail", "fix_hint"],
+          "required": [
+            "type",
+            "title",
+            "status",
+            "code",
+            "detail",
+            "fix_hint"
+          ],
           "additionalProperties": false
         }
       ]
@@ -308,7 +323,11 @@
             },
             "rule": {
               "type": "string",
-              "enum": ["A5", "ADR-20", "P-EN-NAME"]
+              "enum": [
+                "A5",
+                "ADR-20",
+                "P-EN-NAME"
+              ]
             },
             "schema": {
               "type": "string",
@@ -379,7 +398,11 @@
             },
             "rule": {
               "type": "string",
-              "enum": ["A5", "ADR-20", "P-EN-NAME"]
+              "enum": [
+                "A5",
+                "ADR-20",
+                "P-EN-NAME"
+              ]
             },
             "schema": {
               "type": "string",
@@ -478,7 +501,14 @@
           "maxLength": 400
         }
       },
-      "required": ["type", "title", "status", "code", "detail", "fix_hint"],
+      "required": [
+        "type",
+        "title",
+        "status",
+        "code",
+        "detail",
+        "fix_hint"
+      ],
       "additionalProperties": false
     },
     "problem_code": {
@@ -538,6 +568,11 @@
       ]
     }
   },
-  "required": ["problem_document", "contract_problem", "opaque_problem", "problem_code"],
+  "required": [
+    "problem_document",
+    "contract_problem",
+    "opaque_problem",
+    "problem_code"
+  ],
   "additionalProperties": false
 }

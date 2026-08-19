@@ -130,6 +130,8 @@ export interface ComposedPack {
   /** UTF-8-bytes/4 heuristic over the exact rendered JSON face plus conservative item bounds. */
   readonly tokens_estimate: number;
   readonly preamble: string;
+  /** The audience/membership/permissions this pack was composed under. */
+  readonly viewer: PackViewer;
   readonly items: readonly ComposedPackItem[];
   readonly omitted: readonly OmittedEntry[];
   readonly next_actions: readonly NextAction[];
@@ -148,6 +150,7 @@ interface PackContents {
   readonly cursor: number;
   readonly budget_tokens: PackBudgetBucket;
   readonly preamble: string;
+  readonly viewer: PackViewer;
   readonly items: readonly ComposedPackItem[];
   readonly omitted: readonly OmittedEntry[];
   readonly next_actions: readonly NextAction[];
@@ -480,6 +483,7 @@ function packProjection(pack: PackContents, tokensEstimate: number): Projection 
     omitted: pack.omitted,
     next_actions: pack.next_actions,
     degraded: pack.degraded,
+    viewer: pack.viewer,
   };
 }
 
@@ -603,6 +607,14 @@ export function composePack(input: PackComposerInput): ComposedPack {
     budget_tokens: budgetTokens,
     preamble: PACK_PREAMBLE,
     degraded: assertDegraded(source.degraded),
+    // The pack honestly echoes the caller's audience, membership, and effective
+    // permissions so the caller knows what it can do (and a reviewer can see the
+    // access the pack was composed under) — response metadata, never a face body.
+    viewer: {
+      audience: viewer.audience,
+      membership: viewer.membership,
+      effective_permissions: viewer.permissions,
+    },
   } as const;
 
   if (!Number.isSafeInteger(common.cursor) || (common.cursor as number) < 0) {

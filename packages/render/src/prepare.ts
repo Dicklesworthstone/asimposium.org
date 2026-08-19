@@ -78,6 +78,11 @@ export interface PreparedProjection {
   readonly omitted: readonly { reason: string; detail?: string }[];
   readonly next_actions: readonly { method: "GET" | "POST"; url: string; why: string }[];
   readonly degraded: readonly string[];
+  readonly viewer?: {
+    readonly audience: "public" | "session";
+    readonly membership: "none" | "observer" | "contributor" | "steward";
+    readonly effective_permissions: readonly string[];
+  };
   readonly fingerprint: string;
   /** Flat per-item report, in item order. */
   readonly neutralized: readonly NeutralizationReport[];
@@ -548,6 +553,15 @@ export function prepareProjection(projection: Projection): PreparedProjection {
       why: action.why,
     })),
     degraded: [...projection.degraded],
+    ...(projection.viewer === undefined
+      ? {}
+      : {
+          viewer: {
+            audience: projection.viewer.audience,
+            membership: projection.viewer.membership,
+            effective_permissions: [...projection.viewer.effective_permissions],
+          },
+        }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,
   };

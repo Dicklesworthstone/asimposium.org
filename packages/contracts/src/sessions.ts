@@ -156,6 +156,16 @@ const PackResponseContentsSchema = z.object({
   ),
   next_actions: z.array(NextActionSchema),
   degraded: z.array(z.string().min(1)),
+  /** The access this pack was composed under — echoed so the caller knows what
+   * it can do and a reviewer can see the composition's access. */
+  viewer: z
+    .object({
+      audience: z.enum(["public", "session"]),
+      membership: z.enum(["none", "observer", "contributor", "steward"]),
+      effective_permissions: z.array(z.string().min(1)),
+    })
+    .strict()
+    .optional(),
 });
 
 /** The union keeps each token ceiling visible in generated JSON Schema. */

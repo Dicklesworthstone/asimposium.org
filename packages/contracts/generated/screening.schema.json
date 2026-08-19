@@ -23,7 +23,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -92,7 +96,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -127,7 +135,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -149,7 +160,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -218,7 +233,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -253,7 +272,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -275,7 +297,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -344,7 +370,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -379,7 +409,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -401,7 +434,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -470,7 +507,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -505,7 +546,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -527,7 +571,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -596,7 +644,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -631,7 +683,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -653,7 +708,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -722,7 +781,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -757,7 +820,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -779,7 +845,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -848,7 +918,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -883,7 +957,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -905,7 +982,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -974,7 +1055,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1009,7 +1094,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1031,7 +1119,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1100,7 +1192,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1135,7 +1231,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1157,7 +1256,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1226,7 +1329,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1261,7 +1368,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1283,7 +1393,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1352,7 +1466,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1387,7 +1505,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1409,7 +1530,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1478,7 +1603,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1513,7 +1642,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1535,7 +1667,11 @@
               "const": "screening-warning"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1604,7 +1740,11 @@
                   "const": "screening-warning"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1639,7 +1779,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1661,7 +1804,11 @@
               "const": "screening-degraded"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1730,7 +1877,11 @@
                   "const": "screening-degraded"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1765,7 +1916,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1787,7 +1941,11 @@
               "const": "screening-degraded"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1856,7 +2014,11 @@
                   "const": "screening-degraded"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -1891,7 +2053,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -1913,7 +2078,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -1982,7 +2151,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2017,7 +2190,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2039,7 +2215,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2108,7 +2288,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2143,7 +2327,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2165,7 +2352,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2234,7 +2425,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2269,7 +2464,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2291,7 +2489,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2360,7 +2562,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2395,7 +2601,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2417,7 +2626,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2486,7 +2699,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2521,7 +2738,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2543,7 +2763,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2612,7 +2836,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2647,7 +2875,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2669,7 +2900,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2738,7 +2973,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2773,7 +3012,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2795,7 +3037,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2864,7 +3110,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -2899,7 +3149,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -2921,7 +3174,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -2990,7 +3247,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3025,7 +3286,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3047,7 +3311,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3116,7 +3384,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3151,7 +3423,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3173,7 +3448,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3242,7 +3521,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3277,7 +3560,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3299,7 +3585,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3368,7 +3658,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3403,7 +3697,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3425,7 +3722,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3494,7 +3795,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3529,7 +3834,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3551,7 +3859,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3620,7 +3932,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3655,7 +3971,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3677,7 +3996,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3746,7 +4069,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3781,7 +4108,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3803,7 +4133,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3872,7 +4206,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -3907,7 +4245,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -3929,7 +4270,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -3998,7 +4343,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4033,7 +4382,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4055,7 +4407,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4124,7 +4480,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4159,7 +4519,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4181,7 +4544,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4250,7 +4617,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4285,7 +4656,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4307,7 +4681,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4376,7 +4754,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4411,7 +4793,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4433,7 +4818,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4502,7 +4891,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4537,7 +4930,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4559,7 +4955,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4628,7 +5028,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4663,7 +5067,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4685,7 +5092,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4754,7 +5165,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4789,7 +5204,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4811,7 +5229,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -4880,7 +5302,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -4915,7 +5341,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -4937,7 +5366,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -5006,7 +5439,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -5041,7 +5478,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -5063,7 +5503,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -5132,7 +5576,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -5167,7 +5615,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -5189,7 +5640,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -5258,7 +5713,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -5293,7 +5752,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     },
     {
@@ -5315,7 +5777,11 @@
               "const": "none"
             }
           },
-          "required": ["category", "action", "notice"],
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
           "additionalProperties": false
         },
         "operator_receipt": {
@@ -5384,7 +5850,11 @@
                   "const": "none"
                 }
               },
-              "required": ["category", "action", "notice"],
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
               "additionalProperties": false
             },
             "provider_status": {
@@ -5419,7 +5889,10 @@
           "additionalProperties": false
         }
       },
-      "required": ["public_action", "operator_receipt"],
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
       "additionalProperties": false
     }
   ]

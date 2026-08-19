@@ -18,6 +18,10 @@
       "const": "non-product"
     }
   },
-  "required": ["schema", "kind", "scope"],
+  "required": [
+    "schema",
+    "kind",
+    "scope"
+  ],
   "additionalProperties": false
 }

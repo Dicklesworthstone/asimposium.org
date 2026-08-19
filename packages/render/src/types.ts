@@ -84,6 +84,8 @@ export interface Projection {
   readonly next_actions: readonly NextAction[];
   /** Diagnostics. Never mixed into rendered bodies (Fable §7.1 axiom 2). */
   readonly degraded: readonly string[];
+  /** The access this projection was composed under. Present on session packs. */
+  readonly viewer?: ProjectionViewer;
 }
 
 /** What the sanitizer did to one item, surfaced on every face. */
@@ -91,6 +93,18 @@ export interface NeutralizationReport {
   readonly item_id: string;
   readonly marker: NeutralizationMarker;
   readonly count: number;
+}
+
+/**
+ * The audience/membership/permissions a projection was composed under. Response
+ * metadata (the caller's access), never an untrusted body — the canonical JSON
+ * agent face carries it so a caller knows what it can do and a reviewer can see
+ * the access the pack was composed under.
+ */
+export interface ProjectionViewer {
+  readonly audience: "public" | "session";
+  readonly membership: "none" | "observer" | "contributor" | "steward";
+  readonly effective_permissions: readonly string[];
 }
 
 export type NeutralizationMarker =

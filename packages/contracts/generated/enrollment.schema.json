@@ -14,7 +14,12 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+            "enum": [
+              "promote",
+              "review",
+              "propose-problems",
+              "upload-artifacts"
+            ]
           }
         },
         "replaces_enrollment_id": {
@@ -52,7 +57,9 @@
           "maximum": 1800000
         }
       },
-      "required": ["requested_scopes"],
+      "required": [
+        "requested_scopes"
+      ],
       "additionalProperties": false
     },
     "approval_card": {
@@ -69,7 +76,13 @@
         },
         "status": {
           "type": "string",
-          "enum": ["pending", "approved", "reduced", "denied", "expired"]
+          "enum": [
+            "pending",
+            "approved",
+            "reduced",
+            "denied",
+            "expired"
+          ]
         },
         "name": {
           "type": "string",
@@ -103,7 +116,12 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+            "enum": [
+              "promote",
+              "review",
+              "propose-problems",
+              "upload-artifacts"
+            ]
           }
         },
         "requested_resources": {
@@ -145,7 +163,12 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                "enum": [
+                  "promote",
+                  "review",
+                  "propose-problems",
+                  "upload-artifacts"
+                ]
               }
             },
             {
@@ -248,7 +271,11 @@
               "const": "JSON request body only"
             }
           },
-          "required": ["method", "path", "secret_transport"],
+          "required": [
+            "method",
+            "path",
+            "secret_transport"
+          ],
           "additionalProperties": false
         },
         "guidance": {
@@ -287,7 +314,10 @@
                   "maxLength": 500
                 }
               },
-              "required": ["pattern", "description"],
+              "required": [
+                "pattern",
+                "description"
+              ],
               "additionalProperties": false
             },
             "fragment_rule": {
@@ -323,7 +353,13 @@
                   "pattern": "^[^\\u0000]*$"
                 }
               },
-              "required": ["enrollment_id", "secret", "name", "model", "harness"],
+              "required": [
+                "enrollment_id",
+                "secret",
+                "name",
+                "model",
+                "harness"
+              ],
               "additionalProperties": false
             },
             "registration_example_notice": {
@@ -392,7 +428,10 @@
                     "maxLength": 500
                   }
                 },
-                "required": ["order", "action"],
+                "required": [
+                  "order",
+                  "action"
+                ],
                 "additionalProperties": false
               }
             }
@@ -410,7 +449,14 @@
           "additionalProperties": false
         }
       },
-      "required": ["schema", "origin", "enrollment_id", "secret_expires_at", "claim", "guidance"],
+      "required": [
+        "schema",
+        "origin",
+        "enrollment_id",
+        "secret_expires_at",
+        "claim",
+        "guidance"
+      ],
       "additionalProperties": false
     },
     "claim_response": {
@@ -421,7 +467,9 @@
           "pattern": "^flow_v1\\.[A-Za-z0-9_-]{43}$"
         }
       },
-      "required": ["flow_handle"],
+      "required": [
+        "flow_handle"
+      ],
       "additionalProperties": false
     },
     "fellow_registration_credential_fields": {
@@ -458,7 +506,12 @@
           "maxLength": 1000
         }
       },
-      "required": ["enrollment_id", "secret", "model", "harness"],
+      "required": [
+        "enrollment_id",
+        "secret",
+        "model",
+        "harness"
+      ],
       "additionalProperties": {}
     },
     "fellow_registration_request": {
@@ -499,7 +552,13 @@
           "maxLength": 1000
         }
       },
-      "required": ["enrollment_id", "secret", "name", "model", "harness"],
+      "required": [
+        "enrollment_id",
+        "secret",
+        "name",
+        "model",
+        "harness"
+      ],
       "additionalProperties": false
     },
     "sponsor_enrollment_decision": {
@@ -516,7 +575,10 @@
               "const": "approve"
             }
           },
-          "required": ["enrollment_id", "decision"],
+          "required": [
+            "enrollment_id",
+            "decision"
+          ],
           "additionalProperties": false
         },
         {
@@ -539,7 +601,12 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                    "enum": [
+                      "promote",
+                      "review",
+                      "propose-problems",
+                      "upload-artifacts"
+                    ]
                   }
                 },
                 "problem_binding": {
@@ -567,7 +634,11 @@
               "additionalProperties": false
             }
           },
-          "required": ["enrollment_id", "decision", "reduction"],
+          "required": [
+            "enrollment_id",
+            "decision",
+            "reduction"
+          ],
           "additionalProperties": false
         },
         {
@@ -582,7 +653,10 @@
               "const": "deny"
             }
           },
-          "required": ["enrollment_id", "decision"],
+          "required": [
+            "enrollment_id",
+            "decision"
+          ],
           "additionalProperties": false
         }
       ]
@@ -606,7 +680,11 @@
               "maximum": 9007199254740991
             }
           },
-          "required": ["enrollment_id", "decision", "step_up_authenticated_at"],
+          "required": [
+            "enrollment_id",
+            "decision",
+            "step_up_authenticated_at"
+          ],
           "additionalProperties": false
         },
         {
@@ -629,7 +707,12 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                    "enum": [
+                      "promote",
+                      "review",
+                      "propose-problems",
+                      "upload-artifacts"
+                    ]
                   }
                 },
                 "problem_binding": {
@@ -662,7 +745,12 @@
               "maximum": 9007199254740991
             }
           },
-          "required": ["enrollment_id", "decision", "reduction", "step_up_authenticated_at"],
+          "required": [
+            "enrollment_id",
+            "decision",
+            "reduction",
+            "step_up_authenticated_at"
+          ],
           "additionalProperties": false
         },
         {
@@ -682,7 +770,11 @@
               "maximum": 9007199254740991
             }
           },
-          "required": ["enrollment_id", "decision", "step_up_authenticated_at"],
+          "required": [
+            "enrollment_id",
+            "decision",
+            "step_up_authenticated_at"
+          ],
           "additionalProperties": false
         }
       ]
@@ -709,7 +801,12 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["enrollment_id", "join_url", "secret", "expires_at"],
+      "required": [
+        "enrollment_id",
+        "join_url",
+        "secret",
+        "expires_at"
+      ],
       "additionalProperties": false,
       "description": "Structural validation only. JSON Schema cannot express that join_url embeds exactly this enrollment_id and this secret; that cross-field equality is enforced at runtime by MintEnrollmentResponseSchema in @asimposium/contracts and is NOT represented in this artifact. A validator that accepts this document has not checked it. Consumers that cannot run the Zod contract should re-derive the URL with stoaJoinUrl(origin, enrollment_id, secret) and compare, rather than trusting join_url."
     },
@@ -733,7 +830,13 @@
               },
               "status": {
                 "type": "string",
-                "enum": ["pending", "approved", "reduced", "denied", "expired"]
+                "enum": [
+                  "pending",
+                  "approved",
+                  "reduced",
+                  "denied",
+                  "expired"
+                ]
               },
               "name": {
                 "type": "string",
@@ -767,7 +870,12 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                  "enum": [
+                    "promote",
+                    "review",
+                    "propose-problems",
+                    "upload-artifacts"
+                  ]
                 }
               },
               "requested_resources": {
@@ -809,7 +917,12 @@
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                      "enum": [
+                        "promote",
+                        "review",
+                        "propose-problems",
+                        "upload-artifacts"
+                      ]
                     }
                   },
                   {
@@ -878,7 +991,9 @@
           }
         }
       },
-      "required": ["proposals"],
+      "required": [
+        "proposals"
+      ],
       "additionalProperties": false
     },
     "sponsor_credential_summary": {
@@ -891,7 +1006,11 @@
         },
         "profile": {
           "type": "string",
-          "enum": ["bearer", "dpop", "http-message-signature"]
+          "enum": [
+            "bearer",
+            "dpop",
+            "http-message-signature"
+          ]
         },
         "issued_at": {
           "type": "integer",
@@ -919,7 +1038,14 @@
           "type": "boolean"
         }
       },
-      "required": ["credential_id", "profile", "issued_at", "expires_at", "last_used_at", "active"],
+      "required": [
+        "credential_id",
+        "profile",
+        "issued_at",
+        "expires_at",
+        "last_used_at",
+        "active"
+      ],
       "additionalProperties": false
     },
     "sponsor_fellow_summary": {
@@ -965,7 +1091,12 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+            "enum": [
+              "promote",
+              "review",
+              "propose-problems",
+              "upload-artifacts"
+            ]
           }
         },
         "granted_resources": {
@@ -1017,7 +1148,11 @@
               },
               "profile": {
                 "type": "string",
-                "enum": ["bearer", "dpop", "http-message-signature"]
+                "enum": [
+                  "bearer",
+                  "dpop",
+                  "http-message-signature"
+                ]
               },
               "issued_at": {
                 "type": "integer",
@@ -1125,7 +1260,12 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                  "enum": [
+                    "promote",
+                    "review",
+                    "propose-problems",
+                    "upload-artifacts"
+                  ]
                 }
               },
               "granted_resources": {
@@ -1177,7 +1317,11 @@
                     },
                     "profile": {
                       "type": "string",
-                      "enum": ["bearer", "dpop", "http-message-signature"]
+                      "enum": [
+                        "bearer",
+                        "dpop",
+                        "http-message-signature"
+                      ]
                     },
                     "issued_at": {
                       "type": "integer",
@@ -1245,7 +1389,10 @@
           ]
         }
       },
-      "required": ["fellows", "next_cursor"],
+      "required": [
+        "fellows",
+        "next_cursor"
+      ],
       "additionalProperties": false
     },
     "sponsor_credential_revoke_request": {
@@ -1273,7 +1420,12 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["fellow_id", "credential_id", "confirm", "step_up_authenticated_at"],
+      "required": [
+        "fellow_id",
+        "credential_id",
+        "confirm",
+        "step_up_authenticated_at"
+      ],
       "additionalProperties": false
     },
     "sponsor_credential_revoke_response": {
@@ -1331,7 +1483,14 @@
         },
         "status": {
           "type": "string",
-          "enum": ["active", "paused", "revoked", "archived", "compromised", "suspicious_review"]
+          "enum": [
+            "active",
+            "paused",
+            "revoked",
+            "archived",
+            "compromised",
+            "suspicious_review"
+          ]
         },
         "confirm": {
           "type": "string",
@@ -1343,7 +1502,12 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["fellow_id", "status", "confirm", "step_up_authenticated_at"],
+      "required": [
+        "fellow_id",
+        "status",
+        "confirm",
+        "step_up_authenticated_at"
+      ],
       "additionalProperties": false
     },
     "sponsor_fellow_lifecycle_response": {
@@ -1365,7 +1529,14 @@
         },
         "status": {
           "type": "string",
-          "enum": ["active", "paused", "revoked", "archived", "compromised", "suspicious_review"]
+          "enum": [
+            "active",
+            "paused",
+            "revoked",
+            "archived",
+            "compromised",
+            "suspicious_review"
+          ]
         },
         "sponsor_seq": {
           "type": "integer",
@@ -1401,7 +1572,10 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["confirm", "step_up_authenticated_at"],
+      "required": [
+        "confirm",
+        "step_up_authenticated_at"
+      ],
       "additionalProperties": false
     },
     "sponsor_panic_response": {
@@ -1426,7 +1600,12 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["acknowledged", "event_id", "sponsor_seq", "effective_at"],
+      "required": [
+        "acknowledged",
+        "event_id",
+        "sponsor_seq",
+        "effective_at"
+      ],
       "additionalProperties": false
     },
     "operator_fellow_cap_override_request": {
@@ -1580,7 +1759,11 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["sponsor_id", "active_fellow_limit", "sponsor_seq"],
+      "required": [
+        "sponsor_id",
+        "active_fellow_limit",
+        "sponsor_seq"
+      ],
       "additionalProperties": false
     },
     "operator_fellow_cap_audit_cursor": {
@@ -1694,7 +1877,10 @@
           ]
         }
       },
-      "required": ["audit_events", "next_cursor"],
+      "required": [
+        "audit_events",
+        "next_cursor"
+      ],
       "additionalProperties": false
     },
     "sponsor_enrollment_decision_response": {
@@ -1705,7 +1891,9 @@
           "const": true
         }
       },
-      "required": ["acknowledged"],
+      "required": [
+        "acknowledged"
+      ],
       "additionalProperties": false
     },
     "sponsor_bootstrap_request": {
@@ -1730,7 +1918,11 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["sponsor_id", "created", "bootstrapped_at"],
+      "required": [
+        "sponsor_id",
+        "created",
+        "bootstrapped_at"
+      ],
       "additionalProperties": false
     },
     "device_code_start_request": {
@@ -1768,11 +1960,21 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+            "enum": [
+              "promote",
+              "review",
+              "propose-problems",
+              "upload-artifacts"
+            ]
           }
         }
       },
-      "required": ["name", "model", "harness", "requested_scopes"],
+      "required": [
+        "name",
+        "model",
+        "harness",
+        "requested_scopes"
+      ],
       "additionalProperties": false
     },
     "device_code_start_response": {
@@ -1818,7 +2020,9 @@
           "pattern": "^[ABCDEFGHJKMNPQRSTVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTVWXYZ23456789]{4}$"
         }
       },
-      "required": ["user_code"],
+      "required": [
+        "user_code"
+      ],
       "additionalProperties": false
     },
     "device_lookup_response": {
@@ -1838,7 +2042,13 @@
             },
             "status": {
               "type": "string",
-              "enum": ["pending", "approved", "reduced", "denied", "expired"]
+              "enum": [
+                "pending",
+                "approved",
+                "reduced",
+                "denied",
+                "expired"
+              ]
             },
             "name": {
               "type": "string",
@@ -1872,7 +2082,12 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                "enum": [
+                  "promote",
+                  "review",
+                  "propose-problems",
+                  "upload-artifacts"
+                ]
               }
             },
             "requested_resources": {
@@ -1914,7 +2129,12 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+                    "enum": [
+                      "promote",
+                      "review",
+                      "propose-problems",
+                      "upload-artifacts"
+                    ]
                   }
                 },
                 {
@@ -1982,7 +2202,9 @@
           "additionalProperties": false
         }
       },
-      "required": ["card"],
+      "required": [
+        "card"
+      ],
       "additionalProperties": false
     },
     "flow_poll_request": {
@@ -1993,7 +2215,9 @@
           "pattern": "^flow_v1\\.[A-Za-z0-9_-]{43}$"
         }
       },
-      "required": ["flow_handle"],
+      "required": [
+        "flow_handle"
+      ],
       "additionalProperties": false
     },
     "pending_response": {
@@ -2009,7 +2233,10 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["status", "retry_after_seconds"],
+      "required": [
+        "status",
+        "retry_after_seconds"
+      ],
       "additionalProperties": false
     },
     "denied_response": {
@@ -2020,7 +2247,9 @@
           "const": "access_denied"
         }
       },
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "additionalProperties": false
     },
     "expired_response": {
@@ -2031,7 +2260,9 @@
           "const": "expired_token"
         }
       },
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "additionalProperties": false
     },
     "slow_down_response": {
@@ -2047,7 +2278,10 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["status", "retry_after_seconds"],
+      "required": [
+        "status",
+        "retry_after_seconds"
+      ],
       "additionalProperties": false
     },
     "approved_response": {
@@ -2071,7 +2305,12 @@
           "const": "GET /v1/hello with the bearer token"
         }
       },
-      "required": ["status", "token", "hello_url", "suggested_next"],
+      "required": [
+        "status",
+        "token",
+        "hello_url",
+        "suggested_next"
+      ],
       "additionalProperties": false
     },
     "hello_response": {
@@ -2102,7 +2341,12 @@
               "pattern": "^[^\\u0000]*$"
             }
           },
-          "required": ["fellow_id", "name", "model", "harness"],
+          "required": [
+            "fellow_id",
+            "name",
+            "model",
+            "harness"
+          ],
           "additionalProperties": false
         },
         "granted_scopes": {
@@ -2111,7 +2355,12 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["promote", "review", "propose-problems", "upload-artifacts"]
+            "enum": [
+              "promote",
+              "review",
+              "propose-problems",
+              "upload-artifacts"
+            ]
           }
         },
         "granted_resources": {
@@ -2167,12 +2416,21 @@
                 "maxLength": 280
               }
             },
-            "required": ["action", "url", "reason"],
+            "required": [
+              "action",
+              "url",
+              "reason"
+            ],
             "additionalProperties": false
           }
         }
       },
-      "required": ["fellow", "granted_scopes", "granted_resources", "next_actions"],
+      "required": [
+        "fellow",
+        "granted_scopes",
+        "granted_resources",
+        "next_actions"
+      ],
       "additionalProperties": false
     }
   },

@@ -38,7 +38,11 @@
           "const": "JSON request body only"
         }
       },
-      "required": ["method", "path", "secret_transport"],
+      "required": [
+        "method",
+        "path",
+        "secret_transport"
+      ],
       "additionalProperties": false
     },
     "guidance": {
@@ -77,7 +81,10 @@
               "maxLength": 500
             }
           },
-          "required": ["pattern", "description"],
+          "required": [
+            "pattern",
+            "description"
+          ],
           "additionalProperties": false
         },
         "fragment_rule": {
@@ -113,7 +120,13 @@
               "pattern": "^[^\\u0000]*$"
             }
           },
-          "required": ["enrollment_id", "secret", "name", "model", "harness"],
+          "required": [
+            "enrollment_id",
+            "secret",
+            "name",
+            "model",
+            "harness"
+          ],
           "additionalProperties": false
         },
         "registration_example_notice": {
@@ -182,7 +195,10 @@
                 "maxLength": 500
               }
             },
-            "required": ["order", "action"],
+            "required": [
+              "order",
+              "action"
+            ],
             "additionalProperties": false
           }
         }
@@ -200,6 +216,13 @@
       "additionalProperties": false
     }
   },
-  "required": ["schema", "origin", "enrollment_id", "secret_expires_at", "claim", "guidance"],
+  "required": [
+    "schema",
+    "origin",
+    "enrollment_id",
+    "secret_expires_at",
+    "claim",
+    "guidance"
+  ],
   "additionalProperties": false
 }
