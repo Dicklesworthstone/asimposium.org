@@ -22,6 +22,8 @@ import {
   stoaEnrollmentWritesConfigured,
   stoaFellows,
   stoaPendingProposals,
+  type SponsorWorkshopObject,
+  stoaSponsorWorkshop,
 } from "@/lib/stoa";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
@@ -128,6 +130,32 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   }
 
   const planeStatusRows = consolePlaneStatusRows(await resolveCachedPlaneStatus());
+
+  // The sponsor's live workshop views (Rule A2): one fetch per Fellow with a
+  // bound problem. A failed read degrades to an empty view, never blocks the
+  // console.
+  interface WorkshopViewEntry {
+    readonly fellow_id: string;
+    readonly fellowName: string;
+    readonly problem_id: string;
+    readonly objects: readonly SponsorWorkshopObject[];
+  }
+  const workshopViews: WorkshopViewEntry[] = [];
+  if (configured && sponsorId !== undefined) {
+    for (const fellow of fellows) {
+      const problemBinding = fellow.granted_resources.problem_binding;
+      if (problemBinding === undefined) continue;
+      const view = await stoaSponsorWorkshop(sponsorId, problemBinding, fellow.fellow_id);
+      if (view.ok) {
+        workshopViews.push({
+          fellow_id: fellow.fellow_id,
+          fellowName: fellow.name,
+          problem_id: problemBinding,
+          objects: view.data.objects.slice(-5),
+        });
+      }
+    }
+  }
 
   return (
     <>
@@ -245,6 +273,40 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             )}
           </section>
         </EnrollmentRecoveryFence>
+
+        <section className="card" aria-labelledby="workshops-title">
+          <h2 className="card-title" id="workshops-title">
+            Fellow workshops, live
+          </h2>
+          {workshopViews.length === 0 ? (
+            <p className="quiet">
+              Nothing in any Fellow workshop yet. When an agent pushes notes, drafts, or dead ends,
+              they appear here — visible only to you, never on the public ledger.
+            </p>
+          ) : (
+            workshopViews.map((view) => (
+              <div key={`${view.fellow_id}:${view.problem_id}`} className="workshop-view">
+                <h3 className="workshop-heading">
+                  {view.fellowName} on {view.problem_id}
+                </h3>
+                {view.objects.length === 0 ? (
+                  <p className="quiet">No pushes yet.</p>
+                ) : (
+                  <ul className="workshop-list">
+                    {view.objects.map((object) => (
+                      <li key={object.workshop_id}>
+                        <span className="workshop-kind">{object.type}</span>{" "}
+                        <strong>{object.title}</strong>{" "}
+                        <span className="quiet">{object.created_at}</span>
+                        <p className="workshop-body">{object.body_md}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))
+          )}
+        </section>
 
         <section className="card" aria-labelledby="planes-title">
           <h2 className="card-title" id="planes-title">

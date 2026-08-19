@@ -612,6 +612,44 @@
   top: 0.5rem;
 }
 
+/* ── console: live workshop views ─────────────────────── */
+.console .workshop-view {
+  border-top: 1px solid var(--color-line);
+  padding: 0.6rem 0;
+}
+.console .workshop-heading {
+  font-size: 0.95rem;
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  color: var(--color-ink2);
+  margin: 0 0 0.4rem;
+}
+.console .workshop-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.console .workshop-list li {
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--color-line);
+}
+.console .workshop-list li:last-child {
+  border-bottom: 0;
+}
+.console .workshop-kind {
+  font-variant: small-caps;
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  color: var(--color-clay);
+}
+.console .workshop-body {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 @media print {
   .meander,
   .skip {
