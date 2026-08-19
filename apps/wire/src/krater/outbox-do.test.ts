@@ -30,6 +30,7 @@ interface FakeOutboxRow {
   readonly dedupe_key: string;
   readonly payload_sha256: string;
   state: "pending" | "delivered";
+  created_at: string;
   delivered_at: string | null;
   quarantined_at: string | null;
   quarantine_code: string | null;
@@ -47,7 +48,7 @@ interface OutboxHarnessOptions {
   readonly acknowledgeZeroChanges?: number;
 }
 
-function outboxRow(id: number, valid = true): FakeOutboxRow {
+function outboxRow(id: number, valid = true, createdAt?: string): FakeOutboxRow {
   const eventId = `E-outbox-${id}`;
   return {
     id,
@@ -57,6 +58,7 @@ function outboxRow(id: number, valid = true): FakeOutboxRow {
     dedupe_key: `search.index:${eventId}`,
     payload_sha256: "a".repeat(64),
     state: "pending",
+    created_at: createdAt ?? new Date().toISOString(),
     delivered_at: null,
     quarantined_at: null,
     quarantine_code: null,
@@ -127,16 +129,30 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
         },
         first: async <T>() => {
           if (
-            !sql.includes(
+            sql.includes(
               "SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
             )
           ) {
-            throw new Error(`unexpected first query: ${sql}`);
+            return {
+              count: rows.filter((row) => row.state === "pending" && row.quarantined_at === null)
+                .length,
+            } as T;
           }
-          return {
-            count: rows.filter((row) => row.state === "pending" && row.quarantined_at === null)
-              .length,
-          } as T;
+          if (
+            sql.includes(
+              "SELECT MIN(created_at) AS oldest FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
+            )
+          ) {
+            const pendingRows = rows.filter(
+              (row) => row.state === "pending" && row.quarantined_at === null,
+            );
+            const oldest = pendingRows
+              .map((row) => row.created_at)
+              .sort()
+              .at(0);
+            return { oldest: oldest ?? null } as T;
+          }
+          throw new Error(`unexpected first query: ${sql}`);
         },
         run: async () => {
           if (sql.includes("SET quarantined_at = ?")) {
@@ -576,4 +592,29 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(rows[0]?.state).toBe("delivered");
     await drainScheduledAlarms(harness);
   });
+});
+
+test("the status face exposes the oldest-pending lag metric (W2.5)", async () => {
+  // A row created 5s ago and a fresh one: the lag is the OLDEST pending age.
+  const old = outboxRow(1, true, new Date(Date.now() - 5000).toISOString());
+  const fresh = outboxRow(2, true, new Date().toISOString());
+  const harness = outboxHarness([old, fresh]);
+  const status = await harness.drainer.fetch(
+    new Request("https://krater-outbox.internal/status", { method: "GET" }),
+  );
+  expect(status.status).toBe(200);
+  const body = (await status.json()) as { pending: number; oldest_pending_age_ms: number };
+  expect(body.pending).toBe(2);
+  // The lag reflects the 5s-old row, not the fresh one (within timing slack).
+  expect(body.oldest_pending_age_ms).toBeGreaterThanOrEqual(4000);
+});
+
+test("an empty queue reports zero lag", async () => {
+  const harness = outboxHarness([]);
+  const status = await harness.drainer.fetch(
+    new Request("https://krater-outbox.internal/status", { method: "GET" }),
+  );
+  const body = (await status.json()) as { pending: number; oldest_pending_age_ms: number };
+  expect(body.pending).toBe(0);
+  expect(body.oldest_pending_age_ms).toBe(0);
 });

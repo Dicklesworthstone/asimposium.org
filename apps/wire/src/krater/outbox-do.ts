@@ -93,6 +93,8 @@ interface OutboxStatus extends DurableCounters {
   active: number;
   pending: number;
   alarm_at: number | null;
+  /** Age in ms of the oldest still-pending row (0 when the queue is empty). */
+  oldest_pending_age_ms: number;
 }
 
 interface OutboxCommand {
@@ -384,6 +386,23 @@ export class KraterOutboxDrainer {
     return row?.count ?? 0;
   }
 
+  /**
+   * The lag metric (W2.5): the age in milliseconds of the oldest still-pending
+   * outbox row. A growing lag is the backpressure signal the alarm/alert reads;
+   * 0 when the queue is empty. Pure read of the authoritative queue.
+   */
+  private async oldestPendingAgeMs(nowMs: number): Promise<number> {
+    const row = await statement(
+      this.env.DB,
+      "SELECT MIN(created_at) AS oldest FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
+    ).first<{ oldest: string | number | null }>();
+    if (row?.oldest === null || row?.oldest === undefined) return 0;
+    const oldestMs =
+      typeof row.oldest === "number" ? row.oldest : Date.parse(String(row.oldest));
+    if (!Number.isFinite(oldestMs)) return 0;
+    return Math.max(0, nowMs - oldestMs);
+  }
+
   private async quarantine(
     row: PendingOutboxRow,
     code: NonNullable<ReturnType<typeof validateOutboxRow>>,
@@ -583,6 +602,7 @@ export class KraterOutboxDrainer {
       ...(await this.counters()),
       active: (await this.state.storage.get<number>("active")) ?? 0,
       pending: await this.pendingCount(),
+      oldest_pending_age_ms: await this.oldestPendingAgeMs(Date.now()),
       alarm_at: await this.state.storage.getAlarm(),
     };
   }
