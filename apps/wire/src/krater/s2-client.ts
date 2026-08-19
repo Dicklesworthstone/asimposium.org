@@ -452,7 +452,19 @@ interface RequestResult {
   requestId: string;
 }
 
-interface OutboxStatus {
+export type S2OldestPendingAgeStatus =
+  | "empty"
+  | "measured"
+  | "degraded-invalid-timestamp"
+  | "degraded-future-timestamp";
+
+export type S2OldestPendingAgeAlert =
+  | "not-pending"
+  | "below-threshold"
+  | "at-or-above-threshold"
+  | "degraded";
+
+export interface S2OutboxStatus {
   active: number;
   pending: number;
   alarm_at: number | null;
@@ -466,7 +478,19 @@ interface OutboxStatus {
   last_backoff_ms: number | null;
   last_quarantine_code: string | null;
   last_phase: string;
+  oldest_pending_age_ms: number | null;
+  oldest_pending_age_status: S2OldestPendingAgeStatus;
+  oldest_pending_age_alert: S2OldestPendingAgeAlert;
+  oldest_pending_age_alert_threshold_ms: number;
 }
+
+export type S2OutboxAgeEvidence = Pick<
+  S2OutboxStatus,
+  | "oldest_pending_age_ms"
+  | "oldest_pending_age_status"
+  | "oldest_pending_age_alert"
+  | "oldest_pending_age_alert_threshold_ms"
+>;
 
 let requestCount = 0;
 
@@ -522,6 +546,38 @@ function nullableSafeNonnegativeIntegerAt(
 ): number | null {
   const value = record[key];
   return value === null || value === undefined ? null : safeNonnegativeIntegerAt(record, key);
+}
+
+/** New status/evidence fields must be present data, never inherited or omitted defaults. */
+function ownDataAt(record: Record<string, unknown>, key: string): unknown {
+  if (!Object.prototype.hasOwnProperty.call(record, key)) fail("S2_RESPONSE_INVALID");
+  return record[key];
+}
+
+function ownStringAt(record: Record<string, unknown>, key: string): string {
+  const value = ownDataAt(record, key);
+  if (typeof value !== "string") fail("S2_RESPONSE_INVALID");
+  return value;
+}
+
+function ownNullableSafeNonnegativeIntegerAt(
+  record: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = ownDataAt(record, key);
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    fail("S2_RESPONSE_INVALID");
+  }
+  return value;
+}
+
+function ownSafePositiveIntegerAt(record: Record<string, unknown>, key: string): number {
+  const value = ownDataAt(record, key);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    fail("S2_RESPONSE_INVALID");
+  }
+  return value;
 }
 
 function stringAt(record: Record<string, unknown>, key: string): string {
@@ -1224,8 +1280,26 @@ async function deterministicAllocationAndRollback(): Promise<void> {
   });
 }
 
-function outboxStatusResult(body: Record<string, unknown>): OutboxStatus {
-  return {
+export function parseS2OutboxStatus(body: Record<string, unknown>): S2OutboxStatus {
+  const oldestPendingAgeStatus = ownStringAt(body, "oldest_pending_age_status");
+  if (
+    oldestPendingAgeStatus !== "empty" &&
+    oldestPendingAgeStatus !== "measured" &&
+    oldestPendingAgeStatus !== "degraded-invalid-timestamp" &&
+    oldestPendingAgeStatus !== "degraded-future-timestamp"
+  ) {
+    fail("S2_RESPONSE_INVALID");
+  }
+  const oldestPendingAgeAlert = ownStringAt(body, "oldest_pending_age_alert");
+  if (
+    oldestPendingAgeAlert !== "not-pending" &&
+    oldestPendingAgeAlert !== "below-threshold" &&
+    oldestPendingAgeAlert !== "at-or-above-threshold" &&
+    oldestPendingAgeAlert !== "degraded"
+  ) {
+    fail("S2_RESPONSE_INVALID");
+  }
+  const result: S2OutboxStatus = {
     active: numberAt(body, "active"),
     pending: numberAt(body, "pending"),
     alarm_at: nullableNumberAt(body, "alarm_at"),
@@ -1239,19 +1313,60 @@ function outboxStatusResult(body: Record<string, unknown>): OutboxStatus {
     last_backoff_ms: nullableNumberAt(body, "last_backoff_ms"),
     last_quarantine_code: nullableStringAt(body, "last_quarantine_code"),
     last_phase: stringAt(body, "last_phase"),
+    oldest_pending_age_ms: ownNullableSafeNonnegativeIntegerAt(body, "oldest_pending_age_ms"),
+    oldest_pending_age_status: oldestPendingAgeStatus,
+    oldest_pending_age_alert: oldestPendingAgeAlert,
+    oldest_pending_age_alert_threshold_ms: ownSafePositiveIntegerAt(
+      body,
+      "oldest_pending_age_alert_threshold_ms",
+    ),
   };
+
+  if (!Number.isSafeInteger(result.pending) || result.pending < 0) fail("S2_RESPONSE_INVALID");
+  if (result.oldest_pending_age_status === "empty") {
+    if (
+      result.pending !== 0 ||
+      result.oldest_pending_age_ms !== 0 ||
+      result.oldest_pending_age_alert !== "not-pending"
+    ) {
+      fail("S2_RESPONSE_INVALID");
+    }
+  } else if (result.oldest_pending_age_status === "measured") {
+    if (result.pending === 0 || result.oldest_pending_age_ms === null) fail("S2_RESPONSE_INVALID");
+    const expectedAlert =
+      result.oldest_pending_age_ms >= result.oldest_pending_age_alert_threshold_ms
+        ? "at-or-above-threshold"
+        : "below-threshold";
+    if (result.oldest_pending_age_alert !== expectedAlert) fail("S2_RESPONSE_INVALID");
+  } else if (
+    result.pending === 0 ||
+    result.oldest_pending_age_ms !== null ||
+    result.oldest_pending_age_alert !== "degraded"
+  ) {
+    fail("S2_RESPONSE_INVALID");
+  }
+  return result;
 }
 
-async function outboxStatus(scenario: string): Promise<OutboxStatus> {
+async function outboxStatus(scenario: string): Promise<S2OutboxStatus> {
   const result = await request("GET", "/__s2/outbox/status", scenario);
   assertEqual(result.status, 200, "S2_OUTBOX_STATUS_FAILED");
-  return outboxStatusResult(result.body);
+  return parseS2OutboxStatus(result.body);
+}
+
+export function outboxAgeEvidence(status: S2OutboxStatus): S2OutboxAgeEvidence {
+  return {
+    oldest_pending_age_ms: status.oldest_pending_age_ms,
+    oldest_pending_age_status: status.oldest_pending_age_status,
+    oldest_pending_age_alert: status.oldest_pending_age_alert,
+    oldest_pending_age_alert_threshold_ms: status.oldest_pending_age_alert_threshold_ms,
+  };
 }
 
 async function waitForOutbox(
   scenario: string,
-  predicate: (status: OutboxStatus) => boolean,
-): Promise<OutboxStatus> {
+  predicate: (status: S2OutboxStatus) => boolean,
+): Promise<S2OutboxStatus> {
   const deadline = performance.now() + 8_000;
   while (performance.now() < deadline) {
     const current = await outboxStatus(scenario);
@@ -1280,6 +1395,7 @@ async function waitForOutbox(
     build_digest: null,
     checkpoint_digest: null,
     checkpoint_mode: "unsigned-v0",
+    ...outboxAgeEvidence(observed),
     ...receiptMetrics(),
     lock_wait_ms: null,
     retry_count: observed.delivery_attempts,
@@ -2486,6 +2602,7 @@ async function restartVerify(): Promise<void> {
     build_digest: null,
     checkpoint_digest: primary.checkpoint_digest,
     checkpoint_mode: primary.checkpoint_mode,
+    ...outboxAgeEvidence(recoveredOutbox),
     ...receiptMetrics(),
     lock_wait_ms: null,
     retry_count: recoveredOutbox.delivery_attempts,

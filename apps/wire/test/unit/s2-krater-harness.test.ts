@@ -21,6 +21,7 @@ import { S2_COST_RECEIPT_BINDINGS_KEYS, S2_COST_RECEIPT_ROOT_KEYS } from "@asimp
 import {
   buildS2CostMeasurementReceipt,
   parseS2EventPageResult,
+  parseS2OutboxStatus,
   parseS2StateResult,
   parseS2WriteResult,
   S2_COST_RECEIPT_RELATIVE_PATH,
@@ -1037,6 +1038,86 @@ describe("S2 to S7 normalized cost receipt", () => {
           has_more: false,
         }),
       ).toThrow("S2_RESPONSE_INVALID");
+    }
+  });
+
+  test("PLANTED: S2 retains honest outbox-age evidence and rejects incoherent polarity", () => {
+    const threshold = 300_000;
+    const base = {
+      active: 0,
+      pending: 1,
+      alarm_at: null,
+      owner_acquisitions: 1,
+      max_active: 1,
+      recovered_ownerships: 0,
+      delivery_attempts: 1,
+      delivered: 0,
+      quarantined: 0,
+      failures: 0,
+      last_backoff_ms: null,
+      last_quarantine_code: null,
+      last_phase: "idle",
+      oldest_pending_age_alert_threshold_ms: threshold,
+    };
+
+    expect(
+      parseS2OutboxStatus({
+        ...base,
+        oldest_pending_age_ms: threshold - 1,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "below-threshold",
+      }),
+    ).toMatchObject({ oldest_pending_age_alert: "below-threshold" });
+    expect(
+      parseS2OutboxStatus({
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "at-or-above-threshold",
+      }),
+    ).toMatchObject({ oldest_pending_age_alert: "at-or-above-threshold" });
+    expect(
+      parseS2OutboxStatus({
+        ...base,
+        oldest_pending_age_ms: threshold + 1,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "at-or-above-threshold",
+      }),
+    ).toMatchObject({ oldest_pending_age_alert: "at-or-above-threshold" });
+    expect(
+      parseS2OutboxStatus({
+        ...base,
+        oldest_pending_age_ms: null,
+        oldest_pending_age_status: "degraded-future-timestamp",
+        oldest_pending_age_alert: "degraded",
+      }),
+    ).toMatchObject({
+      oldest_pending_age_ms: null,
+      oldest_pending_age_status: "degraded-future-timestamp",
+      oldest_pending_age_alert: "degraded",
+    });
+
+    for (const invalid of [
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "below-threshold",
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: 0,
+        oldest_pending_age_status: "degraded-invalid-timestamp",
+        oldest_pending_age_alert: "degraded",
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: 1.5,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "below-threshold",
+      },
+    ]) {
+      expect(() => parseS2OutboxStatus(invalid)).toThrow("S2_RESPONSE_INVALID");
     }
   });
 
