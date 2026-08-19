@@ -45,9 +45,7 @@ function comparePaths(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function generatedSchemaDirectoryEntryKind(
-  entry: Dirent,
-): GeneratedSchemaDirectoryEntry["kind"] {
+function generatedSchemaDirectoryEntryKind(entry: Dirent): GeneratedSchemaDirectoryEntry["kind"] {
   if (entry.isSymbolicLink()) return "symlink";
   if (entry.isDirectory()) return "directory";
   if (entry.isFile()) return "file";
@@ -185,7 +183,5 @@ test("generated schema census is deterministic, recursive, and rejects symlinks"
   };
   expect(() =>
     checkedInGeneratedSchemaPaths(fixtureDirectory, readSymlinkedFixtureDirectory),
-  ).toThrow(
-    "PUBLIC_SCHEMA_CENSUS_SYMLINK:nested/alias.schema.json",
-  );
+  ).toThrow("PUBLIC_SCHEMA_CENSUS_SYMLINK:nested/alias.schema.json");
 });
