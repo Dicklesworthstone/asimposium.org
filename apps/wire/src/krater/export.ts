@@ -78,9 +78,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
  * mirror reads this first to confirm the format and extract the checkpoints
  * before trusting any event line.
  */
-export function parseExportHeader(
-  line: string,
-):
+export function parseExportHeader(line: string):
   | {
       readonly ok: true;
       readonly format: string;

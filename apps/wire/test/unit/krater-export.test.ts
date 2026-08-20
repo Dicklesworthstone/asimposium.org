@@ -5,8 +5,13 @@ import {
   EXPORT_LICENSE,
   parseExportHeader,
   serializeProblemExport,
+  verifyProblemExportChain,
 } from "../../src/krater/export.ts";
-import type { KraterEvent } from "../../src/krater/krater.ts";
+import {
+  eventChainDigest,
+  genesisChainDigest,
+  type KraterEvent,
+} from "../../src/krater/krater.ts";
 
 function event(seq: number): KraterEvent {
   return {
@@ -109,9 +114,6 @@ describe("per-problem event export (W2.8)", () => {
     }
   });
 });
-
-import { verifyProblemExportChain } from "../../src/krater/export.ts";
-import { eventChainDigest, genesisChainDigest } from "../../src/krater/krater.ts";
 
 async function chainedEvent(
   seq: number,
