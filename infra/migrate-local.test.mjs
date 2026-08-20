@@ -504,6 +504,7 @@ async function runOwnerLeaseWriteFailurePlant(failureMode) {
     },
     end() {
       events.push("end");
+      return failAt("end");
     },
   };
   const result = await runBoundedCommand({
@@ -527,7 +528,10 @@ async function runOwnerLeaseWriteFailurePlant(failureMode) {
         resolveExit(137);
       }
     },
-    groupExists: () => groupAlive,
+    groupExists: () => {
+      events.push(groupAlive ? "group-live" : "group-gone");
+      return groupAlive;
+    },
     toolEnvironment: {},
   });
   return { events, result, stderr, stdout };
@@ -1633,21 +1637,29 @@ const cases = [
         "the outer CLI receipt preceded nested cleanup settlement",
       );
 
-      for (const failureMode of [
-        "sync-write",
-        "async-write",
-        "sync-flush",
-        "async-flush",
-        "sync-ref",
-        "async-ref",
+      for (const [failureMode, expectedOutcome] of [
+        ["sync-write", "owner-lease-write-unproven"],
+        ["async-write", "owner-lease-write-unproven"],
+        ["sync-flush", "owner-lease-write-unproven"],
+        ["async-flush", "owner-lease-write-unproven"],
+        ["sync-ref", "owner-lease-write-unproven"],
+        ["async-ref", "owner-lease-write-unproven"],
+        ["sync-end", "owner-lease-close-unproven"],
+        ["async-end", "owner-lease-close-unproven"],
       ]) {
         const writeFailure = await runOwnerLeaseWriteFailurePlant(failureMode);
-        assert.equal(writeFailure.result.outcome, "owner-lease-write-unproven", failureMode);
+        assert.equal(writeFailure.result.outcome, expectedOutcome, failureMode);
         assert.deepEqual(
           writeFailure.events.filter((event) => event === "SIGTERM" || event === "SIGKILL"),
           ["SIGTERM", "SIGKILL"],
           `${failureMode} did not retire the exact owned group`,
         );
+        const killIndex = writeFailure.events.indexOf("SIGKILL");
+        assert.ok(
+          writeFailure.events.indexOf("group-gone", killIndex + 1) > killIndex,
+          `${failureMode} did not observe group absence after SIGKILL`,
+        );
+        assert.equal(writeFailure.result.exitCode, 137, `${failureMode} did not reap the child`);
         assert.ok(
           writeFailure.events.indexOf("end") < writeFailure.events.indexOf("SIGTERM"),
           `${failureMode} signalled before closing the owner lease`,
