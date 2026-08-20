@@ -5,7 +5,7 @@
  *
  *  - proposition markers (`therefore`, `we prove`, `we show`, `lemma:`,
  *    `theorem:`, `claim:`, `conjecture:`), or
- *  - a long body (> 800 chars) with no `relates_to` anchors.
+ *  - a long body (> 800 Unicode code points) with no `relates_to` anchors.
  *
  * A hit returns LOOKS_LIKE_CLAIM with the claim schema and a suggested body
  * prefilled from the text; the author may promote that, or resubmit with
@@ -14,6 +14,15 @@
  */
 
 export const CLAIM_LOOKALIKE_BODY_CHARS = 800;
+
+/**
+ * The two text limits in this module are Unicode-code-point limits. ECMAScript
+ * string iteration keeps a valid surrogate pair together, but it deliberately
+ * does not count UTF-16 code units, UTF-8 bytes, or rendered grapheme clusters.
+ * That makes the pure classifier locale-independent. In particular, a prefix
+ * can end between combining or ZWJ code points; its only integrity guarantee is
+ * that it never emits half of a valid surrogate pair.
+ */
 
 const PROPOSITION_MARKERS = [
   /\btherefore\b/i,
