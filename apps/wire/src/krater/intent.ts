@@ -29,6 +29,26 @@ export interface IntentAssessment {
   readonly signals: readonly string[];
 }
 
+function exceedsCodePointLimit(text: string, limit: number): boolean {
+  let count = 0;
+  for (const _character of text) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
+}
+
+function codePointPrefix(text: string, limit: number): string {
+  let count = 0;
+  let prefix = "";
+  for (const character of text) {
+    if (count === limit) break;
+    prefix += character;
+    count += 1;
+  }
+  return prefix;
+}
+
 /**
  * Assess whether a workshop note body is claim-shaped. `hasRelatesTo` is
  * whether the author anchored the note to ledger objects.
@@ -42,8 +62,8 @@ export function assessNoteIntent(bodyMd: string, hasRelatesTo: boolean): IntentA
     }
   }
 
-  if (bodyMd.length > CLAIM_LOOKALIKE_BODY_CHARS && !hasRelatesTo) {
-    signals.push(`long-unanchored:${bodyMd.length}>${CLAIM_LOOKALIKE_BODY_CHARS}`);
+  if (!hasRelatesTo && exceedsCodePointLimit(bodyMd, CLAIM_LOOKALIKE_BODY_CHARS)) {
+    signals.push(`long-unanchored:>${CLAIM_LOOKALIKE_BODY_CHARS}`);
   }
 
   return {
@@ -58,6 +78,13 @@ export function assessNoteIntent(bodyMd: string, hasRelatesTo: boolean): IntentA
  * falsifier is left as the teaching placeholder (P3 still gates promotion).
  */
 export function suggestedClaimFromNote(bodyMd: string): { readonly statement: string } {
-  const firstLine = bodyMd.split("\n").find((line) => line.trim().length > 0) ?? "";
-  return { statement: firstLine.trim().slice(0, 500) };
+  let offset = 0;
+  while (offset <= bodyMd.length) {
+    const lineEnd = bodyMd.indexOf("\n", offset);
+    const line = bodyMd.slice(offset, lineEnd < 0 ? bodyMd.length : lineEnd).trim();
+    if (line.length > 0) return { statement: codePointPrefix(line, 500).trimEnd() };
+    if (lineEnd < 0) break;
+    offset = lineEnd + 1;
+  }
+  return { statement: "" };
 }

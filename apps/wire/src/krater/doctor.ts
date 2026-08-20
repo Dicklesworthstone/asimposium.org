@@ -13,6 +13,15 @@
 import type { ClaimProjection, KraterEvent } from "./krater.ts";
 import { replayClaimProjections } from "./krater.ts";
 
+export class ProjectionDoctorInputError extends Error {
+  readonly code = "PROJECTION_DOCTOR_INPUT_INVALID";
+
+  constructor(detail: string) {
+    super(`PROJECTION_DOCTOR_INPUT_INVALID: ${detail}`);
+    this.name = "ProjectionDoctorInputError";
+  }
+}
+
 export type ProjectionDrift =
   | {
       readonly kind: "missing_projection";
@@ -27,13 +36,26 @@ export type ProjectionDrift =
   | {
       readonly kind: "stale_projection";
       readonly claimId: string;
-      readonly detail: string;
+      readonly expected: false;
+      readonly actual: true;
     }
   | {
       readonly kind: "version_divergence";
       readonly claimId: string;
       readonly expected: number;
       readonly actual: number;
+    }
+  | {
+      readonly kind: "source_sequence_divergence";
+      readonly claimId: string;
+      readonly expected: number;
+      readonly actual: number;
+    }
+  | {
+      readonly kind: "build_digest_divergence";
+      readonly claimId: string;
+      readonly expected: string;
+      readonly actual: string;
     };
 
 export interface ProjectionDoctorReport {
@@ -57,7 +79,22 @@ export function doctorProjections(
   events: readonly KraterEvent[],
   stored: readonly ClaimProjection[],
 ): ProjectionDoctorReport {
+  if (
+    events.some((event) => event.problemId !== problemId) ||
+    stored.some((projection) => projection.problemId !== problemId)
+  ) {
+    throw new ProjectionDoctorInputError("every row must belong to the requested problem");
+  }
+
   const replayed = replayClaimProjections(events);
+
+  if (new Set(replayed.map((projection) => projection.claimId)).size !== replayed.length) {
+    throw new ProjectionDoctorInputError("replayed claim ids must be unique");
+  }
+  if (new Set(stored.map((projection) => projection.claimId)).size !== stored.length) {
+    throw new ProjectionDoctorInputError("stored claim ids must be unique");
+  }
+
   const replayedById = new Map(replayed.map((p) => [p.claimId, p]));
   const storedById = new Map(stored.map((p) => [p.claimId, p]));
 
@@ -78,7 +115,16 @@ export function doctorProjections(
       drift.push({
         kind: "stale_projection",
         claimId: projection.claimId,
-        detail: "the stored projection is flagged stale and must be rebuilt from the log",
+        expected: false,
+        actual: true,
+      });
+    }
+    if (current.sourceSeq !== projection.sourceSeq) {
+      drift.push({
+        kind: "source_sequence_divergence",
+        claimId: projection.claimId,
+        expected: projection.sourceSeq,
+        actual: current.sourceSeq,
       });
     }
     if (current.projectionVersion !== projection.projectionVersion) {
@@ -87,6 +133,14 @@ export function doctorProjections(
         claimId: projection.claimId,
         expected: projection.projectionVersion,
         actual: current.projectionVersion,
+      });
+    }
+    if (current.buildDigest !== projection.buildDigest) {
+      drift.push({
+        kind: "build_digest_divergence",
+        claimId: projection.claimId,
+        expected: projection.buildDigest,
+        actual: current.buildDigest,
       });
     }
   }
@@ -103,7 +157,9 @@ export function doctorProjections(
   }
 
   // The rebuild set: every claim whose stored state diverges from the replay.
-  const rebuildSet = drift.map((d) => d.claimId).sort();
+  const rebuildSet = [...new Set(drift.map((item) => item.claimId))].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
 
   return {
     problemId,

@@ -294,6 +294,12 @@ describe("Krater deterministic contracts", () => {
     expect(outboxMatchesEvents(events, outbox)).toBe(true);
     expect(transactionBoundaryMatches(2, events, projections, outbox)).toBe(true);
     expect(transactionBoundaryMatches(1, events, projections, outbox)).toBe(false);
+
+    const wrongBuildDigest = projections.map((projection, index) =>
+      index === 0 ? { ...projection, buildDigest: "corrupt-row-digest" } : projection,
+    );
+    expect(projectionReplayMatches(events, wrongBuildDigest)).toBe(false);
+    expect(transactionBoundaryMatches(2, events, wrongBuildDigest, outbox)).toBe(false);
   });
 
   test("validates bounded FTS read inputs before the real-D1 FTS query", () => {

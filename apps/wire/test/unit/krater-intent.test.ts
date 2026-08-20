@@ -27,14 +27,41 @@ describe("the §7.6 intent classifier", () => {
     expect(assessNoteIntent(long, true).looksLikeClaim).toBe(false);
   });
 
+  test("the long-body threshold counts complete Unicode code points", () => {
+    const atLimit = "🙂".repeat(CLAIM_LOOKALIKE_BODY_CHARS);
+    const overLimit = `${atLimit}🙂`;
+    expect(assessNoteIntent(atLimit, false).looksLikeClaim).toBe(false);
+    expect(assessNoteIntent(overLimit, false).signals).toContain(
+      `long-unanchored:>${CLAIM_LOOKALIKE_BODY_CHARS}`,
+    );
+  });
+
   test("a long anchored body with no markers is a note", () => {
     const long = "working note. ".repeat(200);
     expect(assessNoteIntent(long, true).looksLikeClaim).toBe(false);
   });
 
   test("the suggested claim prefills the statement from the first line", () => {
-    const note = "The map factors through the quotient.\n\nA longer derivation follows.";
+    const note = "\n  \nThe map factors through the quotient.\n\nA longer derivation follows.";
     expect(suggestedClaimFromNote(note).statement).toBe("The map factors through the quotient.");
+  });
+
+  test("the suggested statement truncates without splitting an astral character", () => {
+    const statement = suggestedClaimFromNote(`${"a".repeat(499)}🙂discarded`).statement;
+    expect(Array.from(statement)).toHaveLength(500);
+    expect(statement.endsWith("🙂")).toBe(true);
+    expect(statement).not.toContain("discarded");
+  });
+
+  test("the suggested statement stays canonical when the cut lands on whitespace", () => {
+    const statement = suggestedClaimFromNote(`${"a".repeat(499)} discarded`).statement;
+    expect(statement).toBe("a".repeat(499));
+    expect(statement.endsWith(" ")).toBe(false);
+  });
+
+  test("an empty or all-blank note has no suggested statement", () => {
+    expect(suggestedClaimFromNote("")).toEqual({ statement: "" });
+    expect(suggestedClaimFromNote("\n\n  \n")).toEqual({ statement: "" });
   });
 
   test("the classifier is pure — same text, same verdict", () => {

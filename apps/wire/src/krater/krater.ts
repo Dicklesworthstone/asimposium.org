@@ -1474,6 +1474,7 @@ export function projectionReplayMatches(
         current.problemId === projection.problemId &&
         current.sourceSeq === projection.sourceSeq &&
         current.projectionVersion === projection.projectionVersion &&
+        current.buildDigest === projection.buildDigest &&
         current.stale === projection.stale
       );
     }) && replayed.length === projections.length

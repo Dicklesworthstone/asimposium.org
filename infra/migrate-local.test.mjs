@@ -466,7 +466,7 @@ async function runShippedOwnerWatchdogPreauthPlant({
   assert.equal(reaped, true, `${expectedCode} watchdog was not reaped before refusal receipt`);
 }
 
-async function runOwnerLeaseWriteFailurePlant(failureMode) {
+async function runOwnerLeaseWriteFailurePlant(failureMode, { groupSurvivesKill = false } = {}) {
   const events = [];
   const stdout = new ReadableStream({
     cancel() {
@@ -523,7 +523,7 @@ async function runOwnerLeaseWriteFailurePlant(failureMode) {
     },
     signalGroup: (_child, signal) => {
       events.push(signal);
-      if (signal === "SIGKILL") {
+      if (signal === "SIGKILL" && !groupSurvivesKill) {
         groupAlive = false;
         resolveExit(137);
       }
@@ -1660,18 +1660,44 @@ const cases = [
           `${failureMode} did not observe group absence after SIGKILL`,
         );
         assert.equal(writeFailure.result.exitCode, 137, `${failureMode} did not reap the child`);
+        const endIndex = writeFailure.events.indexOf("end");
+        const termIndex = writeFailure.events.indexOf("SIGTERM");
+        assert.ok(endIndex >= 0, `${failureMode} never closed the owner lease`);
+        assert.ok(termIndex >= 0, `${failureMode} never sent SIGTERM`);
         assert.ok(
-          writeFailure.events.indexOf("end") < writeFailure.events.indexOf("SIGTERM"),
+          endIndex < termIndex,
           `${failureMode} signalled before closing the owner lease`,
         );
+        const stdoutCancelIndex = writeFailure.events.indexOf("stdout-cancel");
+        const stderrCancelIndex = writeFailure.events.indexOf("stderr-cancel");
+        assert.ok(stdoutCancelIndex >= 0, `${failureMode} never cancelled stdout`);
+        assert.ok(stderrCancelIndex >= 0, `${failureMode} never cancelled stderr`);
         assert.ok(
-          writeFailure.events.indexOf("stdout-cancel") < writeFailure.events.indexOf("SIGTERM") &&
-            writeFailure.events.indexOf("stderr-cancel") < writeFailure.events.indexOf("SIGTERM"),
+          stdoutCancelIndex < termIndex && stderrCancelIndex < termIndex,
           `${failureMode} signalled before cancelling both owned readers`,
         );
         assert.equal(writeFailure.stdout.locked, false);
         assert.equal(writeFailure.stderr.locked, false);
       }
+
+      const survivor = await runOwnerLeaseWriteFailurePlant("sync-write", {
+        groupSurvivesKill: true,
+      });
+      assert.equal(survivor.result.outcome, "process-reap-unproven");
+      assert.equal(survivor.result.exitCode, undefined);
+      assert.deepEqual(
+        survivor.events.filter((event) => event === "SIGTERM" || event === "SIGKILL"),
+        ["SIGTERM", "SIGKILL"],
+      );
+      const survivorKillIndex = survivor.events.indexOf("SIGKILL");
+      assert.ok(survivorKillIndex >= 0);
+      assert.ok(
+        survivor.events.indexOf("group-live", survivorKillIndex + 1) > survivorKillIndex,
+        "a group that survived SIGKILL was not observed live after escalation",
+      );
+      assert.equal(survivor.events.indexOf("group-gone", survivorKillIndex + 1), -1);
+      assert.equal(survivor.stdout.locked, false);
+      assert.equal(survivor.stderr.locked, false);
 
       // MODE POLARITY: parent-owned execution must inherit the outer group and
       // signal only its direct child. Any negative-PID/group signal here could
