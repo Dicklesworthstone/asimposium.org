@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  backfillKraterIntegrity,
   canonicalJson,
   checkpointDigest,
+  ensureProblem,
   serverAuthoredOutboxTimestamp,
   cursorMatchesEvents,
   deterministicWorkload,
@@ -24,6 +26,7 @@ import {
   UNDIGESTED_EVENT_PROBE_SQL,
   validateKraterIngressTimestamp,
   validateFtsReadInput,
+  writeClaim,
 } from "./krater";
 
 function event(
@@ -46,10 +49,208 @@ function event(
   };
 }
 
+interface ObservedD1Statement {
+  readonly sql: string;
+  readonly bindings: readonly unknown[];
+}
+
+function fakeD1Result<T>(results: readonly T[] = []): {
+  readonly success: true;
+  readonly results: readonly T[];
+  readonly meta: { readonly rows_read: number; readonly rows_written: number };
+} {
+  return {
+    success: true,
+    results,
+    meta: { rows_read: 0, rows_written: 0 },
+  };
+}
+
+function ensureProblemHarness(): {
+  readonly db: Parameters<typeof ensureProblem>[0];
+  readonly inserts: readonly (readonly unknown[])[];
+  readonly batches: readonly (readonly ObservedD1Statement[])[];
+} {
+  const inserts: (readonly unknown[])[] = [];
+  const batches: (readonly ObservedD1Statement[])[] = [];
+  const prepared = (sql: string) => {
+    let bindings: readonly unknown[] = [];
+    const statement = {
+      sql,
+      get bindings(): readonly unknown[] {
+        return bindings;
+      },
+      bind: (...next: unknown[]) => {
+        bindings = next;
+        return statement;
+      },
+      all: async () => {
+        if (sql.includes("SELECT public_seq, chain_digest FROM problems")) {
+          return fakeD1Result([{ public_seq: 0, chain_digest: null }]);
+        }
+        if (sql.includes("FROM krater_integrity_backfill")) return fakeD1Result();
+        if (sql.includes("FROM events WHERE problem_id")) return fakeD1Result();
+        throw new Error(`unexpected ensureProblem all query: ${sql}`);
+      },
+      first: async () => null,
+      run: async () => {
+        if (!sql.includes("INSERT INTO problems")) {
+          throw new Error(`unexpected ensureProblem run query: ${sql}`);
+        }
+        inserts.push(bindings);
+        return fakeD1Result();
+      },
+    };
+    return statement;
+  };
+  const db = {
+    prepare: prepared,
+    batch: async (statements: readonly unknown[]) => {
+      const observed = statements as readonly ObservedD1Statement[];
+      batches.push(observed);
+      return observed.map(() => fakeD1Result());
+    },
+  } as unknown as Parameters<typeof ensureProblem>[0];
+  return { db, inserts, batches };
+}
+
+function retryingWriteHarness(): {
+  readonly db: Parameters<typeof writeClaim>[0];
+  readonly armConflict: () => void;
+  readonly persistedOutboxCreatedAt: () => string | null;
+} {
+  let publicSeq = 0;
+  let chainDigest = "a".repeat(64);
+  let conflictArmed = false;
+  let outboxCreatedAt: string | null = null;
+  let idempotency: { request_digest: string; event_id: string; event_seq: number } | null = null;
+  let persistedEvent: Record<string, unknown> | null = null;
+  let persistedProjection: Record<string, unknown> | null = null;
+  let persistedCheckpoint: Record<string, unknown> | null = null;
+
+  const prepared = (sql: string) => {
+    let bindings: readonly unknown[] = [];
+    const statement = {
+      sql,
+      get bindings(): readonly unknown[] {
+        return bindings;
+      },
+      bind: (...next: unknown[]) => {
+        bindings = next;
+        return statement;
+      },
+      all: async () => {
+        if (sql.includes("SELECT public_seq, chain_digest FROM problems")) {
+          return fakeD1Result([{ public_seq: publicSeq, chain_digest: chainDigest }]);
+        }
+        if (sql.includes("FROM krater_integrity_backfill")) {
+          return fakeD1Result([{ state: "complete", legacy_event_count: publicSeq }]);
+        }
+        if (sql.includes("SELECT id FROM events")) return fakeD1Result();
+        throw new Error(`unexpected retry-harness all query: ${sql}`);
+      },
+      first: async () => {
+        if (sql.includes("SELECT public_seq, chain_digest FROM problems")) {
+          return { public_seq: publicSeq, chain_digest: chainDigest };
+        }
+        if (
+          sql.includes("SELECT request_digest, event_id, event_seq") &&
+          sql.includes("FROM idempotency WHERE problem_id")
+        ) {
+          return idempotency;
+        }
+        if (sql.includes("FROM events WHERE id = ?")) return persistedEvent;
+        if (sql.includes("FROM claim_projections")) return persistedProjection;
+        if (sql.includes("FROM integrity_checkpoints")) return persistedCheckpoint;
+        throw new Error(`unexpected retry-harness first query: ${sql}`);
+      },
+      run: async () => {
+        throw new Error(`unexpected retry-harness run query: ${sql}`);
+      },
+    };
+    return statement;
+  };
+
+  const db = {
+    prepare: prepared,
+    batch: async (statements: readonly unknown[]) => {
+      const observed = statements as readonly ObservedD1Statement[];
+      if (conflictArmed) {
+        conflictArmed = false;
+        throw new Error("KRATER_CHAIN_HEAD_MISMATCH");
+      }
+      const one = (needle: string): ObservedD1Statement => {
+        const found = observed.find((statement) => statement.sql.includes(needle));
+        if (found === undefined) throw new Error(`retry-harness statement missing: ${needle}`);
+        return found;
+      };
+      const updateProblem = one("UPDATE problems SET public_seq = public_seq + 1");
+      const idempotencyInsert = one("INSERT INTO idempotency");
+      const eventInsert = one("INSERT INTO events");
+      const projectionInsert = one("INSERT INTO claim_projections");
+      const checkpointInsert = one("INSERT INTO integrity_checkpoints");
+      const outboxInsert = one("INSERT INTO outbox");
+      const nextSeq = publicSeq + 1;
+      chainDigest = updateProblem.bindings[0] as string;
+      publicSeq = nextSeq;
+      const eventBindings = eventInsert.bindings;
+      const projectionBindings = projectionInsert.bindings;
+      const checkpointBindings = checkpointInsert.bindings;
+      const idempotencyBindings = idempotencyInsert.bindings;
+      const outboxBindings = outboxInsert.bindings;
+      idempotency = {
+        request_digest: idempotencyBindings[2] as string,
+        event_id: eventBindings[0] as string,
+        event_seq: nextSeq,
+      };
+      persistedEvent = {
+        id: eventBindings[0],
+        problem_id: eventBindings[7],
+        seq: nextSeq,
+        type: "claim.created",
+        object_kind: "claim",
+        object_id: eventBindings[1],
+        object_version: 1,
+        payload_sha256: eventBindings[2],
+        row_digest: eventBindings[3],
+        chain_digest: eventBindings[4],
+        created_at: eventBindings[5],
+      };
+      persistedProjection = {
+        claim_id: projectionBindings[0],
+        problem_id: projectionBindings[4],
+        source_seq: nextSeq,
+        projection_version: 1,
+        build_digest: projectionBindings[1],
+        stale: 0,
+      };
+      persistedCheckpoint = {
+        problem_id: checkpointBindings[3],
+        checkpoint_seq: nextSeq,
+        root_chain_digest: chainDigest,
+        checkpoint_digest: checkpointBindings[0],
+        checkpoint_version: 1,
+        checkpoint_mode: "unsigned-v0",
+      };
+      outboxCreatedAt = outboxBindings[4] as string;
+      return observed.map((statement, index) =>
+        index === 1 ? fakeD1Result([{ public_seq: nextSeq }]) : fakeD1Result(),
+      );
+    },
+  } as unknown as Parameters<typeof writeClaim>[0];
+  return {
+    db,
+    armConflict: () => {
+      conflictArmed = true;
+    },
+    persistedOutboxCreatedAt: () => outboxCreatedAt,
+  };
+}
+
 /**
- * Pure contract checks only. The real D1 transaction, FTS, trigger, pagination,
- * disconnect, and restart evidence is executed by scripts/e2e-s2-krater.sh.
- * No D1-shaped substitute is constructed here.
+ * Pure contracts plus narrow test-only statement observers for ingress and retry
+ * binding. The real D1 transaction, FTS, trigger, pagination, disconnect, and
+ * restart evidence is executed by scripts/e2e-s2-krater.sh.
  */
 describe("Krater deterministic contracts", () => {
   test("canonicalizes object keys independently of construction order", async () => {
@@ -118,6 +319,38 @@ describe("Krater deterministic contracts", () => {
     }
   });
 
+  test("PLANTED: ensureProblem and direct backfill cannot bypass canonical timestamp ingress", async () => {
+    const serverNowMs = Date.parse("2026-08-19T00:00:00.000Z");
+    const problemId = "P-ingress-seam";
+    const canonical = "2000-01-01T00:00:00.000Z";
+    const untouchedDb = {
+      prepare: () => {
+        throw new Error("KRATER_INGRESS_DB_TOUCHED");
+      },
+    } as unknown as Parameters<typeof ensureProblem>[0];
+    for (const invalid of [
+      "2026-08-19",
+      "2026-08-19T00:00:00+00:00",
+      "2026-02-30T00:00:00.000Z",
+      "2026-08-19T00:00:00.001Z",
+    ]) {
+      await expect(ensureProblem(untouchedDb, problemId, invalid, serverNowMs)).rejects.toThrow(
+        KraterValidationError,
+      );
+      await expect(
+        backfillKraterIntegrity(untouchedDb, problemId, invalid, serverNowMs),
+      ).rejects.toThrow(KraterValidationError);
+    }
+
+    const harness = ensureProblemHarness();
+    await ensureProblem(harness.db, problemId, canonical, serverNowMs);
+    expect(harness.inserts).toEqual([[problemId, canonical, canonical]]);
+    const completion = harness.batches
+      .flat()
+      .find((statement) => statement.sql.includes("UPDATE krater_integrity_backfill"));
+    expect(completion?.bindings).toEqual([0, canonical, problemId]);
+  });
+
   test("captures a deterministic server-authored canonical UTC outbox instant", () => {
     const serverNowMs = Date.parse("2026-08-19T00:00:00.123Z");
 
@@ -125,6 +358,45 @@ describe("Krater deterministic contracts", () => {
     expect(serverAuthoredOutboxTimestamp(serverNowMs)).toBe(
       serverAuthoredOutboxTimestamp(serverNowMs),
     );
+  });
+
+  test("PLANTED: writeClaim retry retains one entry-time server outbox timestamp", async () => {
+    const entryTime = Date.parse("2026-08-19T00:00:10.000Z");
+    const laterRetryTime = Date.parse("2026-08-19T00:00:20.000Z");
+    const harness = retryingWriteHarness();
+    const originalNow = Date.now;
+    let nowCalls = 0;
+    let headReads = 0;
+    Date.now = () => {
+      const value = nowCalls === 0 ? entryTime : laterRetryTime;
+      nowCalls += 1;
+      return value;
+    };
+    try {
+      const result = await writeClaim(
+        harness.db,
+        {
+          problemId: "P-retry-outbox-time",
+          claimId: "C-retry-outbox-time",
+          eventId: "E-retry-outbox-time",
+          idempotencyKey: "IK-retry-outbox-time",
+          statement: "The retry must retain its entry-time outbox timestamp.",
+          createdAt: "2026-08-19T00:00:00.000Z",
+        },
+        {
+          afterReadHead: async () => {
+            headReads += 1;
+            if (headReads === 1) harness.armConflict();
+          },
+        },
+      );
+      expect(result.retryCount).toBe(1);
+      expect(headReads).toBe(2);
+      expect(nowCalls).toBe(1);
+      expect(harness.persistedOutboxCreatedAt()).toBe("2026-08-19T00:00:10.000Z");
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   test("replays contiguous envelopes and rejects sequence gaps or mixed scopes", () => {

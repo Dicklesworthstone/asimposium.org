@@ -284,13 +284,7 @@ export type UploadState =
   | "expired"
   | "quarantined";
 
-export type UploadTransition =
-  | "presign"
-  | "upload"
-  | "verify"
-  | "bind"
-  | "expire"
-  | "mismatch";
+export type UploadTransition = "presign" | "upload" | "verify" | "bind" | "expire" | "mismatch";
 
 const TERMINAL_UPLOAD_STATES: ReadonlySet<UploadState> = new Set([
   "bound",
@@ -299,7 +293,9 @@ const TERMINAL_UPLOAD_STATES: ReadonlySet<UploadState> = new Set([
 ]);
 
 /** The lawful (from, transition) → to edges. Anything absent is refused. */
-const UPLOAD_EDGES: Readonly<Record<UploadTransition, Readonly<Partial<Record<UploadState, UploadState>>>>> = {
+const UPLOAD_EDGES: Readonly<
+  Record<UploadTransition, Readonly<Partial<Record<UploadState, UploadState>>>>
+> = {
   presign: { declared: "presigned" },
   upload: { presigned: "uploaded" },
   verify: { uploaded: "verified" },
@@ -312,7 +308,12 @@ const UPLOAD_EDGES: Readonly<Record<UploadTransition, Readonly<Partial<Record<Up
 
 export type UploadStep =
   | { readonly ok: true; readonly state: UploadState }
-  | { readonly ok: false; readonly code: "UPLOAD_TRANSITION_ILLEGAL"; readonly from: UploadState; readonly transition: UploadTransition };
+  | {
+      readonly ok: false;
+      readonly code: "UPLOAD_TRANSITION_ILLEGAL";
+      readonly from: UploadState;
+      readonly transition: UploadTransition;
+    };
 
 /** Advance the machine one edge. Illegal moves are refused, never coerced. */
 export function stepUpload(state: UploadState, transition: UploadTransition): UploadStep {

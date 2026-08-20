@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import {
   bibtexForClaim,
+  type CitableClaim,
   citeKeyFor,
   claimStableUrl,
   cslForClaim,
-  type CitableClaim,
 } from "../../src/krater/citation.ts";
 
 const CLAIM: CitableClaim = {
@@ -53,11 +53,21 @@ describe("citation export (W2.8)", () => {
   });
 
   test("the version is pinned so an edit never silently strengthens a citation (P9)", () => {
-    const v1 = bibtexForClaim({ ...CLAIM, statementVersion: 1 }, "2026-08-18", "https://asimposium.org");
-    const v2 = bibtexForClaim({ ...CLAIM, statementVersion: 2 }, "2026-08-18", "https://asimposium.org");
+    const v1 = bibtexForClaim(
+      { ...CLAIM, statementVersion: 1 },
+      "2026-08-18",
+      "https://asimposium.org",
+    );
+    const v2 = bibtexForClaim(
+      { ...CLAIM, statementVersion: 2 },
+      "2026-08-18",
+      "https://asimposium.org",
+    );
     // Same stable key, different pinned version — the citation names the exact
     // version it relied on.
-    expect(citeKeyFor(CLAIM.problemId, CLAIM.claimId)).toBe(citeKeyFor(CLAIM.problemId, CLAIM.claimId));
+    expect(citeKeyFor(CLAIM.problemId, CLAIM.claimId)).toBe(
+      citeKeyFor(CLAIM.problemId, CLAIM.claimId),
+    );
     expect(v1).toContain("statement version 1");
     expect(v2).toContain("statement version 2");
   });

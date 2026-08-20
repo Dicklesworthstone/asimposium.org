@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ARTIFACTS_ORIGIN,
   archiveExpansionIsBounded,
   archiveMemberPathIsSafe,
-  ARTIFACTS_ORIGIN,
   bodyLooksSecretShaped,
   CAS_EXTRACT_CHARS,
   CAS_KEY_PREFIX,
@@ -197,10 +197,10 @@ describe("archive safety bounds", () => {
 
 import {
   stepUpload,
-  uploadMayBind,
-  uploadStateIsTerminal,
   type UploadState,
   type UploadTransition,
+  uploadMayBind,
+  uploadStateIsTerminal,
 } from "../../src/krater/cas.ts";
 
 describe("the upload manifest state machine (W2.7)", () => {
@@ -254,7 +254,14 @@ describe("the upload manifest state machine (W2.7)", () => {
   test("every non-terminal state reaches bound or a terminal refusal", () => {
     // Model-check the small graph: from each state, BFS to a terminal.
     const all: UploadState[] = ["declared", "presigned", "uploaded", "verified"];
-    const transitions: UploadTransition[] = ["presign", "upload", "verify", "bind", "expire", "mismatch"];
+    const transitions: UploadTransition[] = [
+      "presign",
+      "upload",
+      "verify",
+      "bind",
+      "expire",
+      "mismatch",
+    ];
     for (const start of all) {
       const seen = new Set<UploadState>([start]);
       const queue: UploadState[] = [start];
@@ -344,10 +351,7 @@ describe("reference-aware GC eligibility (W2.7)", () => {
   });
 });
 
-import {
-  reconcileArtifactInventory,
-  type ArtifactIndexRow,
-} from "../../src/krater/cas.ts";
+import { reconcileArtifactInventory, type ArtifactIndexRow } from "../../src/krater/cas.ts";
 
 describe("artifact inventory reconciliation (W2.7)", () => {
   test("an empty inventory with no objects is clean", () => {

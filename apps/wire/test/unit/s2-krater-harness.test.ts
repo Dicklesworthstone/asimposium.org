@@ -20,6 +20,7 @@ import { S2_COST_RECEIPT_BINDINGS_KEYS, S2_COST_RECEIPT_ROOT_KEYS } from "@asimp
 
 import {
   buildS2CostMeasurementReceipt,
+  outboxAgeEvidence,
   parseS2EventPageResult,
   parseS2OutboxStatus,
   parseS2StateResult,
@@ -1060,14 +1061,19 @@ describe("S2 to S7 normalized cost receipt", () => {
       oldest_pending_age_alert_threshold_ms: threshold,
     };
 
-    expect(
-      parseS2OutboxStatus({
-        ...base,
-        oldest_pending_age_ms: threshold - 1,
-        oldest_pending_age_status: "measured",
-        oldest_pending_age_alert: "below-threshold",
-      }),
-    ).toMatchObject({ oldest_pending_age_alert: "below-threshold" });
+    const belowThreshold = parseS2OutboxStatus({
+      ...base,
+      oldest_pending_age_ms: threshold - 1,
+      oldest_pending_age_status: "measured",
+      oldest_pending_age_alert: "below-threshold",
+    });
+    expect(belowThreshold).toMatchObject({ oldest_pending_age_alert: "below-threshold" });
+    expect(outboxAgeEvidence(belowThreshold)).toEqual({
+      oldest_pending_age_ms: threshold - 1,
+      oldest_pending_age_status: "measured",
+      oldest_pending_age_alert: "below-threshold",
+      oldest_pending_age_alert_threshold_ms: threshold,
+    });
     expect(
       parseS2OutboxStatus({
         ...base,
@@ -1097,6 +1103,20 @@ describe("S2 to S7 normalized cost receipt", () => {
       oldest_pending_age_alert: "degraded",
     });
 
+    expect(
+      parseS2OutboxStatus({
+        ...base,
+        pending: 0,
+        oldest_pending_age_ms: 0,
+        oldest_pending_age_status: "empty",
+        oldest_pending_age_alert: "not-pending",
+      }),
+    ).toMatchObject({
+      oldest_pending_age_ms: 0,
+      oldest_pending_age_status: "empty",
+      oldest_pending_age_alert: "not-pending",
+    });
+
     for (const invalid of [
       {
         ...base,
@@ -1116,9 +1136,78 @@ describe("S2 to S7 normalized cost receipt", () => {
         oldest_pending_age_status: "measured",
         oldest_pending_age_alert: "below-threshold",
       },
+      {
+        ...base,
+        oldest_pending_age_status: "degraded-invalid-timestamp",
+        oldest_pending_age_alert: "degraded",
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: 1,
+        oldest_pending_age_alert: "at-or-above-threshold",
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "unknown",
+        oldest_pending_age_alert: "at-or-above-threshold",
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: null,
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "unknown",
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "at-or-above-threshold",
+        oldest_pending_age_alert_threshold_ms: 0,
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "at-or-above-threshold",
+        oldest_pending_age_alert_threshold_ms: 1.5,
+      },
+      {
+        ...base,
+        oldest_pending_age_ms: threshold,
+        oldest_pending_age_status: "measured",
+        oldest_pending_age_alert: "at-or-above-threshold",
+        oldest_pending_age_alert_threshold_ms: "300000",
+      },
     ]) {
       expect(() => parseS2OutboxStatus(invalid)).toThrow("S2_RESPONSE_INVALID");
     }
+
+    const client = readFileSync(
+      resolve(REPOSITORY_ROOT, "apps/wire/src/krater/s2-client.ts"),
+      "utf8",
+    );
+    const waitForOutboxStart = client.indexOf("async function waitForOutbox");
+    const waitForOutboxEnd = client.indexOf("async function expectTransportAbort", waitForOutboxStart);
+    const restartVerifyStart = client.indexOf("async function restartVerify");
+    const restartVerifyEnd = client.indexOf("async function main", restartVerifyStart);
+    expect(waitForOutboxStart).toBeGreaterThanOrEqual(0);
+    expect(waitForOutboxEnd).toBeGreaterThan(waitForOutboxStart);
+    expect(restartVerifyStart).toBeGreaterThanOrEqual(0);
+    expect(restartVerifyEnd).toBeGreaterThan(restartVerifyStart);
+    expect(client.slice(waitForOutboxStart, waitForOutboxEnd)).toContain(
+      "...outboxAgeEvidence(observed),",
+    );
+    expect(client.slice(restartVerifyStart, restartVerifyEnd)).toContain(
+      "...outboxAgeEvidence(recoveredOutbox),",
+    );
   });
 
   test("builds the verifier's exact receipt schema from successful settled write metrics", () => {

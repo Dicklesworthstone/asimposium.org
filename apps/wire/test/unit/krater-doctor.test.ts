@@ -17,7 +17,11 @@ function event(seq: number, claimId: string): KraterEvent {
   };
 }
 
-function projection(claimId: string, seq: number, overrides: Partial<ClaimProjection> = {}): ClaimProjection {
+function projection(
+  claimId: string,
+  seq: number,
+  overrides: Partial<ClaimProjection> = {},
+): ClaimProjection {
   return {
     claimId,
     problemId: "P-DOC",
@@ -33,10 +37,7 @@ describe("doctor-projections (W2.6)", () => {
   test("a stored state that equals the log replay is sound", () => {
     const events = [event(1, "C-1"), event(2, "C-2")];
     // Replay to get the exact expected projections.
-    const stored = [
-      projection("C-1", 1),
-      projection("C-2", 2),
-    ];
+    const stored = [projection("C-1", 1), projection("C-2", 2)];
     const report = doctorProjections("P-DOC", events, stored);
     expect(report.sound).toBe(true);
     expect(report.drift).toEqual([]);
@@ -59,15 +60,21 @@ describe("doctor-projections (W2.6)", () => {
   });
 
   test("a stale-flagged projection is flagged for rebuild", () => {
-    const report = doctorProjections("P-DOC", [event(1, "C-1")], [projection("C-1", 1, { stale: true })]);
+    const report = doctorProjections(
+      "P-DOC",
+      [event(1, "C-1")],
+      [projection("C-1", 1, { stale: true })],
+    );
     expect(report.sound).toBe(false);
     expect(report.drift.some((d) => d.kind === "stale_projection")).toBe(true);
   });
 
   test("a version divergence is named with both versions", () => {
-    const report = doctorProjections("P-DOC", [event(1, "C-1")], [
-      projection("C-1", 1, { projectionVersion: 7 }),
-    ]);
+    const report = doctorProjections(
+      "P-DOC",
+      [event(1, "C-1")],
+      [projection("C-1", 1, { projectionVersion: 7 })],
+    );
     expect(report.sound).toBe(false);
     const drift = report.drift.find((d) => d.kind === "version_divergence");
     expect(drift).toBeDefined();
@@ -79,10 +86,7 @@ describe("doctor-projections (W2.6)", () => {
 
   test("the rebuild set names exactly the divergent claims, sorted", () => {
     const events = [event(1, "C-1"), event(2, "C-2"), event(3, "C-3")];
-    const stored = [
-      projection("C-2", 2, { stale: true }),
-      projection("C-3", 3),
-    ];
+    const stored = [projection("C-2", 2, { stale: true }), projection("C-3", 3)];
     const report = doctorProjections("P-DOC", events, stored);
     // C-1 missing, C-2 stale; C-3 sound.
     expect(report.rebuildSet).toEqual(["C-1", "C-2"]);

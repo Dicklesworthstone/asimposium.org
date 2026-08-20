@@ -557,7 +557,7 @@ function ownDataAt(record: Record<string, unknown>, key: string): unknown {
 function ownStringAt(record: Record<string, unknown>, key: string): string {
   const value = ownDataAt(record, key);
   if (typeof value !== "string") fail("S2_RESPONSE_INVALID");
-  return value;
+  return value as string;
 }
 
 function ownNullableSafeNonnegativeIntegerAt(
@@ -569,7 +569,7 @@ function ownNullableSafeNonnegativeIntegerAt(
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     fail("S2_RESPONSE_INVALID");
   }
-  return value;
+  return value as number;
 }
 
 function ownSafePositiveIntegerAt(record: Record<string, unknown>, key: string): number {
@@ -577,7 +577,7 @@ function ownSafePositiveIntegerAt(record: Record<string, unknown>, key: string):
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     fail("S2_RESPONSE_INVALID");
   }
-  return value;
+  return value as number;
 }
 
 function stringAt(record: Record<string, unknown>, key: string): string {
@@ -1280,25 +1280,33 @@ async function deterministicAllocationAndRollback(): Promise<void> {
   });
 }
 
+function isOldestPendingAgeStatus(value: string): value is S2OldestPendingAgeStatus {
+  return (
+    value === "empty" ||
+    value === "measured" ||
+    value === "degraded-invalid-timestamp" ||
+    value === "degraded-future-timestamp"
+  );
+}
+
+function isOldestPendingAgeAlert(value: string): value is S2OldestPendingAgeAlert {
+  return (
+    value === "not-pending" ||
+    value === "below-threshold" ||
+    value === "at-or-above-threshold" ||
+    value === "degraded"
+  );
+}
+
 export function parseS2OutboxStatus(body: Record<string, unknown>): S2OutboxStatus {
-  const oldestPendingAgeStatus = ownStringAt(body, "oldest_pending_age_status");
-  if (
-    oldestPendingAgeStatus !== "empty" &&
-    oldestPendingAgeStatus !== "measured" &&
-    oldestPendingAgeStatus !== "degraded-invalid-timestamp" &&
-    oldestPendingAgeStatus !== "degraded-future-timestamp"
-  ) {
-    fail("S2_RESPONSE_INVALID");
-  }
-  const oldestPendingAgeAlert = ownStringAt(body, "oldest_pending_age_alert");
-  if (
-    oldestPendingAgeAlert !== "not-pending" &&
-    oldestPendingAgeAlert !== "below-threshold" &&
-    oldestPendingAgeAlert !== "at-or-above-threshold" &&
-    oldestPendingAgeAlert !== "degraded"
-  ) {
-    fail("S2_RESPONSE_INVALID");
-  }
+  const rawOldestPendingAgeStatus = ownStringAt(body, "oldest_pending_age_status");
+  const oldestPendingAgeStatus = isOldestPendingAgeStatus(rawOldestPendingAgeStatus)
+    ? rawOldestPendingAgeStatus
+    : fail("S2_RESPONSE_INVALID");
+  const rawOldestPendingAgeAlert = ownStringAt(body, "oldest_pending_age_alert");
+  const oldestPendingAgeAlert = isOldestPendingAgeAlert(rawOldestPendingAgeAlert)
+    ? rawOldestPendingAgeAlert
+    : fail("S2_RESPONSE_INVALID");
   const result: S2OutboxStatus = {
     active: numberAt(body, "active"),
     pending: numberAt(body, "pending"),
@@ -1332,9 +1340,11 @@ export function parseS2OutboxStatus(body: Record<string, unknown>): S2OutboxStat
       fail("S2_RESPONSE_INVALID");
     }
   } else if (result.oldest_pending_age_status === "measured") {
-    if (result.pending === 0 || result.oldest_pending_age_ms === null) fail("S2_RESPONSE_INVALID");
+    const measuredAgeMs = result.oldest_pending_age_ms;
+    if (result.pending === 0 || measuredAgeMs === null) fail("S2_RESPONSE_INVALID");
+    const exactMeasuredAgeMs = measuredAgeMs as number;
     const expectedAlert =
-      result.oldest_pending_age_ms >= result.oldest_pending_age_alert_threshold_ms
+      exactMeasuredAgeMs >= result.oldest_pending_age_alert_threshold_ms
         ? "at-or-above-threshold"
         : "below-threshold";
     if (result.oldest_pending_age_alert !== expectedAlert) fail("S2_RESPONSE_INVALID");

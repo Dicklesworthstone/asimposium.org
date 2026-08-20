@@ -113,7 +113,10 @@ describe("per-problem event export (W2.8)", () => {
 import { verifyProblemExportChain } from "../../src/krater/export.ts";
 import { eventChainDigest, genesisChainDigest } from "../../src/krater/krater.ts";
 
-async function chainedEvent(seq: number, previous: string): Promise<{ event: KraterEvent; chain: string }> {
+async function chainedEvent(
+  seq: number,
+  previous: string,
+): Promise<{ event: KraterEvent; chain: string }> {
   const payloadSha256 = `sha256:payload-${seq}`;
   const chain = await eventChainDigest("P-4DSP", seq, payloadSha256, previous);
   return {

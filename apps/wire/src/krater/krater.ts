@@ -778,10 +778,10 @@ export async function backfillKraterIntegrity(
   db: D1Database,
   problemId: string,
   completedAt: string,
+  serverNowMs: number = Date.now(),
 ): Promise<KraterPreflightCost> {
   requireIdentifier("problemId", problemId);
-  if (Number.isNaN(Date.parse(completedAt)))
-    inputError("completedAt must be an ISO-8601 timestamp.");
+  validateKraterIngressTimestamp(completedAt, serverNowMs);
 
   // Measured from the first statement, because this whole function runs before every write and
   // was previously invisible to the receipt.
@@ -951,9 +951,10 @@ export async function ensureProblem(
   db: D1Database,
   problemId: string,
   createdAt: string,
+  serverNowMs: number = Date.now(),
 ): Promise<void> {
   requireIdentifier("problemId", problemId);
-  if (Number.isNaN(Date.parse(createdAt))) inputError("createdAt must be an ISO-8601 timestamp.");
+  validateKraterIngressTimestamp(createdAt, serverNowMs);
   await statement(
     db,
     `INSERT INTO problems (id, public_seq, created_at, updated_at)
@@ -962,7 +963,7 @@ export async function ensureProblem(
     createdAt,
     createdAt,
   ).run();
-  await backfillKraterIntegrity(db, problemId, createdAt);
+  await backfillKraterIntegrity(db, problemId, createdAt, serverNowMs);
 }
 
 /**
@@ -980,7 +981,7 @@ export async function writeClaim(
   const serverNowMs = Date.now();
   validateWriteInput(input, serverNowMs);
   const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
-  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt);
+  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt, serverNowMs);
   const companionRequestDigest = companion?.requestDigest;
   const claimIdForSequence = companion?.claimIdForSequence;
   if (companionRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(companionRequestDigest)) {

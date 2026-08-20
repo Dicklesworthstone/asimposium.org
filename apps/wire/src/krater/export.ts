@@ -70,7 +70,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
     event_count: input.events.length,
     final_cursor: input.events[input.events.length - 1]?.seq ?? 0,
   };
-  return [JSON.stringify(header), ...eventLines, JSON.stringify(trailer)].join("\n") + "\n";
+  return `${[JSON.stringify(header), ...eventLines, JSON.stringify(trailer)].join("\n")}\n`;
 }
 
 /**
@@ -78,9 +78,17 @@ export function serializeProblemExport(input: ProblemExportInput): string {
  * mirror reads this first to confirm the format and extract the checkpoints
  * before trusting any event line.
  */
-export function parseExportHeader(line: string):
-  | { readonly ok: true; readonly format: string; readonly license: string; readonly checkpointCount: number }
-  | { readonly ok: false; readonly reason: string } {  let parsed: unknown;
+export function parseExportHeader(
+  line: string,
+):
+  | {
+      readonly ok: true;
+      readonly format: string;
+      readonly license: string;
+      readonly checkpointCount: number;
+    }
+  | { readonly ok: false; readonly reason: string } {
+  let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
@@ -115,7 +123,9 @@ export function parseExportHeader(line: string):
  * Returns the first broken link, or null when the chain is intact end to end.
  * This is async because the digest is a WebCrypto SHA-256.
  */
-export async function verifyProblemExportChain(ndjson: string): Promise<
+export async function verifyProblemExportChain(
+  ndjson: string,
+): Promise<
   | { readonly intact: true; readonly eventCount: number; readonly finalChainDigest: string }
   | { readonly intact: false; readonly brokenAtSeq: number; readonly detail: string }
   | { readonly intact: false; readonly brokenAtSeq: null; readonly detail: string }
@@ -162,7 +172,11 @@ export async function verifyProblemExportChain(ndjson: string): Promise<
       typeof payloadSha256 !== "string" ||
       typeof chainDigest !== "string"
     ) {
-      return { intact: false, brokenAtSeq: expectedSeq, detail: "event line is missing seq or digests" };
+      return {
+        intact: false,
+        brokenAtSeq: expectedSeq,
+        detail: "event line is missing seq or digests",
+      };
     }
     if (seq !== expectedSeq) {
       return {

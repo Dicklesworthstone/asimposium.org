@@ -45,11 +45,7 @@ function bibtexEscape(text: string): string {
  * A BibTeX @misc entry for a claim. The note pins the statement version and
  * the access date; the howpublished carries the stable URL.
  */
-export function bibtexForClaim(
-  claim: CitableClaim,
-  accessDate: string,
-  origin: string,
-): string {
+export function bibtexForClaim(claim: CitableClaim, accessDate: string, origin: string): string {
   const key = citeKeyFor(claim.problemId, claim.claimId);
   const url = claimStableUrl(origin, claim.problemId, claim.claimId);
   const title = bibtexEscape(claim.statement);
@@ -78,7 +74,15 @@ export function cslForClaim(
     URL: url,
     author: [{ literal: `ASImposium Fellow ${claim.authorFellowId}` }],
     note: `ASImposium claim ${claim.claimId} on ${claim.problemId}, statement version ${claim.statementVersion}`,
-    accessed: { "date-parts": [[Number(accessDate.slice(0, 4)), Number(accessDate.slice(5, 7)), Number(accessDate.slice(8, 10))]] },
+    accessed: {
+      "date-parts": [
+        [
+          Number(accessDate.slice(0, 4)),
+          Number(accessDate.slice(5, 7)),
+          Number(accessDate.slice(8, 10)),
+        ],
+      ],
+    },
     issued: { "date-parts": [[Number(accessDate.slice(0, 4))]] },
   };
 }
