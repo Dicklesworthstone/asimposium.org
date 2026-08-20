@@ -235,6 +235,7 @@ export async function verifyServiceEnvelope(
   }
 
   const skew = options.clockSkewSeconds ?? SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS;
+  if (!Number.isSafeInteger(skew) || skew < 0) return refuse("malformed");
   const maxLifetime = options.maxLifetimeSeconds ?? DEFAULT_MAX_LIFETIME_SECONDS;
   if (claims.exp <= claims.iat) return refuse("malformed");
   if (claims.exp - claims.iat > maxLifetime) return refuse("lifetime_too_long");
@@ -273,11 +274,12 @@ export async function verifyServiceEnvelope(
   }
 
   // Expiry is exclusive in every nonce store: `expiresAt <= now` is no longer
-  // a claim. The envelope itself remains acceptable during bounded clock skew,
-  // so retain the nonce through that window plus one second. Otherwise an
-  // attacker can replay a just-expired nonce to a worker whose clock is within
-  // the permitted skew.
-  const nonceExpiresAt = claims.exp + skew + 1;
+  // a claim. With each isolate allowed skew S from reference time, the clocks
+  // of two isolates can differ by 2S. At one real instant, a fast isolate can
+  // run cleanup at exp + 3S while a slow isolate still accepts this envelope at
+  // exp + S. Retain through the fast cleanup boundary, plus one second for the
+  // exclusive expiry comparison, so the slow isolate still observes the nonce.
+  const nonceExpiresAt = claims.exp + 3 * skew + 1;
   if (!Number.isSafeInteger(nonceExpiresAt)) return refuse("malformed");
 
   let claimed: boolean;

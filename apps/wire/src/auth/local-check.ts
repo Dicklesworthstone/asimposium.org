@@ -57,6 +57,52 @@ export function validateLoopbackOrigin(value: string | undefined): URL {
   return url;
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Match the exact Wrangler JSON result used to observe persisted nonce cleanup.
+ *
+ * The shell and this module's tests share this predicate so a permissive
+ * embedded parser cannot turn truncated or diagnostic output into cleanup
+ * evidence. Wrangler's local D1 result always has one result envelope and one
+ * COUNT row. `meta.duration` is optional because JSON omits an undefined local
+ * duration, but no other metadata is accepted.
+ */
+export function localD1ExpiredCountMatches(value: unknown, expected: number): boolean {
+  if (!Number.isSafeInteger(expected) || expected < 0) return false;
+  if (!Array.isArray(value) || value.length !== 1) return false;
+  const record = value[0];
+  if (!isPlainRecord(record)) return false;
+  if (
+    JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(["meta", "results", "success"])
+  ) {
+    return false;
+  }
+  if (record.success !== true || !Array.isArray(record.results) || record.results.length !== 1) {
+    return false;
+  }
+  const row = record.results[0];
+  if (
+    !isPlainRecord(row) ||
+    JSON.stringify(Object.keys(row).sort()) !== JSON.stringify(["expired_count"]) ||
+    !Number.isSafeInteger(row.expired_count) ||
+    row.expired_count !== expected
+  ) {
+    return false;
+  }
+  if (!isPlainRecord(record.meta)) return false;
+  const metaKeys = Object.keys(record.meta).sort();
+  if (metaKeys.length > 1 || (metaKeys.length === 1 && metaKeys[0] !== "duration")) return false;
+  return (
+    metaKeys.length === 0 ||
+    (typeof record.meta.duration === "number" &&
+      Number.isFinite(record.meta.duration) &&
+      record.meta.duration >= 0)
+  );
+}
+
 let validatedOrigin: URL | undefined;
 try {
   validatedOrigin = validateLoopbackOrigin(process.env.S6_ORIGIN);
@@ -206,7 +252,7 @@ const ACTION = "s6.probe";
 const PRINCIPAL_ID = "usr_01JXYZ0000000000000000";
 /** Must match the launcher's `--var S6_PSEUDONYM_SALT`. */
 const PSEUDONYM_SALT = "s6-local-salt";
-/** `full` runs the whole suite; `restart` pauses one checker across a restart. */
+/** `full` runs the whole suite; restart phases pause one checker across restarts. */
 const PHASE = process.env.S6_PHASE ?? "full";
 /** Binds the stopped restart checker to the launcher's argv marker. */
 const RESTART_CHECKER_TOKEN = process.env.S6_RESTART_CHECKER_TOKEN;
@@ -260,6 +306,8 @@ export const EXPECTED_REFUSAL = {
   unauthorized: { status: 401, code: "UNAUTHORIZED" },
   /** The wrong credential class for the host/route pair. */
   wrongPrincipal: { status: 403, code: "WRONG_PRINCIPAL" },
+  /** A valid envelope reached a real D1 binding before its nonce migration exists. */
+  replayStoreUnavailable: { status: 503, code: "AUTH_REPLAY_STORE_UNAVAILABLE" },
 } as const;
 
 /**
@@ -270,15 +318,17 @@ export const EXPECTED_REFUSAL = {
  * satisfied it, so the suite reported "refused as expected" for a harness that
  * had simply failed — the precise shape of a test that cannot fail for the
  * reason it claims to test. A refusal is now an exact status *and* an exact
- * code, and a server error is called out as its own condition so it can never
- * be read as proof.
+ * code. A server error remains a failure unless this case explicitly requires
+ * the replay store's documented 503/code pair; that pair proves a failed-closed
+ * replay defence, while every other 5xx remains infrastructure failure.
  */
 export function classifyRefusal(
   status: number,
   body: Record<string, unknown>,
   expected: { status: number; code: string },
 ): { ok: boolean; detail: string } {
-  if (status >= 500) {
+  const code = typeof body.code === "string" ? body.code : "";
+  if (status >= 500 && (status !== expected.status || code !== expected.code)) {
     return {
       ok: false,
       detail: `server error ${status} is not a refusal (code ${String(body.code ?? "none")})`,
@@ -288,7 +338,6 @@ export function classifyRefusal(
   if (status !== expected.status) {
     return { ok: false, detail: `status ${status}, expected ${expected.status}` };
   }
-  const code = typeof body.code === "string" ? body.code : "";
   if (code !== expected.code) {
     return { ok: false, detail: `code ${code || "none"}, expected ${expected.code}` };
   }
@@ -495,7 +544,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (PHASE === "restart") {
+  if (PHASE === "restart" || PHASE === "pre-migration" || PHASE === "retention") {
     const marker = `s6-restart-checker:${RESTART_CHECKER_TOKEN ?? ""}`;
     if (!/^[A-Za-z0-9]{32}$/.test(RESTART_CHECKER_TOKEN ?? "") || !process.argv.includes(marker)) {
       emit({
@@ -530,6 +579,8 @@ async function main(): Promise<void> {
       method: string;
       action: string;
       now: number;
+      lifetimeSeconds: number;
+      nonce: string;
       principalId: string;
     }> = {},
   ) =>
@@ -537,12 +588,167 @@ async function main(): Promise<void> {
       privateKey,
       kid: KID,
       now: overrides.now ?? NOW,
+      ...(overrides.lifetimeSeconds === undefined
+        ? {}
+        : { lifetimeSeconds: overrides.lifetimeSeconds }),
       method: overrides.method ?? "POST",
       route: overrides.route ?? ROUTE,
       action: overrides.action ?? ACTION,
+      nonce: overrides.nonce,
       principalId: overrides.principalId ?? PRINCIPAL_ID,
       body,
     });
+
+  if (PHASE === "retention-seed") {
+    const seedBody = '{"claim":"C-retention-cleanup-seed","n":40}';
+    const seedEnvelope = await sign(seedBody, {
+      lifetimeSeconds: 1,
+      nonce: "c".repeat(43),
+    });
+    check(
+      "the_cleanup_seed_expires_before_the_fast_clock_boundary",
+      seedEnvelope.claims.iat === NOW && seedEnvelope.claims.exp === NOW + 1,
+      "the cleanup seed did not retain its exact one-second signed lifetime",
+    );
+    await checkAccepted(
+      "the_cleanup_seed_nonce_is_persisted_through_the_real_worker_ingress",
+      await send(seedEnvelope, seedBody),
+      ACTION,
+    );
+    finish();
+    return;
+  }
+
+  if (PHASE === "pre-migration") {
+    const heldBody = '{"claim":"C-pre-migration-held","n":31}';
+    const heldEnvelope = await sign(heldBody);
+    checkRefusal(
+      "a_valid_held_envelope_is_exactly_rejected_before_the_replay_migration",
+      await send(heldEnvelope, heldBody),
+      EXPECTED_REFUSAL.replayStoreUnavailable,
+    );
+    if (failures > 0) {
+      finish();
+      return;
+    }
+
+    emit({
+      assertion: "pre_migration_checker_stopped_with_held_envelope",
+      status: "pass",
+      detail: "one unaccepted envelope remains only in this checker process memory",
+      phase: PHASE,
+    });
+    process.kill(process.pid, "SIGSTOP");
+
+    await checkAccepted(
+      "the_same_held_envelope_is_accepted_after_real_migrations_and_restart",
+      await send(heldEnvelope, heldBody),
+      ACTION,
+    );
+    checkRefusal(
+      "the_same_held_envelope_is_refused_on_its_second_post_migration_presentation",
+      await send(heldEnvelope, heldBody),
+      EXPECTED_REFUSAL.unauthorized,
+    );
+    finish();
+    return;
+  }
+
+  if (PHASE === "retention") {
+    const skewSeconds = 60;
+    const originalBody = '{"claim":"C-retention-original","n":41}';
+    const originalEnvelope = await sign(originalBody, { nonce: "o".repeat(43) });
+    const slowNow = originalEnvelope.claims.exp + skewSeconds;
+    const fastNow = originalEnvelope.claims.exp + 3 * skewSeconds;
+
+    await checkAccepted(
+      "the_original_nonce_is_accepted_by_the_slow_worker_at_exp_plus_skew",
+      await send(originalEnvelope, originalBody),
+      ACTION,
+    );
+    if (failures > 0) {
+      finish();
+      return;
+    }
+
+    emit({
+      assertion: "retention_checker_stopped_with_original_envelope",
+      status: "pass",
+      detail: "one accepted envelope remains only in this checker process memory",
+      phase: PHASE,
+    });
+    process.kill(process.pid, "SIGSTOP");
+
+    const freshBody = '{"claim":"C-retention-fast","n":42}';
+    const freshEnvelope = await sign(freshBody, { now: fastNow });
+    check(
+      "the_fast_cleanup_envelope_is_distinct_from_the_original",
+      freshEnvelope.claims.nonce !== originalEnvelope.claims.nonce &&
+        freshEnvelope.signature !== originalEnvelope.signature,
+      "the fast cleanup request was not a distinct fresh envelope",
+    );
+    await checkAccepted(
+      "the_fresh_fast_envelope_triggers_real_d1_cleanup_at_exp_plus_three_skew",
+      await send(freshEnvelope, freshBody),
+      ACTION,
+    );
+    if (failures > 0) {
+      finish();
+      return;
+    }
+
+    emit({
+      assertion: "retention_checker_stopped_after_fast_cleanup",
+      status: "pass",
+      detail: "the original envelope remains only in this checker process memory",
+      phase: PHASE,
+    });
+    process.kill(process.pid, "SIGSTOP");
+
+    checkRefusal(
+      "the_original_nonce_is_exactly_replayed_by_the_fresh_slow_worker_at_exp_plus_skew",
+      await send(originalEnvelope, originalBody),
+      EXPECTED_REFUSAL.unauthorized,
+    );
+    if (failures > 0) {
+      finish();
+      return;
+    }
+
+    emit({
+      assertion: "retention_checker_stopped_after_slow_replay",
+      status: "pass",
+      detail: "the original envelope remains only in this checker process memory",
+      phase: PHASE,
+    });
+    process.kill(process.pid, "SIGSTOP");
+
+    const reclaimedBody = '{"claim":"C-retention-reclaimed","n":43}';
+    const reclaimedEnvelope = await sign(reclaimedBody, {
+      now: fastNow + 1,
+      nonce: originalEnvelope.claims.nonce,
+    });
+    check(
+      "the_expiry_boundary_envelope_is_fresh_but_reuses_only_the_original_nonce",
+      reclaimedEnvelope.claims.nonce === originalEnvelope.claims.nonce &&
+        reclaimedEnvelope.signature !== originalEnvelope.signature &&
+        reclaimedEnvelope.claims.iat === fastNow + 1 &&
+        slowNow === originalEnvelope.claims.exp + skewSeconds,
+      "the expiry-boundary envelope did not preserve the required nonce/time relation",
+    );
+    await checkAccepted(
+      "the_same_nonce_is_accepted_once_after_the_exclusive_expiry_boundary",
+      await send(reclaimedEnvelope, reclaimedBody),
+      ACTION,
+    );
+    checkRefusal(
+      "the_same_nonce_is_refused_after_its_post_expiry_boundary_acceptance",
+      await send(reclaimedEnvelope, reclaimedBody),
+      EXPECTED_REFUSAL.unauthorized,
+    );
+    finish();
+    return;
+  }
 
   /**
    * Restart-persistent replay.

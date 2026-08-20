@@ -2649,7 +2649,7 @@ assert(
   "panic-leaves-no-active-minted-credential",
 );
 
-console.log('{"suite":"token-lifecycle-local","assertion":"mint_use_scope_refusal_active_cap_expiry_individual_revoke_panic_zero_active_credentials_cross_principal_exact_replay","status":"pass"}');
+console.log('{"suite":"token-lifecycle-local","assertion":"mint_use_scope_refusal_expiry_individual_revoke_panic_zero_active_credentials_cross_principal_exact_replay","status":"pass"}');
 console.log('{"suite":"token-lifecycle-local","assertion":"revoke_vs_effectful_domain_write","status":"pass","route":"POST /v1/sessions","code":"FELLOW_TOKEN_INVALID"}');
 BUN
 

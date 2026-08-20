@@ -687,6 +687,20 @@ for (const current of FAULT_CASES) {
   });
 }
 
+test("PLANTED: combined lifecycle evidence omits the unevidenced active cap", () => {
+  const script = readFileSync(SCRIPT, "utf8");
+  const assertions = [...script.matchAll(/"assertion":"(mint_use_scope_refusal_[^"]+)","status":"pass"/g)].map(
+    (match) => match[1],
+  );
+
+  expect(assertions).toEqual([
+    "mint_use_scope_refusal_expiry_individual_revoke_panic_zero_active_credentials_cross_principal_exact_replay",
+  ]);
+  // PLANTED: field reordering or an additional evidence record must not let an
+  // unsupported active-cap claim evade the exact combined-record selector.
+  expect(script).not.toContain("active_cap");
+});
+
 test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit registered", async () => {
   const result = await runHarness();
   expect(result.exitCode).toBe(0);

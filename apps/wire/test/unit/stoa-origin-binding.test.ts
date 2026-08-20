@@ -351,7 +351,12 @@ describe("the isolate cache is keyed on the Stoa origin", () => {
       new Request(`https://a.asimposium.org/join/${ENROLLMENT_ID}`, {
         headers: { accept: "text/markdown" },
       }),
-      { DB: db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: origin, AGORA_ORIGIN: STAGING_AGORA_ORIGIN } as never,
+        {
+          DB: db,
+          ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+          STOA_ORIGIN: origin,
+          AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+        } as never,
       ctx,
     );
     return { status: response.status, text: await response.text() };

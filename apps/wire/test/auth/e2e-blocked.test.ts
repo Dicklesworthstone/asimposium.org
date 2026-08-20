@@ -22,6 +22,7 @@ import {
   EXPECTED_REFUSAL,
   LOCAL_FETCH_TIMEOUT_MS,
   loadSigningKey,
+  localD1ExpiredCountMatches,
   localFetch,
   validateLoopbackOrigin,
 } from "../../src/auth/local-check";
@@ -1286,7 +1287,7 @@ describe("localFetch never carries a signed envelope to a second origin", () => 
   });
 });
 
-describe("restart persistence retains credentials in one stopped checker", () => {
+describe("restart persistence retains envelope state in one stopped checker", () => {
   const checker = code(CHECKER);
   const script = code(SCRIPT);
 
@@ -1304,6 +1305,18 @@ describe("restart persistence retains credentials in one stopped checker", () =>
     }
     expect(script).toContain("export S6_PUBLIC_KEY_HEX S6_PRIVATE_KEY_JWK S6_KID S6_NOW");
     expect(script).not.toContain("env S6_PRIVATE_KEY_JWK=");
+  });
+
+  test("PLANTED: the signing key is bootstrap environment only, never phase handoff state", () => {
+    const start = script.slice(
+      script.indexOf("start_restart_checker()"),
+      script.indexOf("resume_restart_checker()"),
+    );
+    expect(checker).toContain("loadSigningKey(process.env.S6_PRIVATE_KEY_JWK)");
+    expect(script).toContain("export S6_PUBLIC_KEY_HEX S6_PRIVATE_KEY_JWK S6_KID S6_NOW");
+    expect(start).not.toContain("S6_PRIVATE_KEY_JWK=");
+    expect(start).not.toContain("env S6_PRIVATE_KEY_JWK");
+    expect(script).toContain("never used as phase handoff");
   });
 
   test("PLANTED: one checker stops with the spent envelope then proves both replay and fresh acceptance", () => {
@@ -1348,6 +1361,185 @@ describe("restart persistence retains credentials in one stopped checker", () =>
     expect(script).toContain(
       'record.detail === "one accepted envelope remains only in this checker process memory"',
     );
+  });
+
+  test("PLANTED: pre-migration refusal, migration, restart, and held-envelope replay are ordered", () => {
+    const checkerPhase = checker.slice(
+      checker.indexOf('if (PHASE === "pre-migration")'),
+      checker.indexOf('if (PHASE === "retention")'),
+    );
+    const shellPhase = script.slice(
+      script.indexOf("# ── pre-migration replay-store refusal"),
+      script.indexOf("# ── cross-clock nonce retention"),
+    );
+    const unavailable = checkerPhase.indexOf("EXPECTED_REFUSAL.replayStoreUnavailable");
+    const stopped = checkerPhase.indexOf("pre_migration_checker_stopped_with_held_envelope");
+    const stop = checkerPhase.indexOf('process.kill(process.pid, "SIGSTOP")');
+    const accepted = checkerPhase.indexOf(
+      "the_same_held_envelope_is_accepted_after_real_migrations_and_restart",
+    );
+    const replayed = checkerPhase.indexOf(
+      "the_same_held_envelope_is_refused_on_its_second_post_migration_presentation",
+    );
+    expect(unavailable).toBeGreaterThan(-1);
+    expect(stopped).toBeGreaterThan(unavailable);
+    expect(stop).toBeGreaterThan(stopped);
+    expect(accepted).toBeGreaterThan(stop);
+    expect(replayed).toBeGreaterThan(accepted);
+    expect(checkerPhase).toContain("EXPECTED_REFUSAL.unauthorized");
+    expect(shellPhase).toContain("AUTH_REPLAY_STORE_UNAVAILABLE");
+    const start = shellPhase.indexOf("if ! start_worker; then");
+    const checkerStart = shellPhase.indexOf('start_restart_checker "pre-migration" "unavailable"');
+    const stopBeforeMigration = shellPhase.indexOf("if ! stop_worker; then", checkerStart);
+    const migrate = shellPhase.indexOf("apply_local_d1_migrations");
+    const restart = shellPhase.indexOf("if ! start_worker; then", migrate);
+    const resume = shellPhase.indexOf("resume_restart_checker", restart);
+    expect(start).toBeGreaterThan(-1);
+    expect(checkerStart).toBeGreaterThan(start);
+    expect(stopBeforeMigration).toBeGreaterThan(checkerStart);
+    expect(migrate).toBeGreaterThan(stopBeforeMigration);
+    expect(restart).toBeGreaterThan(migrate);
+    expect(resume).toBeGreaterThan(restart);
+  });
+
+  test("PLANTED: cross-clock retention uses fresh workers and exact causal order", () => {
+    const checkerPhase = checker.slice(
+      checker.indexOf('if (PHASE === "retention")'),
+      checker.indexOf('if (PHASE === "restart")'),
+    );
+    const shellPhase = script.slice(
+      script.indexOf("# ── cross-clock nonce retention"),
+      script.indexOf("# Restore the ordinary checker clock"),
+    );
+    const original = checkerPhase.indexOf(
+      "the_original_nonce_is_accepted_by_the_slow_worker_at_exp_plus_skew",
+    );
+    const fast = checkerPhase.indexOf(
+      "the_fresh_fast_envelope_triggers_real_d1_cleanup_at_exp_plus_three_skew",
+    );
+    const slowReplay = checkerPhase.indexOf(
+      "the_original_nonce_is_exactly_replayed_by_the_fresh_slow_worker_at_exp_plus_skew",
+    );
+    const boundary = checkerPhase.indexOf(
+      "the_same_nonce_is_accepted_once_after_the_exclusive_expiry_boundary",
+    );
+    const boundaryReplay = checkerPhase.indexOf(
+      "the_same_nonce_is_refused_after_its_post_expiry_boundary_acceptance",
+    );
+    expect(original).toBeGreaterThan(-1);
+    expect(fast).toBeGreaterThan(original);
+    expect(slowReplay).toBeGreaterThan(fast);
+    expect(boundary).toBeGreaterThan(slowReplay);
+    expect(boundaryReplay).toBeGreaterThan(boundary);
+    expect(checkerPhase).toContain("EXPECTED_REFUSAL.unauthorized");
+    expect(checkerPhase).toContain("fastNow + 1");
+    expect(checkerPhase).toContain("originalEnvelope.claims.nonce");
+    expect(shellPhase).toContain('WORKER_NOW="${RETENTION_FAST_NOW}"');
+    expect(shellPhase).toContain(
+      "WORKER_NOW=$((S6_NOW + ENVELOPE_LIFETIME_SECONDS + 3 * CLOCK_SKEW_SECONDS + 1))",
+    );
+    const originalStart = shellPhase.indexOf('start_restart_checker "retention" "original"');
+    const fastStart = shellPhase.indexOf("if ! start_worker; then", originalStart);
+    const fastResume = shellPhase.indexOf('resume_restart_checker_until_stopped "fast-cleanup"');
+    const slowStart = shellPhase.indexOf("if ! start_worker; then", fastResume);
+    const slowResume = shellPhase.indexOf('resume_restart_checker_until_stopped "slow-replay"');
+    const boundaryStart = shellPhase.indexOf("if ! start_worker; then", slowResume);
+    const boundaryResume = shellPhase.indexOf("resume_restart_checker\n", boundaryStart);
+    expect(originalStart).toBeGreaterThan(-1);
+    expect(fastStart).toBeGreaterThan(originalStart);
+    expect(fastResume).toBeGreaterThan(fastStart);
+    expect(slowStart).toBeGreaterThan(fastResume);
+    expect(slowResume).toBeGreaterThan(slowStart);
+    expect(boundaryStart).toBeGreaterThan(slowResume);
+    expect(boundaryResume).toBeGreaterThan(boundaryStart);
+  });
+
+  test("PLANTED: real D1 cleanup removes a separately seeded expired row before nonce reuse", () => {
+    const seedPhase = checker.slice(
+      checker.indexOf('if (PHASE === "retention-seed")'),
+      checker.indexOf('if (PHASE === "pre-migration")'),
+    );
+    expect(seedPhase).toContain("lifetimeSeconds: 1");
+    expect(seedPhase).toContain('nonce: "c".repeat(43)');
+    expect(seedPhase).toContain("seedEnvelope.claims.exp === NOW + 1");
+    expect(seedPhase).toContain(
+      "the_cleanup_seed_nonce_is_persisted_through_the_real_worker_ingress",
+    );
+
+    const query = script.slice(
+      script.indexOf("assert_expired_nonce_row_count()"),
+      script.indexOf("# ── cleanup survivors"),
+    );
+    expect(query).toContain(
+      "SELECT COUNT(*) AS expired_count FROM auth_envelope_nonces WHERE expires_at <= ${observed_at};",
+    );
+    expect(query).toContain('--persist-to "${STATE_DIR}" --json');
+    expect(query).toContain("constants.O_RDONLY | constants.O_NOFOLLOW");
+    expect(query).toContain('new TextDecoder("utf-8", { fatal: true })');
+    expect(query).toContain("localD1ExpiredCountMatches(JSON.parse(text), expected)");
+
+    const shellPhase = script.slice(
+      script.indexOf("# Seed one short-lived nonce"),
+      script.indexOf("# Restore the ordinary checker clock"),
+    );
+    const seed = shellPhase.indexOf('run_checker "retention-seed"');
+    const present = shellPhase.indexOf(
+      'assert_expired_nonce_row_count "${RETENTION_FAST_NOW}" 1 "before-fast-cleanup"',
+    );
+    const original = shellPhase.indexOf('start_restart_checker "retention" "original"');
+    const cleanup = shellPhase.indexOf('resume_restart_checker_until_stopped "fast-cleanup"');
+    const absent = shellPhase.indexOf(
+      'assert_expired_nonce_row_count "${RETENTION_FAST_NOW}" 0 "after-fast-cleanup"',
+    );
+    const reuse = shellPhase.indexOf('resume_restart_checker_until_stopped "slow-replay"');
+    expect(seed).toBeGreaterThan(-1);
+    expect(present).toBeGreaterThan(seed);
+    expect(original).toBeGreaterThan(present);
+    expect(cleanup).toBeGreaterThan(original);
+    expect(absent).toBeGreaterThan(cleanup);
+    expect(reuse).toBeGreaterThan(absent);
+
+    const retentionPhase = checker.slice(
+      checker.indexOf('if (PHASE === "retention")'),
+      checker.indexOf('if (PHASE === "restart")'),
+    );
+    expect(retentionPhase).toContain('nonce: "o".repeat(43)');
+    expect(retentionPhase).toContain(
+      "freshEnvelope.claims.nonce !== originalEnvelope.claims.nonce",
+    );
+  });
+
+  test("PLANTED: persisted cleanup count accepts only Wrangler's exact result shape", () => {
+    const valid = [
+      {
+        results: [{ expired_count: 1 }],
+        success: true,
+        meta: { duration: 0.25 },
+      },
+    ];
+    expect(localD1ExpiredCountMatches(valid, 1)).toBe(true);
+    expect(
+      localD1ExpiredCountMatches([{ results: [{ expired_count: 1 }], success: true, meta: {} }], 1),
+    ).toBe(true);
+
+    const malformed: unknown[] = [
+      [],
+      [valid[0], valid[0]],
+      [{ ...valid[0], extra: true }],
+      [{ ...valid[0], success: false }],
+      [{ ...valid[0], results: [] }],
+      [{ ...valid[0], results: [{ expired_count: 1 }, { expired_count: 1 }] }],
+      [{ ...valid[0], results: [{ expired_count: 1, extra: true }] }],
+      [{ ...valid[0], results: [{ expired_count: 1.5 }] }],
+      [{ ...valid[0], results: [{ expired_count: "1" }] }],
+      [{ ...valid[0], meta: { duration: -1 } }],
+      [{ ...valid[0], meta: { duration: Number.NaN } }],
+      [{ ...valid[0], meta: { duration: 0.25, extra: true } }],
+    ];
+    for (const value of malformed) expect(localD1ExpiredCountMatches(value, 1)).toBe(false);
+    expect(localD1ExpiredCountMatches(valid, 0)).toBe(false);
+    expect(localD1ExpiredCountMatches(valid, -1)).toBe(false);
+    expect(localD1ExpiredCountMatches(valid, 1.5)).toBe(false);
   });
 
   test("PLANTED: stopped-checker coordination observes a stopped process state", () => {

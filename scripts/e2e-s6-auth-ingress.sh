@@ -264,6 +264,8 @@ PROVISIONAL_SUPERVISOR_OWNED=0
 RESTART_CHECKER_PID=""
 RESTART_CHECKER_STARTED_AT=""
 RESTART_CHECKER_TOKEN=""
+RESTART_CHECKER_PHASE=""
+RESTART_CHECKER_STAGE=""
 CHECKER_PID=""
 CHECKER_STARTED_AT=""
 CHECKER_TOKEN=""
@@ -1019,6 +1021,8 @@ clear_restart_checker_identity() {
   RESTART_CHECKER_PID=""
   RESTART_CHECKER_STARTED_AT=""
   RESTART_CHECKER_TOKEN=""
+  RESTART_CHECKER_PHASE=""
+  RESTART_CHECKER_STAGE=""
 }
 
 clear_checker_identity() {
@@ -1343,22 +1347,16 @@ S6_RUN_ID="$(bun --eval 'console.log(crypto.randomUUID().replace(/-/g, ""));')"
 readonly S6_RUN_ID
 S6_NOW="$(bun --eval 'console.log(Math.floor(Date.now() / 1000));')"
 readonly S6_NOW
+readonly ENVELOPE_LIFETIME_SECONDS=60
+readonly CLOCK_SKEW_SECONDS=60
+readonly RETENTION_FAST_NOW=$((S6_NOW + ENVELOPE_LIFETIME_SECONDS + 3 * CLOCK_SKEW_SECONDS))
+# This is non-secret worker clock injection; the signer remains fixed at S6_NOW.
+# Each restart gets a fresh local workerd against the same --persist-to directory.
+WORKER_NOW="${S6_NOW}"
 # Inherit the private key directly into checker processes. Do not pass it as an
 # `env KEY=value` argument, which is observable in the short-lived launcher's
 # argv before `env` execs Bun.
 export S6_PUBLIC_KEY_HEX S6_PRIVATE_KEY_JWK S6_KID S6_NOW
-
-# ── real local D1 through the real numbered migrations ──────────────────────
-if ! assert_work_budget; then
-  exit 1
-fi
-if ! "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
-  --persist-to "${STATE_DIR}" >"${STATE_DIR}/migration.log" 2>&1; then
-  show_redacted "d1 migrations" "${STATE_DIR}/migration.log"
-  fail_record "local_d1_migrations_applied" "wrangler could not apply db/migrations to local D1"
-  exit 1
-fi
-emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"local_d1_migrations_applied\",\"status\":\"pass\",\"detail\":\"0003_auth_nonce_replay.sql applied through the real migration path\",\"reproduce\":\"${REPRODUCE}\"}"
 
 start_worker() {
   local launch_status=0
@@ -1373,7 +1371,7 @@ start_worker() {
     --show-interactive-dev-session=false \
     --var "S6_PUBLIC_KEY_HEX:${S6_PUBLIC_KEY_HEX}" \
     --var "S6_KID:${S6_KID}" \
-    --var "S6_NOW:${S6_NOW}" \
+    --var "S6_NOW:${WORKER_NOW}" \
     --var "S6_PSEUDONYM_SALT:s6-local-salt" \
     --var "S6_RUN_ID:${S6_RUN_ID}" || launch_status=$?
 
@@ -1418,6 +1416,83 @@ start_worker() {
     sleep 0.25
   done
   return 1
+}
+
+apply_local_d1_migrations() {
+  assert_work_budget || return 1
+  if ! "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
+    --persist-to "${STATE_DIR}" >"${STATE_DIR}/migration.log" 2>&1; then
+    show_redacted "d1 migrations" "${STATE_DIR}/migration.log"
+    fail_record "local_d1_migrations_applied" "wrangler could not apply db/migrations to local D1"
+    return 1
+  fi
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"local_d1_migrations_applied\",\"status\":\"pass\",\"detail\":\"0003_auth_nonce_replay.sql applied through the real migration path\",\"reproduce\":\"${REPRODUCE}\"}"
+}
+
+# Observe the persisted D1 cleanup result without presenting the observed nonce
+# again. Reusing the same nonce would let the claim UPSERT reclaim its own
+# expired row and make `D1NonceStore.cleanupExpired()` non-causal.
+assert_expired_nonce_row_count() {
+  local observed_at="$1" expected="$2" label="$3"
+  local output="${STATE_DIR}/nonce-cleanup-${label}.json"
+  local diagnostic="${STATE_DIR}/nonce-cleanup-${label}.log"
+  if ! [[ "${observed_at}" =~ ^[0-9]+$ && "${expected}" =~ ^[0-9]+$ ]] \
+    || [[ "${label}" != "before-fast-cleanup" && "${label}" != "after-fast-cleanup" ]]; then
+    fail_record "real_d1_nonce_cleanup" "the cleanup observation inputs were not canonical"
+    return 1
+  fi
+  assert_work_budget || return 1
+  if ! "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local \
+    --persist-to "${STATE_DIR}" --json \
+    --command "SELECT COUNT(*) AS expired_count FROM auth_envelope_nonces WHERE expires_at <= ${observed_at};" \
+    >"${output}" 2>"${diagnostic}"; then
+    show_redacted "d1 cleanup observation" "${diagnostic}"
+    fail_record "real_d1_nonce_cleanup" "the persisted D1 cleanup observation failed"
+    return 1
+  fi
+  if ! bun --eval '
+    import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+    const { localD1ExpiredCountMatches } = await import("./apps/wire/src/auth/local-check.ts");
+    const [file, expectedText] = process.argv.slice(1);
+    const expected = Number(expectedText);
+    let descriptor;
+    let matches = false;
+    try {
+      descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const before = fstatSync(descriptor, { bigint: true });
+      if (!before.isFile() || before.size <= 0n || before.size > 65536n) throw new Error("invalid size");
+      const bytes = Buffer.alloc(Number(before.size));
+      let offset = 0;
+      while (offset < bytes.length) {
+        const read = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+        if (read <= 0) throw new Error("truncated read");
+        offset += read;
+      }
+      const after = fstatSync(descriptor, { bigint: true });
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size) {
+        throw new Error("unstable result file");
+      }
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      matches = localD1ExpiredCountMatches(JSON.parse(text), expected);
+    } catch {
+      matches = false;
+    } finally {
+      if (descriptor !== undefined) {
+        try {
+          closeSync(descriptor);
+        } catch {
+          matches = false;
+        }
+      }
+    }
+    process.exit(matches ? 0 : 1);
+  ' "${output}" "${expected}"; then
+    show_redacted "d1 cleanup observation" "${diagnostic}"
+    fail_record "real_d1_nonce_cleanup" \
+      "the persisted D1 expired-row count was not exactly ${expected} at ${label}"
+    return 1
+  fi
+  return 0
 }
 
 # ── cleanup survivors, asserted on every path ────────────────────────────────
@@ -1557,14 +1632,7 @@ trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 trap 'handle_signal 129' HUP
 
-if ! start_worker; then
-  show_redacted "wrangler" "${SERVER_LOG}"
-  show_redacted "curl" "${CURL_LOG}"
-  fail_record "local_worker_ready" "the local Worker never answered on its owned port"
-  exit 1
-fi
-
-# ── the checks ───────────────────────────────────────────────────────────────
+# ── ordinary checker lifecycle ───────────────────────────────────────────────
 run_checker() {
   local deadline status exact
   assert_work_budget || return 1
@@ -1618,8 +1686,33 @@ run_checker() {
 readonly RESTART_CHECKER_PHASE_LOG="${STATE_DIR}/restart-checker.ndjson"
 
 restart_checker_phase_is_safe_and_recorded() {
+  local expected_assertion expected_detail
+  case "${RESTART_CHECKER_PHASE}:${RESTART_CHECKER_STAGE}" in
+    restart:accepted)
+      expected_assertion="restart_checker_stopped_with_spent_envelope"
+      expected_detail="one accepted envelope remains only in this checker process memory"
+      ;;
+    pre-migration:unavailable)
+      expected_assertion="pre_migration_checker_stopped_with_held_envelope"
+      expected_detail="one unaccepted envelope remains only in this checker process memory"
+      ;;
+    retention:original)
+      expected_assertion="retention_checker_stopped_with_original_envelope"
+      expected_detail="one accepted envelope remains only in this checker process memory"
+      ;;
+    retention:fast-cleanup)
+      expected_assertion="retention_checker_stopped_after_fast_cleanup"
+      expected_detail="the original envelope remains only in this checker process memory"
+      ;;
+    retention:slow-replay)
+      expected_assertion="retention_checker_stopped_after_slow_replay"
+      expected_detail="the original envelope remains only in this checker process memory"
+      ;;
+    *) return 1 ;;
+  esac
   bun --eval '
-    const lines = (await Bun.file(process.argv[1]).text()).split("\n").filter(Boolean);
+    const [file, assertion, phase, detail] = process.argv.slice(1);
+    const lines = (await Bun.file(file).text()).split("\n").filter(Boolean);
     const expectedKeys = ["assertion", "detail", "phase", "reproduce", "status", "suite"];
     const matched = lines.some((line) => {
       try {
@@ -1627,28 +1720,31 @@ restart_checker_phase_is_safe_and_recorded() {
         return JSON.stringify(Object.keys(record).sort()) === JSON.stringify(expectedKeys)
           && record.suite === "s6-auth-ingress-local"
           && record.reproduce === "bash scripts/e2e-s6-auth-ingress.sh"
-          && record.assertion === "restart_checker_stopped_with_spent_envelope"
+          && record.assertion === assertion
           && record.status === "pass"
-          && record.phase === "restart"
-          && record.detail === "one accepted envelope remains only in this checker process memory";
+          && record.phase === phase
+          && record.detail === detail;
       } catch {
         return false;
       }
     });
     process.exit(matched ? 0 : 1);
-  ' "${RESTART_CHECKER_PHASE_LOG}" >/dev/null 2>&1
+  ' "${RESTART_CHECKER_PHASE_LOG}" "${expected_assertion}" "${RESTART_CHECKER_PHASE}" \
+    "${expected_detail}" >/dev/null 2>&1
 }
 
 start_restart_checker() {
-  local deadline state status
+  local phase="${1:-restart}" stage="${2:-accepted}" deadline state status
   assert_work_budget || return 1
   [[ -z "${RESTART_CHECKER_PID}" ]] || return 1
   RESTART_CHECKER_PID=""
   RESTART_CHECKER_STARTED_AT=""
+  RESTART_CHECKER_PHASE="${phase}"
+  RESTART_CHECKER_STAGE="${stage}"
   RESTART_CHECKER_TOKEN="$(mint_supervisor_token)" || RESTART_CHECKER_TOKEN=""
   if ! [[ "${RESTART_CHECKER_TOKEN}" =~ ^[A-Za-z0-9]{32}$ ]]; then return 1; fi
   LIFECYCLE_CRITICAL=1
-  S6_ORIGIN="${ORIGIN}" S6_PHASE="restart" \
+  S6_ORIGIN="${ORIGIN}" S6_PHASE="${RESTART_CHECKER_PHASE}" \
     S6_RESTART_CHECKER_TOKEN="${RESTART_CHECKER_TOKEN}" \
     bun "${CHECKER}" "s6-restart-checker:${RESTART_CHECKER_TOKEN}" \
       >"${RESTART_CHECKER_PHASE_LOG}" 2>"${CHECK_LOG}" &
@@ -1696,6 +1792,62 @@ start_restart_checker() {
       "the checker did not stop by its deadline and exact-only cleanup failed"
   fi
   return 1
+}
+
+resume_restart_checker_until_stopped() {
+  local next_stage="$1" deadline state status exact=0
+  [[ -n "${RESTART_CHECKER_PID}" ]] || return 1
+  assert_work_budget || return 124
+  [[ -n "${next_stage}" ]] || return 1
+  RESTART_CHECKER_STAGE="${next_stage}"
+  deadline="$(deadline_after_work "${CHECK_DEADLINE_SECONDS}")"
+  while (( SECONDS < deadline )); do
+    if restart_checker_identity_is_exact \
+      "${RESTART_CHECKER_PID}" "${RESTART_CHECKER_STARTED_AT}" "${RESTART_CHECKER_TOKEN}"; then
+      exact=1
+      break
+    fi
+    if direct_child_is_gone "${RESTART_CHECKER_PID}"; then
+      if wait "${RESTART_CHECKER_PID}"; then status=0; else status=$?; fi
+      clear_restart_checker_identity
+      return "${status}"
+    fi
+    sleep 0.1
+  done
+  (( exact == 1 )) || return 124
+  if ! restart_checker_identity_is_exact \
+    "${RESTART_CHECKER_PID}" "${RESTART_CHECKER_STARTED_AT}" "${RESTART_CHECKER_TOKEN}" \
+    || ! kill -CONT "${RESTART_CHECKER_PID}" 2>/dev/null; then
+    return 1
+  fi
+  while (( SECONDS < deadline )); do
+    if ! restart_checker_identity_is_exact \
+      "${RESTART_CHECKER_PID}" "${RESTART_CHECKER_STARTED_AT}" "${RESTART_CHECKER_TOKEN}"; then
+      if direct_child_is_gone "${RESTART_CHECKER_PID}"; then
+        if ! wait "${RESTART_CHECKER_PID}" 2>/dev/null; then :; fi
+        clear_restart_checker_identity
+        return 1
+      fi
+      sleep 0.1
+      continue
+    fi
+    state="$(ps -o stat= -p "${RESTART_CHECKER_PID}" 2>/dev/null)"; status=$?
+    (( status == 0 )) || return 1
+    if [[ "${state}" == *T* ]]; then
+      if restart_checker_phase_is_safe_and_recorded; then
+        maybe_signal_window "restart-checker"
+        return 0
+      fi
+      if ! stop_restart_checker; then
+        fail_record "restart_checker_coordination" \
+          "the resumed checker phase record was unsafe and exact-only cleanup failed"
+      fi
+      return 1
+    fi
+    sleep 0.1
+  done
+  if ! stop_restart_checker; then return 125; fi
+  return 124
 }
 
 resume_restart_checker() {
@@ -1758,6 +1910,155 @@ resume_restart_checker() {
   return 124
 }
 
+# ── pre-migration replay-store refusal and held-envelope recovery ────────────
+#
+# The Worker starts against a brand-new --persist-to root with no D1 migrations.
+# The checker retains its valid envelope only in its stopped process. After a
+# clean Worker stop, the real numbered migrations apply to that same root and
+# a fresh Worker resumes the exact checker to prove the prior 503 did not claim
+# the nonce.
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  show_redacted "curl" "${CURL_LOG}"
+  fail_record "pre_migration_worker_ready" "the un-migrated local Worker never answered on its owned port"
+  exit 1
+fi
+if ! start_restart_checker "pre-migration" "unavailable"; then
+  show_redacted "checker stderr" "${CHECK_LOG}"
+  fail_record "pre_migration_replay_store" \
+    "the held-envelope checker did not stop after the exact replay-store-unavailable refusal"
+  exit 1
+fi
+emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"pre_migration_replay_store\",\"status\":\"pass\",\"detail\":\"a valid held envelope received exact 503 AUTH_REPLAY_STORE_UNAVAILABLE before migrations\",\"reproduce\":\"${REPRODUCE}\"}"
+if ! stop_worker; then
+  fail_record "pre_migration_replay_store" "the un-migrated worker could not be cleanly stopped before migrations"
+  exit 1
+fi
+if ! apply_local_d1_migrations; then
+  exit 1
+fi
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  show_redacted "curl" "${CURL_LOG}"
+  fail_record "pre_migration_replay_store" "the migrated local Worker did not restart against the same persisted D1"
+  exit 1
+fi
+resume_restart_checker
+PRE_MIGRATION_EXIT=$?
+show_redacted "checker stderr" "${CHECK_LOG}"
+if [[ ${PRE_MIGRATION_EXIT} -ne 0 ]]; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  fail_record "pre_migration_replay_store" \
+    "the held envelope was not accepted once then replay-refused after migrations (checker exit ${PRE_MIGRATION_EXIT})"
+  exit 1
+fi
+emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"pre_migration_held_envelope_recovery\",\"status\":\"pass\",\"detail\":\"the same in-memory envelope accepted once then replay-refused after real migrations and restart\",\"reproduce\":\"${REPRODUCE}\"}"
+
+# Seed one short-lived nonce through the real signed ingress while the Worker is
+# still at S6_NOW. Its retained expiry is strictly before RETENTION_FAST_NOW, so
+# the later distinct-nonce request has an actually expired row to sweep.
+if ! run_checker "retention-seed"; then
+  show_redacted "checker stderr" "${CHECK_LOG}"
+  fail_record "real_d1_nonce_cleanup" "the short-lived cleanup seed was not persisted"
+  exit 1
+fi
+emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"retention_cleanup_seed\",\"status\":\"pass\",\"detail\":\"a one-second envelope seeded one independently expiring nonce through real Workerd/D1 ingress\",\"reproduce\":\"${REPRODUCE}\"}"
+
+# ── cross-clock nonce retention over fresh local Workerd processes ───────────
+#
+# Each Worker below is a fresh Workerd process sharing the same --persist-to D1
+# root. `WORKER_NOW` is non-secret clock injection only. O, its nonce, and the
+# signed headers remain inside the one stopped checker; neither values nor
+# headers are serialized, passed in argv, or logged. The signing key is inherited
+# as checker bootstrap environment configuration, never used as phase handoff
+# state, written to the persist directory, or emitted in diagnostics.
+if ! stop_worker; then
+  fail_record "cross_clock_nonce_retention" "the migrated worker could not be cleanly stopped before slow-clock proof"
+  exit 1
+fi
+if ! assert_expired_nonce_row_count "${RETENTION_FAST_NOW}" 1 "before-fast-cleanup"; then
+  exit 1
+fi
+WORKER_NOW=$((S6_NOW + ENVELOPE_LIFETIME_SECONDS + CLOCK_SKEW_SECONDS))
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  fail_record "cross_clock_nonce_retention" "the slow-clock Worker did not start"
+  exit 1
+fi
+if ! start_restart_checker "retention" "original"; then
+  show_redacted "checker stderr" "${CHECK_LOG}"
+  fail_record "cross_clock_nonce_retention" "the original-envelope checker did not stop at slow exp plus skew"
+  exit 1
+fi
+if ! stop_worker; then
+  fail_record "cross_clock_nonce_retention" "the slow-clock Worker could not be cleanly stopped before fast cleanup"
+  exit 1
+fi
+WORKER_NOW="${RETENTION_FAST_NOW}"
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  fail_record "cross_clock_nonce_retention" "the fast-clock Worker did not start"
+  exit 1
+fi
+if ! resume_restart_checker_until_stopped "fast-cleanup"; then
+  show_redacted "checker stderr" "${CHECK_LOG}"
+  fail_record "cross_clock_nonce_retention" "the fast-clock distinct-envelope cleanup phase did not stop safely"
+  exit 1
+fi
+if ! stop_worker; then
+  fail_record "cross_clock_nonce_retention" "the fast-clock Worker could not be cleanly stopped before slow replay"
+  exit 1
+fi
+if ! assert_expired_nonce_row_count "${RETENTION_FAST_NOW}" 0 "after-fast-cleanup"; then
+  exit 1
+fi
+WORKER_NOW=$((S6_NOW + ENVELOPE_LIFETIME_SECONDS + CLOCK_SKEW_SECONDS))
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  fail_record "cross_clock_nonce_retention" "the fresh slow-clock Worker did not start"
+  exit 1
+fi
+if ! resume_restart_checker_until_stopped "slow-replay"; then
+  show_redacted "checker stderr" "${CHECK_LOG}"
+  fail_record "cross_clock_nonce_retention" "the fresh slow-clock replay phase did not stop safely"
+  exit 1
+fi
+if ! stop_worker; then
+  fail_record "cross_clock_nonce_retention" "the slow-clock Worker could not be cleanly stopped before expiry-boundary reclaim"
+  exit 1
+fi
+WORKER_NOW=$((S6_NOW + ENVELOPE_LIFETIME_SECONDS + 3 * CLOCK_SKEW_SECONDS + 1))
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  fail_record "cross_clock_nonce_retention" "the expiry-boundary Worker did not start"
+  exit 1
+fi
+resume_restart_checker
+RETENTION_EXIT=$?
+show_redacted "checker stderr" "${CHECK_LOG}"
+if [[ ${RETENTION_EXIT} -ne 0 ]]; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  fail_record "cross_clock_nonce_retention" \
+    "the retained nonce did not reject slow replay then accept once/replay-refuse after exclusive expiry (checker exit ${RETENTION_EXIT})"
+  exit 1
+fi
+emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"cross_clock_nonce_retention\",\"status\":\"pass\",\"detail\":\"a known-expired row was present before and absent after distinct-nonce fast cleanup; slow replay refusal and exclusive-boundary reclaim passed against persisted D1\",\"reproduce\":\"${REPRODUCE}\"}"
+
+# Restore the ordinary checker clock before the existing same-clock suite and
+# restart-persistence proof. Its envelopes remain independently signed.
+if ! stop_worker; then
+  fail_record "local_worker_ready" "the expiry-boundary Worker could not be cleanly stopped before ordinary checks"
+  exit 1
+fi
+WORKER_NOW="${S6_NOW}"
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  show_redacted "curl" "${CURL_LOG}"
+  fail_record "local_worker_ready" "the local Worker never answered on its owned port"
+  exit 1
+fi
+
+# ── the checks ───────────────────────────────────────────────────────────────
 run_checker
 CHECK_EXIT=$?
 show_redacted "checker stderr" "${CHECK_LOG}"

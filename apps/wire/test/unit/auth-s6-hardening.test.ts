@@ -12,7 +12,11 @@ import {
   type ServiceEnvelopeClaims,
   toHex,
 } from "../../src/auth/canonical";
-import { parseEnvelope, verifyServiceEnvelope } from "../../src/auth/envelope";
+import {
+  parseEnvelope,
+  SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS,
+  verifyServiceEnvelope,
+} from "../../src/auth/envelope";
 import { VerificationKeyring } from "../../src/auth/keyring";
 import {
   D1NonceStore,
@@ -308,11 +312,9 @@ describe("shared NonceStore input contract", () => {
       test("accepts the exact one-second margin and still refuses its replay", async () => {
         const { store, close } = makeStore();
         try {
-          // `verifyServiceEnvelope` retains through `exp + skew + 1`, so the
-          // narrowest window a real claim ever presents is exactly one second.
-          // This is the boundary the invalid table sits directly beneath, and
-          // accepting it is what keeps the table a contract rather than a
-          // blanket refusal.
+          // The stores accept the exact one-second margin. The verifier uses
+          // the wider `exp + 3 * skew + 1` retention bound; this direct store
+          // contract keeps the invalid table from becoming a blanket refusal.
           expect(await store.claim(CONTRACT_NONCE, NOW + 1, NOW)).toBe(true);
           expect(await store.claim(CONTRACT_NONCE, NOW + 1, NOW)).toBe(false);
         } finally {
@@ -338,17 +340,21 @@ describe("signed authorization and replay ordering", () => {
           .get()?.count,
       ).toBe(0);
 
-      const withinSkew = NOW + 60 + 60;
+      const withinSkew = NOW + 60 + SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS;
       expect((await h.verify(signed, store, withinSkew)).ok).toBe(true);
       expect(await h.verify(signed, store, withinSkew)).toMatchObject({
         ok: false,
         reason: "replayed",
       });
+      // PLANTED: the persisted D1 expiry must retain through the E + 3S
+      // cleanup boundary. Reverting the verifier to E + S + 1 makes this
+      // exact database assertion fail without duplicating the in-memory
+      // fast/slow-isolate scenario.
       expect(
         sqlite
           .query<{ expires_at: number }, []>("SELECT expires_at FROM auth_envelope_nonces")
           .get()?.expires_at,
-      ).toBe(NOW + 60 + 60 + 1);
+      ).toBe(NOW + 60 + 3 * SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS + 1);
     } finally {
       sqlite.close();
     }

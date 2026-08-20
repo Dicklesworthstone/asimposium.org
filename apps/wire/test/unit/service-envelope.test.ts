@@ -434,6 +434,18 @@ describe("verification — clock", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("a configurable skew must be a non-negative safe integer", async () => {
+    const h = await harness();
+    const envelope = await signedEnvelope(h);
+
+    for (const clockSkewSeconds of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(await h.verify(envelope, { clockSkewSeconds })).toMatchObject({
+        ok: false,
+        reason: "malformed",
+      });
+    }
+  });
+
   test("an envelope issued in the future is refused", async () => {
     const h = await harness();
     const envelope = await signedEnvelope(h, { iat: NOW + 3600, exp: NOW + 3660 });
@@ -464,6 +476,28 @@ describe("verification — replay", () => {
 
     expect((await h.verify(envelope)).ok).toBe(true);
     expect(await h.verify(envelope)).toMatchObject({ ok: false, reason: "replayed" });
+  });
+
+  test("PLANTED: a fast-isolate cleanup cannot forget a nonce still replayable to a slow isolate", async () => {
+    const h = await harness();
+    const skew = 60;
+    const a = await signedEnvelope(h, { nonce: "a".repeat(43) });
+    const fastNow = a.claims.exp + 3 * skew;
+    const b = await signedEnvelope(h, {
+      iat: fastNow - 60,
+      exp: fastNow + 60,
+      nonce: "b".repeat(43),
+    });
+
+    // A is accepted normally. B is a distinct valid envelope whose claim runs
+    // the real MemoryNonceStore cleanup at the fast clock boundary. At the same
+    // real instant a slow isolate reads exp + S, where A remains valid.
+    expect((await h.verify(a, { clockSkewSeconds: skew })).ok).toBe(true);
+    expect((await h.verify(b, { now: fastNow, clockSkewSeconds: skew })).ok).toBe(true);
+    expect(await h.verify(a, { now: a.claims.exp + skew, clockSkewSeconds: skew })).toMatchObject({
+      ok: false,
+      reason: "replayed",
+    });
   });
 
   test("a nonce is not consumed by an envelope that fails verification", async () => {
