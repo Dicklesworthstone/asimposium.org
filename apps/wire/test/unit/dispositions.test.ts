@@ -10,6 +10,7 @@ import {
   computeStalenessFacet,
   displayClaimDisposition,
   displayHypothesisDisposition,
+  distinctSupportingReviews,
   EMPTY_CLAIM_CONTEXT,
   evaluateClaimTransition,
   evaluateHypothesisTransition,
@@ -47,6 +48,45 @@ function context(overrides: Partial<ClaimTransitionContext> = {}): ClaimTransiti
 const T2_REVIEW = review({ tier: "T2" });
 const T1_REVIEW = review({ tier: "T1", cross_family: false });
 const T0_REVIEW = review({ tier: "T0", cross_family: false });
+
+test("identical replay rows count as one supporting review at the evaluator seam", () => {
+  const replayed: VerifiedReview = {
+    review_id: "R-IDENTICAL-REPLAY",
+    reviewer_id: "F-REPLAY",
+    tier: "T2",
+    cross_family: true,
+    full_write_up: true,
+    finding: "support",
+  };
+  expect(distinctSupportingReviews([replayed, { ...replayed }])).toEqual([replayed]);
+});
+
+test("one review id attributed to two reviewers provides no supporting evidence", () => {
+  const first: VerifiedReview = {
+    review_id: "R-CONFLICTING-REVIEWER",
+    reviewer_id: "F-FIRST-REVIEWER",
+    tier: "T2",
+    cross_family: true,
+    full_write_up: true,
+    finding: "support",
+  };
+  const conflictingReviewer: VerifiedReview = {
+    ...first,
+    reviewer_id: "F-SECOND-REVIEWER",
+  };
+
+  expect(distinctSupportingReviews([first, conflictingReviewer])).toEqual([]);
+  expect(
+    evaluateClaimTransition(
+      "open",
+      { kind: "review-verified", review: conflictingReviewer },
+      context({ recorded_refutation_attempts: 1, verified_reviews: [first] }),
+    ),
+  ).toEqual({
+    allowed: false,
+    unmet: ["requires ≥1 independent verified review (tier ≥ T1)"],
+  });
+});
 
 function expectAllowed(
   current: ClaimDisposition,

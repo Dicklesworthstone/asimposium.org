@@ -189,7 +189,9 @@ function sameVerifiedReview(left: VerifiedReview, right: VerifiedReview): boolea
  * the same review id count zero rather than letting storage corruption choose
  * whichever copy grants the stronger transition.
  */
-function distinctSupportingReviews(reviews: readonly VerifiedReview[]): VerifiedReview[] {
+export function distinctSupportingReviews(
+  reviews: readonly VerifiedReview[],
+): VerifiedReview[] {
   const firstById = new Map<string, VerifiedReview>();
   const conflictedIds = new Set<string>();
   for (const review of reviews) {
