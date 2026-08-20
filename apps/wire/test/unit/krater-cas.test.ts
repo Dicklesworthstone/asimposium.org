@@ -45,16 +45,21 @@ describe("the spill threshold and extract", () => {
   test("bodies over 1 KB spill; at-or-under stays in the row", () => {
     expect(shouldSpillToCas(CAS_SPILL_THRESHOLD_BYTES)).toBe(false);
     expect(shouldSpillToCas(CAS_SPILL_THRESHOLD_BYTES + 1)).toBe(true);
+    for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => shouldSpillToCas(invalid)).toThrow("ARTIFACT_SIZE_INVALID");
+    }
   });
 
-  test("the extract is exactly 280 chars max and never splits a body's tail oddly", () => {
+  test("the extract is exactly 280 code points max and never splits a surrogate pair", () => {
     const long = "x".repeat(1000);
     const extract = casExtractFor(long);
     expect(extract.length).toBe(CAS_EXTRACT_CHARS);
     expect(casExtractFor("short")).toBe("short");
-    // Multi-byte: the slice is on characters, never a half-encoded tail.
-    const unicode = "λ".repeat(500);
-    expect(casExtractFor(unicode).length).toBe(CAS_EXTRACT_CHARS);
+    const unicode = `${"λ".repeat(CAS_EXTRACT_CHARS - 1)}😀tail`;
+    const unicodeExtract = casExtractFor(unicode);
+    expect([...unicodeExtract]).toHaveLength(CAS_EXTRACT_CHARS);
+    expect(unicodeExtract.endsWith("😀")).toBe(true);
+    expect(unicodeExtract).not.toContain("\uFFFD");
   });
 });
 
@@ -120,6 +125,47 @@ describe("size caps", () => {
     });
     expect(lakeOk.admitted).toBe(true);
   });
+
+  test("invalid server-observed sizes are refused before admission", () => {
+    for (const sizeBytes of [
+      -1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      const verdict = decideArtifactAdmission({ sniffedType: "text/plain", sizeBytes });
+      expect(verdict.admitted).toBe(false);
+      if (!verdict.admitted) expect(verdict.code).toBe("ARTIFACT_SIZE_INVALID");
+    }
+  });
+
+  test("cheap doomed-upload checks run before the body secret scan", () => {
+    for (const expected of [
+      { sniffedType: "text/plain", sizeBytes: -1, code: "ARTIFACT_SIZE_INVALID" },
+      { sniffedType: "text/html", sizeBytes: 1, code: "ARTIFACT_TYPE_FORBIDDEN" },
+      { sniffedType: "application/x-unknown", sizeBytes: 1, code: "ARTIFACT_TYPE_NOT_ALLOWED" },
+      {
+        sniffedType: "text/plain",
+        sizeBytes: MAX_ARTIFACT_BYTES + 1,
+        code: "ARTIFACT_TOO_LARGE",
+      },
+    ] as const) {
+      const input = Object.defineProperty(
+        { sniffedType: expected.sniffedType, sizeBytes: expected.sizeBytes },
+        "body",
+        {
+          enumerable: true,
+          get(): string {
+            throw new Error("body scan reached");
+          },
+        },
+      );
+      const verdict = decideArtifactAdmission(input);
+      expect(verdict.admitted).toBe(false);
+      if (!verdict.admitted) expect(verdict.code).toBe(expected.code);
+    }
+  });
 });
 
 describe("the P7 secret-shaped refusal", () => {
@@ -159,6 +205,16 @@ describe("the P7 secret-shaped refusal", () => {
     expect(JSON.stringify(findings)).not.toContain(token);
   });
 
+  test("the scan reports every same-kind finding on one line in location order", () => {
+    const first = `asimp_ag_${"A".repeat(26)}_${"x".repeat(43)}`;
+    const second = `asimp_ag_${"B".repeat(26)}_${"y".repeat(43)}`;
+    const findings = scanBodyForSecrets(`first ${first}; second ${second}`);
+    expect(findings.filter((finding) => finding.kind === "fellow-token")).toEqual([
+      { kind: "fellow-token", line: 1, column: 7 },
+      { kind: "fellow-token", line: 1, column: 95 },
+    ]);
+  });
+
   test("personal email addresses are PII and refused", () => {
     const findings = scanBodyForSecrets("reach me at researcher@example.org for the data");
     expect(findings.some((f) => f.kind === "personal-address")).toBe(true);
@@ -175,6 +231,21 @@ describe("the P7 secret-shaped refusal", () => {
     // An artifacts URL has no @, so it must not false-positive as an address.
     expect(scanBodyForSecrets(`see ${casUrlForHash(HASH_A)}`)).toHaveLength(0);
   });
+
+  test("the early-exit wall stays equivalent to exhaustive diagnostics across calls", () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"x".repeat(43)}`;
+    for (const body of [
+      "ordinary research prose",
+      `first call ${token}`,
+      "clean first line\ncontact: researcher@example.org",
+    ]) {
+      const expected = scanBodyForSecrets(body).length > 0;
+      expect(bodyLooksSecretShaped(body)).toBe(expected);
+      // The repeat is load-bearing: a future global/sticky regex would mutate
+      // lastIndex and make the second observation disagree.
+      expect(bodyLooksSecretShaped(body)).toBe(expected);
+    }
+  });
 });
 
 describe("archive safety bounds", () => {
@@ -182,6 +253,10 @@ describe("archive safety bounds", () => {
     expect(archiveExpansionIsBounded(1000, 1000 * MAX_ARCHIVE_EXPANSION_RATIO)).toBe(true);
     expect(archiveExpansionIsBounded(1000, 1000 * MAX_ARCHIVE_EXPANSION_RATIO + 1)).toBe(false);
     expect(archiveExpansionIsBounded(0, 100)).toBe(false);
+    for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(archiveExpansionIsBounded(invalid, 100)).toBe(false);
+      expect(archiveExpansionIsBounded(100, invalid)).toBe(false);
+    }
   });
 
   test("traversal members are refused; ordinary members pass", () => {

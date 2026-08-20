@@ -86,6 +86,7 @@ export type CasRefusalCode =
   | "ARTIFACT_TYPE_FORBIDDEN"
   | "ARTIFACT_TYPE_NOT_ALLOWED"
   | "ARTIFACT_TOO_LARGE"
+  | "ARTIFACT_SIZE_INVALID"
   | "ARTIFACT_DIGEST_INVALID"
   | "ARTIFACT_SECRET_SHAPED";
 
@@ -107,17 +108,26 @@ export function casUrlForHash(sha256Hex: string): string {
 
 /** A body larger than 1 KB belongs in the CAS, not the index row. */
 export function shouldSpillToCas(bodyBytes: number): boolean {
+  if (!Number.isSafeInteger(bodyBytes) || bodyBytes < 0) {
+    throw new Error("ARTIFACT_SIZE_INVALID: body size must be a nonnegative safe integer");
+  }
   return bodyBytes > CAS_SPILL_THRESHOLD_BYTES;
 }
 
 /**
  * The 280-character extract the owning index row carries for a spilled body.
- * Sliced on characters (not bytes) so a multi-byte body never yields a
- * half-encoded tail; trailing whitespace collapsed so the extract reads clean.
+ * Sliced on Unicode code points (not UTF-16 code units or bytes) so the cut
+ * never splits a valid surrogate pair.
  */
 export function casExtractFor(body: string): string {
-  if (body.length <= CAS_EXTRACT_CHARS) return body;
-  return body.slice(0, CAS_EXTRACT_CHARS);
+  let codePoints = 0;
+  let end = 0;
+  for (const character of body) {
+    if (codePoints === CAS_EXTRACT_CHARS) break;
+    codePoints += 1;
+    end += character.length;
+  }
+  return end === body.length ? body : body.slice(0, end);
 }
 
 /**
@@ -143,7 +153,10 @@ const SECRET_PATTERNS: ReadonlyArray<{
   { kind: "prefixed-grant", pattern: /asimp_[a-z]{2}_[0-9A-Za-z_-]{20,}/ },
   { kind: "api-key", pattern: /sk_live_[0-9A-Za-z]{16,}/ },
   { kind: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { kind: "personal-address", pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
+  {
+    kind: "personal-address",
+    pattern: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}/,
+  },
 ];
 
 /**
@@ -155,18 +168,27 @@ export function scanBodyForSecrets(body: string): readonly SecretFinding[] {
   const lines = body.split("\n");
   for (const [lineIndex, lineText] of lines.entries()) {
     for (const { kind, pattern } of SECRET_PATTERNS) {
-      const matcher = new RegExp(pattern.source, pattern.flags);
-      const hit = matcher.exec(lineText);
-      if (hit !== null) {
+      const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+      const matcher = new RegExp(pattern.source, flags);
+      for (const hit of lineText.matchAll(matcher)) {
         findings.push({ kind, line: lineIndex + 1, column: hit.index + 1 });
       }
     }
   }
-  return findings;
+  return findings.sort((left, right) => {
+    const locationOrder = left.line - right.line || left.column - right.column;
+    if (locationOrder !== 0) return locationOrder;
+    if (left.kind < right.kind) return -1;
+    if (left.kind > right.kind) return 1;
+    return 0;
+  });
 }
 
 export function bodyLooksSecretShaped(body: string): boolean {
-  return scanBodyForSecrets(body).length > 0;
+  // Admission needs only a yes/no wall. Do not construct the exhaustive
+  // diagnostic array here: a body containing many repeated matches could
+  // otherwise amplify one upload into millions of finding objects.
+  return SECRET_PATTERNS.some(({ pattern }) => pattern.test(body));
 }
 
 /**
@@ -180,14 +202,13 @@ export function decideArtifactAdmission(input: {
   readonly sizeBytes: number;
   readonly body?: string;
 }): CasAdmission {
-  const { sniffedType, sizeBytes, body } = input;
+  const { sniffedType, sizeBytes } = input;
 
-  if (body !== undefined && bodyLooksSecretShaped(body)) {
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
     return {
       admitted: false,
-      code: "ARTIFACT_SECRET_SHAPED",
-      reason:
-        "the body carries a credential-shaped string; unlisted hashes are not secrets, so tokens never belong in the CAS",
+      code: "ARTIFACT_SIZE_INVALID",
+      reason: "the server-observed artifact size must be a nonnegative safe integer",
     };
   }
 
@@ -218,6 +239,18 @@ export function decideArtifactAdmission(input: {
     };
   }
 
+  // Secret scanning is deliberately last among the cheap admission checks.
+  // It is linear in the supplied body but still materially more expensive
+  // than scalar/type/cap validation, so a doomed upload must never reach it.
+  if (input.body !== undefined && bodyLooksSecretShaped(input.body)) {
+    return {
+      admitted: false,
+      code: "ARTIFACT_SECRET_SHAPED",
+      reason:
+        "the body carries a credential-shaped string; unlisted hashes are not secrets, so tokens never belong in the CAS",
+    };
+  }
+
   return {
     admitted: true,
     contentType: sniffedType,
@@ -237,8 +270,18 @@ export function archiveExpansionIsBounded(
   compressedBytes: number,
   declaredUncompressedBytes: number,
 ): boolean {
-  if (compressedBytes <= 0 || declaredUncompressedBytes < 0) return false;
-  return declaredUncompressedBytes <= compressedBytes * MAX_ARCHIVE_EXPANSION_RATIO;
+  if (
+    !Number.isSafeInteger(compressedBytes) ||
+    compressedBytes <= 0 ||
+    !Number.isSafeInteger(declaredUncompressedBytes) ||
+    declaredUncompressedBytes < 0
+  ) {
+    return false;
+  }
+  return (
+    BigInt(declaredUncompressedBytes) <=
+    BigInt(compressedBytes) * BigInt(MAX_ARCHIVE_EXPANSION_RATIO)
+  );
 }
 
 /**
