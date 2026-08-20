@@ -234,6 +234,16 @@ interface PackSessionRow {
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
+  const privateNoStore = (response: Response): Response => {
+    const headers = new Headers(response.headers);
+    headers.set("cache-control", "private, no-store");
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+
   type ReplayScope = "session_open" | "workshop_push" | "promote" | "session_close";
 
   type SessionPreparedStatement = ReturnType<Env["DB"]["prepare"]>;
@@ -719,21 +729,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const url = new URL(c.req.url);
     const profileParam = url.searchParams.get("profile") ?? "working";
     if (!PROFILES.includes(profileParam as PackProfile)) {
-      return problem({
-        status: 400,
-        code: "UNKNOWN_PROFILE",
-        title: "Unknown pack profile",
-        detail: `No pack profile named '${profileParam}'.`,
-        fixHint: `Use one of: ${PROFILES.join(", ")}.`,
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          allowed: PROFILES,
-        },
-      });
+      return privateNoStore(
+        problem({
+          status: 400,
+          code: "UNKNOWN_PROFILE",
+          title: "Unknown pack profile",
+          detail: `No pack profile named '${profileParam}'.`,
+          fixHint: `Use one of: ${PROFILES.join(", ")}.`,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            allowed: PROFILES,
+          },
+        }),
+      );
     }
     const profile = profileParam as PackProfile;
     const requestedMaxTokens = packBudgetOrRefusal(url.searchParams.get("max_tokens"), profile);
-    if (requestedMaxTokens instanceof Response) return requestedMaxTokens;
+    if (requestedMaxTokens instanceof Response) return privateNoStore(requestedMaxTokens);
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const cursor = await readCursor(db, session.problem_id);
@@ -1611,20 +1623,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // reads a Fellow's workshop). Verified by the signed service envelope.
   app.post("/v1/sponsors/workshop", async (c) => {
     if (options.verifiedSponsor === undefined) {
-      return problem({
-        status: 503,
-        code: "SPONSOR_AUTH_UNAVAILABLE",
-        title: "Sponsor reads are not configured on this Worker",
-        detail: "This deployment has no service-envelope verification keyring.",
-        fixHint: "Configure the service-envelope verification keys and retry.",
-      });
+      return privateNoStore(
+        problem({
+          status: 503,
+          code: "SPONSOR_AUTH_UNAVAILABLE",
+          title: "Sponsor reads are not configured on this Worker",
+          detail: "This deployment has no service-envelope verification keyring.",
+          fixHint: "Configure the service-envelope verification keys and retry.",
+        }),
+      );
     }
     const verified = await options.verifiedSponsor(
       c.req.raw,
       "/v1/sponsors/workshop",
       "workshop.read",
     );
-    if (verified instanceof Response) return verified;
+    if (verified instanceof Response) return privateNoStore(verified);
     let requestBody: unknown;
     try {
       requestBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(verified.rawBody));
@@ -1633,17 +1647,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const parsedRequest = SponsorWorkshopRequestSchema.safeParse(requestBody);
     if (!parsedRequest.success) {
-      return problem({
-        status: 422,
-        code: "WORKSHOP_READ_BODY_INVALID",
-        title: "Workshop read body is invalid",
-        detail: "The signed JSON body must contain exactly problem_id and fellow_id.",
-        fixHint: "Send the problem and one of your own Fellows in the signed JSON body.",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { problem_id: "P-4DSP", fellow_id: "fellow-01JXYZ" },
-        },
-      });
+      return privateNoStore(
+        problem({
+          status: 422,
+          code: "WORKSHOP_READ_BODY_INVALID",
+          title: "Workshop read body is invalid",
+          detail: "The signed JSON body must contain exactly problem_id and fellow_id.",
+          fixHint: "Send the problem and one of your own Fellows in the signed JSON body.",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { problem_id: "P-4DSP", fellow_id: "fellow-01JXYZ" },
+          },
+        }),
+      );
     }
     const { problem_id: problemId, fellow_id: fellowId } = parsedRequest.data;
     // The sponsor may only read THEIR OWN fellows' workshops.
@@ -1657,13 +1673,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fellow === undefined ||
       fellow.sponsor_id !== verified.principal.sponsorId
     ) {
-      return problem({
-        status: 404,
-        code: "WORKSHOP_NOT_FOUND",
-        title: "No such workshop",
-        detail: "No workshop visible to this sponsor matches the query.",
-        fixHint: "Check the fellow id against your console's Fellows list.",
-      });
+      return privateNoStore(
+        problem({
+          status: 404,
+          code: "WORKSHOP_NOT_FOUND",
+          title: "No such workshop",
+          detail: "No workshop visible to this sponsor matches the query.",
+          fixHint: "Check the fellow id against your console's Fellows list.",
+        }),
+      );
     }
     const objects = await c.env.DB.prepare(
       `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at

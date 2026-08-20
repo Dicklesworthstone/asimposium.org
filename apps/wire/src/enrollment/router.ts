@@ -1200,6 +1200,21 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
   return app;
 }
 
+/**
+ * A verifier can supply its own typed refusal. It is still a private response:
+ * preserve its exact body and metadata while forbidding shared or client cache
+ * retention at the enrollment-router boundary.
+ */
+function privateNoStoreVerifierRefusal(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "private, no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 /** The sponsor's service-envelope identity, or the exact refusal to serve. */
 async function requireSponsor(
   options: EnrollmentRouterOptions,
@@ -1212,7 +1227,7 @@ async function requireSponsor(
   }
   try {
     const result = await options.verifiedSponsor(request, route, action);
-    if (result instanceof Response) return result;
+    if (result instanceof Response) return privateNoStoreVerifierRefusal(result);
     if (!isEnrollmentPrincipal(result?.principal) || !(result?.rawBody instanceof Uint8Array)) {
       return sponsorAuthUnavailableResponse();
     }
@@ -1234,7 +1249,7 @@ async function requireOperator(
   }
   try {
     const result = await options.verifiedOperator(request, route, action);
-    if (result instanceof Response) return result;
+    if (result instanceof Response) return privateNoStoreVerifierRefusal(result);
     if (
       !isEnrollmentPrincipal(result?.principal) ||
       result.principal.type !== "operator" ||

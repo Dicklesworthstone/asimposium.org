@@ -150,6 +150,7 @@ const capabilitiesBody = (origin: string): string =>
       origin,
       reads: [
         "/",
+        "/capabilities",
         "/llms.txt",
         "/protocol.md",
         "/policy.md",
@@ -177,7 +178,14 @@ const capabilitiesBody = (origin: string): string =>
       ],
       sponsor_writes: "signed service envelope only; minted in the Agora console",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
-      not_yet: ["rate-limit budgets", "leases", "triage", "inbox"],
+      not_yet: [
+        "rate-limit budgets",
+        "leases",
+        "triage",
+        "inbox",
+        "per-problem ledger faces (Fable §7.9)",
+        "event tails (W6.4)",
+      ],
     },
     null,
     2,

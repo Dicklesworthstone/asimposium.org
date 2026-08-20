@@ -479,6 +479,89 @@ describe("sponsor enrollment routes", () => {
     });
   });
 
+  test("private sponsor and operator GET verifier refusals preserve bytes while forbidding storage", async () => {
+    const sponsorRefusal = new Response("sponsor verifier refusal bytes", {
+      status: 401,
+      statusText: "Sponsor verifier denied",
+      headers: {
+        "content-type": "application/vnd.asimposium.sponsor-refusal+json",
+        "x-verifier-sentinel": "sponsor",
+      },
+    });
+    const sponsorHarness = await harness({ verifiedSponsor: async () => sponsorRefusal });
+    const sponsorResponse = await sponsorHarness.app.fetch(
+      new Request(`${origin}/v1/enrollments/proposals`, { method: "GET" }),
+    );
+    expect(sponsorResponse.status).toBe(401);
+    expect(sponsorResponse.statusText).toBe("Sponsor verifier denied");
+    expect(sponsorResponse.headers.get("content-type")).toBe(
+      "application/vnd.asimposium.sponsor-refusal+json",
+    );
+    expect(sponsorResponse.headers.get("x-verifier-sentinel")).toBe("sponsor");
+    expect(sponsorResponse.headers.get("cache-control")).toBe("private, no-store");
+    expect(await sponsorResponse.text()).toBe("sponsor verifier refusal bytes");
+
+    const operatorRefusal = new Response("operator verifier refusal bytes", {
+      status: 418,
+      statusText: "Operator verifier refused",
+      headers: {
+        "content-type": "application/vnd.asimposium.operator-refusal+json",
+        "x-verifier-sentinel": "operator",
+      },
+    });
+    const operatorHarness = await harness({ verifiedOperator: async () => operatorRefusal });
+    const operatorResponse = await operatorHarness.app.fetch(
+      new Request(`${origin}/v1/operators/sponsors/${SPONSOR}/fellow-cap`, { method: "GET" }),
+    );
+    expect(operatorResponse.status).toBe(418);
+    expect(operatorResponse.statusText).toBe("Operator verifier refused");
+    expect(operatorResponse.headers.get("content-type")).toBe(
+      "application/vnd.asimposium.operator-refusal+json",
+    );
+    expect(operatorResponse.headers.get("x-verifier-sentinel")).toBe("operator");
+    expect(operatorResponse.headers.get("cache-control")).toBe("private, no-store");
+    expect(await operatorResponse.text()).toBe("operator verifier refusal bytes");
+
+    const successHarness = await harness();
+    const proposalHeaders = await successHarness.sign(
+      "",
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+      "GET",
+    );
+    const proposalSuccess = await successHarness.app.fetch(
+      envelopeRequest("/v1/enrollments/proposals", proposalHeaders, "GET"),
+    );
+    expect(proposalSuccess.status).toBe(200);
+    expect(proposalSuccess.headers.get("cache-control")).toBe("no-store");
+    expect(SponsorProposalListResponseSchema.parse(await proposalSuccess.json())).toEqual({
+      proposals: [],
+    });
+
+    await successHarness.service.bootstrapSponsor({ type: "sponsor", sponsorId: SPONSOR });
+    const operatorHeaders = await successHarness.sign(
+      "",
+      "/v1/operators/sponsors/:sponsorId/fellow-cap",
+      "operator.fellow-cap.read",
+      "GET",
+      OPERATOR,
+      "operator",
+    );
+    const operatorSuccess = await successHarness.app.fetch(
+      envelopeRequest(
+        `/v1/operators/sponsors/${SPONSOR}/fellow-cap`,
+        operatorHeaders,
+        "GET",
+      ),
+    );
+    expect(operatorSuccess.status).toBe(200);
+    expect(operatorSuccess.headers.get("cache-control")).toBe("no-store");
+    expect(OperatorFellowCapStateResponseSchema.parse(await operatorSuccess.json())).toMatchObject({
+      sponsor_id: SPONSOR,
+      sponsor_seq: 0,
+    });
+  });
+
   test("auth-seam throws become one coarse 503 on every sponsor route", async () => {
     const privateMessage = "private keyring or nonce-store failure";
     const h = await harness({

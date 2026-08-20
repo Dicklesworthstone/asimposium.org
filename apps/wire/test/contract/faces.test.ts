@@ -426,6 +426,34 @@ const readSafeProtocolDocument = (id: DocumentId): ProtocolDocument =>
 });
 
 const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
+
+const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
+  "/p/P-4DSP",
+  "/p/P-4DSP.md",
+  "/p/P-4DSP.json",
+  "/p/P-4DSP/full.md",
+  "/p/P-4DSP/claims.md",
+  "/p/P-4DSP/claims.json",
+  "/p/P-4DSP/claims.toon",
+  "/p/P-4DSP/claims/C-7.md",
+  "/p/P-4DSP/claims/C-7.json",
+  "/p/P-4DSP/claims/C-7.toon",
+  "/p/P-4DSP/hypotheses.md",
+  "/p/P-4DSP/hypotheses.json",
+  "/p/P-4DSP/hypotheses.toon",
+  "/p/P-4DSP/gaps.md",
+  "/p/P-4DSP/conflicts.md",
+  "/p/P-4DSP/events.json?since=0",
+  "/p/P-4DSP/events.ndjson?since=0",
+  "/p/P-4DSP/events.toon?since=0",
+  "/p/P-4DSP/orders",
+  "/p/P-4DSP/moves.md",
+  "/p/P-4DSP/dead-ends.md",
+  "/p/P-4DSP/feed.rss",
+  "/p/P-4DSP/feed.json",
+  "/p/P-4DSP/export.jsonl.gz",
+  "/p/P-4DSP.events.json?since=0",
+] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
 function trustedStoaEnv(): Env {
@@ -441,10 +469,24 @@ describe("face wire format", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toContain("max-age=60");
     const body = JSON.parse(res.bodyText) as {
+      reads: string[];
       agent_writes: string[];
       fellow_reads: string[];
       not_yet: string[];
     };
+    expect(body.reads).toEqual([
+      "/",
+      "/capabilities",
+      "/llms.txt",
+      "/protocol.md",
+      "/policy.md",
+      "/skill.md",
+      "/problems.md",
+      "/problems.json",
+      "/join/<enrollment-id>",
+      "/schemas/<name>",
+      "/internal/health",
+    ]);
     expect(body.agent_writes).toEqual([
       "POST /v1/device-code",
       "POST /v1/device-token",
@@ -460,7 +502,14 @@ describe("face wire format", () => {
       "GET /v1/sessions/<id>/pack?profile=… (bearer)",
       "GET /cursor",
     ]);
-    expect(body.not_yet).toEqual(["rate-limit budgets", "leases", "triage", "inbox"]);
+    expect(body.not_yet).toEqual([
+      "rate-limit budgets",
+      "leases",
+      "triage",
+      "inbox",
+      "per-problem ledger faces (Fable §7.9)",
+      "event tails (W6.4)",
+    ]);
   });
 
   test("the default Worker entrypoint quarantines every per-problem spelling before D1", async () => {
@@ -478,30 +527,23 @@ describe("face wire format", () => {
     } as unknown as Env["DB"];
     const context = executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2];
 
-    for (const [method, path] of [
-      ["GET", "/p/P-4DSP.md"],
-      ["HEAD", "/p/P-4DSP.md"],
-      ["GET", "/p/P-4DSP.json"],
-      ["HEAD", "/p/P-4DSP.json"],
-      ["GET", "/p/P-4DSP.events.json?since=0"],
-      ["HEAD", "/p/P-4DSP.events.json?since=0"],
-      ["GET", "/p/P-4DSP/events.json?since=0"],
-      ["HEAD", "/p/P-4DSP/events.json?since=0"],
-    ] as const) {
-      const response = await wireEntrypoint.fetch(
-        new Request(`https://a.asimposium.org${path}`, { method }),
-        env,
-        context,
-      );
-      expect(response.status, `${method} ${path}`).toBe(404);
-      const body = await response.text();
-      if (method === "GET") {
-        expect(body, `${method} ${path}`).toContain('"code":"ROUTE_NOT_FOUND"');
-        expect(body, `${method} ${path}`).not.toContain(forged);
-      } else {
-        expect(body, `${method} ${path}`).toBe("");
+    for (const path of FABLE_UNMOUNTED_PROBLEM_FACE_PATHS) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const response = await wireEntrypoint.fetch(
+          new Request(`https://a.asimposium.org${path}`, { method }),
+          env,
+          context,
+        );
+        expect(response.status, `${method} ${path}`).toBe(404);
+        const body = await response.text();
+        if (method === "GET") {
+          expect(body, `${method} ${path}`).toContain('"code":"ROUTE_NOT_FOUND"');
+          expect(body, `${method} ${path}`).not.toContain(forged);
+        } else {
+          expect(body, `${method} ${path}`).toBe("");
+        }
+        expect(prepares, `${method} ${path}`).toBe(0);
       }
-      expect(prepares, `${method} ${path}`).toBe(0);
     }
   });
 
@@ -617,6 +659,67 @@ describe("face wire format", () => {
     expect(canonical.status).toBe(404);
     expect(await canonical.json()).toMatchObject({ code: "PROBLEM_NOT_FOUND" });
     expect(prepares).toBe(1);
+  });
+
+  test("the retained event-tail experiment serializes camelCase KraterEvents without mounting it", async () => {
+    const queries: string[] = [];
+    const experimental = createExperimentalLedgerEventTailRoutes();
+    const response = await experimental.fetch(
+      new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=0"),
+      {
+        DB: {
+          prepare(query: string) {
+            queries.push(query);
+            return {
+              bind() {
+                if (query.includes("SELECT id FROM problems WHERE id = ?")) {
+                  return { first: async () => ({ id: "P-4DSP" }) };
+                }
+                if (query.includes("FROM events")) {
+                  return {
+                    all: async () => ({
+                      results: [
+                        {
+                          id: "EV-7",
+                          problem_id: "P-4DSP",
+                          seq: 7,
+                          type: "claim.created",
+                          object_id: "C-7",
+                          payload_sha256: "a".repeat(64),
+                          row_digest: "b".repeat(64),
+                          chain_digest: "c".repeat(64),
+                          created_at: "2026-08-19T00:00:07.000Z",
+                        },
+                      ],
+                    }),
+                  };
+                }
+                throw new Error(`unexpected experimental D1 query: ${query}`);
+              },
+            };
+          },
+        } as unknown as Env["DB"],
+      } as Env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      problem_id: "P-4DSP",
+      since: 0,
+      events: [
+        {
+          id: "EV-7",
+          seq: 7,
+          type: "claim.created",
+          object_id: "C-7",
+          created_at: "2026-08-19T00:00:07.000Z",
+        },
+      ],
+      has_more: false,
+    });
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("SELECT id FROM problems WHERE id = ?");
+    expect(queries[1]).toContain("FROM events");
   });
 
   test("session and cursor routes are mounted and refuse unauthenticated writes", async () => {

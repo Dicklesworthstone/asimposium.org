@@ -2,7 +2,11 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { PackResponseSchema } from "@asimposium/contracts";
+import {
+  PackResponseSchema,
+  SponsorWorkshopViewSchema,
+  WorkshopPushResponseSchema,
+} from "@asimposium/contracts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
@@ -2024,6 +2028,7 @@ describe("session protocol routes", () => {
         `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=${invalid}`,
       );
       expect(refusal.status).toBe(400);
+      expect(refusal.headers.get("cache-control")).toBe("private, no-store");
       expect(await refusal.json()).toMatchObject({ code: "INVALID_PACK_BUDGET" });
     }
 
@@ -2067,6 +2072,7 @@ describe("session protocol routes", () => {
       }),
     });
     expect(pushed.status).toBe(201);
+    const pushedObject = WorkshopPushResponseSchema.parse(await pushed.json());
     const pushedSecond = await call(`/v1/sessions/${session.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "sponsor-push-2" },
@@ -2078,6 +2084,7 @@ describe("session protocol routes", () => {
       }),
     });
     expect(pushedSecond.status).toBe(201);
+    const pushedSecondObject = WorkshopPushResponseSchema.parse(await pushedSecond.json());
 
     const sponsorRouter = createSessionRouter({
       service,
@@ -2105,7 +2112,7 @@ describe("session protocol routes", () => {
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(await response.json()).toMatchObject({
+    expect(SponsorWorkshopViewSchema.parse(await response.json())).toMatchObject({
       problem_id: "P-4DSP",
       fellow_id: binding.fellowId,
       objects: [
@@ -2127,6 +2134,7 @@ describe("session protocol routes", () => {
         { DB: db } as import("../../src/env.ts").Env,
       );
       expect(invalidRequest.status).toBe(422);
+      expect(invalidRequest.headers.get("cache-control")).toBe("private, no-store");
       expect(await invalidRequest.json()).toMatchObject({ code: "WORKSHOP_READ_BODY_INVALID" });
     }
 
@@ -2145,8 +2153,85 @@ describe("session protocol routes", () => {
       }),
       { DB: db } as import("../../src/env.ts").Env,
     );
-    expect(wrongSponsor.status).toBe(404);
-    expect(await wrongSponsor.text()).not.toContain("Private sponsor note");
+    const snapshotResponse = async (response: Response) => ({
+      status: response.status,
+      statusText: response.statusText,
+      headers: [...response.headers.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+      body: await response.text(),
+    });
+    const wrongSponsorSnapshot = await snapshotResponse(wrongSponsor);
+    expect(wrongSponsorSnapshot.status).toBe(404);
+    expect(wrongSponsorSnapshot.headers).toContainEqual([
+      "cache-control",
+      "private, no-store",
+    ]);
+    for (const privateCanary of [
+      pushedObject.workshop_id,
+      pushedSecondObject.workshop_id,
+      "Private sponsor note",
+      "Newer private sponsor note",
+      "Only the Fellow and sponsor may read these bytes.",
+      "The live view presents this card first.",
+    ]) {
+      expect(wrongSponsorSnapshot.body).not.toContain(privateCanary);
+    }
+
+    const absentFellow = await wrongSponsorRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+        method: "POST",
+        body: JSON.stringify({
+          problem_id: "P-4DSP",
+          fellow_id: "fellow-no-such",
+        }),
+      }),
+      { DB: db } as import("../../src/env.ts").Env,
+    );
+    expect(await snapshotResponse(absentFellow)).toEqual(wrongSponsorSnapshot);
+
+    const unavailable = await createSessionRouter({ service, replayProtector }).fetch(
+      new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+        method: "POST",
+        body: requestBody,
+      }),
+      { DB: db } as import("../../src/env.ts").Env,
+    );
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.get("cache-control")).toBe("private, no-store");
+
+    const verifierBytes = '\n{\n  "code": "UNAUTHORIZED"\n}\n';
+    const verifierRefusal = await createSessionRouter({
+      service,
+      replayProtector,
+      verifiedSponsor: async () =>
+        new Response(verifierBytes, {
+          status: 401,
+          statusText: "Verifier refused",
+          headers: {
+            "content-type": "application/problem+json",
+            "x-verifier-sentinel": "e7j.1-preserve-this-header",
+          },
+        }),
+    }).fetch(
+      new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+        method: "POST",
+        body: requestBody,
+      }),
+      { DB: db } as import("../../src/env.ts").Env,
+    );
+    expect(verifierRefusal.status).toBe(401);
+    expect(verifierRefusal.statusText).toBe("Verifier refused");
+    expect(
+      [...verifierRefusal.headers.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ).toEqual([
+      ["cache-control", "private, no-store"],
+      ["content-type", "application/problem+json"],
+      ["x-verifier-sentinel", "e7j.1-preserve-this-header"],
+    ]);
+    expect(await verifierRefusal.text()).toBe(verifierBytes);
   });
 
   test("one replay key cannot alias identical bodies across two session resources", async () => {
@@ -2233,6 +2318,7 @@ describe("session protocol routes", () => {
     const session = (await opened.json()) as { session_id: string };
     const unknownProfile = await call(`/v1/sessions/${session.session_id}/pack?profile=all`);
     expect(unknownProfile.status).toBe(400);
+    expect(unknownProfile.headers.get("cache-control")).toBe("private, no-store");
     expect(await unknownProfile.json()).toMatchObject({ code: "UNKNOWN_PROFILE" });
   });
 
