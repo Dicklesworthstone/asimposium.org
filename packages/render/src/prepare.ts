@@ -131,6 +131,19 @@ function projectionStrings(projection: Projection): ProjectionString[] {
   if (projection.session !== undefined) {
     fields.push({ field: "session", value: projection.session, reject_control_comment: false });
   }
+  if (projection.viewer !== undefined) {
+    fields.push(
+      { field: "viewer.audience", value: projection.viewer.audience, reject_control_comment: false },
+      { field: "viewer.membership", value: projection.viewer.membership, reject_control_comment: false },
+    );
+    for (const [index, permission] of projection.viewer.effective_permissions.entries()) {
+      fields.push({
+        field: `viewer.effective_permissions[${index}]`,
+        value: permission,
+        reject_control_comment: false,
+      });
+    }
+  }
 
   for (const [index, item] of projection.items.entries()) {
     fields.push(
@@ -524,6 +537,15 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     omitted: projection.omitted,
     next_actions: projection.next_actions,
     degraded: projection.degraded,
+    ...(projection.viewer === undefined
+      ? {}
+      : {
+          viewer: {
+            audience: projection.viewer.audience,
+            membership: projection.viewer.membership,
+            effective_permissions: [...projection.viewer.effective_permissions],
+          },
+        }),
   });
 
   return {

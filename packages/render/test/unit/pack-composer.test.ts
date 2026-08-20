@@ -180,6 +180,65 @@ describe("stable-prefix composition", () => {
     expect(second.canonical_fingerprint).toBe(first.canonical_fingerprint);
   });
 
+  test("viewer-only membership and permission mutations change the rendered fingerprint", () => {
+    const composeForViewer = (viewer: PackComposerInput["viewer"]) =>
+      composePack(
+        input({
+          requested_max_tokens: 4_000,
+          viewer,
+          candidates: [candidate("C-viewer", 0, 1)],
+          action_candidates: [],
+        }),
+      );
+    const render = (pack: ReturnType<typeof composePack>) =>
+      JSON.parse(renderAllFaces(composedPackToProjection(pack)).json.body) as {
+        fingerprint: string;
+        items: Array<{ id: string }>;
+        next_actions: unknown[];
+      };
+
+    const baseline = composeForViewer({
+      audience: "session",
+      membership: "contributor",
+      effective_permissions: [],
+    });
+    const membershipMutation = composeForViewer({
+      audience: "session",
+      membership: "steward",
+      effective_permissions: [],
+    });
+    const permissionMutation = composeForViewer({
+      audience: "session",
+      membership: "contributor",
+      effective_permissions: ["review:read"],
+    });
+
+    const baselineFace = render(baseline);
+    for (const mutation of [membershipMutation, permissionMutation]) {
+      const mutatedFace = render(mutation);
+      expect(mutation.items).toEqual(baseline.items);
+      expect(mutation.next_actions).toEqual(baseline.next_actions);
+      expect(mutatedFace.items).toEqual(baselineFace.items);
+      expect(mutatedFace.next_actions).toEqual(baselineFace.next_actions);
+      expect(mutatedFace.fingerprint).not.toBe(baselineFace.fingerprint);
+    }
+  });
+
+  test("refuses a malformed viewer permission before fingerprint serialization", () => {
+    const projection = composedPackToProjection(composePack(input({ requested_max_tokens: 4_000 })));
+    expect(
+      errorCode(() =>
+        prepareProjection({
+          ...projection,
+          viewer: {
+            ...projection.viewer!,
+            effective_permissions: ["review\ud800"],
+          },
+        }),
+      ),
+    ).toBe("INVALID_HEADER_VALUE");
+  });
+
   test("a fresh Bun process emits the same canonical bytes", () => {
     const composerUrl = new URL("../../src/pack-composer.ts", import.meta.url).href;
     const source = `
