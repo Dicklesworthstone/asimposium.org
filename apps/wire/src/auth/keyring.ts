@@ -53,6 +53,9 @@ export class KeyringConfigError extends Error {
  * verifier and becoming a 500 that leaks a stack trace.
  */
 function validateRecord(record: VerificationKeyRecord): void {
+  if (typeof record !== "object" || record === null) {
+    throw new KeyringConfigError("key record must be an object");
+  }
   if (!KID_PATTERN.test(record.kid)) {
     throw new KeyringConfigError("key record has an invalid key identifier");
   }
@@ -105,9 +108,9 @@ export class VerificationKeyring {
 
     const newestNotBefore = Math.max(...records.map((record) => record.notBefore));
     const openEnded = records.filter((record) => record.notAfter === undefined);
-    if (openEnded.length > 1 || openEnded.some((record) => record.notBefore !== newestNotBefore)) {
+    if (openEnded.length !== 1 || openEnded[0]?.notBefore !== newestNotBefore) {
       throw new KeyringConfigError(
-        "only the newest current key may have an open-ended validity window",
+        "exactly the newest current key must have an open-ended validity window",
       );
     }
   }
@@ -124,6 +127,9 @@ export class VerificationKeyring {
   async lookup(kid: string, issuedAt: number): Promise<KeyLookup> {
     const record = this.#records.get(kid);
     if (record === undefined) return { ok: false, reason: "unknown_kid" };
+    if (!Number.isSafeInteger(issuedAt) || issuedAt < 0) {
+      return { ok: false, reason: "key_unusable" };
+    }
     if (issuedAt < record.notBefore) return { ok: false, reason: "key_not_yet_valid" };
     if (record.notAfter !== undefined && issuedAt >= record.notAfter) {
       return { ok: false, reason: "key_retired" };

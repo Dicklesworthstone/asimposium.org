@@ -10,7 +10,11 @@ import {
 import { Hono } from "hono";
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
-import { type VerificationKeyRecord, VerificationKeyring } from "./auth/keyring";
+import {
+  KeyringConfigError,
+  type VerificationKeyRecord,
+  VerificationKeyring,
+} from "./auth/keyring";
 import { D1NonceStore } from "./auth/nonce";
 import { envelopeRefusalProblem } from "./auth/refusal";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
@@ -70,6 +74,7 @@ interface CachedEnrollmentStack {
 }
 
 let cached: CachedEnrollmentStack | undefined;
+let lastInvalidKeyringCredentialKey: string | undefined;
 
 const ROUTER_MISS_HEADER = "x-asimp-internal-router-miss";
 const EXACT_ENROLLMENT_PATHS = new Set([
@@ -409,13 +414,16 @@ function routeNotFound(requestUrl: string, ownedPathMethod?: string): Response {
 
 function parseKeyringRecords(raw: string | undefined): VerificationKeyRecord[] | undefined {
   if (raw === undefined) return undefined;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
-    return parsed as VerificationKeyRecord[];
+    parsed = JSON.parse(raw);
   } catch {
-    return undefined;
+    throw new KeyringConfigError("configured keyring must be valid JSON");
   }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new KeyringConfigError("configured keyring must be a nonempty array");
+  }
+  return parsed as VerificationKeyRecord[];
 }
 
 /**
@@ -515,12 +523,23 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   }
 
   let keyring: VerificationKeyring | undefined;
-  const records = parseKeyringRecords(env.SERVICE_ENVELOPE_KEYS);
-  if (records !== undefined) {
-    try {
+  try {
+    const records = parseKeyringRecords(env.SERVICE_ENVELOPE_KEYS);
+    if (records !== undefined) {
       keyring = new VerificationKeyring(records);
-    } catch {
-      keyring = undefined;
+    }
+  } catch (error) {
+    if (!(error instanceof KeyringConfigError)) throw error;
+    // The public refusal remains deliberately opaque, but a malformed present
+    // binding must not be indistinguishable from an intentionally unconfigured
+    // sponsor plane in deployment logs. Log once per observed binding tuple so
+    // an unauthenticated caller cannot amplify a known configuration failure.
+    // Never include the raw config or error.
+    if (lastInvalidKeyringCredentialKey !== credentialKey) {
+      console.error("[wire] invalid service-envelope keyring", {
+        error: "KEYRING_CONFIG_INVALID",
+      });
+      lastInvalidKeyringCredentialKey = credentialKey;
     }
   }
   const nonces = new D1NonceStore(env.DB);

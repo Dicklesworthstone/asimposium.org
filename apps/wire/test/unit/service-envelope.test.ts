@@ -664,7 +664,7 @@ describe("keyring configuration fails at construction, never at request time", (
     expect(message).not.toContain(canary);
   });
 
-  test("only the newest current key may be open-ended", () => {
+  test("exactly the newest current key must be open-ended", () => {
     expect(
       () =>
         new VerificationKeyring([
@@ -679,6 +679,27 @@ describe("keyring configuration fails at construction, never at request time", (
           { kid: "current", publicKeyHex: "cd".repeat(32), notBefore: 10 },
         ]),
     ).not.toThrow();
+    expect(
+      () =>
+        new VerificationKeyring([
+          { kid: "retired", publicKeyHex: "ab".repeat(32), notBefore: 0, notAfter: 10 },
+        ]),
+    ).toThrow(/exactly the newest current key/);
+  });
+
+  test.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, 1.5])(
+    "a malformed issued-at value %s cannot select a verification key",
+    async (issuedAt) => {
+      const keyring = new VerificationKeyring([good]);
+      expect(await keyring.lookup(good.kid, issuedAt)).toEqual({
+        ok: false,
+        reason: "key_unusable",
+      });
+    },
+  );
+
+  test("non-object records fail as typed configuration errors", () => {
+    expect(() => new VerificationKeyring([null] as never)).toThrow(KeyringConfigError);
   });
 
   test("a syntactically valid key the runtime rejects fails closed, not by throwing", async () => {

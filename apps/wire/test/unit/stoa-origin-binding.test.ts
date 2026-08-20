@@ -625,4 +625,90 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
         .get()?.n,
     ).toBe(0);
   });
+
+  test.each([
+    ["malformed JSON", "not-json"],
+    ["an empty array", "[]"],
+    [
+      "an all-retired keyring",
+      JSON.stringify([
+        {
+          kid: "retired",
+          publicKeyHex: "ab".repeat(32),
+          notBefore: 0,
+          notAfter: 1,
+        },
+      ]),
+    ],
+  ])("a present %s keyring fails loudly without leaking its bytes", async (_label, keyring) => {
+    const { db } = latestD1();
+    const errors: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...values: unknown[]) => {
+      errors.push(values);
+    };
+    try {
+      const response = await createApp().fetch(
+        new Request("https://a.asimposium.org/v1/operators/fellow-cap", { method: "POST" }),
+        {
+          DB: db,
+          ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+          STOA_ORIGIN: LOOPBACK,
+          AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+          SERVICE_ENVELOPE_KEYS: keyring,
+          OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+        } as never,
+        ctx,
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual(await fixture(OPERATOR_AUTH_UNAVAILABLE_FIXTURE));
+
+      const repeated = await createApp().fetch(
+        new Request("https://a.asimposium.org/v1/operators/fellow-cap", { method: "POST" }),
+        {
+          DB: db,
+          ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+          STOA_ORIGIN: LOOPBACK,
+          AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+          SERVICE_ENVELOPE_KEYS: keyring,
+          OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+        } as never,
+        ctx,
+      );
+      expect(repeated.status).toBe(503);
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors).toEqual([
+      ["[wire] invalid service-envelope keyring", { error: "KEYRING_CONFIG_INVALID" }],
+    ]);
+    expect(JSON.stringify(errors)).not.toContain(keyring);
+  });
+
+  test("an absent optional keyring stays a quiet typed-unavailable sponsor plane", async () => {
+    const { db } = latestD1();
+    const errors: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...values: unknown[]) => {
+      errors.push(values);
+    };
+    try {
+      const response = await createApp().fetch(
+        new Request("https://a.asimposium.org/v1/operators/fellow-cap", { method: "POST" }),
+        {
+          DB: db,
+          ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+          STOA_ORIGIN: LOOPBACK,
+          AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+          OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+        } as never,
+        ctx,
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual(await fixture(OPERATOR_AUTH_UNAVAILABLE_FIXTURE));
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors).toEqual([]);
+  });
 });
