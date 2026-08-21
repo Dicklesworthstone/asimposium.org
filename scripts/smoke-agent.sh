@@ -331,7 +331,9 @@ if [[ ! "$loop_session_id" =~ ^S-[A-Za-z0-9]{26}$ ]]; then
 fi
 
 # Stage: working pack with the mandatory omitted[] and server next_actions.
-loop_pack="$(smoke_loop GET "/v1/sessions/$loop_session_id/pack?profile=working")" || loop_pack=""
+# A direct read: the nested smoke_loop_read -> smoke_loop command substitution
+# dropped the GET body, so the pack reads directly.
+loop_pack="$(curl --silent --max-time 15 --write-out $'\n%{http_code}' --header "Authorization: Bearer $ASIMPOSIUM_SMOKE_FELLOW_TOKEN" "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/v1/sessions/$loop_session_id/pack?profile=working")"
 loop_pack_status="${loop_pack##*$'\n'}"
 if [[ "$loop_pack_status" != "200" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PACK_UNAVAILABLE" "$reproduce"
