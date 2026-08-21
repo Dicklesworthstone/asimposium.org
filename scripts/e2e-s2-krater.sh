@@ -104,6 +104,10 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0014_sponsor_enrollment_rate_limit.sql
   db/migrations/0015_sponsor_enrollment_bootstrap_invariant.sql
   db/migrations/0016_operator_fellow_cap_override.sql
+  db/migrations/0017_sessions_workshop_cursor.sql
+  db/migrations/0018_session_write_replays.sql
+  db/migrations/0019_problem_memberships.sql
+  db/migrations/0020_session_replay_atomic_claim.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -117,7 +121,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/artifacts.ts
   packages/contracts/src/s2-cost-receipt.ts
   packages/contracts/src/index.ts
-  # `index.ts` is a re-export barrel, so these four are executed by every run
+  # `index.ts` is a re-export barrel, so these modules are executed by every run
   # that touches the contracts entry point. The mechanical closure walk found
   # them; the hand-maintained list had covered the barrel and stopped there.
   packages/contracts/src/enrollment.ts
@@ -125,6 +129,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/problem.ts
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
+  packages/contracts/src/sessions.ts
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
   # executed ones, and a listed file whose own imports escape the set leaves the
@@ -133,6 +138,73 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/test/unit/schema.test.ts
   packages/contracts/generated/s2-cost-receipt.schema.json
   packages/contracts/generated/s2-cost-receipt.types.ts
+  # The S-2 harness worker now imports createApp so the mounted promotion route
+  # runs the real Stoa app against this run's D1 + DO. That pulls the entire
+  # production closure into the attested graph. Derived statically from the
+  # worker.ts import walk (and the workspace-package resolver extension below):
+  # every reached local source file, workspace manifest, protocol text asset,
+  # and generated schema the imports read is listed here so the mechanical
+  # `s2_verify_source_closure` walk stays exact.
+  apps/wire/src/app.ts
+  apps/wire/src/env.ts
+  apps/wire/src/ledger-face.ts
+  apps/wire/src/auth/canonical.ts
+  apps/wire/src/auth/envelope.ts
+  apps/wire/src/auth/http.ts
+  apps/wire/src/auth/keyring.ts
+  apps/wire/src/auth/nonce.ts
+  apps/wire/src/auth/principal.ts
+  apps/wire/src/auth/refusal.ts
+  apps/wire/src/enrollment/capsule.ts
+  apps/wire/src/enrollment/d1-store.ts
+  apps/wire/src/enrollment/router.ts
+  apps/wire/src/enrollment/service.ts
+  apps/wire/src/http/envelope.ts
+  apps/wire/src/http/health.ts
+  apps/wire/src/http/redact.ts
+  apps/wire/src/krater/intent.ts
+  apps/wire/src/screening/aggregate.ts
+  apps/wire/src/screening/context.ts
+  apps/wire/src/screening/provider.ts
+  apps/wire/src/screening/route.ts
+  apps/wire/src/screening/types.ts
+  apps/wire/src/screening/workers-ai.ts
+  apps/wire/src/sessions/router.ts
+  apps/wire/src/split/policy.ts
+  packages/contracts/src/public-schemas.ts
+  packages/contracts/generated/enrollment.schema.json
+  packages/contracts/generated/enrollment-capsule.schema.json
+  packages/contracts/generated/ledger.schema.json
+  packages/contracts/generated/problem.schema.json
+  packages/contracts/generated/screening.schema.json
+  packages/contracts/generated/sessions.schema.json
+  packages/protocol/package.json
+  packages/protocol/src/index.ts
+  packages/protocol/src/errors.ts
+  packages/protocol/src/registry.ts
+  packages/protocol/src/scan.ts
+  packages/protocol/src/sha256.ts
+  packages/protocol/src/text.ts
+  packages/protocol/src/types.ts
+  packages/protocol/assets/capsule.md
+  packages/protocol/assets/handbook.md
+  packages/protocol/assets/llms.txt
+  packages/protocol/assets/policy.md
+  packages/protocol/assets/protocol.md
+  packages/protocol/assets/skill.md
+  packages/render/package.json
+  packages/render/src/index.ts
+  packages/render/src/canonical.ts
+  packages/render/src/errors.ts
+  packages/render/src/pack-composer.ts
+  packages/render/src/prepare.ts
+  packages/render/src/render.ts
+  packages/render/src/sanitize.ts
+  packages/render/src/spike.ts
+  packages/render/src/types.ts
+  packages/render/src/faces/html.ts
+  packages/render/src/faces/json.ts
+  packages/render/src/faces/markdown.ts
   package.json
   bun.lock
   apps/wire/package.json
@@ -156,6 +228,10 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0014_sponsor_enrollment_rate_limit.sql
   0015_sponsor_enrollment_bootstrap_invariant.sql
   0016_operator_fellow_cap_override.sql
+  0017_sessions_workshop_cursor.sql
+  0018_session_write_replays.sql
+  0019_problem_memberships.sql
+  0020_session_replay_atomic_claim.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
@@ -611,11 +687,21 @@ s2_verify_source_closure() {
     // cover — including under an omission plant that removes exactly this path.
     // Resolved on first use so the refusal travels the typed walk-error channel
     // instead of escaping as an uncaught throw before the walk begins.
-    const packageRoot = resolve(repoRoot, "packages/contracts");
-    const packageManifestPath = resolve(packageRoot, "package.json");
-    let exportsMapCache;
-    const exportsMapFor = () => {
-      if (exportsMapCache !== undefined) return exportsMapCache;
+    // Every workspace package the closure reaches by name resolves through ITS
+    // OWN listed package.json export map, keyed by package root -- not one
+    // hardcoded package. @asimposium/contracts, @asimposium/protocol and
+    // @asimposium/render are all local source under packages/<name>: createApp
+    // imports protocol directly, and ledger-face plus the session router import
+    // render, so returning undefined for those (as a bun.lock dependency) would
+    // silently drop live workspace source from the attested closure. Each
+    // manifest travels the same listed-and-safe policy as any other input and is
+    // read on first use so a refusal takes the typed walk-error channel.
+    const WORKSPACE_SCOPE = "@asimposium/";
+    const workspaceExportsCache = new Map();
+    const exportsMapForPackageRoot = (packageRoot) => {
+      const cached = workspaceExportsCache.get(packageRoot);
+      if (cached !== undefined) return cached;
+      const packageManifestPath = resolve(packageRoot, "package.json");
       if (!listed.has(packageManifestPath)) sourceError("package-manifest-unlisted");
       if (!isSafeSourceFile(packageManifestPath)) sourceError("package-manifest-unreadable");
       let manifest;
@@ -632,8 +718,8 @@ s2_verify_source_closure() {
       if (exportsMap === null || typeof exportsMap !== "object") {
         sourceError("package-manifest-json-invalid");
       }
-      exportsMapCache = exportsMap;
-      return exportsMapCache;
+      workspaceExportsCache.set(packageRoot, exportsMap);
+      return exportsMap;
     };
 
     // The Worker sources import extensionless (`from "./krater"`), so a resolver
@@ -657,13 +743,21 @@ s2_verify_source_closure() {
     const resolveSpecifier = (specifier, importer) => {
       if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return undefined;
       if (specifier.startsWith(".")) return resolveLocalFile(resolve(dirname(importer), specifier));
-      if (specifier === "@asimposium/contracts" || specifier.startsWith("@asimposium/contracts/")) {
-        const subpath = specifier === "@asimposium/contracts"
-          ? "."
-          : `./${specifier.slice("@asimposium/contracts/".length)}`;
-        const target = exportsMapFor()[subpath];
+      if (specifier.startsWith(WORKSPACE_SCOPE)) {
+        const rest = specifier.slice(WORKSPACE_SCOPE.length);
+        const slash = rest.indexOf("/");
+        const packageName = slash === -1 ? rest : rest.slice(0, slash);
+        const subpath = slash === -1 ? "." : "./" + rest.slice(slash + 1);
+        if (packageName.length === 0) sourceError("unmapped-export");
+        // The workspace name basename is the directory: @asimposium/render lives
+        // at packages/render. Containment is enforced before any manifest read.
+        const packageRoot = resolve(repoRoot, "packages", packageName);
+        if (!withinRepo(packageRoot)) sourceError("import-escapes-repository");
+        const target = exportsMapForPackageRoot(packageRoot)[subpath];
         if (typeof target !== "string") sourceError("unmapped-export");
-        return resolve(packageRoot, target);
+        const resolved = resolve(packageRoot, target);
+        if (!withinRepo(resolved)) sourceError("import-escapes-repository");
+        return resolved;
       }
       return undefined; // A published dependency, pinned by bun.lock, which is listed.
     };
@@ -778,6 +872,19 @@ random_hex() {
   local bytes="$1" value
   value="$(LC_ALL=C od -An -N "${bytes}" -tx1 /dev/urandom | tr -d '[:space:]')" || return 1
   [[ "${value}" =~ ^[a-f0-9]+$ && ${#value} -eq $((bytes * 2)) ]] || return 1
+  printf '%s\n' "${value}"
+}
+
+# A fresh 43-char base64url key (32 random bytes, unpadded) for the production
+# session stack's replay protector. This is secret-shaped local replay material,
+# so it is generated per run and injected via --var like the harness token --
+# never written to wrangler.s2.toml or the repo. base64url alphabet only, so it
+# is a valid ENROLLMENT_REPLAY_KEY without any escaping in the --var value.
+random_replay_key() {
+  local value
+  value="$(LC_ALL=C head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]')" \
+    || return 1
+  [[ "${value}" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
   printf '%s\n' "${value}"
 }
 
@@ -968,6 +1075,11 @@ S2_ACTIVE_HARNESS_TOKEN=""
 S2_ACTIVE_HARNESS_RUN_ID=""
 S2_COST_PHASE_EXERCISE="not-run"
 S2_COST_PHASE_RESTART_VERIFY="not-run"
+# The mounted-promotion phases intentionally have no cost-manifest status var: the
+# strict S2 cost-manifest contract predates them and must not gain keys silently
+# (that would be a contracts-first change under its own leases). Their proof is
+# the exact mounted terminal records the client emits plus the fail-closed
+# control flow below, so a dead manifest status here would be misleading.
 S2_COST_PHASE_UPGRADE_EXISTING="not-run"
 S2_COST_PHASE_UPGRADE_EMPTY="not-run"
 S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="not-run"
@@ -3397,6 +3509,34 @@ stop_worker() {
   clear_most_recent_supervisor_if_marker "${stopped_marker}"
 }
 
+# An abrupt crash of the exact owned worker, for the mounted crash/restart proof.
+# A graceful stop_worker would let the process drain; this proves durability
+# across a real kill. It reuses the same leader/marker identity authority as
+# stop_worker -- kill_owned_group_to_zero sends KILL to the proved leader-pinned
+# group only (no numeric unpinned signal) and then proves zero run survivors --
+# and clears the same S2_SERVER_* state so a following start_worker or EXIT
+# cleanup never re-signals a dead group.
+crash_worker() {
+  local crashed_marker
+  [[ -n "${S2_SERVER_PID}" ]] || return 0
+  # Fail closed unless we still provably own this exact worker before killing it.
+  server_is_owned || return 1
+  crashed_marker="${S2_SERVER_MARKER}"
+  kill_owned_group_to_zero \
+    "${S2_SERVER_PID}" "${S2_SERVER_PGID}" "${S2_SERVER_MARKER}" \
+    "${S2_SERVER_PERSIST}" "${S2_SERVER_PORT}" server || return 1
+  S2_SERVER_PID=""
+  S2_SERVER_PGID=""
+  S2_SERVER_MARKER=""
+  S2_SERVER_WATCHDOG_PID=""
+  S2_SERVER_WATCHDOG_HEALTH=""
+  S2_SERVER_PERSIST=""
+  S2_SERVER_PORT=""
+  S2_ACTIVE_HARNESS_TOKEN=""
+  S2_ACTIVE_HARNESS_RUN_ID=""
+  clear_most_recent_supervisor_if_marker "${crashed_marker}"
+}
+
 remember_lifecycle_supervisor() {
   S2_LIFECYCLE_OWNED_PIDS+=("$1")
   S2_LIFECYCLE_OWNED_PGIDS+=("$2")
@@ -4668,10 +4808,14 @@ start_worker() {
   local persist="${2:-${S2_STATE_DIR}}"
   local port="${3:-${S2_PORT}}"
   local log="${4:-${S2_SERVER_LOG}}"
-  local token run_id ready_response deadline
+  local token run_id replay_key ready_response deadline
   port_is_busy "${port}" && return 2
   token="$(random_hex 32)" || return 1
   run_id="$(random_hex 16)" || return 1
+  # A restart on the same persist dir (crash/reconcile scenarios) must reuse the
+  # same replay key so the production session stack rebuilds an identical replay
+  # protector; a fresh worker in a fresh persist dir mints a new one.
+  replay_key="${S2_ACTIVE_ENROLLMENT_REPLAY_KEY:-$(random_replay_key)}" || return 1
   S2_ACTIVE_ORIGIN="http://127.0.0.1:${port}"
 
   start_pinned_supervisor "${persist}/server-${run_id}.status" "worker-${port}" \
@@ -4686,6 +4830,9 @@ start_worker() {
       --inspector-port 0 \
       --var "S2_HARNESS_TOKEN:${token}" \
       --var "S2_HARNESS_RUN_ID:${run_id}" \
+      --var "ENROLLMENT_REPLAY_KEY:${replay_key}" \
+      --var "STOA_ORIGIN:${S2_ACTIVE_ORIGIN}" \
+      --var "AGORA_ORIGIN:https://asimposium.org" \
       --log-level error \
       --show-interactive-dev-session=false \
       >>"${log}" 2>&1 || return 1
@@ -4698,6 +4845,7 @@ start_worker() {
   S2_SERVER_PORT="${port}"
   S2_ACTIVE_HARNESS_TOKEN="${token}"
   S2_ACTIVE_HARNESS_RUN_ID="${run_id}"
+  S2_ACTIVE_ENROLLMENT_REPLAY_KEY="${replay_key}"
   # Transfer is complete only after every Worker handle is visible to EXIT cleanup.
   clear_most_recent_supervisor_if_marker "${S2_SERVER_MARKER}"
 
@@ -6803,9 +6951,35 @@ run_s2_shell_regression_test() {
     journal_valid="${S2_STATE_DIR}/journal-valid-$(random_hex 8).json"
     journal_alternate="${S2_STATE_DIR}/journal-alternate-$(random_hex 8).json"
     journal_invalid="${S2_STATE_DIR}/journal-invalid-$(random_hex 8).json"
+    # The timestamp vectors below predate the session migrations and enumerate
+    # the first sixteen rows explicitly. Extend each from the authoritative
+    # expected journal so a later migration cannot make this plant stale-green.
+    extend_journal_timestamp_fixture() {
+      local path="$1" applied_at="$2" contents appended="" separator=""
+      local index migration_name
+      # Remove only the results-array, response-object, and outer-array
+      # delimiters. The preceding `}` belongs to the existing final row and
+      # must remain before the comma that introduces the appended rows.
+      local suffix=']}]'
+      IFS= read -r contents <"${path}" || return 1
+      [[ "${contents}" == *"${suffix}" ]] || return 1
+      contents="${contents%"${suffix}"}"
+      for ((index = 16; index < ${#S2_EXPECTED_MIGRATION_JOURNAL[@]}; index += 1)); do
+        migration_name="${S2_EXPECTED_MIGRATION_JOURNAL[index]}"
+        [[ "${migration_name}" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] || return 1
+        printf -v appended '%s%s{"id":%d,"name":"%s","applied_at":"%s"}' \
+          "${appended}" "${separator}" "$((index + 1))" "${migration_name}" "${applied_at}"
+        separator=','
+      done
+      [[ -n "${appended}" ]] || return 1
+      printf '%s,%s%s\n' "${contents}" "${appended}" "${suffix}" >"${path}"
+    }
     printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"},{"id":16,"name":"0016_operator_fellow_cap_override.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
     printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 10:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 10:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 10:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 10:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 10:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 10:25:37"},{"id":16,"name":"0016_operator_fellow_cap_override.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
     printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"},{"id":16,"name":"0016_operator_fellow_cap_override.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
+    extend_journal_timestamp_fixture "${journal_valid}" "2026-08-14 09:25:37" || return 1
+    extend_journal_timestamp_fixture "${journal_alternate}" "2026-08-14 10:25:37" || return 1
+    extend_journal_timestamp_fixture "${journal_invalid}" "2026-08-14 09:25:37" || return 1
     if valid_output="$(validate_current_migration_journal "${journal_valid}" journal-timestamp-valid)"; then :; else return 1; fi
     if alternate_output="$(validate_current_migration_journal "${journal_alternate}" journal-timestamp-alternate)"; then :; else return 1; fi
     if invalid_output="$(validate_current_migration_journal "${journal_invalid}" journal-timestamp-invalid)"; then return 1; fi
@@ -7754,6 +7928,49 @@ else
   S2_COST_PHASE_RESTART_VERIFY="fail"
   stop_worker
   emit_wrangler_failure "LOCAL_D1_RESTART_SCENARIO_FAILED"
+  exit "${S2_CLIENT_EXIT}"
+fi
+stop_worker
+
+# ── the mounted production promotion path, on the real D1-to-DO seam ──────────
+# The client owns the whole HTTP sequence for each phase (seed -> mounted
+# open/workshop/promote -> DO status poll -> reconcile -> census). The shell only
+# orchestrates the crash and restart between the two phases: the pre-restart
+# phase confirms one committed-but-undelivered outbox row is durable (its exit 0
+# is that confirmation), the shell then abruptly KILLs the exact owned worker,
+# and the post-restart phase drives the SAME persistence directory and replay key
+# so the durable row recovers and delivers exactly once against the real DO.
+# These phases carry no cost-manifest key; the proof is the retained exact
+# mounted terminal records plus this fail-closed control flow.
+if ! start_worker; then
+  emit_wrangler_failure "LOCAL_MOUNTED_WORKER_UNAVAILABLE"
+  exit 1
+fi
+if run_phase "mounted-outbox"; then
+  :
+else
+  S2_CLIENT_EXIT=$?
+  stop_worker || :
+  emit_wrangler_failure "LOCAL_MOUNTED_OUTBOX_SCENARIO_FAILED"
+  exit "${S2_CLIENT_EXIT}"
+fi
+# The crash: the durable pending row was just confirmed, so kill -- not drain --
+# the worker and prove the group is absent before restarting on the same persist.
+if ! crash_worker; then
+  emit_wrangler_failure "LOCAL_MOUNTED_CRASH_OWNERSHIP_UNPROVEN"
+  exit 1
+fi
+
+if ! start_worker; then
+  emit_wrangler_failure "LOCAL_MOUNTED_RESTART_WORKER_UNAVAILABLE"
+  exit 1
+fi
+if run_phase "mounted-outbox-restart-verify"; then
+  :
+else
+  S2_CLIENT_EXIT=$?
+  stop_worker || :
+  emit_wrangler_failure "LOCAL_MOUNTED_RESTART_SCENARIO_FAILED"
   exit "${S2_CLIENT_EXIT}"
 fi
 stop_worker

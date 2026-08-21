@@ -74,6 +74,9 @@ readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/.bin/wrangler"
 readonly LOCAL_WRANGLER_CONFIG="$REPO_ROOT/infra/wrangler.toml"
 readonly LOCAL_D1_WORKER="$REPO_ROOT/apps/wire/src/enrollment/local-d1-worker.ts"
 readonly LOCAL_D1_CLIENT="$REPO_ROOT/apps/wire/src/enrollment/local-d1-client.ts"
+# This public, canonical Worker binding is pinned in the private Wrangler
+# env-file. Replay and Stoa remain per-run private-FD bindings below.
+readonly LOCAL_WRANGLER_AGORA_ENV="AGORA_ORIGIN=https://asimposium.org"
 # Never resolve an executable through a caller-controlled PATH. This fixed
 # search set is also the PATH inherited by local Wrangler: its /usr/bin/env
 # node shebang must not turn a hostile caller PATH into code that receives the
@@ -394,6 +397,8 @@ prepare_local_runtime_roots() {
     create_private_local_runtime_directory "$root" || return 1
   done
   create_private_local_runtime_file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" || return 1
+  printf '%s\n' "$LOCAL_WRANGLER_AGORA_ENV" >"$LOCAL_RUNTIME_WRANGLER_ENV_FILE" || return 1
+  private_wrangler_env_is_exact || return 1
   # This is the only retention declaration. Every concrete writable runtime root
   # is below it, so one inode-safe traversal covers the whole retained surface.
   LOCAL_RETAINED_ROOTS=("$STATE_DIR")
@@ -411,9 +416,9 @@ prepare_local_runtime_roots() {
     "XDG_RUNTIME_DIR=$LOCAL_RUNTIME_XDG_RUNTIME"
     "WRANGLER_CACHE_DIR=$LOCAL_RUNTIME_WRANGLER_CACHE"
     "WRANGLER_LOG_PATH=$LOCAL_RUNTIME_WRANGLER_LOG"
-    # `--env-file` always names this private empty file. Wrangler therefore
+    # `--env-file` always names this private fixed file. Wrangler therefore
     # bypasses config-relative .dev.vars and default .env discovery, while this
-    # true setting permits only the scrubbed process bindings needed by Workerd.
+    # true setting permits only the private-FD process bindings needed by Workerd.
     "CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=true"
     # Wrangler 4.123 enables Miniflare's local trace collector by default;
     # it retains request/response bodies (including minted flow material) in
@@ -1967,12 +1972,13 @@ wait_for_private_workerd_handoff_adoption() {
 }
 
 # Start one stopped supervisor whose child reads the replay/origin handoff from
-# descriptor 9, closes that descriptor, and only then exports the two Worker
-# bindings. The full wrapper chain begins under LOCAL_RUNTIME_ENV in
+# descriptor 9, closes that descriptor, and only then exports the two private
+# Worker bindings. The canonical public Agora binding is in the fixed private
+# Wrangler env-file. The full wrapper chain begins under LOCAL_RUNTIME_ENV in
 # start_pinned_supervisor, including the supervisor itself and Wrangler's node
-# shebang. `--env-file` always names the private empty file, which makes this
-# exact Wrangler version skip config-relative .dev.vars and default .env
-# discovery while still admitting the wrapper's scrubbed process bindings.
+# shebang. `--env-file` names the fixed private file, which makes this exact
+# Wrangler version skip config-relative .dev.vars and default .env discovery
+# while still admitting the wrapper's scrubbed process bindings.
 start_private_workerd_supervisor() {
   local status_file="$1" label="$2" replay_key="$3" stoa_origin="$4" cwd="$5" log="$6" handoff_ack=""
   shift 6
@@ -2179,6 +2185,70 @@ readonly LOCAL_CLIENT_CAPTURE_PROGRAM='
     process.exit(125);
   }
 '
+
+# The client writes only fixed harness-owned codes, but its retained diagnostic
+# is still untrusted input at this boundary. Surface one code only when the
+# complete JSON record is exact and the code is in this finite allowlist.
+readonly LOCAL_CLIENT_FAILURE_CODE_PROGRAM='
+  import { constants } from "node:fs";
+  import { lstat, open } from "node:fs/promises";
+  const args = process.argv.slice(1);
+  const [path] = args;
+  const allowedCodes = new Set(["capsule-json-status"]);
+  const expectedKeys = ["code", "duration_ms", "package", "reproduce", "status", "suite", "tool", "version"];
+  if (args.length !== 1 || typeof path !== "string") process.exit(1);
+  try {
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size < 1 || entry.size > 4096) process.exit(1);
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await file.stat();
+      if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size) process.exit(1);
+      const bytes = await file.readFile();
+      const after = await file.stat();
+      if (!after.isFile() || after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || bytes.length !== opened.size) process.exit(1);
+      if (bytes.at(-1) !== 0x0a || bytes.indexOf(0x0a) !== bytes.length - 1) process.exit(1);
+      const record = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const parsed = JSON.parse(record.slice(0, -1));
+      if (record !== `${JSON.stringify(parsed)}\n`) process.exit(1);
+      if (
+        typeof parsed !== "object" || parsed === null || Array.isArray(parsed) ||
+        JSON.stringify(Object.keys(parsed).sort()) !== JSON.stringify(expectedKeys) ||
+        parsed.tool !== "bun+wrangler" || parsed.package !== "apps/wire" ||
+        parsed.suite !== "s1-enrollment-local-d1" || parsed.status !== "fail" ||
+        parsed.reproduce !== "scripts/e2e-s1-cold-enrollment.sh --local-d1" ||
+        typeof parsed.version !== "string" || parsed.version.length < 1 || parsed.version.length > 64 ||
+        !Number.isSafeInteger(parsed.duration_ms) || parsed.duration_ms < 0 ||
+        typeof parsed.code !== "string" || !allowedCodes.has(parsed.code)
+      ) process.exit(1);
+    } finally {
+      await file.close();
+    }
+  } catch {
+    process.exit(1);
+  }
+'
+
+local_client_failure_validator() {
+  local stderr_path="$1"
+  [[ "$stderr_path" == "$STATE_DIR/"* && -f "$stderr_path" && ! -L "$stderr_path" && -O "$stderr_path" && -r "$stderr_path" ]] || return 1
+  "$PERL_BIN" -e '
+    $SIG{ALRM} = sub { exit 124 };
+    alarm shift @ARGV;
+    exec @ARGV;
+  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
+    cwd="$1"; shift
+    cd -- "$cwd" || exit 125
+    exec "$@"
+  ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$BUN_BIN" -e "$LOCAL_CLIENT_FAILURE_CODE_PROGRAM" "$stderr_path"
+}
+
+local_client_failure_code() {
+  local stderr_path="$1" status=0
+  local_client_failure_validator "$stderr_path" >/dev/null 2>/dev/null || status=$?
+  ((status == 0)) || return 0
+  printf '%s' "capsule-json-status"
+}
 
 # Capture the local client streams as private, bounded retained artifacts. The
 # wrapper opens both paths with O_EXCL|O_NOFOLLOW, never prints an exception, and
@@ -3646,6 +3716,97 @@ self_test_private_runtime_env() {
   emit "pass" "PRIVATE_RUNTIME_ENV_SELF_TEST_PASSED"
 }
 
+# The public Wrangler artifact is bounded before it is read: only the exact
+# one-line canonical binding is admitted, including its required final LF.
+private_wrangler_env_is_exact() {
+  local line actual_bytes expected_bytes
+  [[ -f "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && ! -L "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && -O "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && -r "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" ]] ||
+    return 1
+  expected_bytes=$(( ${#LOCAL_WRANGLER_AGORA_ENV} + 1 ))
+  actual_bytes="$(LC_ALL=C wc -c <"$LOCAL_RUNTIME_WRANGLER_ENV_FILE" 2>/dev/null | tr -d '[:space:]')" ||
+    return 1
+  [[ "$actual_bytes" =~ ^[0-9]+$ && "$actual_bytes" == "$expected_bytes" ]] || return 1
+  IFS= read -r line <"$LOCAL_RUNTIME_WRANGLER_ENV_FILE" || return 1
+  [[ "$line" == "$LOCAL_WRANGLER_AGORA_ENV" ]]
+}
+
+# PLANTED: the retained Wrangler env-file is one exact public binding. Missing
+# LF and a second blank line both fail before any Workerd child can consume it.
+self_test_private_wrangler_env() {
+  lifecycle_state_dir "private-wrangler-env"
+  private_wrangler_env_is_exact || failed "PRIVATE_WRANGLER_ENV_CONTENT_INVALID"
+  printf '%s' "$LOCAL_WRANGLER_AGORA_ENV" >"$LOCAL_RUNTIME_WRANGLER_ENV_FILE" ||
+    failed "PRIVATE_WRANGLER_ENV_UNTRUSTED"
+  if private_wrangler_env_is_exact; then
+    failed "PRIVATE_WRANGLER_ENV_MISSING_LF_FALSE_GREEN"
+  fi
+  printf '%s\n\n' "$LOCAL_WRANGLER_AGORA_ENV" >"$LOCAL_RUNTIME_WRANGLER_ENV_FILE" ||
+    failed "PRIVATE_WRANGLER_ENV_UNTRUSTED"
+  if private_wrangler_env_is_exact; then
+    failed "PRIVATE_WRANGLER_ENV_EXTRA_BLANK_FALSE_GREEN"
+  fi
+  printf '%s\n' "$LOCAL_WRANGLER_AGORA_ENV" >"$LOCAL_RUNTIME_WRANGLER_ENV_FILE" ||
+    failed "PRIVATE_WRANGLER_ENV_UNTRUSTED"
+  private_wrangler_env_is_exact || failed "PRIVATE_WRANGLER_ENV_CONTENT_INVALID"
+  log_phase "private-wrangler-env-observed" "result=exact binding=AGORA_ORIGIN missing-lf=refused extra-blank=refused scope=private-env-file"
+  emit "pass" "PRIVATE_WRANGLER_ENV_SELF_TEST_PASSED"
+}
+
+# PLANTED paired records: exactly the approved fixed client cause may cross the
+# retained diagnostic boundary; another well-formed fixed client code is withheld.
+self_test_client_failure_diagnostic_allowlist() {
+  local allowed_path rejected_path malformed_utf8_path duplicate_path trailing_path no_lf_path
+  local allowed_code rejected_code malformed_utf8_code duplicate_code trailing_code no_lf_code record
+  local validator_stdout validator_status=0
+  lifecycle_state_dir "client-failure-diagnostic"
+  allowed_path="$STATE_DIR/client-allowed.stderr"
+  rejected_path="$STATE_DIR/client-rejected.stderr"
+  malformed_utf8_path="$STATE_DIR/client-malformed-utf8.stderr"
+  duplicate_path="$STATE_DIR/client-duplicate.stderr"
+  trailing_path="$STATE_DIR/client-trailing.stderr"
+  no_lf_path="$STATE_DIR/client-no-lf.stderr"
+  record='{"tool":"bun+wrangler","package":"apps/wire","suite":"s1-enrollment-local-d1","version":"0.0.0","duration_ms":0,"status":"fail","code":"capsule-json-status","reproduce":"scripts/e2e-s1-cold-enrollment.sh --local-d1"}'
+  set -C
+  printf '%s\n' "$record" >"$allowed_path" || {
+    set +C
+    failed "CLIENT_FAILURE_DIAGNOSTIC_FIXTURE_UNTRUSTED"
+  }
+  printf '%s\n' '{"tool":"bun+wrangler","package":"apps/wire","suite":"s1-enrollment-local-d1","version":"0.0.0","duration_ms":0,"status":"fail","code":"local-d1-scenario","reproduce":"scripts/e2e-s1-cold-enrollment.sh --local-d1"}' >"$rejected_path" || {
+    set +C
+    failed "CLIENT_FAILURE_DIAGNOSTIC_FIXTURE_UNTRUSTED"
+  }
+  printf '%s\377%s\n' '{"tool":"bun+wrangler","package":"apps/wire","suite":"s1-enrollment-local-d1","version":"' '","duration_ms":0,"status":"fail","code":"capsule-json-status","reproduce":"scripts/e2e-s1-cold-enrollment.sh --local-d1"}' >"$malformed_utf8_path" || {
+    set +C
+    failed "CLIENT_FAILURE_DIAGNOSTIC_FIXTURE_UNTRUSTED"
+  }
+  printf '%s\n%s\n' "$record" "$record" >"$duplicate_path" || {
+    set +C
+    failed "CLIENT_FAILURE_DIAGNOSTIC_FIXTURE_UNTRUSTED"
+  }
+  printf '%s\n ' "$record" >"$trailing_path" || {
+    set +C
+    failed "CLIENT_FAILURE_DIAGNOSTIC_FIXTURE_UNTRUSTED"
+  }
+  printf '%s' "$record" >"$no_lf_path" || {
+    set +C
+    failed "CLIENT_FAILURE_DIAGNOSTIC_FIXTURE_UNTRUSTED"
+  }
+  set +C
+  validator_stdout="$(local_client_failure_validator "$allowed_path" 2>/dev/null)" || validator_status=$?
+  [[ "$validator_status" == "0" && -z "$validator_stdout" ]] ||
+    failed "CLIENT_FAILURE_DIAGNOSTIC_VALIDATOR_STDOUT_NOT_EMPTY"
+  allowed_code="$(local_client_failure_code "$allowed_path")"
+  rejected_code="$(local_client_failure_code "$rejected_path")"
+  malformed_utf8_code="$(local_client_failure_code "$malformed_utf8_path")"
+  duplicate_code="$(local_client_failure_code "$duplicate_path")"
+  trailing_code="$(local_client_failure_code "$trailing_path")"
+  no_lf_code="$(local_client_failure_code "$no_lf_path")"
+  [[ "$allowed_code" == "capsule-json-status" && -z "$rejected_code" && -z "$malformed_utf8_code" && -z "$duplicate_code" && -z "$trailing_code" && -z "$no_lf_code" ]] ||
+    failed "CLIENT_FAILURE_DIAGNOSTIC_ALLOWLIST_FALSE_GREEN"
+  log_phase "client-failure-diagnostic-allowlist" "allowed=$allowed_code validator-stdout=empty parent-code=fixed rejected=withheld malformed-utf8=withheld duplicate=withheld trailing=withheld no-lf=withheld scope=closed-capture-file"
+  emit "pass" "CLIENT_FAILURE_DIAGNOSTIC_ALLOWLIST_SELF_TEST_PASSED"
+}
+
 # PLANTED NEGATIVE: exercise the actual bounded local-client capture wrapper,
 # place only a secret-shaped diagnostic on its stderr stream, then require the
 # retained-root scanner to refuse it without naming the stream or material.
@@ -4035,8 +4196,12 @@ assert_port_ownership() {
 # terminal typed record, and a later EXIT cleanup must be allowed to supersede it
 # only if that cleanup itself remains unproven.
 terminal_local_client_failure() {
-  local client_exit="$1"
-  log_phase "client-failed" "exit=$client_exit"
+  local client_exit="$1" inner_code="${2:-}"
+  if [[ "$inner_code" == "capsule-json-status" ]]; then
+    log_phase "client-failed" "exit=$client_exit inner-code=$inner_code"
+  else
+    log_phase "client-failed" "exit=$client_exit"
+  fi
   case "$client_exit" in
     124) failed "LOCAL_D1_CLIENT_TIMEOUT" ;;
     125) failed "LOCAL_D1_CLIENT_CONTAINMENT_UNPROVEN" ;;
@@ -4048,7 +4213,7 @@ run_local_d1() {
   [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
 
   local local_port origin token server_log server_status_file ready readiness_deadline client_exit scope
-  local evidence_path client_stdout client_stderr
+  local evidence_path client_stdout client_stderr client_failure_code
   local migration_exit=0
   local server_status="" server_status_read=0
   # Both resolvers refuse in this shell, so a pinned port that is invalid or busy
@@ -4171,7 +4336,11 @@ run_local_d1() {
   assert_local_client_streams_not_retained "$client_stdout" "$client_stderr"
   if ((client_exit != 0)); then
     ((client_exit == 124)) && log_phase "client-deadline" "deadline_s=$CLIENT_DEADLINE_SECONDS"
-    terminal_local_client_failure "$client_exit"
+    client_failure_code=""
+    if ((client_exit != 124 && client_exit != 125)); then
+      client_failure_code="$(local_client_failure_code "$client_stderr")"
+    fi
+    terminal_local_client_failure "$client_exit" "$client_failure_code"
   fi
   log_phase "client-passed" "exit=0"
 
@@ -4353,6 +4522,16 @@ main() {
   if [[ "${1:-}" == "--self-test-private-runtime-env" ]]; then
     begin_self_test "private-runtime-env"
     self_test_private_runtime_env
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-private-wrangler-env" ]]; then
+    begin_self_test "private-wrangler-env"
+    self_test_private_wrangler_env
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-failure-diagnostic" ]]; then
+    begin_self_test "client-failure-diagnostic"
+    self_test_client_failure_diagnostic_allowlist
     return
   fi
   if [[ "${1:-}" == "--self-test-client-stream-secret" ]]; then

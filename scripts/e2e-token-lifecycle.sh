@@ -112,6 +112,334 @@ fail() {
   return 1
 }
 
+# This verifier is intentionally dependency-free so the ordinary unit
+# self-test can exercise exactly the same post-panic completeness and token
+# rejection seam as the local Workerd/D1 client. Its callbacks carry all I/O;
+# the returned terminal record is count-only.
+PANIC_COVERAGE_VERIFIER_SOURCE=""
+read -r -d '' PANIC_COVERAGE_VERIFIER_SOURCE <<'BUN' || true
+type PanicCoverageFellow = {
+  readonly fellow_id: string;
+  readonly credentials: readonly {
+    readonly credential_id: string;
+    readonly active: boolean;
+  }[];
+};
+
+type PanicCoverageRegistryEntry = {
+  readonly label: string;
+  readonly fellowId: string;
+  /** Sponsor inventory hides individually revoked and expired credentials. */
+  readonly beforePanicCredentialCardinality: 0 | 1;
+};
+
+type PanicCoverageCredentialExpectation = PanicCoverageRegistryEntry & {
+  readonly credentialId: string;
+};
+
+type PanicCoverageActiveToken = {
+  readonly label: string;
+  readonly fellowId: string;
+  readonly credentialId: string;
+  readonly token: string;
+};
+
+type PanicCoverageTokenRejection = {
+  readonly label: string;
+  readonly status: number;
+  readonly code: string;
+};
+
+function panicCoverageAssert(condition: unknown, label: string): asserts condition {
+  if (!condition) throw new Error(label);
+}
+
+function exactPanicCoverageFellow(
+  fellows: readonly PanicCoverageFellow[],
+  expected: PanicCoverageRegistryEntry,
+  phase: "before" | "after",
+): PanicCoverageFellow {
+  const matches = fellows.filter((candidate) => candidate.fellow_id === expected.fellowId);
+  panicCoverageAssert(matches.length === 1, `panic-${phase}-fellow-present-once-${expected.label}`);
+  const fellow = matches[0];
+  panicCoverageAssert(fellow !== undefined, `panic-${phase}-fellow-present-${expected.label}`);
+  return fellow;
+}
+
+async function verifyPanicCoverage(input: {
+  readonly registry: readonly PanicCoverageRegistryEntry[];
+  readonly beforePanicFellows: readonly PanicCoverageFellow[];
+  readonly prePanicActiveTokens: readonly PanicCoverageActiveToken[];
+  readonly assertTokenActive: (token: PanicCoverageActiveToken) => Promise<{ readonly fellowId: string }>;
+  readonly runPanic: () => Promise<void>;
+  readonly readAfterPanicFellows: () => Promise<readonly PanicCoverageFellow[]>;
+  readonly assertTokenRejected: (
+    token: PanicCoverageActiveToken,
+  ) => Promise<PanicCoverageTokenRejection>;
+}): Promise<{
+  readonly known_fellows: number;
+  /** One credential was minted for each registry flow; this is not a current listing count. */
+  readonly known_credentials: number;
+  readonly pre_panic_visible_credentials: number;
+  readonly pre_panic_active_tokens: number;
+  readonly post_panic_rejected_tokens: number;
+}> {
+  panicCoverageAssert(input.registry.length === 5, "panic-registry-exactly-five-fellows");
+  panicCoverageAssert(
+    new Set(input.registry.map((entry) => entry.label)).size === input.registry.length,
+    "panic-registry-labels-unique",
+  );
+  panicCoverageAssert(
+    new Set(input.registry.map((entry) => entry.fellowId)).size === input.registry.length,
+    "panic-registry-fellows-unique",
+  );
+  const expectedCredentials: PanicCoverageCredentialExpectation[] = [];
+  for (const expected of input.registry) {
+    const fellow = exactPanicCoverageFellow(input.beforePanicFellows, expected, "before");
+    panicCoverageAssert(
+      fellow.credentials.length === expected.beforePanicCredentialCardinality,
+      `panic-before-credential-cardinality-${expected.label}`,
+    );
+    if (expected.beforePanicCredentialCardinality === 0) continue;
+    const credential = fellow.credentials[0];
+    panicCoverageAssert(credential !== undefined, `panic-before-credential-present-${expected.label}`);
+    expectedCredentials.push({ ...expected, credentialId: credential.credential_id });
+  }
+  panicCoverageAssert(
+    new Set(expectedCredentials.map((entry) => entry.credentialId)).size === expectedCredentials.length,
+    "panic-registry-credentials-unique",
+  );
+  panicCoverageAssert(
+    input.prePanicActiveTokens.length === expectedCredentials.length,
+    "panic-pre-active-token-count-equals-visible-credentials",
+  );
+  panicCoverageAssert(
+    new Set(input.prePanicActiveTokens.map((token) => token.fellowId)).size ===
+      input.prePanicActiveTokens.length,
+    "panic-pre-active-token-fellows-unique",
+  );
+  panicCoverageAssert(
+    new Set(input.prePanicActiveTokens.map((token) => token.credentialId)).size ===
+      input.prePanicActiveTokens.length,
+    "panic-pre-active-token-credentials-unique",
+  );
+  for (const expectedCredential of expectedCredentials) {
+    const matchingTokens = input.prePanicActiveTokens.filter(
+      (token) =>
+        token.fellowId === expectedCredential.fellowId &&
+        token.credentialId === expectedCredential.credentialId,
+    );
+    panicCoverageAssert(
+      matchingTokens.length === 1,
+      `panic-pre-active-token-exact-visible-credential-${expectedCredential.label}`,
+    );
+  }
+
+  const prePanicConfirmedTokens: PanicCoverageActiveToken[] = [];
+  for (const token of input.prePanicActiveTokens) {
+    const registryMatches = input.registry.filter((entry) => entry.fellowId === token.fellowId);
+    panicCoverageAssert(
+      registryMatches.length === 1,
+      `panic-pre-active-fellow-present-once-${token.label}`,
+    );
+    const active = await input.assertTokenActive(token);
+    panicCoverageAssert(
+      active.fellowId === token.fellowId,
+      `panic-token-active-subject-before-panic-${token.label}`,
+    );
+    prePanicConfirmedTokens.push(token);
+  }
+
+  await input.runPanic();
+  const afterPanicFellows = await input.readAfterPanicFellows();
+  panicCoverageAssert(
+    afterPanicFellows.flatMap((fellow) => fellow.credentials).every((credential) => !credential.active),
+    "panic-leaves-no-active-listed-credential",
+  );
+
+  const matchedFellows: PanicCoverageFellow[] = [];
+  for (const expected of input.registry) {
+    const fellow = exactPanicCoverageFellow(afterPanicFellows, expected, "after");
+    panicCoverageAssert(
+      fellow.credentials.length === 0,
+      `panic-after-credential-cardinality-${expected.label}`,
+    );
+    matchedFellows.push(fellow);
+  }
+
+  const rejectedTokens: PanicCoverageTokenRejection[] = [];
+  for (const token of prePanicConfirmedTokens) {
+    const rejection = await input.assertTokenRejected(token);
+    panicCoverageAssert(rejection.label === token.label, `panic-token-rejection-label-${token.label}`);
+    panicCoverageAssert(rejection.status === 401, `panic-token-rejection-status-${token.label}`);
+    panicCoverageAssert(
+      rejection.code === "FELLOW_TOKEN_INVALID",
+      `panic-token-rejection-code-${token.label}`,
+    );
+    rejectedTokens.push(rejection);
+  }
+
+  return {
+    known_fellows: matchedFellows.length,
+    known_credentials: input.registry.length,
+    pre_panic_visible_credentials: expectedCredentials.length,
+    pre_panic_active_tokens: prePanicConfirmedTokens.length,
+    post_panic_rejected_tokens: rejectedTokens.length,
+  };
+}
+
+function emitPanicCoverage(
+  panicCoverage: Awaited<ReturnType<typeof verifyPanicCoverage>>,
+): void {
+  const { pre_panic_visible_credentials, ...credentialCoverage } = panicCoverage;
+  console.log(JSON.stringify({
+    suite: "token-lifecycle-local",
+    record: "panic-pre-panic-visible-credential-count",
+    assertion: "pre_panic_visible_credentials_exactly_equals_active_token_coverage",
+    pre_panic_visible_credentials,
+    pre_panic_active_tokens: panicCoverage.pre_panic_active_tokens,
+    status: "pass",
+  }));
+  console.log(JSON.stringify({
+    suite: "token-lifecycle-local",
+    record: "panic-credential-coverage",
+    assertion: "panic_complete_known_minted_fellow_credential_coverage_and_pre_panic_active_token_rejection",
+    ...credentialCoverage,
+    status: "pass",
+  }));
+}
+BUN
+readonly PANIC_COVERAGE_VERIFIER_SOURCE
+
+PANIC_COVERAGE_VERIFIER_SELF_TEST_SOURCE=""
+read -r -d '' PANIC_COVERAGE_VERIFIER_SELF_TEST_SOURCE <<'BUN' || true
+const selfTestRegistry = [
+  { label: "alpha", fellowId: "self-fellow-alpha", beforePanicCredentialCardinality: 0 },
+  { label: "expiring", fellowId: "self-fellow-expiring", beforePanicCredentialCardinality: 0 },
+  { label: "charlie", fellowId: "self-fellow-charlie", beforePanicCredentialCardinality: 0 },
+  { label: "delta", fellowId: "self-fellow-delta", beforePanicCredentialCardinality: 1 },
+  { label: "echo", fellowId: "self-fellow-echo", beforePanicCredentialCardinality: 1 },
+] as const satisfies readonly PanicCoverageRegistryEntry[];
+const selfTestBefore = selfTestRegistry.map((entry) => ({
+  fellow_id: entry.fellowId,
+  credentials:
+    entry.beforePanicCredentialCardinality === 0
+      ? []
+      : [{ credential_id: `self-credential-${entry.label}`, active: true }],
+}));
+const selfTestAfterPanic = selfTestBefore.map((fellow) => ({
+  fellow_id: fellow.fellow_id,
+  credentials: [],
+}));
+const selfTestAfterPanicWithVisibleCredential = selfTestAfterPanic.map((fellow) =>
+  fellow.fellow_id === "self-fellow-delta"
+    ? {
+        ...fellow,
+        credentials: [{ credential_id: "self-unsafe-visible-after-panic", active: false }],
+      }
+    : fellow,
+);
+const selfTestPrePanicActiveTokens = [
+  {
+    label: "echo",
+    fellowId: "self-fellow-echo",
+    credentialId: "self-credential-echo",
+    token: "self-test-token-echo",
+  },
+  {
+    label: "delta",
+    fellowId: "self-fellow-delta",
+    credentialId: "self-credential-delta",
+    token: "self-test-token-delta",
+  },
+] as const satisfies readonly PanicCoverageActiveToken[];
+const selfTestControl = process.env.TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW === "1"
+  ? "omit-after-row"
+  : process.env.TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP === "1"
+    ? "token-rejection-noop"
+    : "none";
+const panicCoverage = await verifyPanicCoverage({
+  registry: selfTestRegistry,
+  beforePanicFellows: selfTestBefore,
+  prePanicActiveTokens: selfTestPrePanicActiveTokens,
+  assertTokenActive: async (token) => ({ fellowId: token.fellowId }),
+  runPanic: async () => {},
+  readAfterPanicFellows: async () => {
+    const rows = selfTestAfterPanic;
+    if (selfTestControl === "omit-after-row") {
+      const omitted = selfTestRegistry.at(-1);
+      if (omitted === undefined) throw new Error("panic-self-test-registry-empty");
+      return rows.filter((fellow) => fellow.fellow_id !== omitted.fellowId);
+    }
+    return rows;
+  },
+  assertTokenRejected: async (token) => {
+    if (selfTestControl === "token-rejection-noop") {
+      return undefined as unknown as PanicCoverageTokenRejection;
+    }
+    return { label: token.label, status: 401, code: "FELLOW_TOKEN_INVALID" };
+  },
+});
+let afterVisibleCredentialControlRejected = false;
+try {
+  await verifyPanicCoverage({
+    registry: selfTestRegistry,
+    beforePanicFellows: selfTestBefore,
+    prePanicActiveTokens: selfTestPrePanicActiveTokens,
+    assertTokenActive: async (token) => ({ fellowId: token.fellowId }),
+    runPanic: async () => {},
+    readAfterPanicFellows: async () => selfTestAfterPanicWithVisibleCredential,
+    assertTokenRejected: async (token) => ({
+      label: token.label,
+      status: 401,
+      code: "FELLOW_TOKEN_INVALID",
+    }),
+  });
+} catch (error) {
+  afterVisibleCredentialControlRejected =
+    error instanceof Error && error.message === "panic-after-credential-cardinality-delta";
+}
+panicCoverageAssert(
+  afterVisibleCredentialControlRejected,
+  "panic-self-test-after-visible-credential-control-rejected",
+);
+let omittedActiveTokenControlRejected = false;
+try {
+  await verifyPanicCoverage({
+    registry: selfTestRegistry,
+    beforePanicFellows: selfTestBefore,
+    prePanicActiveTokens: selfTestPrePanicActiveTokens.filter((token) => token.label !== "delta"),
+    assertTokenActive: async (token) => ({ fellowId: token.fellowId }),
+    runPanic: async () => {},
+    readAfterPanicFellows: async () => selfTestAfterPanic,
+    assertTokenRejected: async (token) => ({
+      label: token.label,
+      status: 401,
+      code: "FELLOW_TOKEN_INVALID",
+    }),
+  });
+} catch (error) {
+  omittedActiveTokenControlRejected =
+    error instanceof Error &&
+    error.message === "panic-pre-active-token-count-equals-visible-credentials";
+}
+panicCoverageAssert(
+  omittedActiveTokenControlRejected,
+  "panic-self-test-omitted-active-token-control-rejected",
+);
+emitPanicCoverage(panicCoverage);
+BUN
+readonly PANIC_COVERAGE_VERIFIER_SELF_TEST_SOURCE
+
+run_panic_coverage_verifier_self_test() {
+  local output
+  output="$("${BUN}" --eval "${PANIC_COVERAGE_VERIFIER_SOURCE}"$'\n'"${PANIC_COVERAGE_VERIFIER_SELF_TEST_SOURCE}")" || {
+    fail "TOKEN_LIFECYCLE_PANIC_VERIFIER_SELF_TEST_FAILED"
+    return 1
+  }
+  emit "${output}"
+}
+
 remaining_seconds() {
   local remaining=$((SCRIPT_DEADLINE - SECONDS))
   (( remaining > 0 )) || return 1
@@ -1209,6 +1537,7 @@ SOURCE_CLOSURE_BEFORE="$(source_closure_manifest)" || {
   exit 1
 }
 if (( SELF_TEST == 1 )); then
+  run_panic_coverage_verifier_self_test || exit 1
   emit "{\"suite\":\"${SUITE}\",\"assertion\":\"self_test_transitive_source_config_migration_closure\",\"status\":\"pass\",\"wrangler_started\":false}"
   exit 0
 fi
@@ -2244,13 +2573,25 @@ async function mintClaimApprove(
   return { enrollmentId: minted.enrollment_id, fellowId: helloPayload.fellow.fellow_id, token: granted.token };
 }
 
-async function assertTokenRejected(token: string, label: string) {
+async function assertTokenRejected(
+  token: string,
+  label: string,
+): Promise<{ readonly label: string; readonly status: number; readonly code: string }> {
+  if (
+    label.startsWith("panic-") &&
+    process.env.TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP === "1"
+  ) {
+    // Causal unsafe control: the shared verifier must reject a callback that
+    // no longer performed the mounted-token refusal assertion.
+    return undefined as unknown as { readonly label: string; readonly status: number; readonly code: string };
+  }
   const response = await boundedFetch(`${origin}/v1/hello`, {
     headers: { authorization: `Bearer ${token}` },
   });
   assert(response.status === 401, `token-invalid-${label}`);
   const payload = ProblemDocumentSchema.parse(await response.json());
   assert(payload.code === "FELLOW_TOKEN_INVALID", `token-code-${label}`);
+  return { label, status: response.status, code: payload.code };
 }
 
 await bootstrap(sponsorA);
@@ -2266,6 +2607,22 @@ const delta = await mintClaimApprove("lifecycle-delta");
 const echo = await mintClaimApprove("lifecycle-echo", {
   requestedScopes: ["promote", "review"],
 });
+
+// This fixed registry is the complete set of Fellows that this harness has
+// actually minted, claimed, and approved. The separate cap enrollment below
+// is intentionally absent because its approval is refused and it creates no
+// Fellow credential row to cover.
+const knownMintedFlows = [
+  { label: "alpha", flow: alpha },
+  { label: "expiring", flow: expiring },
+  { label: "charlie", flow: charlie },
+  { label: "delta", flow: delta },
+  { label: "echo", flow: echo },
+] as const;
+assert(
+  new Set(knownMintedFlows.map(({ flow }) => flow.fellowId)).size === knownMintedFlows.length,
+  "known-minted-fellows-unique",
+);
 
 const capMint = await sponsorRequest(
   sponsorA,
@@ -2366,7 +2723,7 @@ const closed = SessionCloseResponseSchema.parse(
     {
       handback: "Real D1 replay collision proof completed.",
       promote: [],
-      keep: [workshopPush.workshop_id],
+      keep: [],
       discard: [],
     },
     key("session-close-race"),
@@ -2624,35 +2981,111 @@ const survivingHello = await boundedFetch(`${origin}/v1/hello`, {
 assert(survivingHello.status === 200, "different-body-loser-remains-active");
 console.log('{"suite":"token-lifecycle-local","assertion":"concurrent_http_same_key_different_body_one_commit_one_conflict","deterministic_barrier":true,"store_gate":"after_replay_preflight_before_d1_revoke","status":"pass"}');
 
-const panic = await sponsorRequest(
-  sponsorA,
-  "POST",
-  "/v1/sponsors/panic",
-  "/v1/sponsors/panic",
-  "sponsor.panic",
-  { confirm: "revoke-all-fellow-credentials", step_up_authenticated_at: stepUp() },
-  key("panic"),
-);
-assert(panic.response.status === 200, "panic");
-SponsorPanicResponseSchema.parse(panic.payload);
-const afterPanic = await sponsorRequest(
+// Take an authoritative, sponsor-safe row snapshot before panic. The shared
+// verifier owns all exact row matching and terminal count derivation, so an
+// omitted post-panic Fellow cannot make the zero-active check vacuously pass.
+const beforePanic = await sponsorRequest(
   sponsorA,
   "GET",
   "/v1/fellows",
   "/v1/fellows",
   "fellows.list",
 );
-assert(afterPanic.response.status === 200, "fellows-after-panic");
-const afterPanicFellows = SponsorFellowListResponseSchema.parse(afterPanic.payload);
-assert(
-  afterPanicFellows.fellows.flatMap((fellow) => fellow.credentials).every((credential) => !credential.active),
-  "panic-leaves-no-active-minted-credential",
-);
+assert(beforePanic.response.status === 200, "fellows-before-panic");
+const beforePanicFellows = SponsorFellowListResponseSchema.parse(beforePanic.payload);
+const knownMintedRegistry = [
+  { label: "alpha", fellowId: alpha.fellowId, beforePanicCredentialCardinality: 0 },
+  { label: "expiring", fellowId: expiring.fellowId, beforePanicCredentialCardinality: 0 },
+  {
+    label: "charlie",
+    fellowId: charlie.fellowId,
+    beforePanicCredentialCardinality: winnerIndex === 0 ? 0 : 1,
+  },
+  {
+    label: "delta",
+    fellowId: delta.fellowId,
+    beforePanicCredentialCardinality: winnerIndex === 1 ? 0 : 1,
+  },
+  { label: "echo", fellowId: echo.fellowId, beforePanicCredentialCardinality: 1 },
+] as const satisfies readonly PanicCoverageRegistryEntry[];
+
+// These are the only harness tokens still known active after expiry, the
+// individual revoke, and the same-key different-body race. Recheck their
+// identity inside the verifier immediately before it invokes panic.
+const prePanicActiveTokens = [
+  {
+    label: "echo",
+    fellowId: echo.fellowId,
+    credentialId: activeCredentialFor(echo.fellowId).credential_id,
+    token: echo.token,
+  },
+  {
+    label: "different-body-loser",
+    fellowId: differentBodies[loserIndex].flow.fellowId,
+    credentialId: differentBodies[loserIndex].body.credential_id,
+    token: differentBodies[loserIndex].flow.token,
+  },
+] as const;
+const panicCoverage = await verifyPanicCoverage({
+  registry: knownMintedRegistry,
+  beforePanicFellows: beforePanicFellows.fellows,
+  prePanicActiveTokens,
+  assertTokenActive: async ({ label, fellowId, token }) => {
+    const hello = await boundedFetch(`${origin}/v1/hello`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert(hello.status === 200, `token-active-before-panic-${label}`);
+    const helloPayload = EnrollmentHelloResponseSchema.parse(await hello.json());
+    assert(
+      helloPayload.fellow.fellow_id === fellowId,
+      `token-active-subject-before-panic-${label}`,
+    );
+    return { fellowId: helloPayload.fellow.fellow_id };
+  },
+  runPanic: async () => {
+    const panic = await sponsorRequest(
+      sponsorA,
+      "POST",
+      "/v1/sponsors/panic",
+      "/v1/sponsors/panic",
+      "sponsor.panic",
+      { confirm: "revoke-all-fellow-credentials", step_up_authenticated_at: stepUp() },
+      key("panic"),
+    );
+    assert(panic.response.status === 200, "panic");
+    SponsorPanicResponseSchema.parse(panic.payload);
+  },
+  readAfterPanicFellows: async () => {
+    const afterPanic = await sponsorRequest(
+      sponsorA,
+      "GET",
+      "/v1/fellows",
+      "/v1/fellows",
+      "fellows.list",
+    );
+    assert(afterPanic.response.status === 200, "fellows-after-panic");
+    const rows = SponsorFellowListResponseSchema.parse(afterPanic.payload).fellows;
+    if (process.env.TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW === "1") {
+      // Causal unsafe control: exact post-panic matching must fail rather
+      // than accepting a vacuous all-inactive projection.
+      const omitted = knownMintedRegistry.at(-1);
+      assert(omitted !== undefined, "panic-registry-empty");
+      return rows.filter((fellow) => fellow.fellow_id !== omitted.fellowId);
+    }
+    return rows;
+  },
+  assertTokenRejected: async ({ label, token }) => {
+    const rejection = await assertTokenRejected(token, `panic-${label}`);
+    return { ...rejection, label };
+  },
+});
+emitPanicCoverage(panicCoverage);
 
 console.log('{"suite":"token-lifecycle-local","assertion":"mint_use_scope_refusal_expiry_individual_revoke_panic_zero_active_credentials_cross_principal_exact_replay","status":"pass"}');
 console.log('{"suite":"token-lifecycle-local","assertion":"revoke_vs_effectful_domain_write","status":"pass","route":"POST /v1/sessions","code":"FELLOW_TOKEN_INVALID"}');
 BUN
 
+CLIENT_SOURCE="${PANIC_COVERAGE_VERIFIER_SOURCE}"$'\n'"${CLIENT_SOURCE}"
 require_remaining
 TOKEN_LIFECYCLE_ORIGIN="${ORIGIN}" TOKEN_LIFECYCLE_PRIVATE_JWK="${PRIVATE_JWK}" \
   TOKEN_LIFECYCLE_BARRIER_CAPABILITY="${BARRIER_CAPABILITY}" \
