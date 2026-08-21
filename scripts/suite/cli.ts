@@ -104,6 +104,7 @@ const OWNED_PROCESS_INSPECTION_TIMEOUT_MS = 500;
 const OWNED_PROCESS_INSPECTION_STREAM_RETAINED_BYTES = 64 * 1024;
 const OWNED_PROCESS_INSPECTION_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const OWNED_PROCESS_MAX_INSPECTIONS_PER_CLEANUP = 4;
+const ACTIVE_OWNED_CONTROL_FILES = new Set<ReturnType<typeof Bun.file>>();
 const TOOLCHAIN_INTEGRATION_TOTAL_TIMEOUT_MS =
   TOOLCHAIN_INTEGRATION_STEPS.reduce((total, step) => total + step.timeoutMs, 0) +
   TOOLCHAIN_INTEGRATION_STEPS.length *
@@ -213,6 +214,21 @@ type OwnedCommandOutcome =
   | "ownership-unproven"
   | "spawn-failed";
 
+export type OwnedSessionFailurePhase =
+  | "ready-record"
+  | "supervisor-pid"
+  | "terminal-record"
+  | "control-stream"
+  | "initial-census"
+  | "term-signal"
+  | "cleanup-deadline"
+  | "post-term-census"
+  | "kill-signal"
+  | "kill-reap"
+  | "final-census"
+  | "leader-release"
+  | "leader-reap";
+
 export interface OwnedCommandOptions {
   command: readonly string[];
   cwd: string;
@@ -249,6 +265,8 @@ export interface OwnedCommandResult {
   retainedStderrBytes: number;
   retainedOutputBytes: number;
   cleanupProven?: boolean;
+  /** Nonsecret phase attribution for a fail-closed owned-session identity loss. */
+  ownershipFailurePhase?: OwnedSessionFailurePhase;
 }
 
 interface ToolchainIntegrationStepRecord {
@@ -536,6 +554,17 @@ my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
 $SIG{USR1} = sub { exit $exit; };
 publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n");
+# Seal the exact two-record transcript while the parent lease still keeps this
+# supervisor alive. The dispatcher proves fd3 EOF before it sends SIGUSR1, so a
+# Bun stream-close anomaly cannot race an otherwise successful leader reap.
+close($control) or retire_orphaned_group();
+# The target has been reaped, so the supervisor is now the only legitimate
+# owner of the outer output writers. Seal both while the parent lease still
+# pins this exact group. A detached inheritor keeps a writer open and therefore
+# remains a typed pipe-drain refusal; a normal run no longer races EOF against
+# supervisor reap in Bun's ReadableStream wrapper.
+close(STDOUT) or retire_orphaned_group();
+close(STDERR) or retire_orphaned_group();
 while (parent_lease_is_open()) { select undef, undef, undef, 0.05; }
 retire_orphaned_group();
 `;
@@ -1218,6 +1247,7 @@ async function releaseOrKillOwnedSession(
   memberCount?: number,
   inspector?: OwnedSessionInspectorOptions,
   retireThroughParentLease?: () => void,
+  recordOwnershipFailure?: (phase: OwnedSessionFailurePhase) => void,
 ): Promise<OwnedCommandOutcome | undefined> {
   const inspection =
     inspector ??
@@ -1248,14 +1278,20 @@ async function releaseOrKillOwnedSession(
     await reapBefore(child, cleanupDeadlineAt);
     return outcome;
   };
+  const ownershipUnproven = (phase: OwnedSessionFailurePhase): Promise<OwnedCommandOutcome> => {
+    recordOwnershipFailure?.(phase);
+    return abandon("ownership-unproven");
+  };
   const killOwnedGroupAndProveEmpty = async (): Promise<OwnedCommandOutcome | undefined> => {
     const signal = await signalOwnedSession(leaderPid, "SIGKILL", inspection, cleanupDeadlineAt);
     if (signal === "inspection-unproven") return abandon("inspection-unproven");
-    if (signal !== "signalled") return abandon("ownership-unproven");
-    if (!(await reapBefore(child, cleanupDeadlineAt))) return abandon("ownership-unproven");
+    if (signal !== "signalled") return ownershipUnproven("kill-signal");
+    if (!(await reapBefore(child, cleanupDeadlineAt))) return ownershipUnproven("kill-reap");
     const finalCensus = await inspectOwnedProcessGroup(leaderPid, inspection, cleanupDeadlineAt);
     if (finalCensus.state === "inspection-unproven") return "inspection-unproven";
-    return finalCensus.members.length === 0 ? undefined : "ownership-unproven";
+    if (finalCensus.members.length === 0) return undefined;
+    recordOwnershipFailure?.("final-census");
+    return "ownership-unproven";
   };
 
   // The supervisor intentionally emits `-1`: post-target census authority lives
@@ -1263,14 +1299,16 @@ async function releaseOrKillOwnedSession(
   void memberCount;
   const initial = await inspectOwnedSession(leaderPid, inspection, cleanupDeadlineAt);
   if (initial.state === "inspection-unproven") return abandon("inspection-unproven");
-  if (initial.state !== "owned") return abandon("ownership-unproven");
+  if (initial.state !== "owned") return ownershipUnproven("initial-census");
 
   const hadDescendant = initial.members.some((member) => member.pid !== leaderPid);
   if (timeout || hadDescendant) {
     const term = await signalOwnedSession(leaderPid, "SIGTERM", inspection, cleanupDeadlineAt);
     if (term === "inspection-unproven") return abandon("inspection-unproven");
-    if (term !== "signalled") return abandon("ownership-unproven");
-    if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) return abandon("ownership-unproven");
+    if (term !== "signalled") return ownershipUnproven("term-signal");
+    if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) {
+      return ownershipUnproven("cleanup-deadline");
+    }
     // The fresh bounded host census saw this residual while the still-live direct
     // leader pinned the group identity. Escalate without trusting product bytes.
     if (hadDescendant) {
@@ -1283,7 +1321,7 @@ async function releaseOrKillOwnedSession(
     if (afterTerm.state !== "owned") {
       // The supervisor deliberately ignores TERM. Its unexpected disappearance
       // means the identity pin was lost before a bounded group reap was proved.
-      return abandon("ownership-unproven");
+      return ownershipUnproven("post-term-census");
     }
     if (afterTerm.members.some((member) => member.pid !== leaderPid)) {
       const killed = await killOwnedGroupAndProveEmpty();
@@ -1297,24 +1335,26 @@ async function releaseOrKillOwnedSession(
   if (release === "descendant") {
     const term = await signalOwnedSession(leaderPid, "SIGTERM", inspection, cleanupDeadlineAt);
     if (term === "inspection-unproven") return abandon("inspection-unproven");
-    if (term !== "signalled") return abandon("ownership-unproven");
-    if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) return abandon("ownership-unproven");
+    if (term !== "signalled") return ownershipUnproven("term-signal");
+    if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) {
+      return ownershipUnproven("cleanup-deadline");
+    }
     const afterTerm = await inspectOwnedSession(leaderPid, inspection, cleanupDeadlineAt);
     if (afterTerm.state === "inspection-unproven") return abandon("inspection-unproven");
-    if (afterTerm.state !== "owned") return abandon("ownership-unproven");
+    if (afterTerm.state !== "owned") return ownershipUnproven("post-term-census");
     if (afterTerm.members.some((member) => member.pid !== leaderPid)) {
       const killed = await killOwnedGroupAndProveEmpty();
       if (killed !== undefined) return killed;
     } else if (
       (await releaseOwnedLeader(leaderPid, inspection, cleanupDeadlineAt)) !== "released"
     ) {
-      return abandon("ownership-unproven");
+      return ownershipUnproven("leader-release");
     }
     return timeout ? "timeout" : "descendant-leaked";
   }
-  if (release === "unproven") return abandon("ownership-unproven");
+  if (release === "unproven") return ownershipUnproven("leader-release");
   if (!(await reapBefore(child, cleanupDeadlineAt))) {
-    return abandon("ownership-unproven");
+    return ownershipUnproven("leader-reap");
   }
   return timeout ? "timeout" : hadDescendant ? "descendant-leaked" : undefined;
 }
@@ -1326,6 +1366,7 @@ async function terminateForOutputOverrun(
   killReapMs: number,
   inspector: OwnedSessionInspectorOptions,
   retireThroughParentLease?: () => void,
+  recordOwnershipFailure?: (phase: OwnedSessionFailurePhase) => void,
 ): Promise<OwnedCommandOutcome> {
   if (supervisorPid !== undefined) {
     return (
@@ -1338,6 +1379,7 @@ async function terminateForOutputOverrun(
         undefined,
         inspector,
         retireThroughParentLease,
+        recordOwnershipFailure,
       )) ?? "ownership-unproven"
     );
   }
@@ -1440,7 +1482,13 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       // The raw extra-pipe descriptor may already have been released on error.
     }
   };
+  let controlFile: ReturnType<typeof Bun.file> | undefined;
   try {
+    // Retain the BunFile itself until `finally` closes the numeric fd. A stream
+    // created from an otherwise-temporary BunFile can lose its fd owner during a
+    // long, allocation-heavy root run even though the ReadableStream is alive.
+    controlFile = Bun.file(Number(controlFd));
+    ACTIVE_OWNED_CONTROL_FILES.add(controlFile);
     const stdout = captureBoundedPipe(
       child.stdout as ReadableStream<Uint8Array>,
       streamLimitBytes,
@@ -1455,7 +1503,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       undefined,
       () => options.onPipeCancelRequested?.("stderr"),
     );
-    const control = captureControlPipe(Bun.file(Number(controlFd)).stream(), nonce, child.pid);
+    const control = captureControlPipe(controlFile.stream(), nonce, child.pid);
     const termGraceMs = options.termGraceMs ?? OWNED_PROCESS_TERM_GRACE_MS;
     const killReapMs = options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS;
     const pipeDrainMs = options.pipeDrainMs ?? OWNED_PROCESS_PIPE_DRAIN_MS;
@@ -1464,6 +1512,10 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     let exitCode: number | undefined;
     let signal: string | undefined;
     let cleanupProven: boolean | undefined;
+    let ownershipFailurePhase: OwnedSessionFailurePhase | undefined;
+    const recordOwnershipFailure = (phase: OwnedSessionFailurePhase): void => {
+      ownershipFailurePhase ??= phase;
+    };
 
     if (options.supervisorScript === undefined) {
       try {
@@ -1529,6 +1581,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         undefined,
         inspector,
         retireThroughParentLease,
+        recordOwnershipFailure,
       );
       cancelCapturedPipes([stdout, stderr, control]);
       const drained = await drainWithin([stdout, stderr, control], pipeDrainMs);
@@ -1571,6 +1624,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         // cannot upgrade that assertion into proved cleanup.
         cleanupProven = false;
         outcome = "ownership-unproven";
+        recordOwnershipFailure("terminal-record");
       }
     } else if (supervisorPid === undefined) {
       // A command deadline may elapse while its ready record is still queued. The
@@ -1586,6 +1640,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         undefined,
         inspector,
         retireThroughParentLease,
+        recordOwnershipFailure,
       );
       cleanupProven = cleanup === "timeout";
       outcome =
@@ -1598,6 +1653,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
             ? "timeout"
             : (cleanup ?? "spawn-failed");
     } else if (supervisorPid !== child.pid) {
+      recordOwnershipFailure("supervisor-pid");
       const cleanup = await releaseOrKillOwnedSession(
         child,
         child.pid,
@@ -1607,6 +1663,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         undefined,
         inspector,
         retireThroughParentLease,
+        recordOwnershipFailure,
       );
       cleanupProven = cleanup === "timeout";
       outcome = "ownership-unproven";
@@ -1619,6 +1676,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
           killReapMs,
           inspector,
           retireThroughParentLease,
+          recordOwnershipFailure,
         );
         if (cleanup === "inspection-unproven" || cleanup === "ownership-unproven") {
           cleanupProven = false;
@@ -1646,6 +1704,9 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         if (completion?.kind === "output-overrun") {
           await finishOutputOverrun();
         } else if (completion === undefined || completion.control === undefined) {
+          if (completion !== undefined || control.failed()) {
+            recordOwnershipFailure("control-stream");
+          }
           const cleanup = await releaseOrKillOwnedSession(
             child,
             supervisorPid,
@@ -1655,6 +1716,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
             undefined,
             inspector,
             retireThroughParentLease,
+            recordOwnershipFailure,
           );
           cleanupProven = cleanup === "timeout";
           outcome =
@@ -1662,12 +1724,67 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
               ? "ownership-unproven"
               : (cleanup ?? "ownership-unproven");
         } else {
-          const control = completion.control;
-          exitCode = control.exitCode;
-          signal = control.signal;
-          if (stdout.overflowed() || stderr.overflowed()) {
+          const controlEvent = completion.control;
+          exitCode = controlEvent.exitCode;
+          signal = controlEvent.signal;
+          const controlSealRemaining = Math.max(
+            0,
+            options.timeoutMs - Math.round(performance.now() - startedAt),
+          );
+          const controlSealed =
+            options.supervisorScript !== undefined ||
+            ((await valueBefore(
+              control.done.then(() => true),
+              controlSealRemaining,
+            )) === true &&
+              !control.failed());
+          if (!controlSealed) {
+            recordOwnershipFailure("control-stream");
+            const cleanup = await releaseOrKillOwnedSession(
+              child,
+              supervisorPid,
+              termGraceMs,
+              killReapMs,
+              false,
+              undefined,
+              inspector,
+              retireThroughParentLease,
+              recordOwnershipFailure,
+            );
+            cleanupProven = cleanup === "timeout";
+            outcome = "ownership-unproven";
+          } else if (stdout.overflowed() || stderr.overflowed()) {
             await finishOutputOverrun();
-          } else if (control.supervisorPid !== supervisorPid || control.kind === "start-failed") {
+          } else if (
+            options.supervisorScript === undefined &&
+            !(await drainWithin([stdout, stderr], pipeDrainMs))
+          ) {
+            const cleanup = await releaseOrKillOwnedSession(
+              child,
+              supervisorPid,
+              termGraceMs,
+              killReapMs,
+              false,
+              undefined,
+              inspector,
+              retireThroughParentLease,
+              recordOwnershipFailure,
+            );
+            if (cleanup === "inspection-unproven" || cleanup === "ownership-unproven") {
+              cleanupProven = false;
+              outcome = cleanup;
+            } else if (cleanup === "descendant-leaked") {
+              cleanupProven = true;
+              outcome = cleanup;
+            } else {
+              cleanupProven = cleanup === undefined;
+              outcome = "pipe-drain-unproven";
+            }
+          } else if (
+            controlEvent.supervisorPid !== supervisorPid ||
+            controlEvent.kind === "start-failed"
+          ) {
+            recordOwnershipFailure("terminal-record");
             const cleanup = await releaseOrKillOwnedSession(
               child,
               supervisorPid,
@@ -1677,9 +1794,10 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
               undefined,
               inspector,
               retireThroughParentLease,
+              recordOwnershipFailure,
             );
             cleanupProven = cleanup === "timeout";
-            outcome = control.kind === "start-failed" ? "spawn-failed" : "ownership-unproven";
+            outcome = controlEvent.kind === "start-failed" ? "spawn-failed" : "ownership-unproven";
           } else {
             await lifecycleCheckpoint("completed", supervisorPid);
             outcome =
@@ -1689,9 +1807,10 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
                 termGraceMs,
                 killReapMs,
                 false,
-                control.memberCount,
+                controlEvent.memberCount,
                 inspector,
                 retireThroughParentLease,
+                recordOwnershipFailure,
               )) ?? "exited";
           }
         }
@@ -1708,11 +1827,15 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     const drained = await drainWithin([stdout, stderr, control], pipeDrainMs);
     if (control.failed()) {
       outcome = "ownership-unproven";
+      recordOwnershipFailure("control-stream");
     } else if (outcome === "exited" && (stdout.overflowed() || stderr.overflowed())) {
       outcome = "output-overrun";
       cleanupProven = true;
     } else if (outcome === "exited" && !drained) {
       outcome = "pipe-drain-unproven";
+    }
+    if (outcome === "ownership-unproven" && ownershipFailurePhase === undefined) {
+      recordOwnershipFailure("ready-record");
     }
     return {
       outcome,
@@ -1724,6 +1847,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       retainedStderrBytes: stderr.retainedBytes(),
       retainedOutputBytes: budget.retainedBytes,
       ...(cleanupProven === undefined ? {} : { cleanupProven }),
+      ...(ownershipFailurePhase === undefined ? {} : { ownershipFailurePhase }),
     };
   } finally {
     // Normal release has already reaped the supervisor. Closing the writer here
@@ -1731,6 +1855,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     // lease-waiting leader.
     closeOwnershipLease();
     closeControlFd();
+    if (controlFile !== undefined) ACTIVE_OWNED_CONTROL_FILES.delete(controlFile);
   }
 }
 
@@ -2223,7 +2348,7 @@ async function runUnit(
                   ? `"${command}" could not complete its bounded owned-group inspection; ` +
                     "the direct supervisor was stopped, but group cleanup could not be proved."
                   : result.outcome === "ownership-unproven"
-                    ? `"${command}" lost its owned session identity before cleanup could be proved.`
+                    ? `"${command}" lost its owned session identity during ${result.ownershipFailurePhase ?? "an unclassified phase"} before cleanup could be proved.`
                     : `"${command}" could not start the owned session supervisor.`,
     };
   }

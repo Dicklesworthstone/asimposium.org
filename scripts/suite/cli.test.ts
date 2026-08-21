@@ -1150,6 +1150,7 @@ describe("owned session launcher", () => {
       });
 
       expect(result.outcome).toBe("ownership-unproven");
+      expect(result.ownershipFailurePhase).toBe("leader-reap");
       // This custom supervisor is not authority for a clean owned-session exit.
       // A false green here would conceal the failed direct-child reap.
       expect(result.cleanupProven).not.toBe(true);
@@ -1202,6 +1203,76 @@ describe("owned session launcher", () => {
 
     expect(result.outcome).toBe("exited");
     expect(result.exitCode).toBe(0);
+    expect(result.ownershipFailurePhase).toBeUndefined();
+  });
+
+  test("the production fd3 owner survives parent GC until the transcript is sealed", async () => {
+    const resultPath = newParentLeaseCheckpointPath();
+    const helperSource = `
+      import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
+      let gcCheckpointReached = false;
+      const result = await runOwnedCommand({
+        command: ["perl", "-e", "select undef, undef, undef, 0.15; exit 0;"],
+        cwd: ${JSON.stringify(process.cwd())},
+        env: ${JSON.stringify(childEnvironment())},
+        timeoutMs: 2_000,
+        onLifecycleCheckpoint: async (phase) => {
+          if (phase !== "ready") return;
+          for (let index = 0; index < 64; index += 1) {
+            void new Uint8Array(256 * 1024);
+          }
+          Bun.gc(true);
+          gcCheckpointReached = true;
+          await Bun.sleep(25);
+        },
+      });
+      await Bun.write(
+        ${JSON.stringify(resultPath)},
+        JSON.stringify({ gcCheckpointReached, result }) + "\\n",
+      );
+    `;
+    const helper = Bun.spawn({
+      cmd: ["bun", "-e", helperSource],
+      env: childEnvironment(),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const helperExit = await Promise.race([helper.exited, Bun.sleep(5_000).then(() => undefined)]);
+    if (helperExit === undefined) {
+      helper.kill("SIGKILL");
+      await helper.exited;
+      throw new Error("fd3 GC helper exceeded its bounded lifetime");
+    }
+    expect(helperExit).toBe(0);
+    let parsed: {
+      gcCheckpointReached: boolean;
+      result: OwnedCommandResult;
+    };
+    try {
+      parsed = JSON.parse(readFileSync(resultPath, "utf8")) as typeof parsed;
+    } catch {
+      throw new Error("fd3 GC helper did not publish its exact JSON receipt");
+    }
+
+    expect(parsed.gcCheckpointReached).toBe(true);
+    expect(parsed.result.outcome).toBe("exited");
+    expect(parsed.result.exitCode).toBe(0);
+    expect(parsed.result.ownershipFailurePhase).toBeUndefined();
+  });
+
+  test("PLANTED: a missing initial leader census names the exact ownership phase", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      inspectionCommand: ["perl", "-e", "exit 1;"],
+    });
+
+    expect(result.outcome).toBe("ownership-unproven");
+    expect(result.ownershipFailurePhase).toBe("initial-census");
+    expect(result.cleanupProven).not.toBe(true);
   });
 
   test("unterminated product stderr cannot hide the supervisor completion", async () => {
