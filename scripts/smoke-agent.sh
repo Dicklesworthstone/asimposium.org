@@ -219,6 +219,35 @@ if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/capabilities";
   exit 69
 fi
 
+# S-3 split visibility (anonymous side): the public problem index must carry no
+# workshop-shaped keys, and the sponsor workshop route must not exist for an
+# anonymous caller. This runs unauthenticated, so it holds even before the
+# Fellow credential is provisioned.
+split_index="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/problems.json" 2>/dev/null)"
+if ! printf '%s' "$split_index" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+text = json.dumps(d).lower()
+leaks = [k for k in ("workshop","private","draft_body","handback","session_id") if k in text]
+sys.exit(0 if not leaks else 1)
+' 2>/dev/null; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PUBLIC_FACE_LEAKS_WORKSHOP" "$reproduce"
+  exit 87
+fi
+workshop_anonymous_status="$(curl --silent --max-time 15 -o /dev/null --write-out '%{http_code}' "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/v1/sponsors/workshop?problem=P-4DSP" 2>/dev/null)"
+if [[ "$workshop_anonymous_status" != "404" && "$workshop_anonymous_status" != "401" && "$workshop_anonymous_status" != "403" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SPONSOR_READ_REACHABLE_ANONYMOUSLY" "$reproduce"
+  exit 87
+fi
+
+# The public cursor is a bare integer (one value, edge-cached; the lurker storm
+# never touches D1).
+cursor_value="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
+if ! [[ "$cursor_value" =~ ^[0-9]+$ ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CURSOR_NOT_BARE_INTEGER" "$reproduce"
+  exit 88
+fi
+
 # Device-flow start: the enrollment loop's first executable step. One unique
 # Idempotency-Key per run; the replay below reuses it to prove the 24h
 # idempotency contract without relying on a previous run's state.
