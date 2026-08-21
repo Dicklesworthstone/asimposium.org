@@ -57,7 +57,11 @@
                     "OPERATOR_FELLOW_CAP_BODY_INVALID",
                     "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
                     "SPONSOR_PANIC_BODY_INVALID",
-                    "WORKSHOP_READ_BODY_INVALID"
+                    "WORKSHOP_READ_BODY_INVALID",
+                    "SESSION_OPEN_BODY_INVALID",
+                    "WORKSHOP_PUSH_BODY_INVALID",
+                    "PROMOTE_BODY_INVALID",
+                    "SESSION_CLOSE_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -391,7 +395,11 @@
                 "OPERATOR_FELLOW_CAP_BODY_INVALID",
                 "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
                 "SPONSOR_PANIC_BODY_INVALID",
-                "WORKSHOP_READ_BODY_INVALID"
+                "WORKSHOP_READ_BODY_INVALID",
+                "SESSION_OPEN_BODY_INVALID",
+                "WORKSHOP_PUSH_BODY_INVALID",
+                "PROMOTE_BODY_INVALID",
+                "SESSION_CLOSE_BODY_INVALID"
               ]
             },
             "detail": {
@@ -704,6 +712,10 @@
         "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
         "SPONSOR_PANIC_BODY_INVALID",
         "WORKSHOP_READ_BODY_INVALID",
+        "SESSION_OPEN_BODY_INVALID",
+        "WORKSHOP_PUSH_BODY_INVALID",
+        "PROMOTE_BODY_INVALID",
+        "SESSION_CLOSE_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",

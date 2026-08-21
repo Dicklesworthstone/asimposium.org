@@ -347,38 +347,66 @@
               }
             },
             "viewer": {
-              "type": "object",
-              "properties": {
-                "audience": {
-                  "type": "string",
-                  "enum": [
-                    "public",
-                    "session"
-                  ]
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "public"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "const": "none"
+                    },
+                    "effective_permissions": {
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 },
-                "membership": {
-                  "type": "string",
-                  "enum": [
-                    "none",
-                    "observer",
-                    "contributor",
-                    "steward"
-                  ]
-                },
-                "effective_permissions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "session"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "observer",
+                        "contributor",
+                        "steward"
+                      ]
+                    },
+                    "effective_permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "audience",
-                "membership",
-                "effective_permissions"
-              ],
-              "additionalProperties": false
+              ]
             },
             "budget_tokens": {
               "type": "number",
@@ -679,38 +707,66 @@
               }
             },
             "viewer": {
-              "type": "object",
-              "properties": {
-                "audience": {
-                  "type": "string",
-                  "enum": [
-                    "public",
-                    "session"
-                  ]
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "public"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "const": "none"
+                    },
+                    "effective_permissions": {
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 },
-                "membership": {
-                  "type": "string",
-                  "enum": [
-                    "none",
-                    "observer",
-                    "contributor",
-                    "steward"
-                  ]
-                },
-                "effective_permissions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "session"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "observer",
+                        "contributor",
+                        "steward"
+                      ]
+                    },
+                    "effective_permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "audience",
-                "membership",
-                "effective_permissions"
-              ],
-              "additionalProperties": false
+              ]
             },
             "budget_tokens": {
               "type": "number",
@@ -1011,38 +1067,66 @@
               }
             },
             "viewer": {
-              "type": "object",
-              "properties": {
-                "audience": {
-                  "type": "string",
-                  "enum": [
-                    "public",
-                    "session"
-                  ]
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "public"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "const": "none"
+                    },
+                    "effective_permissions": {
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 },
-                "membership": {
-                  "type": "string",
-                  "enum": [
-                    "none",
-                    "observer",
-                    "contributor",
-                    "steward"
-                  ]
-                },
-                "effective_permissions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "session"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "observer",
+                        "contributor",
+                        "steward"
+                      ]
+                    },
+                    "effective_permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "audience",
-                "membership",
-                "effective_permissions"
-              ],
-              "additionalProperties": false
+              ]
             },
             "budget_tokens": {
               "type": "number",
@@ -1343,38 +1427,66 @@
               }
             },
             "viewer": {
-              "type": "object",
-              "properties": {
-                "audience": {
-                  "type": "string",
-                  "enum": [
-                    "public",
-                    "session"
-                  ]
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "public"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "const": "none"
+                    },
+                    "effective_permissions": {
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 },
-                "membership": {
-                  "type": "string",
-                  "enum": [
-                    "none",
-                    "observer",
-                    "contributor",
-                    "steward"
-                  ]
-                },
-                "effective_permissions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "session"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "observer",
+                        "contributor",
+                        "steward"
+                      ]
+                    },
+                    "effective_permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "audience",
-                "membership",
-                "effective_permissions"
-              ],
-              "additionalProperties": false
+              ]
             },
             "budget_tokens": {
               "type": "number",
@@ -1675,38 +1787,66 @@
               }
             },
             "viewer": {
-              "type": "object",
-              "properties": {
-                "audience": {
-                  "type": "string",
-                  "enum": [
-                    "public",
-                    "session"
-                  ]
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "public"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "const": "none"
+                    },
+                    "effective_permissions": {
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 },
-                "membership": {
-                  "type": "string",
-                  "enum": [
-                    "none",
-                    "observer",
-                    "contributor",
-                    "steward"
-                  ]
-                },
-                "effective_permissions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                {
+                  "type": "object",
+                  "properties": {
+                    "audience": {
+                      "type": "string",
+                      "const": "session"
+                    },
+                    "membership": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "observer",
+                        "contributor",
+                        "steward"
+                      ]
+                    },
+                    "effective_permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "audience",
+                    "membership",
+                    "effective_permissions"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "audience",
-                "membership",
-                "effective_permissions"
-              ],
-              "additionalProperties": false
+              ]
             },
             "budget_tokens": {
               "type": "number",
