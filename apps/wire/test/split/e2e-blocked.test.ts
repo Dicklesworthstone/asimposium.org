@@ -2038,7 +2038,7 @@ function isolatedBuildFreshResultUpperBound(rawEvidenceBytes: number): number {
   // JSON can therefore add at most one byte per raw byte (only `"` and `\\`
   // require escaping); the rest of the result record is measured exactly.
   const fixedPublicationBytes = Buffer.byteLength(
-    JSON.stringify({
+    `${JSON.stringify({
       nonce: "00000000-0000-4000-8000-000000000000",
       kind: "result",
       result: {
@@ -2051,7 +2051,7 @@ function isolatedBuildFreshResultUpperBound(rawEvidenceBytes: number): number {
         retainedOutputBytes: rawEvidenceBytes,
       },
       cleanupProven: true,
-    }) + "\n",
+    })}\n`,
     "utf8",
   );
   const bound = fixedPublicationBytes + 2 * rawEvidenceBytes;

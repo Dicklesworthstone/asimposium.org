@@ -6200,6 +6200,8 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     ]);
   });
 
+  // The ~10k-row occupy() setup dominates wall time on loaded machines; the
+  // assertions below are behavioral (suggestion output), never a time budget.
   test("PLANTED: a saturated range returns fewer suggestions, never an error", async () => {
     const sqlite = database();
     const stem = "zzz";
@@ -6211,7 +6213,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(stem)).toEqual([
       "zzz-9999",
     ]);
-  });
+  }, 30_000);
 
   test("PLANTED: 500 occupied suffixes still cost exactly one statement", async () => {
     const sqlite = database();
@@ -6241,7 +6243,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     // whole suffix series, none of which is ever returned to the Worker.
     expect(suggestions).toEqual(["orchid-3", "orchid-5", "orchid-6"]);
     expect(recording.issued.length).toBe(1);
-  });
+  }, 30_000);
 
   test("the generated-suffix join uses the name index rather than scanning fellows", async () => {
     const sqlite = database();
