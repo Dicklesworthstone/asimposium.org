@@ -110,6 +110,11 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0020_session_replay_atomic_claim.sql
   db/migrations/0021_problem_scoped_claim_identity.sql
   db/migrations/0022_workshop_cas_spill.sql
+  db/migrations/0023_claim_versions_deps.sql
+  db/migrations/0024_reviews.sql
+  db/migrations/0025_hypotheses.sql
+  db/migrations/0026_evidence.sql
+  db/migrations/0027_w58_remaining_objects.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -237,6 +242,11 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0020_session_replay_atomic_claim.sql
   0021_problem_scoped_claim_identity.sql
   0022_workshop_cas_spill.sql
+  0023_claim_versions_deps.sql
+  0024_reviews.sql
+  0025_hypotheses.sql
+  0026_evidence.sql
+  0027_w58_remaining_objects.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

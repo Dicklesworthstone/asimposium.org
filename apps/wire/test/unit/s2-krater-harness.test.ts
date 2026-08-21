@@ -4300,6 +4300,11 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(onDisk).toContain("0016_operator_fellow_cap_override.sql");
     expect(onDisk).toContain("0020_session_replay_atomic_claim.sql");
     expect(onDisk).toContain("0022_workshop_cas_spill.sql");
+    expect(onDisk).toContain("0023_claim_versions_deps.sql");
+    expect(onDisk).toContain("0024_reviews.sql");
+    expect(onDisk).toContain("0025_hypotheses.sql");
+    expect(onDisk).toContain("0026_evidence.sql");
+    expect(onDisk).toContain("0027_w58_remaining_objects.sql");
     const listed = new Set(declaredSourcePaths());
     for (const name of onDisk) expect(listed.has(`db/migrations/${name}`)).toBe(true);
   });
