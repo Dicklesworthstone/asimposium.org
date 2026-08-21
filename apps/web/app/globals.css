@@ -117,7 +117,8 @@
 .landing .greek-sub {
   margin: 0.3rem 0 0;
   color: var(--color-muted);
-  opacity: 0.75;
+  /* No opacity dimming on top of the muted token: the ornament is real text,
+     and the dim dropped it to 3.13:1 contrast (WCAG AA needs 4.5:1). */
   font-size: 0.82rem;
   letter-spacing: 0.34em;
   text-indent: 0.34em;
