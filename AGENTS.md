@@ -357,3 +357,5 @@ Before finishing a work session you MUST:
 5. Hand off: what changed, gates run + results, remaining risks, concrete next steps.
 
 Do not claim a surface is done unless the relevant Fable gate is actually green.
+
+For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
