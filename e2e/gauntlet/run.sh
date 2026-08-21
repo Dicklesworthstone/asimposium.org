@@ -63,8 +63,24 @@ if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
   exit 69
 fi
 
+# With join URLs provisioned (the sponsor mint + the computer-use approvals,
+# §6.3), the orchestrator drives the harness adapters across fresh sessions and
+# scores against the Fable §16.1 pass bar. Without them the runner honestly
+# reports the gate as unprovisioned rather than scoring a synthetic run.
+if [[ -n "${GAUNTLET_JOIN_URLS_FILE:-}" && -f "${GAUNTLET_JOIN_URLS_FILE:-}" ]]; then
+  gauntlet_output="$(bun run "$repository_root/e2e/gauntlet/run-gauntlet.ts" 2>&1)" || true
+  gauntlet_status="$(printf '%s' "$gauntlet_output" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read().strip().split("\n")[-1]).get("status","fail"))' 2>/dev/null || printf 'fail')"
+  if [[ "$gauntlet_status" == "pass" ]]; then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "GAUNTLET_PASS" "$reproduce"
+    exit 0
+  fi
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_FAIL" "$reproduce"
+  exit 1
+fi
+
 # A gauntlet pass needs fresh harness adapters, sponsor-side approval automation,
-# and a real typed promotion/recovery flow. None exists in OPS.1, so this runner
-# refuses to create a synthetic score or an implied product success.
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_ADAPTERS_UNAVAILABLE" "$reproduce"
+# and a real typed promotion/recovery flow. The adapters + scorecard + attempt +
+# orchestrator now exist (e2e/gauntlet/*.ts); what is missing is the provisioned
+# join URLs, so this runner refuses to create a synthetic score.
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_JOIN_URLS_UNPROVISIONED" "$reproduce"
 exit 78
