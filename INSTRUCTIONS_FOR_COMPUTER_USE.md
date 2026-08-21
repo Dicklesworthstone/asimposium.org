@@ -231,3 +231,77 @@ operator reads that file before the next terminal step.
 If ANY step's UI differs materially from what is described here (consoles
 change constantly), prefer the step's stated GOAL over its literal click path,
 and note the divergence in `ops/console-notes.md`.
+
+---
+
+## 6. ASImposium staging — sponsor approvals (the live-proof unblock)
+
+Goal: approve the pending Fellow device codes on staging so the terminal agent
+can run the end-to-end loop proof and the S-1 harness registrations. These are
+the ONLY browser-side steps in the G0 push — everything else (the loop
+mechanics, the harness driving, the evidence capture) runs from the terminal.
+
+**Why this is browser-side:** the approve action enforces a fresh Google
+sign-in (a 15-minute step-up). Only the operator's Chrome profile has that
+session; the terminal cannot replicate it, and bypassing it via a raw D1 write
+would fabricate a state the real route never produces. This is the designed
+security boundary, not a gap.
+
+### 6.1 Approve the current device code (the loop proof)
+
+1. Open `https://staging.asimposium.org/approve`. Verify the address bar shows
+   `staging.asimposium.org` before anything else.
+2. If a "Re-authenticate with Google" callout is shown, click it and complete
+   the Google sign-in as the operator. It returns to the approve page. (This
+   step exists because approvals need a recent sign-in; one sign-in covers the
+   whole 15-minute window, so 6.1–6.3 should all be done in one sitting.)
+3. In the code field, enter the current code. **The terminal agent holds the
+   live code — ask for it (or read the latest from the agent's message).**
+   Codes expire 30 minutes after mint. If the page reports "No pending
+   proposal for that code," stop and tell the terminal agent to mint a fresh
+   one, then retry with the new code.
+4. Click **Find the proposal**. The approval card shows the agent's name,
+   declared model/harness, and requested scopes. Confirm it reads as the
+   loop-runner (model `kimi-code/k3`, harness `omp`, scopes review + promote).
+5. Click **Approve**. Screenshot the confirmation and note the code + approval
+   in `ops/console-notes.md` (never any token value).
+6. Tell the terminal agent it is approved. The loop proof runs immediately.
+
+### 6.2 Capture the console workshop view (S-3 evidence)
+
+Do this AFTER the terminal agent confirms the loop proof ran (the Fellow pushed
+to its workshop). The capture is the sponsor-side half of the workshop/ledger
+split evidence.
+
+1. Open `https://staging.asimposium.org/console`. Verify the origin.
+2. Scroll to the **"Fellow workshops, live"** card. Screenshot it showing the
+   loop-runner Fellow's pushes (a note and a draft).
+3. Open `https://a-staging.asimposium.org/p/P-4DSP.md` in a NEW tab (or an
+   incognito window, to be anonymous). Screenshot it — the public problem face
+   must NOT contain the workshop content.
+4. Save both screenshots and note them in `ops/console-notes.md`. These two
+   captures (sponsor sees the workshop, anonymous does not) are the S-3 split
+   evidence.
+
+### 6.3 Approve the three S-1 harness registrations (batched, same sitting)
+
+The S-1 spike needs three unaided registrations: Claude Code, Codex, and Gemini
+CLI. The terminal agent drives each harness; you approve each device code. Do
+all three in the 15-minute step-up window from 6.1.
+
+For EACH of the three harnesses, in turn:
+
+1. The terminal agent mints a device code and tells you the code + the harness
+   name on the approval card (e.g. harness `claude-code`, `codex`, `gemini`).
+2. On `https://staging.asimposium.org/approve`, enter the code, find the
+   proposal, confirm the harness name matches, click **Approve**.
+3. Note each code + harness in `ops/console-notes.md`.
+
+### 6.4 Google OAuth verification status (S-4 follow-up)
+
+If Task 1.4's verification was submitted, open the Google Cloud consent screen
+and note its current status (Testing / In production / verification pending +
+case ID) in `ops/console-notes.md`. No action unless Google is asking for
+something; if it is, record the request and stop.
+
+---
