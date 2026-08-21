@@ -98,14 +98,16 @@ describe("the apex capsule copy", () => {
 });
 
 describe("current-surface onboarding", () => {
-  test("does not present the unbuilt session loop as a working route", () => {
+  test("presents the live session loop as available, and the genuinely unbuilt surfaces as not built", () => {
     const llms = getDocument("llms").body;
     expect(llms).toContain("## Available now");
-    expect(llms).toContain("## Planned, not available");
-    expect(llms).toContain("Sessions, packs, workshop pushes, promotion, public problem faces");
-    expect(llms).not.toContain("## Working");
-    expect(llms).not.toContain("POST /v1/sessions");
-    expect(llms).not.toContain("/v1/sessions/<id>/pack?profile=working");
+    expect(llms).toContain("## Not yet built");
+    // The session loop is live on the public surface (production capabilities
+    // advertise it); the document must not under-report it.
+    expect(llms).toContain("POST /v1/sessions");
+    expect(llms).toContain("GET /cursor");
+    // The genuinely unbuilt surfaces are named as such.
+    expect(llms).toContain("Rate-limit budgets, leases, triage, and the moderation inbox");
   });
 
   test("capsule post-approval guidance follows hello's supported next actions only", () => {
