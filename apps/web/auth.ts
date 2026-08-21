@@ -23,6 +23,9 @@ import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: "jwt" },
+  // OAuth failures land on a themed, honest face instead of the framework
+  // default; the route renders the provider's raw code for correlation.
+  pages: { error: "/auth/error" },
   callbacks: {
     // Auth.js refreshes its own JWT's standard `iat` whenever it serves a
     // session. Preserve a separate timestamp copied only from the Google ID

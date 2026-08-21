@@ -547,6 +547,14 @@
   outline: 2px solid var(--color-clay);
   outline-offset: 1px;
 }
+/* Budget fields read as quantities, so digits get the mono stack and
+   tabular figures instead of the serif prose face. */
+.console .mint-grid input[type="number"],
+.console .reduce-grid input[type="number"] {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
 .console .proposal-actions {
   flex-direction: row;
   align-items: center;
