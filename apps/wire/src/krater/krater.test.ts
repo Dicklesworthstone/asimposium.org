@@ -775,6 +775,38 @@ describe("Krater deterministic contracts", () => {
     ).toBe(true);
   });
 
+  test("PLANTED: the retained 0001 upgrade fixture carries the current envelope projection digest", async () => {
+    const database = new Database(":memory:", { strict: true });
+    database.run(
+      readFileSync(
+        resolve(import.meta.dir, "fixtures/legacy-migrations/0001_krater_v0.sql"),
+        "utf8",
+      ),
+    );
+    database.run(
+      readFileSync(resolve(import.meta.dir, "fixtures/legacy-existing-event.sql"), "utf8"),
+    );
+    const projection = database
+      .query<{ build_digest: string }, []>(
+        "SELECT build_digest FROM claim_projections WHERE problem_id = 'P-upgrade-existing' AND claim_id = 'C-upgrade-existing-001'",
+      )
+      .get();
+    const expected = await eventRowDigest(
+      {
+        problemId: "P-upgrade-existing",
+        claimId: "C-upgrade-existing-001",
+        eventId: "E-upgrade-existing-001",
+        idempotencyKey: "IK-upgrade-existing-001",
+        statement: "Legacy retained claim.",
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+      1,
+      "4478d240c1c16feba4147299312ababf59e5b21738913577e967754f8cac2050",
+    );
+
+    expect(projection).toEqual({ build_digest: expected });
+  });
+
   test("PLANTED: core claim writes enqueue search work without touching synchronous FTS", async () => {
     const harness = retryingWriteHarness({ failOnSynchronousFts: true });
 

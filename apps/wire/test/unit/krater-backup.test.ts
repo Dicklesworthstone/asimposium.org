@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { backupKeyFor, backupProblem, type BackupBucket } from "../../src/krater/backup.ts";
+import { type BackupBucket, backupKeyFor, backupProblem } from "../../src/krater/backup.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -24,7 +24,9 @@ function localD1(sqlite: Database) {
 
 function freshDb(): ReturnType<typeof localD1> {
   const sqlite = new Database(":memory:");
-  for (const f of readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort()) {
+  for (const f of readdirSync(MIGRATIONS)
+    .filter((f) => f.endsWith(".sql"))
+    .sort()) {
     sqlite.run(readFileSync(join(MIGRATIONS, f), "utf8"));
   }
   return localD1(sqlite);
@@ -73,16 +75,25 @@ async function seedClaimProblem(db: ReturnType<typeof localD1>, problemId: strin
       .run();
   await insert(
     "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES (?, 1, ?, ?, ?)",
-    problemId, now, now, chain,
+    problemId,
+    now,
+    now,
+    chain,
   );
   // Mark the integrity backfill complete so the chain-head trigger is satisfied.
   await insert(
     "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at) VALUES (?, 'complete', 0, ?)",
-    problemId, now,
+    problemId,
+    now,
   );
   await insert(
     "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest) VALUES (?, ?, 1, 'claim.created', 'claim', 'C-1', 1, ?, ?, ?, ?)",
-    `E-1-${problemId}`, problemId, payloadSha256, now, rowDigest, chain,
+    `E-1-${problemId}`,
+    problemId,
+    payloadSha256,
+    now,
+    rowDigest,
+    chain,
   );
 }
 

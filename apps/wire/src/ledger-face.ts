@@ -192,9 +192,7 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
     const listing =
       data.problems.length === 0
         ? "No problems have been promoted to the public ledger yet."
-        : data.problems
-            .map((problem) => renderProblemIndexMarkdownRow(problem))
-            .join("\n");
+        : data.problems.map((problem) => renderProblemIndexMarkdownRow(problem)).join("\n");
     const body = `# Public problems\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {

@@ -8,6 +8,7 @@ import type {
   D1PreparedStatement,
   DurableObjectState,
 } from "@cloudflare/workers-types";
+import { canonicalClaimPayload } from "./krater";
 import {
   boundedOutboxBackoff,
   KraterOutboxDrainer,
@@ -23,7 +24,6 @@ import {
   oldestPendingAgeAlert,
   validateOutboxRow,
 } from "./outbox-do";
-import { canonicalClaimPayload } from "./krater";
 
 // This is an acceptance contract, deliberately independent of the production
 // retry ceiling. It keeps a five-minute production regression observable here.
@@ -378,8 +378,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
             ) {
               throw new Error("PLANTED_SEARCH_INDEX_SOURCE_BINDING_DRIFT");
             }
-            const queued =
-              rows.find((candidate) => candidate.event_id === eventId);
+            const queued = rows.find((candidate) => candidate.event_id === eventId);
             if (queued !== undefined) materializeSource(queued);
             const event = events.get(eventId);
             const claim = event === undefined ? undefined : claims.get(event.object_id);
@@ -958,7 +957,10 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(harness.searchDocuments()).toEqual(expected);
 
     const replayedAfterRestart = await harness.restart().fetch(drainRequest("hold-before-ack"));
-    expect(await replayedAfterRestart.json()).toMatchObject({ delivered: 0, held_before_ack: true });
+    expect(await replayedAfterRestart.json()).toMatchObject({
+      delivered: 0,
+      held_before_ack: true,
+    });
     expect(row.state).toBe("pending");
     expect(harness.searchDocuments()).toEqual(expected);
 

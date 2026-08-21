@@ -2362,18 +2362,14 @@ test("isolated build output evidence refuses fake fields, malformed, empty, nonc
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NON_UTF8",
   );
   const oneByteOverEvidence = JSON.stringify([
-    "x".repeat(
-      S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES +
-        1 -
-        Buffer.byteLength('[""]', "utf8"),
-    ),
+    "x".repeat(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES + 1 - Buffer.byteLength('[""]', "utf8")),
   ]);
   expect(Buffer.byteLength(oneByteOverEvidence, "utf8")).toBe(
     S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES + 1,
   );
-  expect(() =>
-    decodeIsolatedProductionBuildOutputEvidence(oneByteOverEvidence),
-  ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN");
+  expect(() => decodeIsolatedProductionBuildOutputEvidence(oneByteOverEvidence)).toThrow(
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN",
+  );
   expect(
     isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES),
   ).toBeLessThanOrEqual(S3_FRESH_RUNTIME_RESULT_MAX_BYTES);

@@ -14,11 +14,15 @@
 import type { D1Database } from "@cloudflare/workers-types";
 
 import { serializeProblemExport, verifyProblemExportChain } from "./export.ts";
-import { readEvents, type KraterEvent } from "./krater.ts";
+import { type KraterEvent, readEvents } from "./krater.ts";
 
 /** The minimal bucket surface the backup writer needs. */
 export interface BackupBucket {
-  put(key: string, body: string, options?: { readonly customMetadata?: Record<string, string> }): Promise<unknown>;
+  put(
+    key: string,
+    body: string,
+    options?: { readonly customMetadata?: Record<string, string> },
+  ): Promise<unknown>;
 }
 
 export interface BackupProblemResult {
@@ -29,12 +33,23 @@ export interface BackupProblemResult {
 }
 
 export type BackupRun =
-  | { readonly ok: true; readonly written: readonly BackupProblemResult[]; readonly datePrefix: string }
+  | {
+      readonly ok: true;
+      readonly written: readonly BackupProblemResult[];
+      readonly datePrefix: string;
+    }
   | { readonly ok: false; readonly problemId: string; readonly detail: string };
 
 /** The dated key prefix: `backups/<YYYY-MM-DD>/<problem>/<final-chain>.jsonl`. */
-export function backupKeyFor(datePrefix: string, problemId: string, finalChainDigest: string): string {
-  const digest = finalChainDigest.replace(/^sha256:/, "").replace(/[^a-f0-9]/gi, "").slice(0, 32);
+export function backupKeyFor(
+  datePrefix: string,
+  problemId: string,
+  finalChainDigest: string,
+): string {
+  const digest = finalChainDigest
+    .replace(/^sha256:/, "")
+    .replace(/[^a-f0-9]/gi, "")
+    .slice(0, 32);
   return `backups/${datePrefix}/${problemId}/${digest}.jsonl`;
 }
 
@@ -73,9 +88,7 @@ export async function backupProblem(
   // Never write a backup that fails its own chain verification.
   const verification = await verifyProblemExportChain(ndjson);
   if (!verification.intact) {
-    throw new Error(
-      `backup chain verification failed for ${problemId}: ${verification.detail}`,
-    );
+    throw new Error(`backup chain verification failed for ${problemId}: ${verification.detail}`);
   }
 
   const key = backupKeyFor(datePrefix, problemId, verification.finalChainDigest);

@@ -20,7 +20,7 @@ VALUES (
   'P-upgrade-existing',
   1,
   1,
-  '5863b9f85ea32bef8c3d6370f5a21e3b8c5e9c6779d0f4acf068e6a67d6e09b2',
+  'b6d6f48fd9aa93bd4d0b3338a2dfc3b703d6bc3a2277858d090d3723c6078561',
   0,
   '2026-08-14T00:00:00.000Z'
 );

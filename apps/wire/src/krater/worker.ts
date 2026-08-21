@@ -860,9 +860,10 @@ async function handleHarnessRequest(
       let writeFailure: unknown;
       let cleanupFailed = false;
       // This D1 trigger is a local-only fault injection. It aborts at the outbox
-      // statement, after event_content and FTS have been attempted in the same
-      // canonical batch. The finally block removes only the trigger this request
-      // created, so a failed transaction cannot contaminate later harness cases.
+      // statement, after event_content has been attempted in the same canonical
+      // batch. FTS is intentionally asynchronous and is populated only when the
+      // outbox drainer handles that row. The finally block removes only the trigger
+      // this request created, so a failed transaction cannot contaminate later cases.
       let result: Awaited<ReturnType<typeof writeClaim>> | null = null;
       try {
         result = await writeClaim(

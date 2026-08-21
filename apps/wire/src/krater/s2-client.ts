@@ -12,6 +12,7 @@ import {
 import { resolve } from "node:path";
 
 import {
+  EnrollmentProblemBindingSchema,
   FellowNameSchema,
   FellowTokenSchema,
   MAX_S2_COST_RECEIPT_BYTES,
@@ -31,6 +32,7 @@ import {
   WorkshopObjectIdSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
+import { OUTBOX_IDLE_RECONCILE_MS } from "./outbox-do";
 
 const origin = process.env.S2_ORIGIN;
 const phase = process.env.S2_PHASE ?? "exercise";
@@ -46,6 +48,7 @@ const BINDINGS: S2CostMeasurementReceipt["bindings"] = {
   durable_object: "KRATER_OUTBOX",
   r2: null,
 };
+const S2_IDLE_RECONCILE_CLOCK_TOLERANCE_MS = 1_000;
 const HARNESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const SUCCESSFUL_BATCH_METRIC_SCOPE: typeof S2_SUCCESSFUL_BATCH_SCOPE = S2_SUCCESSFUL_BATCH_SCOPE;
 const FAILED_RETRY_BATCH_METRICS: typeof S2_FAILED_RETRY_SCOPE = S2_FAILED_RETRY_SCOPE;
@@ -67,12 +70,19 @@ const OUTBOX_PROBLEM = "P-s2-outbox";
  * than from source order. They are their own problems so their per-problem D1
  * census stays exact and independent of the `/__s2/outbox/*`-driven counters.
  */
-const MOUNTED_PROBLEM = "P-s2-mounted";
-const MOUNTED_NO_NUDGE_PROBLEM = "P-s2-mounted-no-nudge";
-const MOUNTED_BINDING_FAIL_PROBLEM = "P-s2-mounted-binding-fail";
-const MOUNTED_CAS_PROBLEM = "P-s2-mounted-cas";
+const MOUNTED_PROBLEM = "P-S2MOUNTED";
+const MOUNTED_NO_NUDGE_PROBLEM = "P-S2NONUDGE";
+const MOUNTED_BINDING_FAIL_PROBLEM = "P-S2BINDFAIL";
+const MOUNTED_CAS_PROBLEM = "P-S2CAS";
 /** Spans the crash: committed-but-undelivered before the restart, drained after. */
-const MOUNTED_CRASH_PROBLEM = "P-s2-mounted-crash";
+const MOUNTED_CRASH_PROBLEM = "P-S2CRASH";
+const MOUNTED_PROBLEMS = [
+  MOUNTED_PROBLEM,
+  MOUNTED_NO_NUDGE_PROBLEM,
+  MOUNTED_BINDING_FAIL_PROBLEM,
+  MOUNTED_CAS_PROBLEM,
+  MOUNTED_CRASH_PROBLEM,
+] as const;
 const UPGRADE_EXISTING_PROBLEM = "P-upgrade-existing";
 const UPGRADE_EMPTY_PROBLEM = "P-upgrade-empty";
 
@@ -523,6 +533,12 @@ const fail = (code: string): never => {
   throw new Error(code);
 };
 
+for (const problemId of MOUNTED_PROBLEMS) {
+  if (!EnrollmentProblemBindingSchema.safeParse(problemId).success) {
+    fail("S2_MOUNTED_PROBLEM_BINDING_INVALID");
+  }
+}
+
 function requireHarnessToken(): string {
   const token = harnessToken;
   if (typeof token === "string" && HARNESS_TOKEN_PATTERN.test(token)) return token;
@@ -921,6 +937,13 @@ function assertEqual(actual: unknown, expected: unknown, code: string): void {
   if (actual !== expected) fail(code);
 }
 
+function hasIdleReconcileAlarm(status: S2OutboxStatus): boolean {
+  return (
+    status.alarm_at !== null &&
+    status.alarm_at - Date.now() > OUTBOX_IDLE_RECONCILE_MS - S2_IDLE_RECONCILE_CLOCK_TOLERANCE_MS
+  );
+}
+
 function percentile95(values: readonly number[]): number {
   const ordered = [...values].sort((left, right) => left - right);
   return ordered[Math.max(0, Math.ceil(ordered.length * 0.95) - 1)] ?? 0;
@@ -1026,18 +1049,23 @@ async function deterministicAllocationAndRollback(): Promise<void> {
   assertEqual(rollbackStateResponse.status, 200, "S2_ROLLBACK_STATE_READ_FAILED");
   const rollbackState = parseS2StateResult(rollbackStateResponse.body);
   assertEqual(rollbackState.cursor, 1, "S2_ROLLBACK_CURSOR_INVALID");
+  // The winning write owns one row in every canonical write table. Search is
+  // deliberately asynchronous: this scenario defers the outbox nudge, so the
+  // winner's FTS row does not exist yet. Pinning FTS to one here confused a
+  // deferred projection with a partial transaction and made the real harness
+  // fail before it could inspect the planted late-outbox rollback.
   for (const table of [
     "claims",
     "claim_projections",
     "events",
     "event_content",
-    "public_claim_fts",
     "idempotency",
     "outbox",
     "integrity_checkpoints",
   ]) {
     assertEqual(rollbackState.counts[table], 1, "S2_ROLLBACK_PARTIAL_BATCH_COMMIT");
   }
+  assertEqual(rollbackState.counts.public_claim_fts, 0, "S2_ROLLBACK_DEFERRED_FTS_STATE_INVALID");
   assertEqual(
     safeNonnegativeIntegerAt(rollbackStateResponse.body, "event_content_for_event"),
     0,
@@ -1191,8 +1219,8 @@ async function deterministicAllocationAndRollback(): Promise<void> {
     Array.isArray(cleanupRecoverySearch.body.matches)
       ? cleanupRecoverySearch.body.matches.length
       : -1,
-    1,
-    "S2_ROLLBACK_CLEANUP_STALE_TRIGGER_FTS_CONTAMINATION",
+    0,
+    "S2_ROLLBACK_CLEANUP_RECOVERY_DEFERRED_FTS_STATE_INVALID",
   );
   await assertReplay(ROLLBACK_PROBLEM, 2, "rollback-two-writer-replay");
 
@@ -1627,10 +1655,16 @@ async function exerciseOutboxDrainer(): Promise<void> {
     false,
   );
   assertEqual(auto.outbox_handoff, "armed", "S2_OUTBOX_HANDOFF_NOT_ARMED");
+  // A completely drained queue is not alarm-free. The DO deliberately keeps a
+  // five-minute idle reconcile alarm so a lost producer nudge cannot strand a
+  // durable D1 row forever. Require that recovery authority to survive the
+  // terminal delivery instead of waiting for the now-impossible null alarm.
   const afterAuto = await waitForOutbox(
     "outbox-auto-alarm-delivery",
     (status) =>
-      status.delivered >= before.delivered + 1 && status.pending === 0 && status.alarm_at === null,
+      status.delivered >= before.delivered + 1 &&
+      status.pending === 0 &&
+      hasIdleReconcileAlarm(status),
   );
   assertEqual(afterAuto.max_active, 1, "S2_OUTBOX_AUTO_SINGLE_OWNER_INVALID");
   const autoState = await state(OUTBOX_PROBLEM, "outbox-auto-visible-state");
@@ -1650,14 +1684,18 @@ async function exerciseOutboxDrainer(): Promise<void> {
   assertEqual(scheduled.outbox_handoff, "unavailable", "S2_OUTBOX_HANDOFF_FAILURE_NOT_PLANTED");
   const stranded = await outboxStatus("outbox-failed-handoff-visible", S2_OUTBOX_STATUS_TIMEOUT_MS);
   assertEqual(stranded.pending, 1, "S2_OUTBOX_FAILED_HANDOFF_NOT_PENDING");
-  assertEqual(stranded.alarm_at, null, "S2_OUTBOX_FAILED_HANDOFF_BORROWED_ALARM");
+  // The prior successful drain owns an idle-reconcile alarm. A failed nudge
+  // must not replace or advance that existing authority; comparing the exact
+  // baseline is causal, whereas requiring null became impossible once idle
+  // reconciliation was added.
+  assertEqual(stranded.alarm_at, afterAuto.alarm_at, "S2_OUTBOX_FAILED_HANDOFF_CHANGED_IDLE_ALARM");
   await triggerScheduledOutboxReconcile("outbox-scheduled-reconcile-trigger");
   const afterScheduled = await waitForOutbox(
     "outbox-scheduled-reconcile-delivery",
     (status) =>
       status.delivered >= afterAuto.delivered + 1 &&
       status.pending === 0 &&
-      status.alarm_at === null,
+      hasIdleReconcileAlarm(status),
   );
 
   const concurrent = await write(
@@ -1733,7 +1771,7 @@ async function exerciseOutboxDrainer(): Promise<void> {
   assertEqual(staleReset.status, 202, "S2_OUTBOX_STALE_WRAP_FAULT_RESET_FAILED");
   await waitForOutbox(
     "outbox-stale-wrap-settled",
-    (status) => status.pending === 0 && status.alarm_at === null,
+    (status) => status.pending === 0 && hasIdleReconcileAlarm(status),
   );
   assertEqual(restored.seq, 5, "S2_OUTBOX_STALE_WRAP_SEQUENCE_INVALID");
 
@@ -2501,10 +2539,18 @@ async function exercise(): Promise<void> {
     fail("S2_EVENT_PAGE_INVALID");
   }
 
-  const fts = await request("GET", "/__s2/search?q=Synthetic&limit=20", "fts-read");
-  assertEqual(fts.status, 200, "S2_FTS_QUERY_FAILED");
+  // Every write above deliberately deferred its outbox nudge so this phase can
+  // inspect the durable queue before the real DO drainer runs. FTS is an async
+  // outbox projection, not part of the canonical D1 write batch, so the honest
+  // pre-rebuild state is an empty index. Requiring 13 here encoded the retired
+  // synchronous-index design and made the real D1 harness fail despite correct
+  // deferred delivery. The rebuild below is the positive FTS5 assertion.
+  const fts = await request("GET", "/__s2/search?q=Synthetic&limit=20", "fts-deferred-read");
+  assertEqual(fts.status, 200, "S2_DEFERRED_FTS_QUERY_FAILED");
   const ftsMatches = fts.body.matches;
-  if (!Array.isArray(ftsMatches) || ftsMatches.length !== 13) fail("S2_FTS_RESULT_INVALID");
+  if (!Array.isArray(ftsMatches) || ftsMatches.length !== 0) {
+    fail("S2_DEFERRED_FTS_STATE_INVALID");
+  }
 
   const malformedFts = await request(
     "GET",
@@ -2848,13 +2894,9 @@ function mountedFellowName(problemId: string): string {
 // made two collide under NOCASE, the second seed would hit the DB's UNIQUE(name)
 // mid-run; checking distinctness here at load fails fast and locally instead.
 {
-  const mountedNames = [
-    MOUNTED_PROBLEM,
-    MOUNTED_NO_NUDGE_PROBLEM,
-    MOUNTED_BINDING_FAIL_PROBLEM,
-    MOUNTED_CAS_PROBLEM,
-    MOUNTED_CRASH_PROBLEM,
-  ].map((problemId) => mountedFellowName(problemId).toLowerCase());
+  const mountedNames = MOUNTED_PROBLEMS.map((problemId) =>
+    mountedFellowName(problemId).toLowerCase(),
+  );
   if (new Set(mountedNames).size !== mountedNames.length) {
     fail("S2_MOUNTED_FELLOW_NAMES_NOT_UNIQUE");
   }
@@ -3455,13 +3497,7 @@ async function mountedCrashRecoveryDeliversExactlyOnce(): Promise<void> {
  * pending, a single owner, no active leak) are asserted globally.
  */
 async function mountedFinalCensus(): Promise<void> {
-  for (const problemId of [
-    MOUNTED_PROBLEM,
-    MOUNTED_NO_NUDGE_PROBLEM,
-    MOUNTED_BINDING_FAIL_PROBLEM,
-    MOUNTED_CAS_PROBLEM,
-    MOUNTED_CRASH_PROBLEM,
-  ]) {
+  for (const problemId of MOUNTED_PROBLEMS) {
     assertMountedCensus(
       await state(problemId, "mounted-final-census"),
       "S2_MOUNTED_FINAL_CENSUS_INVALID",

@@ -2090,15 +2090,9 @@ describe("a pinned port is validated before anything is started", () => {
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("PRIVATE_WRANGLER_ENV_SELF_TEST_PASSED");
     expect(phaseValue(run.stderr, "private-wrangler-env-observed", "result")).toBe("exact");
-    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "binding")).toBe(
-      "AGORA_ORIGIN",
-    );
-    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "missing-lf")).toBe(
-      "refused",
-    );
-    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "extra-blank")).toBe(
-      "refused",
-    );
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "binding")).toBe("AGORA_ORIGIN");
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "missing-lf")).toBe("refused");
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "extra-blank")).toBe("refused");
     expect(phaseValue(run.stderr, "private-wrangler-env-observed", "scope")).toBe(
       "private-env-file",
     );
@@ -2129,9 +2123,7 @@ describe("a pinned port is validated before anything is started", () => {
     expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "trailing")).toBe(
       "withheld",
     );
-    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "no-lf")).toBe(
-      "withheld",
-    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "no-lf")).toBe("withheld");
     expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "scope")).toBe(
       "closed-capture-file",
     );
@@ -2320,8 +2312,8 @@ describe("a pinned port is validated before anything is started", () => {
       'printf \'%s\\n\' "$LOCAL_WRANGLER_AGORA_ENV" >"$LOCAL_RUNTIME_WRANGLER_ENV_FILE"',
     );
     expect(source).toContain("private_wrangler_env_is_exact || return 1");
-    expect(source).toContain('printf \'%s\' "$LOCAL_WRANGLER_AGORA_ENV"');
-    expect(source).toContain('printf \'%s\\n\\n\' "$LOCAL_WRANGLER_AGORA_ENV"');
+    expect(source).toContain("printf '%s' \"$LOCAL_WRANGLER_AGORA_ENV\"");
+    expect(source).toContain("printf '%s\\n\\n' \"$LOCAL_WRANGLER_AGORA_ENV\"");
     expect(source).toContain('const allowedCodes = new Set(["capsule-json-status"]);');
     expect(source).toContain("const args = process.argv.slice(1);");
     expect(source).toContain("args.length !== 1");
@@ -2331,9 +2323,11 @@ describe("a pinned port is validated before anything is started", () => {
     expect(source).toContain("const after = await file.stat();");
     expect(source).toContain("after.dev !== opened.dev || after.ino !== opened.ino");
     expect(source).toContain("after.size !== opened.size || bytes.length !== opened.size");
-    expect(source).toContain('record !== `${JSON.stringify(parsed)}\\n`');
+    expect(source).toContain("record !== `${JSON.stringify(parsed)}\\n`");
     expect(source).toContain("!allowedCodes.has(parsed.code)");
-    expect(source).toContain('local_client_failure_validator "$stderr_path" >/dev/null 2>/dev/null');
+    expect(source).toContain(
+      'local_client_failure_validator "$stderr_path" >/dev/null 2>/dev/null',
+    );
     expect(source).toContain("printf '%s' \"capsule-json-status\"");
     expect(source).not.toContain("process.argv.length !== 3");
     expect(source).not.toContain("process.argv.length !== 2");

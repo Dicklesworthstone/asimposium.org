@@ -723,9 +723,7 @@ describe("face wire format", () => {
     for (const query of queries) {
       expect(query.startsWith("SELECT ")).toBe(true);
       expect(query.endsWith(sqlSuffix)).toBe(true);
-      const selectedColumns = query
-        .slice("SELECT ".length, -sqlSuffix.length)
-        .split(", ");
+      const selectedColumns = query.slice("SELECT ".length, -sqlSuffix.length).split(", ");
       expect(selectedColumns).toEqual(descriptorKeys);
       expect([...selectedColumns].sort()).toEqual([...schemaKeys].sort());
     }
