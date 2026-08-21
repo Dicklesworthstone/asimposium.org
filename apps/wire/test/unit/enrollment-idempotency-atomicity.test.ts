@@ -2554,7 +2554,7 @@ function seedCapAuthority(
       "test-model",
       "codex",
       CAP_AT - 1,
-      CAP_AT + PENDING_PROPOSAL_TTL_MS,
+      recordCreatedAt + PENDING_PROPOSAL_TTL_MS,
     );
   sqlite
     .prepare(
