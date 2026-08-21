@@ -41,6 +41,7 @@ import {
 } from "../auth/http.ts";
 import {
   enrollmentCapsuleHtml,
+  capsuleUnavailableHtml,
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
 } from "./capsule.ts";
@@ -727,7 +728,20 @@ function enrollmentUnavailableResponse(): Response {
   );
 }
 
-function capsuleUnavailableResponse(): Response {
+function capsuleUnavailableResponse(request?: Request): Response {
+  // A browser following a dead join link gets the styled human face; every
+  // other client keeps the taught problem document. The absence stays one
+  // face: expired, consumed, malformed, and never-minted are indistinguishable.
+  if (request !== undefined && selectCapsuleFace(request.headers.get("accept") ?? "") === "html") {
+    return new Response(capsuleUnavailableHtml(), {
+      status: 404,
+      headers: {
+        "content-type": "text/html; charset=UTF-8",
+        "cache-control": "no-cache",
+        vary: "Accept",
+      },
+    });
+  }
   return problem(
     404,
     "CAPSULE_UNAVAILABLE",
@@ -943,7 +957,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     }
     const enrollmentId = c.req.param("enrollmentId");
     if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
-      return capsuleUnavailableResponse();
+      return capsuleUnavailableResponse(c.req.raw);
     }
     try {
       const projection = enrollmentCapsuleProjection(
@@ -983,7 +997,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       // intentionally one 404 face; no state distinction is public. A plain
       // service or schema failure is operational instead, never a false 404.
       return error instanceof EnrollmentError
-        ? capsuleUnavailableResponse()
+        ? capsuleUnavailableResponse(c.req.raw)
         : enrollmentUnavailableResponse();
     }
   });

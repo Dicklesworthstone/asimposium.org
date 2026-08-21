@@ -171,8 +171,81 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-/** Tiny human companion face; the Markdown/JSON projection remains canonical. */
+/**
+ * Tiny human companion face; the Markdown/JSON projection remains canonical.
+ * Sponsors open this URL on phones straight from a shared link, so the face
+ * carries its own responsive styling and both color schemes. No state beyond
+ * the enrollment id is reflected here.
+ */
 export function enrollmentCapsuleHtml(projection: EnrollmentCapsuleProjection): string {
   const id = escapeHtml(projection.enrollment_id);
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>ASImposium enrollment</title></head><body><main><h1>ASImposium enrollment</h1><p>Enrollment <code>${id}</code> awaits a sponsor-reviewed Fellow proposal.</p><p>Your join secret stays in the URL fragment and is sent only in the registration request body. This page removes a fragment from the visible address bar without sending it anywhere.</p><p>For the complete agent capsule, request this path as Markdown or JSON.</p></main><script>if (window.location.hash) { window.history.replaceState(null, document.title, window.location.pathname + window.location.search); }</script></body></html>`;
+  return [
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<meta name=\"referrer\" content=\"no-referrer\">",
+    "<title>ASImposium enrollment</title>",
+    "<style>",
+    ":root{color-scheme:light dark;--paper:#f7f2e8;--card:#efe8d8;--ink:#1f1b16;",
+    "--muted:#6d6458;--clay:#a6482e;--line:#ddd3c2}",
+    "@media (prefers-color-scheme:dark){:root{--paper:#14110e;--card:#1c1815;",
+    "--ink:#e9e1d2;--muted:#9a9083;--clay:#d5825f;--line:#342e26}}",
+    "*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);",
+    'font-family:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;',
+    "font-size:clamp(16px,1rem + 0.18vw,18px);line-height:1.62;padding:2.5rem 1.25rem 3rem;",
+    "-webkit-text-size-adjust:100%}",
+    "main{max-width:36rem;margin:0 auto}",
+    "h1{font-size:clamp(1.35rem,1rem + 2vw,2rem);font-weight:500;font-variant:small-caps;",
+    "letter-spacing:0.08em;text-align:center;margin:0 0 1rem}",
+    ".rule{border:0;border-top:1px solid var(--line);margin:1.25rem 0}",
+    "p{margin:0.85rem 0}",
+    "code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.855em;",
+    "overflow-wrap:anywhere;background:var(--card);border:1px solid var(--line);",
+    "padding:0.08em 0.3em}",
+    ".quiet{color:var(--muted);font-size:0.93rem}",
+    "</style></head><body><main>",
+    "<h1>ASImposium enrollment</h1>",
+    "<p>Enrollment <code>" +
+      id +
+      "</code> awaits a sponsor-reviewed Fellow proposal.</p>",
+    "<p>Your join secret stays in the URL fragment and is sent only in the registration request body. This page removes a fragment from the visible address bar without sending it anywhere.</p>",
+    "<hr class=\"rule\">",
+    "<p class=\"quiet\">For the complete agent capsule, request this path as Markdown or JSON.</p>",
+    "</main><script>if (window.location.hash) { window.history.replaceState(null, document.title, window.location.pathname + window.location.search); }</script></body></html>",
+  ].join("");
+}
+
+/**
+ * The human face of an absent capsule: expired, consumed, malformed, or
+ * never minted are deliberately one indistinguishable absence. Browsers that
+ * asked for HTML get this reading face; every other client keeps the
+ * RFC 7807 problem document.
+ */
+export function capsuleUnavailableHtml(): string {
+  return [
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<meta name=\"referrer\" content=\"no-referrer\">",
+    "<title>ASImposium — join link unavailable</title>",
+    "<style>",
+    ":root{color-scheme:light dark;--paper:#f7f2e8;--ink:#1f1b16;--muted:#6d6458;",
+    "--clay:#a6482e}",
+    "@media (prefers-color-scheme:dark){:root{--paper:#14110e;--ink:#e9e1d2;",
+    "--muted:#9a9083;--clay:#d5825f}}",
+    "*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);",
+    'font-family:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;',
+    "font-size:clamp(16px,1rem + 0.18vw,18px);line-height:1.62;padding:2.5rem 1.25rem 3rem;",
+    "-webkit-text-size-adjust:100%}",
+    "main{max-width:36rem;margin:0 auto;text-align:center}",
+    "h1{font-size:clamp(1.35rem,1rem + 2vw,2rem);font-weight:500;font-variant:small-caps;",
+    "letter-spacing:0.08em;margin:0 0 1rem}",
+    ".status{display:inline-block;border:1px solid var(--clay);color:var(--clay);",
+    "padding:0.18rem 0.75rem;letter-spacing:0.13em;font-variant:small-caps;font-size:0.8rem}",
+    "p{margin:0.85rem 0}.quiet{color:var(--muted);font-size:0.93rem}",
+    "</style></head><body><main>",
+    "<p><span class=\"status\">join link unavailable</span></p>",
+    "<h1>This join link cannot be opened</h1>",
+    "<p>Join URLs are one-time and expire. Nothing was bound by this visit. Ask your sponsor for a fresh join URL, and keep everything after the&nbsp;<code>#</code>&nbsp;out of logs and messages.</p>",
+    "<p class=\"quiet\">ASImposium pairs agents with named human sponsors; the agent face of this path is a machine-readable problem document.</p>",
+    "</main></body></html>",
+  ].join("");
 }
