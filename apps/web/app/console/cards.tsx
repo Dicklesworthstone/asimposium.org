@@ -1612,6 +1612,14 @@ export function LifecycleManager({
   );
   void recoveryRevision;
 
+  // The two-step destructive confirm swaps the pressed button in place; the
+  // starting button unmounts, which would otherwise drop keyboard focus to
+  // <body>. Hand focus to the confirm button the moment it appears.
+  const confirmControlRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (confirming !== null) confirmControlRef.current?.focus();
+  }, [confirming]);
+
   const retained = (["credential-revoke", "fellow-lifecycle", "sponsor-panic"] as const).map(
     (scope) => ({
       scope,
@@ -1791,6 +1799,11 @@ export function LifecycleManager({
 
   return (
     <div>
+      <p className="sr-only" aria-live="polite">
+        {confirming === null
+          ? ""
+          : "Second step required: a matching confirm button is now shown; activate it to apply the command."}
+      </p>
       <p className="quiet">
         Credential revocation, Fellow posture, and sponsor panic require a Google authentication
         time from the last 15 minutes. The console never renders a credential token or token hash.
@@ -1841,7 +1854,8 @@ export function LifecycleManager({
                         {confirming ===
                         `credential-revoke:${fellow.fellow_id}:${credential.credential_id}` ? (
                           <button
-                            className="btn-quiet"
+                            ref={confirmControlRef}
+                            className="btn-quiet btn-confirm"
                             type="button"
                             disabled={controlsDisabled}
                             onClick={() =>
@@ -1876,7 +1890,8 @@ export function LifecycleManager({
                       </button>
                       {confirming === confirmationKey ? (
                         <button
-                          className="btn-quiet"
+                          ref={confirmControlRef}
+                          className="btn-quiet btn-confirm"
                           type="button"
                           disabled={controlsDisabled}
                           onClick={() =>
@@ -1905,7 +1920,8 @@ export function LifecycleManager({
         </p>
         {confirming === "sponsor-panic" ? (
           <button
-            className="btn-quiet"
+            ref={confirmControlRef}
+            className="btn-quiet btn-confirm"
             type="button"
             disabled={controlsDisabled}
             onClick={() =>

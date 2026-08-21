@@ -329,6 +329,10 @@
   cursor: not-allowed;
   opacity: 0.55;
 }
+.btn-quiet.btn-confirm:not(:disabled) {
+  border-color: var(--color-clay);
+  color: var(--color-clay);
+}
 .btn-google,
 .btn-quiet,
 .landing a.btn-console {
@@ -712,6 +716,14 @@
   margin: 0.3rem 0 0;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+}
+/*
+ * A workshop push can be arbitrarily long; the private console render stays
+ * bounded by scrolling inside the card instead of growing without limit.
+ */
+.console .workshop-body {
+  max-height: 18rem;
+  overflow-y: auto;
 }
 
 /* ── touch: comfortable targets, no iOS focus zoom ─────── */

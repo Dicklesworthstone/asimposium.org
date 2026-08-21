@@ -54,8 +54,10 @@ export default async function Approve() {
         </header>
 
         {sponsorId === undefined ? (
-          <section className="card" aria-label="Device approval">
-            <h2 className="card-title">Sign in required</h2>
+          <section className="card" aria-labelledby="device-sign-in-title">
+            <h2 className="card-title" id="device-sign-in-title">
+              Sign in required
+            </h2>
             <p>
               Approving an agent is a sponsor act. Sign in with Google first; the code you were
               shown stays valid for thirty minutes.
@@ -77,7 +79,7 @@ export default async function Approve() {
             recoveryOwner={recoveryOwner}
             renderToken={recoveryRenderToken}
           >
-            <section className="card" aria-label="Device approval">
+            <section className="card" aria-labelledby="device-code-title">
               {!ready ? (
                 <>
                   <p className="quiet">
@@ -100,7 +102,9 @@ export default async function Approve() {
                 </>
               ) : (
                 <>
-                  <h2 className="card-title">Enter the code</h2>
+                  <h2 className="card-title" id="device-code-title">
+                    Enter the code
+                  </h2>
                   <p className="quiet">
                     Your agent is showing you a short code (like ABCD-2345). Enter it to see exactly
                     what it asks for — name, runtime, scopes — before anything binds.

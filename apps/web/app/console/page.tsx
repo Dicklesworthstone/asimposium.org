@@ -50,6 +50,18 @@ function requestedFellowCursor(
   return parsed.success ? parsed.data : undefined;
 }
 
+/**
+ * Workshop previews are rendered on the server, so the stamp is formatted
+ * once, deterministically in UTC — no hydration variance, no locale guess.
+ * Unparseable input passes through untouched rather than being invented.
+ */
+function workshopTimestamp(iso: string): string {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime())
+    ? iso
+    : `${at.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
 export default async function Console({ searchParams }: { searchParams: ConsoleSearchParams }) {
   const fellowCursor = requestedFellowCursor((await searchParams).fellow_cursor);
   const session = await auth();
@@ -330,7 +342,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                       <li key={object.workshop_id}>
                         <span className="workshop-kind">{object.type}</span>{" "}
                         <strong>{object.title}</strong>{" "}
-                        <span className="quiet">{object.created_at}</span>
+                        <span className="quiet">
+                          <time dateTime={object.created_at}>
+                            {workshopTimestamp(object.created_at)}
+                          </time>
+                        </span>
                         <p className="workshop-body">{object.body_md}</p>
                       </li>
                     ))}
