@@ -21,7 +21,10 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { OwnedCommandResult } from "../../../../scripts/suite/cli.ts";
+import type {
+  OwnedCommandResult,
+  OwnedSessionFailurePhase,
+} from "../../../../scripts/suite/cli.ts";
 import {
   assertS3PublicProjectionShape,
   assertS3PublicValueSafe,
@@ -145,6 +148,11 @@ const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
 const S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES = 64 * 1024;
 const S3_FRESH_RUNTIME_BOOTSTRAP_NAME = "bootstrap.json";
 const S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE = 97;
+const S3_FRESH_RUNTIME_RESULT_AUTHORITY_EXIT_CODE = 98;
+const S3_FRESH_RUNTIME_RUNNER_AUTHORITY_EXIT_CODE = 99;
+const S3_FRESH_RUNTIME_RUNNER_EXECUTION_EXIT_CODE = 100;
+const S3_FRESH_RUNTIME_RESULT_SCHEMA_EXIT_CODE = 101;
+const S3_FRESH_RUNTIME_RESULT_PUBLICATION_EXIT_CODE = 102;
 const S3_FRESH_RUNTIME_RETAINED_COLLISION_EXIT_CODE = 92;
 // The outer fresh helper has one monotonic deadline. It is never detached: on
 // expiry the harness kills and reaps that exact helper before refusing its
@@ -169,6 +177,22 @@ const OWNED_COMMAND_OUTCOMES = {
   "ownership-unproven": true,
   "spawn-failed": true,
 } as const satisfies Record<OwnedCommandResult["outcome"], true>;
+
+const OWNED_SESSION_FAILURE_PHASES = {
+  "ready-record": true,
+  "supervisor-pid": true,
+  "terminal-record": true,
+  "control-stream": true,
+  "initial-census": true,
+  "term-signal": true,
+  "cleanup-deadline": true,
+  "post-term-census": true,
+  "kill-signal": true,
+  "kill-reap": true,
+  "final-census": true,
+  "leader-release": true,
+  "leader-reap": true,
+} as const satisfies Record<OwnedSessionFailurePhase, true>;
 
 interface S3OwnedCommandOptions {
   readonly timeoutMs: number;
@@ -635,21 +659,28 @@ import { fileURLToPath } from "node:url";
 const BOOTSTRAP_MAX_BYTES = 65536;
 const RESULT_MAX_BYTES = ${S3_FRESH_RUNTIME_RESULT_MAX_BYTES};
 const BOOTSTRAP_EXIT_CODE = ${S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE};
+const RESULT_AUTHORITY_EXIT_CODE = ${S3_FRESH_RUNTIME_RESULT_AUTHORITY_EXIT_CODE};
+const RUNNER_AUTHORITY_EXIT_CODE = ${S3_FRESH_RUNTIME_RUNNER_AUTHORITY_EXIT_CODE};
+const RUNNER_EXECUTION_EXIT_CODE = ${S3_FRESH_RUNTIME_RUNNER_EXECUTION_EXIT_CODE};
+const RESULT_SCHEMA_EXIT_CODE = ${S3_FRESH_RUNTIME_RESULT_SCHEMA_EXIT_CODE};
+const RESULT_PUBLICATION_EXIT_CODE = ${S3_FRESH_RUNTIME_RESULT_PUBLICATION_EXIT_CODE};
 const RETAINED_COLLISION_EXIT_CODE = 92;
 const BOOTSTRAP_NAME = "${S3_FRESH_RUNTIME_BOOTSTRAP_NAME}";
 const RESULT_NAME = "result.json";
 const RUNNER_URL = ${JSON.stringify(S3_OWNED_COMMAND_RUNNER_URL)};
 const OWNED_OUTCOMES = new Set(${JSON.stringify(Object.keys(OWNED_COMMAND_OUTCOMES))});
+const OWNED_FAILURE_PHASES = new Set(${JSON.stringify(Object.keys(OWNED_SESSION_FAILURE_PHASES))});
 const decimal = /^(?:0|[1-9][0-9]*)$/u;
 const sha256 = /^[0-9a-f]{64}$/u;
 let bootstrapFd;
 let resultFd;
 let retainedFd;
+let failureCode = BOOTSTRAP_EXIT_CODE;
 const closeQuietly = (fd) => {
   if (fd === undefined) return;
   try { closeSync(fd); } catch {}
 };
-const failClosed = (code = 1) => {
+const failClosed = (code = failureCode) => {
   closeQuietly(retainedFd);
   closeQuietly(resultFd);
   closeQuietly(bootstrapFd);
@@ -666,7 +697,7 @@ const writeAllAt = (fd, bytes) => {
 const verifiesNamedDirectory = (directoryPath, identity) => {
   let directoryFd;
   try {
-    if (!isAbsolute(directoryPath)) failClosed(BOOTSTRAP_EXIT_CODE);
+    if (!isAbsolute(directoryPath)) failClosed();
     const named = lstatSync(directoryPath, { bigint: true });
     if (
       !named.isDirectory() ||
@@ -674,7 +705,7 @@ const verifiesNamedDirectory = (directoryPath, identity) => {
       named.ino.toString(10) !== identity.ino ||
       named.mode.toString(10) !== identity.mode
     ) {
-      failClosed(BOOTSTRAP_EXIT_CODE);
+      failClosed();
     }
     directoryFd = openSync(
       directoryPath,
@@ -687,10 +718,10 @@ const verifiesNamedDirectory = (directoryPath, identity) => {
       opened.ino.toString(10) !== identity.ino ||
       opened.mode.toString(10) !== identity.mode
     ) {
-      failClosed(BOOTSTRAP_EXIT_CODE);
+      failClosed();
     }
   } catch {
-    failClosed(BOOTSTRAP_EXIT_CODE);
+    failClosed();
   } finally {
     closeQuietly(directoryFd);
   }
@@ -718,6 +749,7 @@ const isOwnedResult = (value, options) =>
     options.retainedStreamBytes,
     options.retainedOutputBytes,
     [...OWNED_OUTCOMES],
+    [...OWNED_FAILURE_PHASES],
   );
 const isBootstrap = (value) => {
   if (
@@ -863,6 +895,7 @@ const readBootstrap = () => {
 };
 try {
   const bootstrap = readBootstrap();
+  failureCode = RESULT_AUTHORITY_EXIT_CODE;
   const identity = bootstrap?.result;
   const directory = bootstrap?.directory;
   const directoryPath = bootstrap?.directoryPath;
@@ -894,17 +927,22 @@ try {
   }
   // The fixed result name is gone, and the held inode has nlink zero, before
   // this dynamic import can execute target code.
-  if (!runnerDigestMatches(bootstrap)) failClosed(BOOTSTRAP_EXIT_CODE);
+  failureCode = RUNNER_AUTHORITY_EXIT_CODE;
+  if (!runnerDigestMatches(bootstrap)) failClosed();
   const module = await import(bootstrap.runnerUrl);
+  failureCode = RUNNER_EXECUTION_EXIT_CODE;
   const result = await module.runOwnedCommand(bootstrap.options);
+  failureCode = RUNNER_AUTHORITY_EXIT_CODE;
   const runnerAfterSha256 = process.env.S3_FRESH_RUNTIME_RUNNER_AFTER_SHA256;
   if (
     (runnerAfterSha256 !== undefined && !sha256.test(runnerAfterSha256)) ||
-    !runnerDigestMatches(bootstrap, runnerAfterSha256 ?? bootstrap.runnerSha256) ||
-    !isOwnedResult(result, bootstrap.options)
+    !runnerDigestMatches(bootstrap, runnerAfterSha256 ?? bootstrap.runnerSha256)
   ) {
-    failClosed(BOOTSTRAP_EXIT_CODE);
+    failClosed();
   }
+  failureCode = RESULT_SCHEMA_EXIT_CODE;
+  if (!isOwnedResult(result, bootstrap.options)) failClosed();
+  failureCode = RESULT_PUBLICATION_EXIT_CODE;
   const cleanupProven = result.outcome === "exited" ? true : result.cleanupProven === true;
   const publication = Buffer.from(JSON.stringify({
     nonce: bootstrap.nonce,
@@ -1510,6 +1548,15 @@ async function assertFreshRuntimeExited(
     if (invocation.exitCode === S3_FRESH_RUNTIME_RETAINED_COLLISION_EXIT_CODE) {
       failure("FRESH_RUNTIME_RETAINED_REPUBLISH_REFUSED");
     }
+    const typedFailure = new Map<number, string>([
+      [S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE, "FRESH_RUNTIME_BOOTSTRAP_AUTHORITY_REFUSED"],
+      [S3_FRESH_RUNTIME_RESULT_AUTHORITY_EXIT_CODE, "FRESH_RUNTIME_RESULT_AUTHORITY_REFUSED"],
+      [S3_FRESH_RUNTIME_RUNNER_AUTHORITY_EXIT_CODE, "FRESH_RUNTIME_RUNNER_AUTHORITY_REFUSED"],
+      [S3_FRESH_RUNTIME_RUNNER_EXECUTION_EXIT_CODE, "FRESH_RUNTIME_RUNNER_EXECUTION_REFUSED"],
+      [S3_FRESH_RUNTIME_RESULT_SCHEMA_EXIT_CODE, "FRESH_RUNTIME_RESULT_SCHEMA_REFUSED"],
+      [S3_FRESH_RUNTIME_RESULT_PUBLICATION_EXIT_CODE, "FRESH_RUNTIME_RESULT_PUBLICATION_REFUSED"],
+    ]).get(invocation.exitCode ?? -1);
+    if (typedFailure !== undefined) failure(typedFailure);
     failure(`FRESH_RUNTIME_STATUS:${invocation.exitCode ?? "unavailable"}`);
   }
   const stdout = await freshRuntimePipeBefore(
@@ -1678,6 +1725,7 @@ function ownedCommandResultIsExact(
   retainedStreamBytes: number,
   retainedOutputBytes: number,
   outcomes: readonly string[],
+  ownershipFailurePhases: readonly string[],
 ): boolean {
   const required = [
     "outcome",
@@ -1687,7 +1735,7 @@ function ownedCommandResultIsExact(
     "retainedStderrBytes",
     "retainedOutputBytes",
   ];
-  const allowed = [...required, "exitCode", "signal", "cleanupProven"];
+  const allowed = [...required, "exitCode", "signal", "cleanupProven", "ownershipFailurePhase"];
   if (
     value === null ||
     typeof value !== "object" ||
@@ -1711,6 +1759,7 @@ function ownedCommandResultIsExact(
   const hasExitCode = Object.hasOwn(result, "exitCode");
   const hasSignal = Object.hasOwn(result, "signal");
   const hasCleanup = Object.hasOwn(result, "cleanupProven");
+  const hasOwnershipFailurePhase = Object.hasOwn(result, "ownershipFailurePhase");
   const signalMatch =
     hasSignal && typeof result.signal === "string"
       ? /^SIG([1-9][0-9]{0,2})$/u.exec(result.signal)
@@ -1720,7 +1769,7 @@ function ownedCommandResultIsExact(
   const stderrBytes = Number(result.retainedStderrBytes);
   const outputBytes = Number(result.retainedOutputBytes);
   const exactUtf8Text = (text: unknown, retainedBytes: number): boolean => {
-    if (typeof text !== "string" || text.includes("\uFFFD")) return false;
+    if (typeof text !== "string") return false;
     const bytes = Buffer.from(text, "utf8");
     if (bytes.byteLength !== retainedBytes) return false;
     try {
@@ -1753,6 +1802,10 @@ function ownedCommandResultIsExact(
         signalNumber <= 127 &&
         result.exitCode === 128 + signalNumber)) &&
     (!hasCleanup || typeof result.cleanupProven === "boolean") &&
+    hasOwnershipFailurePhase === (result.outcome === "ownership-unproven") &&
+    (!hasOwnershipFailurePhase ||
+      (typeof result.ownershipFailurePhase === "string" &&
+        ownershipFailurePhases.includes(result.ownershipFailurePhase))) &&
     ownedOutcomeFieldsValid(result, hasExitCode, hasCleanup)
   );
 }
@@ -1767,6 +1820,7 @@ function isOwnedCommandResult(
     retainedStreamBytes,
     retainedOutputBytes,
     Object.keys(OWNED_COMMAND_OUTCOMES),
+    Object.keys(OWNED_SESSION_FAILURE_PHASES),
   );
 }
 
@@ -1776,6 +1830,7 @@ function isFreshDispatcherOwnedResultForTest(value: unknown): boolean {
     S3_OWNED_STREAM_BYTES,
     S3_OWNED_OUTPUT_BYTES,
     Object.keys(OWNED_COMMAND_OUTCOMES),
+    Object.keys(OWNED_SESSION_FAILURE_PHASES),
   );
 }
 
@@ -1844,7 +1899,30 @@ async function readFreshOwnedS3Result(
       invocation.retainedOutputBytes,
     )
   ) {
-    throw new Error(`${label}_FRESH_RUNTIME_RESULT_SHAPE`);
+    const result =
+      record.result !== null && typeof record.result === "object" && !Array.isArray(record.result)
+        ? (record.result as Record<string, unknown>)
+        : undefined;
+    throw new Error(
+      `${label}_FRESH_RUNTIME_RESULT_SHAPE:${JSON.stringify({
+        topLevelKeys: Object.keys(record).sort(),
+        resultKeys: result === undefined ? [] : Object.keys(result).sort(),
+        outcome: result?.outcome,
+        exitCode: result?.exitCode,
+        signal: result?.signal,
+        cleanupProven: result?.cleanupProven,
+        ownershipFailurePhase: result?.ownershipFailurePhase,
+        stdoutType: typeof result?.stdout,
+        stderrType: typeof result?.stderr,
+        stdoutReplacementCount:
+          typeof result?.stdout === "string" ? result.stdout.split("\uFFFD").length - 1 : undefined,
+        stderrReplacementCount:
+          typeof result?.stderr === "string" ? result.stderr.split("\uFFFD").length - 1 : undefined,
+        retainedStdoutBytes: result?.retainedStdoutBytes,
+        retainedStderrBytes: result?.retainedStderrBytes,
+        retainedOutputBytes: result?.retainedOutputBytes,
+      })}`,
+    );
   }
   const canonical = Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8");
   if (!canonical.equals(content)) {
@@ -2018,12 +2096,9 @@ function decodeIsolatedProductionBuildOutputEvidence(stdout: string): readonly s
     throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_STRING_REQUIRED");
   }
   const outputTexts = parsed as string[];
-  // `ISOLATED_BUILD_SCRIPT` decodes every Bun output fatally. Rejecting the
-  // replacement character also prevents the non-fatal owned-command pipe
-  // reader from upgrading malformed child bytes into parent evidence.
-  if (outputTexts.some((output) => output.includes("\uFFFD"))) {
-    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NON_UTF8");
-  }
+  // `ISOLATED_BUILD_SCRIPT` and the owned-command transport both decode bytes
+  // fatally. U+FFFD is therefore ordinary valid Unicode here, never evidence
+  // that malformed pipe bytes were silently replaced.
   if (stdout !== JSON.stringify(outputTexts)) {
     throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NONCANONICAL");
   }
@@ -2371,9 +2446,9 @@ test("isolated build output evidence refuses fake fields, malformed, empty, nonc
   expect(() => decodeIsolatedProductionBuildOutputEvidence("[]")).toThrow(
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_EMPTY",
   );
-  expect(() => decodeIsolatedProductionBuildOutputEvidence('["\\uFFFD"]')).toThrow(
-    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NON_UTF8",
-  );
+  expect(decodeIsolatedProductionBuildOutputEvidence(JSON.stringify(["\uFFFD"]))).toEqual([
+    "\uFFFD",
+  ]);
   const oneByteOverEvidence = JSON.stringify([
     "x".repeat(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES + 1 - Buffer.byteLength('[""]', "utf8")),
   ]);
@@ -2968,6 +3043,7 @@ test("PLANTED: fresh result parser enforces exact schema bytes and cleanup corre
       kind: "result",
       result: {
         outcome: "ownership-unproven",
+        ownershipFailurePhase: "initial-census",
         stdout: "",
         stderr: "",
         retainedStdoutBytes: 0,
@@ -2984,6 +3060,7 @@ test("PLANTED: fresh result parser enforces exact schema bytes and cleanup corre
       kind: "result",
       result: {
         outcome: "ownership-unproven",
+        ownershipFailurePhase: "leader-reap",
         stdout: "",
         stderr: "",
         retainedStdoutBytes: 0,
@@ -3016,10 +3093,31 @@ test("PLANTED: helper and parent reject every forbidden outcome optional-field m
     { ...base, outcome: "inspection-unproven", cleanupProven: false },
     { ...base, outcome: "inspection-unproven", exitCode: 0 },
     { ...base, outcome: "inspection-unproven", exitCode: 0, cleanupProven: false },
-    { ...base, outcome: "ownership-unproven", cleanupProven: false },
-    { ...base, outcome: "ownership-unproven", cleanupProven: true },
-    { ...base, outcome: "ownership-unproven", exitCode: 0 },
-    { ...base, outcome: "ownership-unproven", exitCode: 0, cleanupProven: true },
+    {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase: "initial-census",
+      cleanupProven: false,
+    },
+    {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase: "control-stream",
+      cleanupProven: true,
+    },
+    {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase: "terminal-record",
+      exitCode: 0,
+    },
+    {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase: "leader-reap",
+      exitCode: 0,
+      cleanupProven: true,
+    },
     { ...base, outcome: "spawn-failed" },
     { ...base, outcome: "spawn-failed", cleanupProven: false },
     { ...base, outcome: "spawn-failed", cleanupProven: true },
@@ -3045,7 +3143,25 @@ test("PLANTED: helper and parent reject every forbidden outcome optional-field m
     { ...base, outcome: "inspection-unproven", cleanupProven: true },
     { ...base, outcome: "inspection-unproven", exitCode: 0, cleanupProven: true },
     { ...base, outcome: "ownership-unproven" },
-    { ...base, outcome: "ownership-unproven", signal: "SIG9", cleanupProven: true },
+    {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase: "not-a-production-phase",
+      cleanupProven: true,
+    },
+    {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase: "term-signal",
+      signal: "SIG9",
+      cleanupProven: true,
+    },
+    {
+      ...base,
+      outcome: "exited",
+      ownershipFailurePhase: "ready-record",
+      exitCode: 0,
+    },
     {
       ...base,
       outcome: "spawn-failed",
@@ -3066,6 +3182,19 @@ test("PLANTED: helper and parent reject every forbidden outcome optional-field m
     expect(isOwnedCommandResult(result)).toBe(false);
     expect(isFreshDispatcherOwnedResultForTest(result)).toBe(false);
   }
+  for (const ownershipFailurePhase of Object.keys(OWNED_SESSION_FAILURE_PHASES)) {
+    const result = {
+      ...base,
+      outcome: "ownership-unproven",
+      ownershipFailurePhase,
+      cleanupProven: false,
+    };
+    expect(isOwnedCommandResult(result)).toBe(true);
+    expect(isFreshDispatcherOwnedResultForTest(result)).toBe(true);
+  }
+  expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+    `const OWNED_FAILURE_PHASES = new Set(${JSON.stringify(Object.keys(OWNED_SESSION_FAILURE_PHASES))});`,
+  );
   expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
     `const ownedOutcomeFieldsValid = ${ownedOutcomeFieldsValid.toString()};`,
   );
@@ -3270,7 +3399,7 @@ test(
     );
     try {
       expect(await settleFreshRuntime(invocation)).toBe("exited");
-      expect(invocation.exitCode).toBe(S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE);
+      expect(invocation.exitCode).toBe(S3_FRESH_RUNTIME_RUNNER_AUTHORITY_EXIT_CODE);
       expect(invocation.helper.signalCode).toBeNull();
       expect(readFileSync(markerPath, "utf8")).toBe("target-ran-before-after-digest-check\n");
       const result = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
@@ -3686,7 +3815,7 @@ test(
     try {
       await expect(
         assertFreshRuntimeExited(invocation, "S3_FRESH_RETAINED_RELOCATION"),
-      ).rejects.toThrow("S3_FRESH_RETAINED_RELOCATION_FRESH_RUNTIME_STATUS:97");
+      ).rejects.toThrow("S3_FRESH_RETAINED_RELOCATION_FRESH_RUNTIME_RESULT_PUBLICATION_REFUSED");
       expect(invocation.helperReaped).toBe(true);
       expect(invocation.timeoutWon).toBe(false);
       expect(invocation.helper.signalCode).toBeNull();

@@ -815,10 +815,11 @@ function captureBoundedPipe(
   onCancelRequested?: () => void,
 ): CapturedStream {
   let captured = "";
-  let buffered = "";
+  const chunks: Uint8Array[] = [];
   let streamFailed = false;
   let streamOverflowed = false;
-  let retainedBytes = 0;
+  let observedRetainedBytes = 0;
+  let reportedRetainedBytes = 0;
   let resolveReady!: (pid: number | undefined) => void;
   let resolveCompletion!: (event: ControlEvent | undefined) => void;
   let resolveOverrun!: () => void;
@@ -920,28 +921,17 @@ function captureBoundedPipe(
     }
     releaseReader();
   };
-  const retain = (chunk: Uint8Array, decoder: TextDecoder): void => {
+  const retain = (chunk: Uint8Array): void => {
     if (streamOverflowed) return;
     const available = Math.max(
       0,
-      Math.min(streamLimitBytes - retainedBytes, budget.limitBytes - budget.retainedBytes),
+      Math.min(streamLimitBytes - observedRetainedBytes, budget.limitBytes - budget.retainedBytes),
     );
     const retained = chunk.byteLength <= available ? chunk : chunk.subarray(0, available);
     if (retained.byteLength > 0) {
-      retainedBytes += retained.byteLength;
+      observedRetainedBytes += retained.byteLength;
       budget.retainedBytes += retained.byteLength;
-      const text = decoder.decode(retained, { stream: true });
-      captured += text;
-      if (controlPrefix !== undefined) {
-        buffered += text;
-        let newline = buffered.indexOf("\n");
-        while (newline >= 0) {
-          inspectLine(buffered.slice(0, newline));
-          buffered = buffered.slice(newline + 1);
-          newline = buffered.indexOf("\n");
-        }
-        if (buffered.length > OWNED_PROCESS_CONTROL_BUFFER_CHARS) buffered = "";
-      }
+      chunks.push(retained.slice());
     }
     if (retained.byteLength !== chunk.byteLength) {
       streamOverflowed = true;
@@ -956,21 +946,31 @@ function captureBoundedPipe(
         cancel();
         return;
       }
-      const decoder = new TextDecoder();
       while (true) {
         const next = await activeReader.read();
         if (next.done) break;
-        retain(next.value, decoder);
+        retain(next.value);
         if (streamOverflowed) {
           cancel();
           break;
         }
       }
-      if (!streamOverflowed) {
-        const decodedTail = decoder.decode();
-        captured += decodedTail;
-        const tail = buffered + decodedTail;
-        if (tail.length > 0) inspectLine(tail);
+      try {
+        const bytes = Buffer.concat(chunks, observedRetainedBytes);
+        captured = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        reportedRetainedBytes = bytes.byteLength;
+        if (controlPrefix !== undefined) {
+          for (const line of captured.split("\n")) {
+            if (line.length > 0) inspectLine(line);
+          }
+        }
+      } catch {
+        // A string API cannot faithfully expose malformed UTF-8. Discard the
+        // affected retained sample and make the enclosing command fail closed;
+        // raw observed bytes have already counted against the output ceiling.
+        captured = "";
+        reportedRetainedBytes = 0;
+        streamFailed = true;
       }
     } catch {
       if (!cancellationRequested) streamFailed = true;
@@ -988,7 +988,7 @@ function captureBoundedPipe(
     cancel,
     failed: () => streamFailed,
     overflowed: () => streamOverflowed,
-    retainedBytes: () => retainedBytes,
+    retainedBytes: () => reportedRetainedBytes,
     readyPid: () => knownReadyPid,
     text: () => captured,
   };
@@ -1544,7 +1544,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
           stderr: stderr.text(),
           retainedStdoutBytes: stdout.retainedBytes(),
           retainedStderrBytes: stderr.retainedBytes(),
-          retainedOutputBytes: budget.retainedBytes,
+          retainedOutputBytes: stdout.retainedBytes() + stderr.retainedBytes(),
           cleanupProven,
         };
       }
@@ -1845,7 +1845,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       stderr: stderr.text(),
       retainedStdoutBytes: stdout.retainedBytes(),
       retainedStderrBytes: stderr.retainedBytes(),
-      retainedOutputBytes: budget.retainedBytes,
+      retainedOutputBytes: stdout.retainedBytes() + stderr.retainedBytes(),
       ...(cleanupProven === undefined ? {} : { cleanupProven }),
       ...(ownershipFailurePhase === undefined ? {} : { ownershipFailurePhase }),
     };

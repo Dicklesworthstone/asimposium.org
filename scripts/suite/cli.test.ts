@@ -985,6 +985,39 @@ describe("owned session launcher", () => {
     expect(result.retainedOutputBytes).toBeLessThanOrEqual(PRODUCTION_AGGREGATE_RETAINED_BYTES);
   });
 
+  test("valid UTF-8 replacement-character bytes remain exact product output", async () => {
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        'binmode(STDOUT); syswrite(STDOUT, pack("C*", 0xEF, 0xBF, 0xBD)); exit 0;',
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.stdout).toBe("\uFFFD");
+    expect(result.retainedStdoutBytes).toBe(3);
+    expect(result.retainedOutputBytes).toBe(3);
+  });
+
+  test("malformed UTF-8 product bytes fail closed without a forged retained string", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", 'binmode(STDOUT); syswrite(STDOUT, pack("C", 0xFF)); exit 0;'],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("pipe-drain-unproven");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.retainedStdoutBytes).toBe(0);
+    expect(result.retainedOutputBytes).toBe(0);
+  });
+
   test("the production 65537-byte per-stream overrun retains no excess and leaves no owned survivor", async () => {
     const marker = `suite-output-overrun-owned-${crypto.randomUUID()}`;
     const cancelled: ("stdout" | "stderr")[] = [];
