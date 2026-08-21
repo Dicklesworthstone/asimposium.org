@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -20,6 +20,12 @@ import {
   LOCAL_D1_EVIDENCE_CASES,
   LOCAL_RESPONSE_MAX_BYTES,
 } from "../../src/enrollment/local-d1-client.ts";
+
+// Most cases launch the harness through its own bounded controller. Bun's
+// unrelated 5-second default can kill that controller during legitimate group
+// retirement and leave the assertion reading a synthetic dangling-child exit.
+// Explicit per-test bounds remain authoritative where they are declared below.
+setDefaultTimeout(60_000);
 
 /**
  * Lifecycle contract of the S-1 shell harness.
@@ -1911,6 +1917,21 @@ describe("a pinned port is validated before anything is started", () => {
     }
   });
 
+  test("PLANTED: ownership observation stays inside the live Workerd binding", () => {
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    const start = source.indexOf("assert_port_ownership() {");
+    const end = source.indexOf("terminal_local_client_failure() {", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const ownership = source.slice(start, end);
+    expect(ownership).toContain('curl_body "POST" "$origin/__s1/sponsor-enrollment-counts"');
+    expect(ownership).toContain("scope=live-binding");
+    // A second Wrangler opening the same persistence tree while `wrangler dev`
+    // is live terminates the owned Workerd process on the supported runtime.
+    expect(ownership).not.toContain("d1 execute");
+    expect(ownership).not.toContain("run_named_with_deadline");
+  });
+
   test("an unpinned run allocates its own port and says which one", async () => {
     if (!existsSync(WRANGLER)) {
       await assertWranglerBlocked();
@@ -2323,7 +2344,7 @@ describe("a pinned port is validated before anything is started", () => {
     expect(source).toContain("const after = await file.stat();");
     expect(source).toContain("after.dev !== opened.dev || after.ino !== opened.ino");
     expect(source).toContain("after.size !== opened.size || bytes.length !== opened.size");
-    expect(source).toContain("record !== `${JSON.stringify(parsed)}\\n`");
+    expect(source).toContain("record !== `$" + "{JSON.stringify(parsed)}\\n`");
     expect(source).toContain("!allowedCodes.has(parsed.code)");
     expect(source).toContain(
       'local_client_failure_validator "$stderr_path" >/dev/null 2>/dev/null',
@@ -2471,7 +2492,7 @@ const PROCESS_PROOF_TIMEOUT_MS = 5_000;
 const HARNESS_CLEANUP_TIMEOUT_MS = 30_000;
 const LOCAL_CHILD_START_TIMEOUT_MS = 150_000;
 // The shell has separate 120 s migration, 45 s readiness, 15 s ownership HTTP,
-// 30 s ownership-query, and 180 s client gates, followed by bounded group
+// and 180 s client gates, followed by bounded group
 // cleanup. Keep the parent beyond their complete serial composition so a
 // correct terminal record is never replaced by the test controller's timeout.
 const RUN_SCRIPT_TIMEOUT_MS = 600_000;
@@ -3013,8 +3034,8 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     expect(await waitForExit(descendant)).toBe(true);
   }, 60_000);
 
-  test("PLANTED: both named Wrangler phases time out only after their stubborn groups are gone", async () => {
-    for (const phase of ["migration", "ownership-query"] as const) {
+  test("PLANTED: the named Wrangler phase times out only after its stubborn group is gone", async () => {
+    for (const phase of ["migration"] as const) {
       const run = await runScript(["--self-test-named-phase"], {
         S1_NAMED_PHASE: phase,
         S1_NAMED_PHASE_BEHAVIOR: "deadline",
@@ -3035,8 +3056,8 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     }
   }, 90_000);
 
-  test("PLANTED: TERM during either named phase uses that phase's adopted ownership", async () => {
-    for (const phase of ["migration", "ownership-query"] as const) {
+  test("PLANTED: TERM during the named phase uses that phase's adopted ownership", async () => {
+    for (const phase of ["migration"] as const) {
       const harness = await spawnCapturedHarness(["--self-test-named-phase"], {
         S1_NAMED_PHASE: phase,
         S1_NAMED_PHASE_BEHAVIOR: "interrupt",

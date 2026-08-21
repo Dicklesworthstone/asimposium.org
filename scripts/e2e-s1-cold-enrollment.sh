@@ -112,7 +112,6 @@ readonly REQUEST_TIMEOUT_SECONDS=15
 readonly READINESS_DEADLINE_SECONDS=45
 readonly CLIENT_DEADLINE_SECONDS=180
 readonly MIGRATION_DEADLINE_SECONDS=120
-readonly OWNERSHIP_QUERY_DEADLINE_SECONDS=30
 readonly ARTIFACT_SCAN_DEADLINE_SECONDS=15
 readonly SUPERVISOR_STOP_DEADLINE_SECONDS=10
 readonly TERMINATION_GRACE_SECONDS=5
@@ -3379,7 +3378,7 @@ self_test_deadline() {
   emit "pass" "DEADLINE_SELF_TEST_PASSED"
 }
 
-# The real local-D1 run wires both Wrangler maintenance phases through the same
+# The real local-D1 run wires its Wrangler migration phase through the same
 # named supervisor primitive as the client. This fixture keeps the exact phase
 # label load-bearing while planting a TERM-resistant descendant, so timeout and
 # external-signal tests prove the named wiring rather than only the generic
@@ -3387,8 +3386,7 @@ self_test_deadline() {
 self_test_named_phase() {
   local label="${S1_NAMED_PHASE:-}" behavior="${S1_NAMED_PHASE_BEHAVIOR:-}"
   local seconds=1 pid_file phase_exit=0 descendant="" liveness=0
-  [[ "$label" == "migration" || "$label" == "ownership-query" ]] ||
-    blocked "NAMED_PHASE_INVALID"
+  [[ "$label" == "migration" ]] || blocked "NAMED_PHASE_INVALID"
   [[ "$behavior" == "deadline" || "$behavior" == "interrupt" ]] ||
     blocked "NAMED_PHASE_BEHAVIOR_INVALID"
   [[ "$behavior" == "deadline" ]] || seconds=300
@@ -4130,17 +4128,14 @@ self_test_client_group() {
   failed "CLIENT_PHASE_NOT_INTERRUPTED"
 }
 
-# Prove the server answering our port is the child we started, by round-tripping
-# this run's token through the worker and then finding it in this run's own
-# persisted D1 state. A foreign process holding the port cannot satisfy both.
+# Prove the server answering our port can round-trip this run's token through
+# its own live D1 binding. Starting a second Wrangler against the same persisted
+# SQLite tree while `wrangler dev` is live terminates Workerd on this supported
+# runtime, so the observation must traverse the already-owned server process.
 assert_port_ownership() {
   local origin="$1"
-  local state_dir="$2"
-  local token="$3"
-  local mint_body mint_status count query_exit=0
-  local query_result="$state_dir/ownership-result"
-  local query_log="$state_dir/ownership.log"
-  local parser='const text = await Bun.stdin.text(); const parsed = JSON.parse(text.slice(text.indexOf("["))); const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : []; process.stdout.write(String(rows[0]?.n ?? 0));'
+  local token="$2"
+  local mint_body mint_status count_body count
 
   mint_body="$(printf '{"sponsor_id":"%s","request":{"requested_scopes":["review"]}}' "$token")"
   if ! mint_status="$(printf '%s' "$mint_body" | curl --disable --silent --output /dev/null \
@@ -4156,39 +4151,25 @@ assert_port_ownership() {
     failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   fi
 
-  [[ ! -e "$query_result" && ! -L "$query_result" ]] || failed "LOCAL_PORT_OWNERSHIP_RESULT_UNTRUSTED"
-  # Keep Wrangler, its parser, and every descendant in one identity-pinned
-  # process group. The parser writes one bounded, non-secret count into a fresh
-  # retained file; the parent never waits in an unbounded command substitution.
-  # shellcheck disable=SC2016
-  run_named_with_deadline "ownership-query" "$OWNERSHIP_QUERY_DEADLINE_SECONDS" \
-    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
-      cwd="$1"
-      result="$2"
-      log="$3"
-      parser="$4"
-      bun_bin="$5"
-      shift 5
-      cd -- "$cwd" || exit 125
-      set -o pipefail
-      set -C
-      "$@" 2>>"$log" | "$bun_bin" -e "$parser" >"$result"
-    ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$query_result" "$query_log" "$parser" "$BUN_BIN" \
-    "$LOCAL_WRANGLER" d1 execute DB --config "$LOCAL_WRANGLER_CONFIG" --local \
-    --persist-to "$state_dir" --env-file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" --json \
-      --command "SELECT COUNT(*) AS n FROM enrollment_records WHERE sponsor_id = '${token}'" || query_exit=$?
-  case "$query_exit" in
-    0) ;;
-    124) failed "LOCAL_PORT_OWNERSHIP_QUERY_TIMEOUT" ;;
-    125) failed "LOCAL_PORT_OWNERSHIP_QUERY_CONTAINMENT_UNPROVEN" ;;
-    *) failed "LOCAL_PORT_OWNERSHIP_UNPROVEN" ;;
-  esac
-  [[ -f "$query_result" && ! -L "$query_result" && -O "$query_result" && -r "$query_result" ]] ||
-    failed "LOCAL_PORT_OWNERSHIP_RESULT_UNTRUSTED"
-  count="$(<"$query_result")" || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
+  count_body="$(curl_body "POST" "$origin/__s1/sponsor-enrollment-counts" \
+    "$(printf '{"sponsor_id":"%s"}' "$token")" "s1-ownership-read-${token}")" ||
+    failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
+  count="$(printf '%s' "$count_body" | "$BUN_BIN" -e '
+    let parsed;
+    try {
+      parsed = JSON.parse(await Bun.stdin.text());
+    } catch {
+      process.exit(1);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) process.exit(1);
+    const keys = Object.keys(parsed).sort();
+    if (keys.length !== 2 || keys[0] !== "device_attempts" || keys[1] !== "join_attempts") process.exit(1);
+    if (![parsed.join_attempts, parsed.device_attempts].every((value) => Number.isSafeInteger(value) && value >= 0)) process.exit(1);
+    process.stdout.write(String(parsed.join_attempts));
+  ' 2>/dev/null)" || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   [[ "$count" =~ ^[0-9]+$ ]] || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   ((count >= 1)) || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
-  log_phase "port-ownership-proven" "rows=$count"
+  log_phase "port-ownership-proven" "rows=$count scope=live-binding"
 }
 
 # `run_with_deadline` reserves 125 for an ownership/containment proof failure.
@@ -4311,7 +4292,7 @@ run_local_d1() {
   fi
   log_phase "server-answering" "port=$local_port"
 
-  assert_port_ownership "$origin" "$STATE_DIR" "$token"
+  assert_port_ownership "$origin" "$token"
 
   client_exit=0
   # The evidence path is handed to the client rather than captured from its

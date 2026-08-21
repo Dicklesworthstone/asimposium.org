@@ -2,7 +2,6 @@ import { writeFileSync } from "node:fs";
 
 import {
   DeviceCodeStartResponseSchema,
-  DeviceLookupResponseSchema,
   EnrollmentHelloResponseSchema,
   isTrustedStoaOrigin,
   PENDING_PROPOSAL_TTL_MS,
@@ -737,28 +736,65 @@ if (!import.meta.main) {
       harness: "codex",
     };
 
-    // Bounded D1 postcondition, read through the sponsor's own approval card:
-    // each snapshot must independently be the expected pending card before
-    // exact-byte comparison can say anything about a refused write.
-    const proposalState = async (): Promise<string> => {
+    // Bounded D1 postcondition, read through the sponsor's own approval card.
+    // D1 deliberately joins through the proposal table, so a freshly minted
+    // enrollment with no proposal has the same privacy-preserving card face as
+    // an unknown enrollment: WRONG_PRINCIPAL. A successful claim then creates
+    // the pending card. Validate each expected face independently before
+    // comparing exact bytes; requiring pending on both sides would make every
+    // fresh run fail before it ever exercised the missing-key refusal.
+    const proposalState = async (expected: "absent" | "pending"): Promise<string> => {
       const card = await post("/__s1/card", {
         sponsor_id: sponsorId,
         enrollment_id: freshMinted.enrollmentId,
       });
       const raw = await card.text();
-      const parsed = DeviceLookupResponseSchema.safeParse(parseLocalJson(raw));
-      if (
-        card.status !== 200 ||
-        !parsed.success ||
-        parsed.data.card.enrollment_id !== freshMinted.enrollmentId ||
-        parsed.data.card.status !== "pending"
-      ) {
-        throw new Error("claim-missing-idempotency-key-card-snapshot");
+      if (expected === "absent") {
+        if (card.status !== 403) {
+          const body = parseLocalJson(raw);
+          const safeCode =
+            typeof body === "object" &&
+            body !== null &&
+            !Array.isArray(body) &&
+            "code" in body &&
+            typeof body.code === "string" &&
+            /^[A-Z][A-Z0-9_]{0,63}$/.test(body.code)
+              ? body.code.toLowerCase()
+              : "invalid-code";
+          throw new Error(
+            `claim-missing-idempotency-key-absent-card-status-${card.status}-${safeCode}`,
+          );
+        }
+        const body = parseLocalJson(raw);
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          throw new Error("claim-missing-idempotency-key-absent-card-shape");
+        }
+        if (!("code" in body) || body.code !== "WRONG_PRINCIPAL") {
+          throw new Error("claim-missing-idempotency-key-absent-card-code");
+        }
+        return `${card.status}:${raw}`;
       }
-      return raw;
+      if (card.status !== 200) {
+        throw new Error(`claim-missing-idempotency-key-pending-card-status-${card.status}`);
+      }
+      const body = parseLocalJson(raw);
+      const localCard =
+        typeof body === "object" && body !== null && !Array.isArray(body) && "card" in body
+          ? body.card
+          : undefined;
+      if (typeof localCard !== "object" || localCard === null || Array.isArray(localCard)) {
+        throw new Error("claim-missing-idempotency-key-pending-card-shape");
+      }
+      if (!("enrollmentId" in localCard) || localCard.enrollmentId !== freshMinted.enrollmentId) {
+        throw new Error("claim-missing-idempotency-key-pending-card-id");
+      }
+      if (!("status" in localCard) || localCard.status !== "pending") {
+        throw new Error("claim-missing-idempotency-key-pending-card-status-value");
+      }
+      return `${card.status}:${raw}`;
     };
 
-    const beforeRefusal = await proposalState();
+    const beforeRefusal = await proposalState("absent");
     const missingIdempotencyKey = await post("/v1/fellows", freshClaimRequest);
     const missingIdempotencyKeyBody = (await missingIdempotencyKey.json()) as { code?: unknown };
     if (
@@ -767,7 +803,7 @@ if (!import.meta.main) {
     ) {
       throw new Error("claim-missing-idempotency-key");
     }
-    const afterRefusal = await proposalState();
+    const afterRefusal = await proposalState("absent");
     if (afterRefusal !== beforeRefusal) throw new Error("claim-missing-idempotency-key-wrote");
 
     // The keyed claim must now succeed as a *first* claim on this enrollment.
@@ -781,7 +817,7 @@ if (!import.meta.main) {
     // Causal closer: the card *does* move when a write really lands. Without
     // this, an approval card that never changed for any reason would make the
     // unchanged-state assertion above vacuous.
-    if ((await proposalState()) === beforeRefusal) {
+    if ((await proposalState("pending")) === beforeRefusal) {
       throw new Error("claim-missing-idempotency-key-postcondition-insensitive");
     }
     completeCase("claim-missing-idempotency-key-no-write");

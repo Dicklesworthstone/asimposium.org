@@ -413,22 +413,28 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
       model: "harness-model",
       harness: "codex",
     };
-    const cardState = async (): Promise<string> => {
+    const cardState = async () => {
       const card = await call(db, KEY_A, "/__s1/card", {
         sponsor_id: mintBody.sponsor_id,
         enrollment_id: enrollmentId,
       });
-      return `${card.status}:${card.raw}`;
+      return { status: card.status, body: card.body, raw: `${card.status}:${card.raw}` };
     };
 
     // The refusal comes *first*, on an enrollment that has never been claimed.
     // Ordering it after a successful claim would make the assertions below
     // insensitive: the proposal would exist either way.
     const before = await cardState();
+    // This test drives the D1 store over in-memory SQLite. That adapter joins
+    // through proposals and therefore exposes a fresh enrollment through the
+    // coarser WRONG_PRINCIPAL face; the real local-D1 client asserts the same
+    // adapter-specific privacy boundary.
+    expect(before.status).toBe(403);
+    expect(before.body).toEqual({ code: "WRONG_PRINCIPAL" });
     const refused = await call(db, KEY_A, "/v1/fellows", claim);
     expect(refused.status).toBe(400);
     expect(refused.body.code).toBe("IDEMPOTENCY_KEY_INVALID");
-    expect(await cardState()).toBe(before);
+    expect((await cardState()).raw).toBe(before.raw);
 
     // The enrollment is still unspent: a first keyed claim succeeds as a fresh
     // 202. Had the refused attempt written a proposal, this could not.
@@ -440,7 +446,10 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
 
     // Causal closer: the observed state does move when a write really lands, so
     // the unchanged-state assertion above is not vacuous.
-    expect(await cardState()).not.toBe(before);
+    const pending = await cardState();
+    expect(pending.status).toBe(200);
+    expect(pending.body.card).toMatchObject({ enrollmentId, status: "pending" });
+    expect(pending.raw).not.toBe(before.raw);
   });
 });
 
