@@ -88,18 +88,22 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<b
   return predicate();
 }
 
-function processGroupIsEmpty(pgid: number): boolean {
-  const probe = Bun.spawnSync({
-    cmd: ["/bin/kill", "-0", `-${pgid}`],
-    stdout: "ignore",
-    stderr: "pipe",
-  });
-  if (probe.exitCode === 0) return false;
-  const diagnostic = probe.stderr.toString();
-  if (probe.exitCode === 1 && diagnostic.includes("No such process")) return true;
-  throw new Error(
-    `token lifecycle process-group probe failed with ${probe.exitCode}: ${diagnostic.trim()}`,
-  );
+function processGroupIsEmpty(
+  pgid: number,
+  signalZero: (target: number) => unknown = (target) => process.kill(target, 0),
+): boolean {
+  try {
+    signalZero(-pgid);
+    return false;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === "ESRCH") return true;
+    if (code === "EPERM") return false;
+    throw error;
+  }
 }
 
 async function assertOwnedLeaderCurrent(identity: OwnedProcessIdentity): Promise<void> {
@@ -412,7 +416,8 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain('[[ "$1" == "--self-test" ]]');
   expect(script).toContain("source_closure_manifest()");
   expect(script).toContain('"scripts/e2e-token-lifecycle.sh"');
-  expect(script).toContain("migration closure is not exactly 0001 through 0021");
+  expect(script).toContain("migration closure is not exactly 0001 through 0022");
+  expect(script).toContain('"0022_workshop_cas_spill.sql"');
   expect(script).toContain('"wrangler_started\\":false');
   expect(script).toContain("assert_migration_journal || exit 1");
   expect(script).toContain("assert_post_stop_d1_counts || exit 1");
@@ -551,6 +556,25 @@ test("PLANTED: a pre-go assertion failure reaps and empties its pinned superviso
   expect(pinnedPgid).toBeNumber();
   if (pinnedPgid === undefined) throw new Error("pre-go plant never pinned its group");
   expect(processGroupIsEmpty(pinnedPgid)).toBe(true);
+});
+
+test("PLANTED: group absence accepts only kernel ESRCH, never EPERM or an unknown probe fault", () => {
+  const fault = (code: string) => Object.assign(new Error(code), { code });
+  expect(
+    processGroupIsEmpty(12345, () => {
+      throw fault("ESRCH");
+    }),
+  ).toBe(true);
+  expect(
+    processGroupIsEmpty(12345, () => {
+      throw fault("EPERM");
+    }),
+  ).toBe(false);
+  expect(() =>
+    processGroupIsEmpty(12345, () => {
+      throw fault("EIO");
+    }),
+  ).toThrow("EIO");
 });
 
 const FAULT_CASES: readonly {

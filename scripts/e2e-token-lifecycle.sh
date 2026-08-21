@@ -63,6 +63,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0019_problem_memberships.sql"
   "0020_session_replay_atomic_claim.sql"
   "0021_problem_scoped_claim_identity.sql"
+  "0022_workshop_cas_spill.sql"
 )
 
 STATE_DIR=""
@@ -482,13 +483,14 @@ source_closure_manifest() {
         "0019_problem_memberships.sql",
         "0020_session_replay_atomic_claim.sql",
         "0021_problem_scoped_claim_identity.sql",
+        "0022_workshop_cas_spill.sql",
       ];
       const migrationDirectory = resolve(root, "db/migrations");
       const discovered = readdirSync(migrationDirectory)
         .filter((name) => /^\d{4}_.+\.sql$/.test(name))
         .sort();
       if (JSON.stringify(discovered) !== JSON.stringify(migrations)) {
-        throw new Error("migration closure is not exactly 0001 through 0021");
+        throw new Error("migration closure is not exactly 0001 through 0022");
       }
       const extensions = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".json"];
       const fileFor = (candidate) => {
@@ -1026,7 +1028,7 @@ assert_migration_journal() {
       fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_MISMATCH"
       return 1
     }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0020\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0022\",\"status\":\"pass\"}"
 }
 
 seed_session_problem() {

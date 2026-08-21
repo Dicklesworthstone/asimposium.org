@@ -4250,6 +4250,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     // before that the walk threw ENOENT and produced a walk-error instead of a
     // closure verdict. An omission here could not have been detected at all.
     ["apps/wire/src/krater/krater.ts"],
+    ["apps/wire/src/krater/cas.ts"],
     ["apps/wire/src/krater/outbox-do.ts"],
     // The S-4 contract barrel now makes this a real Worker dependency. Keep
     // the source-closure plant causal: deleting it from the attested set must
@@ -4298,6 +4299,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(declaredMigrationJournal()).toEqual(onDisk);
     expect(onDisk).toContain("0016_operator_fellow_cap_override.sql");
     expect(onDisk).toContain("0020_session_replay_atomic_claim.sql");
+    expect(onDisk).toContain("0022_workshop_cas_spill.sql");
     const listed = new Set(declaredSourcePaths());
     for (const name of onDisk) expect(listed.has(`db/migrations/${name}`)).toBe(true);
   });

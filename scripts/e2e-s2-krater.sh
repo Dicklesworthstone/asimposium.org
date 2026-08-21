@@ -109,6 +109,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0019_problem_memberships.sql
   db/migrations/0020_session_replay_atomic_claim.sql
   db/migrations/0021_problem_scoped_claim_identity.sql
+  db/migrations/0022_workshop_cas_spill.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -164,6 +165,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/http/health.ts
   apps/wire/src/http/redact.ts
   apps/wire/src/krater/intent.ts
+  apps/wire/src/krater/cas.ts
   apps/wire/src/screening/aggregate.ts
   apps/wire/src/screening/context.ts
   apps/wire/src/screening/provider.ts
@@ -234,6 +236,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0019_problem_memberships.sql
   0020_session_replay_atomic_claim.sql
   0021_problem_scoped_claim_identity.sql
+  0022_workshop_cas_spill.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
