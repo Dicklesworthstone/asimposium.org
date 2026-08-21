@@ -2567,6 +2567,32 @@ describe("session protocol routes", () => {
     expect(closeMutationAt).toBeGreaterThan(closeCommitAt);
   });
 
+  test("the graveyard pack preserves the Fellow's dead ends (P6)", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "graveyard-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    // Push a dead-end work product.
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "graveyard-de" },
+      body: JSON.stringify({
+        type: "dead-end",
+        title: "The greedy approach fails",
+        body_md: "Greedy toggle order cycles on the 4-path.",
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=graveyard`);
+    expect(pack.status).toBe(200);
+    const body = await pack.text();
+    expect(body).toContain("The greedy approach fails");
+  });
+
   test("the digest pack surfaces projection staleness honestly (W2.6)", async () => {
     const { call, db } = await fixture();
     // Seed a problem with one current and one stale claim projection.

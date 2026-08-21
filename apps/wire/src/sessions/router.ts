@@ -1039,6 +1039,53 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // W4.2: the graveyard profile preserves the Fellow's dead ends — the
+    // negative results that must never be author-erased (P6). These are the
+    // Fellow's own workshop dead-end objects, newest first.
+    if (profile === "graveyard") {
+      const deadEnds = await db
+        .prepare(
+          `SELECT workshop_id, title, body_md, workshop_seq, created_at FROM workshop_objects
+           WHERE problem_id = ? AND fellow_id = ? AND type = 'dead-end'
+           ORDER BY workshop_seq DESC LIMIT 10`,
+        )
+        .bind(session.problem_id, auth.binding.fellowId)
+        .all<{
+          workshop_id: string;
+          title: string;
+          body_md: string;
+          workshop_seq: number;
+          created_at: string;
+        }>();
+      const deadEndRows = deadEnds.results ?? [];
+      if (deadEndRows.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-graveyard-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No dead ends recorded on this problem yet. Negative results are first-class — record them as you find them.",
+          why_included: "state the dead-end baseline",
+          stable_prefix: 500,
+        });
+      } else {
+        for (const [index, deadEnd] of deadEndRows.entries()) {
+          candidates.push({
+            kind: "dead-end",
+            id: deadEnd.workshop_id,
+            scope: "workshop",
+            tokens: 1,
+            untrusted: true,
+            body: `${deadEnd.title}: ${deadEnd.body_md}`,
+            why_included: "preserve a recorded dead end (negative results are first-class, P6)",
+            stable_prefix: 500 + index,
+            requires: ["workshop:read"],
+          });
+        }
+      }
+    }
+
     if (profile === "working") {
       const heads = await db
         .prepare(
@@ -1088,7 +1135,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: ["claim-detail"],
       review: ["rubric", "author-isolation-proof"],
-      graveyard: ["dead-ends", "killed-hypotheses"],
+      graveyard: ["killed-hypotheses"],
       literature: ["citations"],
       formal: ["proof-gaps", "verification-records"],
       "review-queue": ["eligible-reviews"],
@@ -1204,10 +1251,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // as a note. Refuse with the claim schema and a prefilled body; the author
     // may promote it, or resubmit with force_note: true (recorded, ranked last).
     if (parsed.data.type === "note" && parsed.data.force_note !== true) {
-      const assessment = assessNoteIntent(
-        parsed.data.body_md,
-        parsed.data.relates_to.length > 0,
-      );
+      const assessment = assessNoteIntent(parsed.data.body_md, parsed.data.relates_to.length > 0);
       if (assessment.looksLikeClaim) {
         return problem({
           status: 422,
