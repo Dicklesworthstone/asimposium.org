@@ -178,7 +178,7 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
   AUTH_PROVIDER_EVIDENCE_ESCAPE: {
     rule: "ASI-PROVIDER-EVIDENCE",
     fix_hint:
-      "Raw provider evidence has exactly three reviewed reads: the truthy `if (account)` guard, `profile?.sub` as the sole argument of sponsorIdFromGoogleSubject, and `account.id_token` as the sole argument of authTimeFromIdToken. Every other read, alias, wrapper, computed access, closure capture or packaging of the profile/account bindings is refused.",
+      "Raw provider evidence has exactly three reviewed reads: the truthy `if (account)` guard, `profile?.sub` as the sole argument of sponsorIdFromGoogleSubject, and `account.id_token` as the sole argument of authTimeFromIdToken. The helper extracts the provider-signed ID-token issuance time. Every other read, alias, wrapper, computed access, closure capture or packaging of the profile/account bindings is refused.",
   },
   AUTH_SPONSOR_PRINCIPAL_UNSAFE: {
     rule: "ASI-SPONSOR-PRINCIPAL",
@@ -188,12 +188,12 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
   AUTH_RECENT_AUTH_CONFIG_MISSING: {
     rule: "ASI-RECENT-AUTH",
     fix_hint:
-      "Configure literal jwt and session callbacks. Stamp token.authTime only when an OAuth account is present, then project that stable claim to session.authIssuedAt.",
+      "Configure literal jwt and session callbacks. Stamp token.authTime from the provider-issued ID token only when an OAuth account is present, then project that stable claim to session.authIssuedAt.",
   },
   AUTH_RECENT_AUTH_REFRESHABLE: {
     rule: "ASI-RECENT-AUTH",
     fix_hint:
-      "Never derive recent authentication from userinfo profile data, callback arrival, or token.iat. Inside the account callback guard, call the reviewed authTimeFromIdToken helper with exactly account.id_token, then project that stable token.authTime claim.",
+      "Never derive recent authentication from userinfo profile data, callback arrival, or Auth.js token.iat. Inside the account callback guard, call the reviewed authTimeFromIdToken helper with exactly account.id_token; that helper extracts the Google-signed ID-token iat, then the callback projects the stable token.authTime claim.",
   },
 };
 
@@ -1739,9 +1739,10 @@ export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface 
   const sessionBinding =
     session.fn === undefined ? undefined : callbackBinding(session.fn, "session");
   const visit = (node: ts.Node): void => {
-    // `iat` is forbidden anywhere in executable auth configuration, including
-    // through aliases or helpers. It is refreshable by Auth.js and therefore
-    // cannot be authentication-age evidence in any spelling.
+    // Auth.js's JWT `iat` is forbidden anywhere in executable auth
+    // configuration, including through aliases or helpers. The separately
+    // reviewed ID-token decoder is the only place the provider's signed `iat`
+    // may be read.
     if (ts.isIdentifier(node) && node.text === "iat") {
       surface.iatReads.push(node.getText(sourceFile));
     }

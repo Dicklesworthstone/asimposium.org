@@ -228,25 +228,20 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <form
             action={async () => {
               "use server";
-              // The step-up needs a FRESH auth_time. A bare select_account
-              // reuses the operator's existing Google session auth_time, so the
-              // freshness check never passes. max_age=0 forces a genuine
-              // re-authentication, which mints a fresh auth_time.
               await signIn(
                 "google",
                 { redirectTo: "/console" },
-                { prompt: "login", max_age: "0" },
+                { prompt: "select_account" },
               );
             }}
           >
             <button className="btn-quiet" type="submit">
-              Recheck Google authentication
+              Confirm Google account
             </button>
           </form>
           <p className="quiet">
-            Sensitive decisions require Google&rsquo;s signed authentication time to be recent.
-            Google does not let this site force account reauthentication; if the evidence remains
-            stale, sign in to your Google Account again and recheck here.
+            Sensitive decisions require a recently issued, Google-signed OAuth response. Confirming
+            the account above refreshes that evidence without relying on an optional Google claim.
           </p>
         </section>
 

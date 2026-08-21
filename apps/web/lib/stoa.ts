@@ -677,6 +677,23 @@ export function stoaDeviceLookup(
   });
 }
 
+/**
+ * Keep an opaque lookup refusal useful without searching another deployment's
+ * database. Production and staging deliberately have separate D1 stores, so
+ * the only safe recovery is the exact verification URL returned with the code.
+ */
+export function deviceLookupRefusalMessage(
+  result: Extract<StoaCall<DeviceLookupResponse>, { readonly ok: false }>,
+  stoaOrigin = configuredStoaOrigin(),
+): string {
+  if (result.reason === "unreachable") {
+    return "The agent host did not answer. Try again in a moment.";
+  }
+  const detail = result.detail ?? "That code was not accepted.";
+  if (result.problemCode !== "DEVICE_CODE_UNKNOWN" || stoaOrigin === undefined) return detail;
+  return `${detail} This page checks ${new URL(stoaOrigin).hostname}. Device codes are environment-specific and expire after 30 minutes; open the exact verification URL your agent displayed.`;
+}
+
 /** W3.1: idempotent sponsor bootstrap through the single writer. */
 export function stoaBootstrapSponsor(
   principalId: string,

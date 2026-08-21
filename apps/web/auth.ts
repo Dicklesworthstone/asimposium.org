@@ -21,39 +21,22 @@ import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-
  * and never appear in a build artifact.
  */
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  // Google does not support relying parties forcing Google-account
-  // reauthentication. Request its signed `auth_time` claim instead and use
-  // that provider evidence verbatim; an old or missing claim fails closed for
-  // sensitive actions rather than turning a fresh OAuth callback into proof.
-  providers: [
-    Google({
-      authorization: {
-        params: { claims: { id_token: { auth_time: { essential: true } } } },
-      },
-    }),
-  ],
+  providers: [Google],
   session: { strategy: "jwt" },
   callbacks: {
-    // Auth.js refreshes the JWT's standard `iat` whenever it serves a session,
-    // so `iat` cannot prove a recent Google sign-in. Preserve our own stable
-    // authentication time and replace it only from the validated Google ID
-    // token on an OAuth callback, never from callback arrival or session read.
+    // Auth.js refreshes its own JWT's standard `iat` whenever it serves a
+    // session. Preserve a separate timestamp copied only from the Google ID
+    // token issued for an OAuth callback; ordinary session reads cannot move it.
     async jwt({ token, account, profile }) {
       if (account) {
         // Adapterless Auth.js deliberately assigns a fresh internal UUID to
         // each OAuth callback. Replace it with a deterministic application
         // principal derived from Google's validated, stable subject.
         token.sub = await sponsorIdFromGoogleSubject(profile?.sub);
-        // The step-up evidence: Google's `auth_time` when it is present in the
-        // (already signature-verified) ID token. Google does not implement the
-        // OIDC `claims` request parameter, so auth_time is present only after a
-        // `max_age`-forced re-authentication. When it is absent but an account
-        // is present, the operator has just completed an OAuth flow — and the
-        // step-up flow forces max_age=0, so that flow IS a genuine fresh
-        // authentication. Use the ID-token claim when present, else the
-        // sign-in time; never a stale carried-over value.
-        token.authTime =
-          authTimeFromIdToken(account.id_token) ?? Math.floor(Date.now() / 1_000);
+        // Google's ID-token `iat` is signed for this relying-party response.
+        // Never prefer the optional `auth_time`: it can describe an old Google
+        // session and caused the approval step-up to remain stale forever.
+        token.authTime = authTimeFromIdToken(account.id_token);
       }
       return token;
     },

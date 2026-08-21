@@ -92,22 +92,17 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
     ]);
   });
 
-  test("OAuth callbacks request and preserve Google's signed authentication time", () => {
+  test("OAuth callbacks preserve the signed ID-token issuance time", () => {
     const configuredGoogle = surface.providers.entries[0]?.text ?? "";
-    expect(configuredGoogle).toContain("claims: { id_token: { auth_time: { essential: true } } }");
-    // The step-up MUST force a real re-authentication: Google's auth_time is the
-    // operator's Google-session auth time, and a passive flow (or bare
-    // select_account) reuses it — so without prompt=login + max_age=0 the
-    // freshness check can never pass and the approve page loops forever. The
-    // provider block itself carries no prompt; the approve page's step-up does.
+    expect(configuredGoogle).not.toContain("auth_time");
+    expect(configuredGoogle).not.toContain("claims:");
     expect(configuredGoogle).not.toContain('prompt: "login"');
     expect(configuredGoogle).not.toContain("max_age");
-    // The approve page's step-up is the one place forced re-auth belongs.
+    // Google documents select_account, not prompt=login/max_age, for this flow.
     const approvePage = readPackageFile("app/approve/page.tsx");
-    expect(approvePage).toContain('max_age: "0"');
-    expect(approvePage).toContain('prompt: "login"');
-    // The step-up buttons (approve + console) force re-auth; the public landing
-    // page never does.
+    expect(approvePage).toContain('prompt: "select_account"');
+    expect(approvePage).not.toContain('prompt: "login"');
+    expect(approvePage).not.toContain("max_age");
     for (const page of ["app/page.tsx"]) {
       const source = readPackageFile(page);
       expect(source).not.toContain('prompt: "login"');
@@ -485,20 +480,16 @@ describe("sponsor console trust boundary", () => {
     expect(refresh).toBeGreaterThan(receipt);
   });
 
-  test("the evidence-refresh buttons force a genuine re-authentication", () => {
+  test("the evidence-refresh buttons require explicit Google account confirmation", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
     for (const page of [consolePage, approvePage]) {
       const normalizedProse = page.replaceAll("&rsquo;", "'").replaceAll(/\s+/gu, " ");
-      // A bare select_account reuses the operator's existing Google-session
-      // auth_time, so the freshness check can never pass. Both step-ups force a
-      // genuine re-authentication (prompt=login + max_age=0) to mint a fresh
-      // auth_time — this is the whole point of the step-up.
-      expect(page).toContain('prompt: "login"');
-      expect(page).toContain('max_age: "0"');
-      expect(page).not.toContain('prompt: "select_account"');
-      expect(page).toContain("Recheck Google authentication");
-      expect(normalizedProse).toContain("signed authentication time");
+      expect(page).toContain('prompt: "select_account"');
+      expect(page).not.toContain('prompt: "login"');
+      expect(page).not.toContain("max_age");
+      expect(page).toContain("Confirm Google account");
+      expect(normalizedProse).toContain("Google-signed OAuth response");
     }
   });
 

@@ -36,6 +36,7 @@ import {
 // API; no production test seam or client import is introduced.
 mock.module("server-only", () => ({}));
 const {
+  deviceLookupRefusalMessage,
   MAX_STOA_FELLOW_LIST_RESPONSE_BYTES,
   MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
   MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES,
@@ -580,6 +581,36 @@ describe("configured Stoa origin binding", () => {
   const production = "https://a.asimposium.org";
   const staging = "https://a-staging.asimposium.org";
   const loopback = "http://127.0.0.1:8787";
+
+  test("a missing device proposal names only the exact configured environment", () => {
+    const refusal = {
+      ok: false as const,
+      reason: "refused" as const,
+      problemCode: "DEVICE_CODE_UNKNOWN" as const,
+      detail: "No pending proposal for that code",
+    };
+    expect(deviceLookupRefusalMessage(refusal, production)).toBe(
+      "No pending proposal for that code This page checks a.asimposium.org. Device codes are environment-specific and expire after 30 minutes; open the exact verification URL your agent displayed.",
+    );
+    expect(deviceLookupRefusalMessage(refusal, staging)).toBe(
+      "No pending proposal for that code This page checks a-staging.asimposium.org. Device codes are environment-specific and expire after 30 minutes; open the exact verification URL your agent displayed.",
+    );
+    expect(deviceLookupRefusalMessage(refusal, undefined)).toBe(
+      "No pending proposal for that code",
+    );
+  });
+
+  test("other device lookup failures do not speculate about another environment", () => {
+    expect(
+      deviceLookupRefusalMessage(
+        { ok: false, reason: "refused", problemCode: "DEVICE_LOOKUP_LOCKED", detail: "Wait" },
+        staging,
+      ),
+    ).toBe("Wait");
+    expect(deviceLookupRefusalMessage({ ok: false, reason: "unreachable" }, staging)).toBe(
+      "The agent host did not answer. Try again in a moment.",
+    );
+  });
 
   test.each([production, staging])(
     "dispatches only to configured trusted HTTPS %s",

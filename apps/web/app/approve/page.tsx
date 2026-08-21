@@ -108,30 +108,22 @@ export default async function Approve() {
                   {recentAuthOk(session?.authIssuedAt) ? null : (
                     <div className="auth-step-up" role="status">
                       <p>
-                        <strong>One quick step first:</strong> approvals need Google&rsquo;s signed
-                        authentication time from the last 15 minutes. Recheck below; if the evidence
-                        remains stale, sign in to your Google Account again and recheck here.
+                        <strong>One quick step first:</strong> approvals need a Google-signed OAuth
+                        response issued in the last 15 minutes. Confirm the Google account below;
+                        completing that callback refreshes the evidence used here.
                       </p>
                       <form
                         action={async () => {
                           "use server";
-                          // Google's auth_time is the time the operator last
-                          // authenticated their GOOGLE session, and a passive
-                          // OAuth flow (or `select_account`) reuses it — so the
-                          // freshness check can never pass while the operator
-                          // stays signed in. `max_age: 0` is the OIDC-standard
-                          // forced re-authentication: Google re-authenticates
-                          // and mints a fresh auth_time. This is the whole point
-                          // of the step-up.
                           await signIn(
                             "google",
                             { redirectTo: "/approve" },
-                            { prompt: "login", max_age: "0" },
+                            { prompt: "select_account" },
                           );
                         }}
                       >
                         <button className="btn-google" type="submit">
-                          Recheck Google authentication
+                          Confirm Google account
                         </button>
                       </form>
                     </div>

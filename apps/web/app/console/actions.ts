@@ -35,6 +35,7 @@ import {
 import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
+  deviceLookupRefusalMessage,
   stoaDecideProposal,
   stoaDeviceLookup,
   stoaEnrollmentRecoveryOwner,
@@ -79,13 +80,7 @@ export async function lookupDeviceCode(userCode: string): Promise<DeviceLookupRe
   if (!sponsor.ok) return sponsor;
   const result = await stoaDeviceLookup(sponsor.sponsorId, userCode.trim().toUpperCase());
   if (!result.ok) {
-    return {
-      ok: false,
-      message:
-        result.reason === "unreachable"
-          ? "The agent host did not answer. Try again in a moment."
-          : (result.detail ?? "That code was not accepted."),
-    };
+    return { ok: false, message: deviceLookupRefusalMessage(result) };
   }
   return { ok: true, card: result.data.card };
 }
@@ -776,8 +771,9 @@ export async function recoverMintJoinUrl(
 /**
  * Approve, reduce, or deny a pending proposal. This is a permanent public
  * binding, so W3.4 requires recent signed Google authentication evidence. The
- * provider `auth_time` projected as `authIssuedAt` is used here, never
- * refreshable JWT `iat`, callback arrival, or a client-supplied time.
+ * provider ID-token issuance time projected as `authIssuedAt` is used here,
+ * never Auth.js's refreshable JWT `iat`, callback arrival, or a client-supplied
+ * time.
  */
 export async function decideProposal(
   recoveryPayload: string,

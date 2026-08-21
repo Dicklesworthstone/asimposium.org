@@ -3,11 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { authTimeFromIdToken, validAuthTime } from "../../lib/auth-time";
 
 /**
- * The step-up gate's evidence source: Google's `auth_time` is an ID-token-only
- * claim — the userinfo endpoint never carries it, so the jwt callback must
- * read it from the (already signature-verified) ID token. This is the bug
- * class that left the approve page's re-authenticate callout permanently on:
- * the claim was requested from Google but never actually captured.
+ * The step-up gate's evidence source: the Google ID token issued for the OAuth
+ * callback, not Auth.js's refreshable session JWT and not Google's optional
+ * `auth_time`. Preferring an old `auth_time` was the bug that left the approve
+ * page's step-up callout permanently on.
  */
 
 function idTokenWith(payload: Record<string, unknown>): string {
@@ -16,9 +15,9 @@ function idTokenWith(payload: Record<string, unknown>): string {
 }
 
 describe("authTimeFromIdToken", () => {
-  test("extracts a valid auth_time from the payload", () => {
+  test("extracts a valid provider-issued iat from the payload", () => {
     const now = Math.floor(Date.now() / 1_000);
-    expect(authTimeFromIdToken(idTokenWith({ auth_time: now, sub: "g-1" }))).toBe(now);
+    expect(authTimeFromIdToken(idTokenWith({ iat: now, sub: "g-1" }))).toBe(now);
   });
 
   test("returns undefined when the ID token is absent or malformed", () => {
@@ -28,7 +27,7 @@ describe("authTimeFromIdToken", () => {
     expect(authTimeFromIdToken("")).toBeUndefined();
     expect(authTimeFromIdToken("no-segments")).toBeUndefined();
     expect(authTimeFromIdToken("a.!!!not-base64-json!!!.c")).toBeUndefined();
-    const valid = idTokenWith({ auth_time: 1_700_000_000 });
+    const valid = idTokenWith({ iat: 1_700_000_000 });
     const [header, payload, signature] = valid.split(".");
     expect(header).toBeDefined();
     expect(payload).toBeDefined();
@@ -40,13 +39,13 @@ describe("authTimeFromIdToken", () => {
     expect(authTimeFromIdToken(`${header}.${payload}!.${signature}`)).toBeUndefined();
 
     const invalidUtf8Payload = Buffer.concat([
-      Buffer.from('{"auth_time":1700000000,"invalid":"', "utf8"),
+      Buffer.from('{"iat":1700000000,"invalid":"', "utf8"),
       Buffer.from([0xff]),
       Buffer.from('"}', "utf8"),
     ]).toString("base64url");
     expect(authTimeFromIdToken(`${header}.${invalidUtf8Payload}.${signature}`)).toBeUndefined();
 
-    let payloadBytes = Buffer.from('{"auth_time":1700000000}', "utf8");
+    let payloadBytes = Buffer.from('{"iat":1700000000}', "utf8");
     while (payloadBytes.length % 3 === 0) {
       payloadBytes = Buffer.concat([payloadBytes, Buffer.from(" ")]);
     }
@@ -63,16 +62,24 @@ describe("authTimeFromIdToken", () => {
     expect(authTimeFromIdToken(`${header}.${noncanonicalPayload}.${signature}`)).toBeUndefined();
   });
 
-  test("returns undefined when auth_time is missing or the wrong shape", () => {
+  test("returns undefined when iat is missing or the wrong shape", () => {
     expect(authTimeFromIdToken(idTokenWith({ sub: "g-1" }))).toBeUndefined();
-    expect(authTimeFromIdToken(idTokenWith({ auth_time: "1700000000" }))).toBeUndefined();
-    expect(authTimeFromIdToken(idTokenWith({ auth_time: -1 }))).toBeUndefined();
-    expect(authTimeFromIdToken(idTokenWith({ auth_time: 1.5 }))).toBeUndefined();
+    expect(authTimeFromIdToken(idTokenWith({ iat: "1700000000" }))).toBeUndefined();
+    expect(authTimeFromIdToken(idTokenWith({ iat: -1 }))).toBeUndefined();
+    expect(authTimeFromIdToken(idTokenWith({ iat: 1.5 }))).toBeUndefined();
+  });
+
+  test("does not preserve a stale optional auth_time over the callback's signed iat", () => {
+    const issuedNow = 1_800_000_000;
+    expect(authTimeFromIdToken(idTokenWith({ iat: issuedNow, auth_time: 1_700_000_000 }))).toBe(
+      issuedNow,
+    );
+    expect(authTimeFromIdToken(idTokenWith({ auth_time: issuedNow }))).toBeUndefined();
   });
 
   test("reads only the payload segment — a forged signature segment is irrelevant", () => {
     const now = Math.floor(Date.now() / 1_000);
-    const token = idTokenWith({ auth_time: now });
+    const token = idTokenWith({ iat: now });
     expect(authTimeFromIdToken(token.replace(/signature$/, "forged"))).toBe(now);
   });
 });

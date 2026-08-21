@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { NextRequest } from "next/server";
-import NextAuth from "next-auth";
-import Google from "next-auth/providers/google";
 import ts from "typescript";
 
 import {
@@ -178,68 +175,6 @@ function mutateExportedNumericLiteral(
 
 function scan(fixture: string): AuthViolation[] {
   return validateAuthConfig(readFileSync(join(FIXTURES, `${fixture}.ts`), "utf8"), `${fixture}.ts`);
-}
-
-const GOOGLE_AUTH_TIME_CLAIMS = { id_token: { auth_time: { essential: true } } };
-
-async function normalizedGoogleClaims(claims: unknown): Promise<string> {
-  const { handlers } = NextAuth({
-    secret: crypto.randomUUID(),
-    trustHost: true,
-    providers: [
-      Google({
-        clientId: "auth-contract-test-client",
-        clientSecret: "auth-contract-test-secret",
-        authorization: { params: { claims } },
-      }),
-    ],
-  });
-
-  const csrfResponse = await handlers.GET(new NextRequest("https://asimposium.org/api/auth/csrf"));
-  if (!csrfResponse.ok) throw new Error("Auth.js did not issue a CSRF token");
-  const csrfBody: unknown = await csrfResponse.json();
-  if (
-    typeof csrfBody !== "object" ||
-    csrfBody === null ||
-    !("csrfToken" in csrfBody) ||
-    typeof csrfBody.csrfToken !== "string"
-  ) {
-    throw new Error("Auth.js issued an invalid CSRF response");
-  }
-  const cookie = csrfResponse.headers
-    .getSetCookie()
-    .map((value) => value.split(";", 1)[0])
-    .join("; ");
-
-  const signInResponse = await handlers.POST(
-    new NextRequest("https://asimposium.org/api/auth/signin/google", {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        cookie,
-        "x-auth-return-redirect": "1",
-      },
-      body: new URLSearchParams({
-        callbackUrl: "https://asimposium.org/console",
-        csrfToken: csrfBody.csrfToken,
-      }),
-    }),
-  );
-  if (!signInResponse.ok) throw new Error("Auth.js did not issue a Google authorization URL");
-  const signInBody: unknown = await signInResponse.json();
-  if (
-    typeof signInBody !== "object" ||
-    signInBody === null ||
-    !("url" in signInBody) ||
-    typeof signInBody.url !== "string"
-  ) {
-    throw new Error("Auth.js issued an invalid Google sign-in response");
-  }
-  const serialized = new URL(signInBody.url).searchParams.get("claims");
-  if (serialized === null || serialized === undefined) {
-    throw new Error("Auth.js did not emit a Google claims parameter");
-  }
-  return serialized;
 }
 
 function codesOf(violations: readonly AuthViolation[]): AuthViolationCode[] {
@@ -657,22 +592,6 @@ describe("the sponsor principal is derived and projected through canonical bindi
 
 describe("recent-auth is stable across ordinary session reads", () => {
   const baselineSource = (): string => readFileSync(join(FIXTURES, "valid.ts"), "utf8");
-
-  test("Auth.js sends the configured Google auth_time request as a JSON object", async () => {
-    const serialized = await normalizedGoogleClaims(GOOGLE_AUTH_TIME_CLAIMS);
-    const parsed: unknown = JSON.parse(serialized);
-
-    expect(parsed).toEqual(GOOGLE_AUTH_TIME_CLAIMS);
-    expect(typeof parsed).toBe("object");
-  });
-
-  test("PLANTED: a pre-serialized Google claims value normalizes to a JSON string, not the object Google requires", async () => {
-    const serialized = await normalizedGoogleClaims(JSON.stringify(GOOGLE_AUTH_TIME_CLAIMS));
-    const parsed: unknown = JSON.parse(serialized);
-
-    expect(typeof parsed).toBe("string");
-    expect(parsed).not.toEqual(GOOGLE_AUTH_TIME_CLAIMS);
-  });
 
   test("the account-guarded ID-token helper is the only accepted wiring", () => {
     const surface = readAuthSurface(baselineSource()).recentAuth;

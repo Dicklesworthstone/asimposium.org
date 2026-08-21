@@ -74,12 +74,11 @@ Read by Auth.js at runtime; never at module scope, never in a build artifact:
 - `AUTH_SECRET`
 - `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`
 
-Sensitive sponsor actions use Google's signed OIDC `auth_time`, not the time an
-OAuth callback happened. The Google Auth Platform application must therefore
-be published and verified with **Session age claims** enabled. If Google omits
-the claim, ordinary sign-in still works but decision step-up fails closed.
-Google does not let a relying party force Google Account reauthentication; the
-UI reports stale evidence honestly rather than minting freshness locally.
+Sensitive sponsor actions use the signed `iat` in the Google ID token issued
+for the most recent OAuth callback. The callback copies that value into a
+separate stable claim; ordinary Auth.js session reads cannot refresh it. The
+step-up UI requests Google account selection and does not depend on optional
+Session age claims or claim an unsupported forced password reauthentication.
 
 Read by the sponsor console's server-only Stoa client at call time:
 

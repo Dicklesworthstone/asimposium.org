@@ -1,10 +1,12 @@
 /**
- * Propylon step-up evidence (Fable §5.1): Google's `auth_time` is an
- * ID-token-only claim — the userinfo endpoint never carries it, so the jwt
- * callback reads it from the (already signature-verified) ID token. These
- * helpers live outside `auth.ts` so the module keeps its exact contract-pinned
- * export surface (`auth`, `handlers`, `signIn`, `signOut`) while the
- * extraction stays unit-testable.
+ * Propylon step-up evidence (Fable §5.1). Google always signs an `iat` into
+ * the ID token issued for a completed OAuth callback. That provider-issued
+ * timestamp is stable in our custom JWT until another OAuth callback replaces
+ * it, unlike Auth.js's own refreshable JWT `iat`.
+ *
+ * These helpers live outside `auth.ts` so the module keeps its exact
+ * contract-pinned export surface (`auth`, `handlers`, `signIn`, `signOut`)
+ * while extraction stays unit-testable.
  */
 
 const fatalUtf8 = new TextDecoder("utf-8", { fatal: true });
@@ -18,10 +20,10 @@ export function validAuthTime(value: unknown): number | undefined {
 }
 
 /**
- * Read `auth_time` out of an OIDC ID token Auth.js has already verified. The
- * token is a compact JWS; only the payload segment is decoded, never trusted
- * beyond the one claim, and any malformed shape yields undefined (fail-closed
- * at the step-up check, not a crash).
+ * Read the provider-issued time out of an OIDC ID token Auth.js has already
+ * verified. The token is a compact JWS; only the payload segment is decoded,
+ * never trusted beyond the one claim, and any malformed shape yields
+ * undefined (fail-closed at the step-up check, not a crash).
  */
 export function authTimeFromIdToken(idToken: unknown): number | undefined {
   if (typeof idToken !== "string") return undefined;
@@ -39,7 +41,7 @@ export function authTimeFromIdToken(idToken: unknown): number | undefined {
     if (payloadBytes.toString("base64url") !== segment) return undefined;
     const payload: unknown = JSON.parse(fatalUtf8.decode(payloadBytes));
     if (typeof payload !== "object" || payload === null) return undefined;
-    return validAuthTime((payload as Record<string, unknown>).auth_time);
+    return validAuthTime((payload as Record<string, unknown>).iat);
   } catch {
     return undefined;
   }
