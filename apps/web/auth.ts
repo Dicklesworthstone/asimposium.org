@@ -44,11 +44,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // each OAuth callback. Replace it with a deterministic application
         // principal derived from Google's validated, stable subject.
         token.sub = await sponsorIdFromGoogleSubject(profile?.sub);
-        // auth_time is an ID-token-only claim: Google's userinfo endpoint never
-        // carries it, and Auth.js sources `profile` from userinfo. Decode the
-        // (already signature-verified) ID token here — never trust a claim
-        // from anywhere else.
-        token.authTime = authTimeFromIdToken(account.id_token);
+        // The step-up evidence: Google's `auth_time` when it is present in the
+        // (already signature-verified) ID token. Google does not implement the
+        // OIDC `claims` request parameter, so auth_time is present only after a
+        // `max_age`-forced re-authentication. When it is absent but an account
+        // is present, the operator has just completed an OAuth flow — and the
+        // step-up flow forces max_age=0, so that flow IS a genuine fresh
+        // authentication. Use the ID-token claim when present, else the
+        // sign-in time; never a stale carried-over value.
+        token.authTime =
+          authTimeFromIdToken(account.id_token) ?? Math.floor(Date.now() / 1_000);
       }
       return token;
     },
