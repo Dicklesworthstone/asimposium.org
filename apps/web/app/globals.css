@@ -427,7 +427,9 @@
   border-bottom: 0;
 }
 .console .status-rows li > span:first-child {
+  flex: 1 1 12rem;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 .console .state {
   font-variant: small-caps;
@@ -436,7 +438,7 @@
   color: var(--color-muted);
   text-align: right;
   min-width: 0;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 .console .state.live {
   color: var(--color-clay);
@@ -446,11 +448,13 @@
  * of running them into one dense inline cluster; every action stays a
  * distinct, right-aligned target at every width.
  */
-.console .status-rows li > .state {
+.console .fellow-status-rows li > .state {
   display: flex;
+  flex: 0 1 auto;
   flex-direction: column;
   align-items: flex-end;
   gap: 0.3rem;
+  max-width: 100%;
 }
 .console .pasteblock {
   background: var(--color-paper);
@@ -519,7 +523,7 @@
 }
 .console .mint-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
   gap: 0.75rem 1rem;
 }
 .console .mint-grid label {
@@ -527,6 +531,7 @@
   flex-direction: column;
   gap: 0.25rem;
   font-size: 0.85rem;
+  min-width: 0;
 }
 .console .mint-grid .mint-wide {
   grid-column: 1 / -1;
@@ -537,7 +542,9 @@
   background: var(--color-card);
   color: var(--color-ink);
   font: inherit;
+  min-width: 0;
   padding: 0.45rem 0.55rem;
+  width: 100%;
 }
 .console .mint-grid textarea {
   resize: vertical;
@@ -760,18 +767,6 @@
 }
 
 /*
- * The Fellow row's right cell stacks its "since" stamp above the lifecycle
- * actions instead of letting them run into a dense inline cluster; each
- * command stays a distinct, right-aligned target at every width.
- */
-.console .status-rows li > .state {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.3rem;
-}
-
-/*
  * Nowrap strips that can overflow on narrow screens keep a visible, thin
  * scrollbar instead of silently clipping their tail.
  */
@@ -800,6 +795,19 @@
 
 /* ── narrow screens: let the session loop wrap instead of scrolling ── */
 @media (max-width: 30rem) {
+  .console .status-rows li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .console .status-rows li > span:first-child,
+  .console .status-rows li > .state {
+    flex: 0 1 auto;
+    text-align: left;
+    width: 100%;
+  }
+  .console .fellow-status-rows li > .state {
+    align-items: flex-start;
+  }
   .landing .loop {
     white-space: normal;
     overflow-x: visible;

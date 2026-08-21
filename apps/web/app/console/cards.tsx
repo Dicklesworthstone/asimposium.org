@@ -1825,7 +1825,7 @@ export function LifecycleManager({
           scopes.
         </p>
       ) : (
-        <ul className="status-rows">
+        <ul className="status-rows fellow-status-rows">
           {fellows.map((fellow) => (
             <li key={fellow.fellow_id}>
               <span>

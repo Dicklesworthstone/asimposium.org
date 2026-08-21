@@ -414,6 +414,22 @@ describe("sponsor console trust boundary", () => {
     expect(consolePage).toContain("<LifecycleManager");
   });
 
+  test("PLANTED: narrow console rows and mint fields retain their responsive CSS guards", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const stylesheet = readPackageFile("app/globals.css");
+
+    expect(cards.match(/className="status-rows fellow-status-rows"/gu)).toHaveLength(1);
+    expect(stylesheet.match(/\.console \.fellow-status-rows li > \.state/gu)).toHaveLength(2);
+    expect(stylesheet).not.toContain(".console .status-rows li > .state {\n  display: flex;");
+    expect(stylesheet).toContain("flex: 1 1 12rem;\n  min-width: 0;\n  overflow-wrap: anywhere;");
+    expect(stylesheet).toContain(
+      "grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));",
+    );
+    expect(stylesheet).toContain(
+      ".console .status-rows li > span:first-child,\n  .console .status-rows li > .state {\n    flex: 0 1 auto;\n    text-align: left;\n    width: 100%;",
+    );
+  });
+
   test("Fellow history stays server-mediated and continuation does not fork lifecycle controls", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
 
