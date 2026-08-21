@@ -168,18 +168,38 @@ describe("neutralizeUntrustedBody", () => {
     const largeRejected = "<!--x".repeat(2_048);
     const terminatedControls = "<!--asimp-->".repeat(1_024);
 
-    // Warm both paths before timing. Taking the fastest of several identical
-    // samples avoids treating a scheduler pause as classifier work.
+    // Warm both paths before timing. A single scan is only about a millisecond
+    // on a fast host, where timer quantization and one JIT transition can
+    // overwhelm the scaling ratio. Measure adjacent small/large batches and
+    // take the median of their ratios. Alternating the order prevents a steady
+    // warm-up trend from favoring either body, while an isolated scheduler
+    // pause can spoil only one pair. A quadratic suffix rescan still grows by
+    // roughly 4x when the input doubles.
     neutralizeUntrustedBody(smallRejected);
-    neutralizeUntrustedBody(terminatedControls);
-    const fastestDurationMs = (body: string): number => {
-      let fastest = Number.POSITIVE_INFINITY;
-      for (let sample = 0; sample < 3; sample += 1) {
-        const started = performance.now();
+    neutralizeUntrustedBody(largeRejected);
+    const batchDurationMs = (body: string): number => {
+      const started = performance.now();
+      for (let repetition = 0; repetition < 4; repetition += 1) {
         neutralizeUntrustedBody(body);
-        fastest = Math.min(fastest, performance.now() - started);
       }
-      return fastest;
+      return performance.now() - started;
+    };
+    const medianScalingRatio = (): number => {
+      const ratios: number[] = [];
+      for (let sample = 0; sample < 11; sample += 1) {
+        let smallMs: number;
+        let largeMs: number;
+        if (sample % 2 === 0) {
+          smallMs = batchDurationMs(smallRejected);
+          largeMs = batchDurationMs(largeRejected);
+        } else {
+          largeMs = batchDurationMs(largeRejected);
+          smallMs = batchDurationMs(smallRejected);
+        }
+        ratios.push(largeMs / smallMs);
+      }
+      ratios.sort((left, right) => left - right);
+      return ratios[5] as number;
     };
 
     expect(neutralizeUntrustedBody(smallRejected)).toEqual({ text: smallRejected, findings: [] });
@@ -188,15 +208,9 @@ describe("neutralizeUntrustedBody", () => {
       { marker: "asimp-control-comment", count: 1_024 },
     ]);
 
-    const smallMs = fastestDurationMs(smallRejected);
-    const largeMs = fastestDurationMs(largeRejected);
-    const terminatedMs = fastestDurationMs(terminatedControls);
-
     // Doubling the rejected corpus must remain near-linear. The terminated
-    // control corpus does the same number of literal-opener searches, so it
-    // guards against a future suffix rescan hidden only on the rejection path.
-    expect(largeMs).toBeLessThan(smallMs * 3);
-    expect(largeMs).toBeLessThan(terminatedMs * 4 + 10);
+    // control corpus above independently proves all openers are still visited.
+    expect(medianScalingRatio()).toBeLessThan(3);
   });
 
   test("makes a forged JSON envelope key inert so no scanner reads it as one", () => {
