@@ -247,13 +247,17 @@ function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
 }
 
 function idempotencyConflictProblem(): Response {
-  return problem({
+  return validatedProblem({
     status: 409,
     code: "IDEMPOTENCY_CONFLICT",
     title: "The Idempotency-Key was used for a different request",
     detail: "This key was first used with a different body or target resource.",
     fixHint: "Retry with a fresh Idempotency-Key for a new request.",
-    extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+    rule: "A5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: { headers: { "Idempotency-Key": "session-new-request-01" } },
+    },
   });
 }
 

@@ -5374,6 +5374,9 @@ describe("committed promotion outbox nudge", () => {
     expect(conflicted.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
     expect(ProblemDocumentSchema.parse(await conflicted.json())).toMatchObject({
       code: "IDEMPOTENCY_CONFLICT",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: { headers: { "Idempotency-Key": "session-new-request-01" } },
     });
     // The conflict reached no commit. These exact-equality assertions are the
     // non-vacuity: a mount that scheduled or forwarded a wake before rejecting the
