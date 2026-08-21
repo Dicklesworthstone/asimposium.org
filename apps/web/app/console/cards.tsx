@@ -1318,7 +1318,11 @@ export function ProposalCard({
             : new Date(resources.fellow_grant_expires_at).toLocaleString()}
         </dd>
         <dt>Proposal expires</dt>
-        <dd>{new Date(card.proposal_expires_at).toLocaleString()}</dd>
+        <dd>
+          {Number.isFinite(new Date(card.proposal_expires_at).getTime())
+            ? new Date(card.proposal_expires_at).toLocaleString()
+            : String(card.proposal_expires_at ?? "unspecified")}
+        </dd>
       </dl>
 
       {recoveredDecisionDraft !== undefined && !externalRecoveryController && (
