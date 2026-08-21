@@ -1812,10 +1812,13 @@ describe("the self-test and the blocked external proof", () => {
   test("S1: lifecycle barriers persist before publication and identity survives the launcher exec", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
     const logPhase = source.slice(source.indexOf("log_phase()"), source.indexOf("blocked()"));
-    const retainedWrite = logPhase.indexOf('printf \'%s\\n\' "$line" >>"$PHASE_LOG"');
+    const retainedWrite = logPhase.indexOf('if ! printf \'%s\\n\' "$line" >>"$PHASE_LOG"');
+    const retainedFailure = logPhase.indexOf("phase-log-write-failed");
     const stderrWrite = logPhase.indexOf("printf '%s\\n' \"$line\" >&2");
     expect(retainedWrite).toBeGreaterThanOrEqual(0);
+    expect(retainedFailure).toBeGreaterThan(retainedWrite);
     expect(stderrWrite).toBeGreaterThan(retainedWrite);
+    expect(stderrWrite).toBeGreaterThan(retainedFailure);
 
     const processIdentity = source.slice(
       source.indexOf("process_identity()"),

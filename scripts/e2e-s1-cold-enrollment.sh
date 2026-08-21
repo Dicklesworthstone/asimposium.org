@@ -283,16 +283,21 @@ emit() {
 
 # Phase logging goes to the retained state directory and to stderr. It records
 # lifecycle facts only: phase, port, pid, elapsed. Never a credential, never a
-# response body, never the replay key.
+# response body, never the replay key. Persist first: stderr is the controller's
+# signal-injection barrier, so observing a phase there must imply that the same
+# phase is already present in the retained lifecycle record.
 log_phase() {
   local phase="$1"
   local detail="${2:-}"
   local line
   line="$(printf '[%s] %s %s' "$SUITE" "$phase" "$detail")"
-  printf '%s\n' "$line" >&2
   if [[ -n "$PHASE_LOG" && -f "$PHASE_LOG" ]]; then
-    printf '%s\n' "$line" >>"$PHASE_LOG" 2>/dev/null || true
+    if ! printf '%s\n' "$line" >>"$PHASE_LOG" 2>/dev/null; then
+      printf '[%s] phase-log-write-failed phase=%s\n' "$SUITE" "$phase" >&2
+      return 0
+    fi
   fi
+  printf '%s\n' "$line" >&2
 }
 
 blocked() {
@@ -618,11 +623,13 @@ process_identity() {
   local identity marker="${2:-}" argv status=0 liveness=0
   [[ -n "${1:-}" ]] || return 1
   identity_unavailable && return 2
-  # PGID, start time, and command remain stable for a live group leader. PPID is
-  # intentionally excluded: during an EXIT trap the shell may already have begun
-  # reparenting children, and treating that expected change as PID reuse would
-  # withhold cleanup from the very group we proved at launch.
-  identity="$($PS_BIN -p "$1" -o pgid=,lstart=,comm= 2>/dev/null)" || status=$?
+  # PGID and kernel start time remain stable for a live group leader. Command is
+  # intentionally excluded: the first observation can see the short-lived
+  # `/usr/bin/env` launcher before its same-PID exec into Bash. PPID is likewise
+  # excluded because EXIT may already have begun reparenting children. The
+  # independent random argv marker below binds this birth identity to the exact
+  # supervisor we launched rather than to a recycled numeric PID or PGID.
+  identity="$($PS_BIN -p "$1" -o pgid=,lstart= 2>/dev/null)" || status=$?
   if ((status != 0)); then
     # `ps -p` exits non-zero for "no such process" and for a real failure alike.
     # Signal 0 distinguishes an extant-but-uninspectable process without changing
