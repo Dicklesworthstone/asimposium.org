@@ -228,7 +228,15 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <form
             action={async () => {
               "use server";
-              await signIn("google", { redirectTo: "/console" }, { prompt: "select_account" });
+              // The step-up needs a FRESH auth_time. A bare select_account
+              // reuses the operator's existing Google session auth_time, so the
+              // freshness check never passes. max_age=0 forces a genuine
+              // re-authentication, which mints a fresh auth_time.
+              await signIn(
+                "google",
+                { redirectTo: "/console" },
+                { prompt: "login", max_age: "0" },
+              );
             }}
           >
             <button className="btn-quiet" type="submit">

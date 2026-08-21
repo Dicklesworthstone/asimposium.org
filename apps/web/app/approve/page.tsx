@@ -115,13 +115,18 @@ export default async function Approve() {
                       <form
                         action={async () => {
                           "use server";
-                          // Google supports account selection here, not a
-                          // relying-party-forced reauthentication. The signed
-                          // auth_time remains the authority and may stay stale.
+                          // Google's auth_time is the time the operator last
+                          // authenticated their GOOGLE session, and a passive
+                          // OAuth flow (or `select_account`) reuses it — so the
+                          // freshness check can never pass while the operator
+                          // stays signed in. `max_age: 0` is the OIDC-standard
+                          // forced re-authentication: Google re-authenticates
+                          // and mints a fresh auth_time. This is the whole point
+                          // of the step-up.
                           await signIn(
                             "google",
                             { redirectTo: "/approve" },
-                            { prompt: "select_account" },
+                            { prompt: "login", max_age: "0" },
                           );
                         }}
                       >
