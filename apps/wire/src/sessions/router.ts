@@ -4,6 +4,8 @@ import {
   PackResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
+  ReviewRequestSchema,
+  ReviewResponseSchema,
   SessionCloseRequestSchema,
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
@@ -41,6 +43,7 @@ import {
   writeClaim,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
+import { gateReviewSubmission } from "../ledger/review-gate";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
 /**
@@ -1759,6 +1762,138 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       throw error;
     }
+  });
+
+  // --- POST /v1/sessions/:id/review (W5.7: the disposition driver's write) ---
+  app.post("/v1/sessions/:id/review", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = ReviewRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "REVIEW_BODY_INVALID",
+        title: "The review does not match the contract",
+        detail: "The JSON body does not match the review contract.",
+        fixHint:
+          "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
+        rule: "A5",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    // The target claim must exist on the session's problem.
+    const claim = await db
+      .prepare("SELECT id FROM claims WHERE id = ? AND problem_id = ?")
+      .bind(parsed.data.target_claim_id, session.problem_id)
+      .first<{ id: string }>();
+    if (claim === null || claim === undefined) {
+      return problem({
+        status: 404,
+        code: "CLAIM_NOT_FOUND",
+        title: "No such claim",
+        detail: `No claim named ${parsed.data.target_claim_id} exists on ${session.problem_id}.`,
+        fixHint: "Check the claim id against the problem's claims board.",
+      });
+    }
+
+    // The claim's author + attribution come from the immutable claim.created
+    // event (Rule A3) — never the Fellow's current sponsor binding, so a later
+    // transfer cannot manufacture or erase independence.
+    const authorEvent = await db
+      .prepare(
+        `SELECT actor_fellow_id, actor_sponsor_id, model_string_self_declared, harness
+         FROM events WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ?
+         ORDER BY seq ASC LIMIT 1`,
+      )
+      .bind(session.problem_id, parsed.data.target_claim_id)
+      .first<{
+        actor_fellow_id: string | null;
+        actor_sponsor_id: string | null;
+        model_string_self_declared: string | null;
+        harness: string | null;
+      }>();
+
+    const reviewer = await db
+      .prepare(`SELECT sponsor_id, model, harness FROM enrollment_fellows WHERE fellow_id = ?`)
+      .bind(auth.binding.fellowId)
+      .first<{ sponsor_id: string; model: string; harness: string }>();
+
+    const gate = gateReviewSubmission({
+      submission: {
+        targetClaimId: parsed.data.target_claim_id,
+        targetVersion: parsed.data.target_version,
+        verdict: parsed.data.verdict,
+        basis: parsed.data.basis,
+        capableOfFailure: parsed.data.capable_of_failure,
+        bodyMd: parsed.data.body_md,
+      },
+      claimAuthorFellowId: authorEvent?.actor_fellow_id ?? "",
+      reviewerFellowId: auth.binding.fellowId,
+      claimAuthorAttribution: {
+        sponsorId: authorEvent?.actor_sponsor_id ?? "unknown",
+        modelFamily: authorEvent?.model_string_self_declared ?? "unknown",
+        methodBasis: authorEvent?.harness ?? "unknown",
+      },
+      reviewerAttribution: {
+        sponsorId: reviewer?.sponsor_id ?? "unknown",
+        modelFamily: reviewer?.model ?? "unknown",
+        methodBasis: reviewer?.harness ?? "unknown",
+      },
+    });
+    if (!gate.ok) {
+      return problem({
+        status: 422,
+        code: gate.code,
+        title: "The review is not acceptable",
+        detail: "The review fails a validator hard rule.",
+        fixHint: gate.fixHint,
+        rule: gate.rule,
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+
+    const reviewId = mintId("R");
+    const createdAt = new Date().toISOString();
+    await db
+      .prepare(
+        `INSERT INTO reviews
+           (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id,
+            tier, verdict, basis, capable_of_failure, rubric_json, body_md, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        reviewId,
+        session.problem_id,
+        parsed.data.target_claim_id,
+        parsed.data.target_version,
+        auth.binding.fellowId,
+        gate.tier,
+        parsed.data.verdict,
+        parsed.data.basis,
+        parsed.data.capable_of_failure ?? null,
+        JSON.stringify(parsed.data.rubric),
+        parsed.data.body_md,
+        createdAt,
+      )
+      .run();
+
+    const response = ReviewResponseSchema.parse({
+      review_id: reviewId,
+      target_claim_id: parsed.data.target_claim_id,
+      target_version: parsed.data.target_version,
+      tier: gate.tier,
+      carries_weight: gate.carriesWeight,
+    });
+    return privateNoStore(c.json(response, 201));
   });
 
   // --- POST /v1/sessions/:id/close ---------------------------------------

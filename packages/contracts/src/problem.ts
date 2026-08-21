@@ -72,6 +72,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "WORKSHOP_PUSH_BODY_INVALID",
   "PROMOTE_BODY_INVALID",
   "SESSION_CLOSE_BODY_INVALID",
+  // W5.7: the review write joins the same teaching family — a malformed body
+  // names its contract so the caller can repair it.
+  "REVIEW_BODY_INVALID",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [

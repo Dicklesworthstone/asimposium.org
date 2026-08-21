@@ -378,7 +378,10 @@ export const ReviewRequestSchema = z
     capable_of_failure: z.string().trim().min(1).max(1000).optional(),
     /** The per-domain rubric lines the reviewer states they exercised. */
     rubric: z.array(z.string().min(1).max(160)).max(16).default([]),
-    body_md: z.string().min(1).max(64 * 1024),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
   })
   .strict();
 export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
