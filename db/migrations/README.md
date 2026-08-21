@@ -8,6 +8,10 @@ Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
 
+Public ledger identifiers are scoped by problem (Fable Rev 3 section 6.1).
+Migration `0021_problem_scoped_claim_identity.sql` repairs the original global
+claim primary keys without changing the public `C-n` grammar.
+
 When W2 begins, each migration must use the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
 agent-reviewable deployment script. The Worker remains the only process that

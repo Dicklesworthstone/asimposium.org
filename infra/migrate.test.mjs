@@ -1016,6 +1016,31 @@ const cases = [
         "the production planner must admit the complete registered 0016-0020 suffix",
       );
 
+      const actual0021 = productionMigrations.find((migration) => migration.sequence === 21);
+      assert.ok(actual0021, "current migration 0021 must exist");
+      assert.equal(actual0021.id, "0021_problem_scoped_claim_identity.sql");
+      const schemaHead21 = productionManifest.schema_heads.filter((head) => head.sequence === 21);
+      assert.equal(
+        schemaHead21.length,
+        1,
+        "the production manifest must register exactly one measured head 21",
+      );
+      const migrationsThrough0021 = productionMigrations.filter(
+        (migration) => migration.sequence <= actual0021.sequence,
+      );
+      assert.equal(
+        migrationsThrough0021.length,
+        21,
+        "the problem-scoped claim proof requires 0001-0021",
+      );
+      assert.deepEqual(
+        planMigrations(migrationsThrough0021, actualHistorical, forwardOptions).to_apply.map(
+          (migration) => migration.id,
+        ),
+        migrationsThrough0021.slice(15).map((migration) => migration.id),
+        "the production planner must admit the complete registered 0016-0021 suffix",
+      );
+
       assert.equal(bootstrapTargetDisposition({ kind: "provably-empty" }), "ready");
       assert.equal(
         bootstrapTargetDisposition({ kind: "bootstrap-baseline15", head: 15 }),

@@ -86,6 +86,23 @@ const COMMAND_REAP_RESERVE_MS = COMMAND_CONTAINMENT_RESERVE_MS + CLEANUP_SCHEDUL
  */
 const LOCAL_D1_EXECUTION_FLOOR_MS = 3_000;
 const LOCAL_D1_COMMAND_WINDOW_MS = COMMAND_REAP_RESERVE_MS + LOCAL_D1_EXECUTION_FLOOR_MS;
+// A deadline-bearing CLI must authenticate its inherited live owner channel
+// before the first local D1 command can use the complete command window. The
+// outer controller first delivers that channel within one pipe window and then
+// reserves the watchdog's authentication window. Neither is extra command
+// execution time: the inner plants observe the command boundary after both
+// sequential allowances have elapsed.
+const LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS = OUTPUT_DRAIN_MS + OWNER_LEASE_HANDSHAKE_MS;
+const LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS =
+  LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS + LOCAL_D1_COMMAND_WINDOW_MS;
+// Default actual-CLI runs may need the complete shipped 15s inner command
+// window, not merely the minimum admission floor. Their outer owner owes its
+// own cleanup tail as well as the CLI bootstrap and inner cleanup tail.
+const ACTUAL_CLI_DEFAULT_REMAINING_MS =
+  COMMAND_REAP_RESERVE_MS +
+  LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS +
+  SHIPPED_LOCAL_CLEANUP_RESERVE_MS +
+  PER_COMMAND_TIMEOUT_MS;
 const TOTAL_TIMEOUT_MS = 180_000;
 const deadlineAt = startedAt + TOTAL_TIMEOUT_MS;
 const appliedAt = "2026-08-16T00:00:00.000Z";
@@ -330,7 +347,7 @@ async function runActualLocalMigrationCli(args, label, commandOptions = undefine
       cwd: root,
       ownerLeaseDeadlineAtMs: deadlineAtMs,
     }),
-    commandOptions,
+    commandOptions ?? { remainingMs: ACTUAL_CLI_DEFAULT_REMAINING_MS },
   );
   assert.equal(result.outcome, "exited", `actual local CLI ${label} must exit normally`);
   try {
@@ -554,14 +571,14 @@ async function runParentOwnedTopologyFixture(deadlineAtMs) {
   process.stdout.write(`${pidRecordPath}\n`);
   const descendantSource = `
 process.on("SIGTERM", () => {});
-setTimeout(() => process.exit(124), 20_000);
+setTimeout(() => process.exit(124), 30_000);
 setInterval(() => {}, 1_000);
 process.stdout.write("ready\\n");
 `;
   const directChildSource = `
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
-setTimeout(() => process.exit(124), 20_000);
+setTimeout(() => process.exit(124), 30_000);
 setInterval(() => {}, 1_000);
 const descendant = Bun.spawn({
   cmd: [process.execPath, "-e", ${JSON.stringify(descendantSource)}],
@@ -603,7 +620,7 @@ writeFileSync(
   // Stall beyond both deadlines. The inner JavaScript timer cannot fire, so
   // only the independent outer controller can retire this process, its direct
   // child, and the TERM-resistant descendant in their one owned group.
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20_000);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
   process.exit(124);
 }
 
@@ -864,7 +881,9 @@ function stableCurrent0020Inputs() {
       sourceDigests: before,
     };
   }
-  assert.fail("replay-claim migration 0020 or bootstrap manifest moved during local-proof input capture");
+  assert.fail(
+    "replay-claim migration 0020 or bootstrap manifest moved during local-proof input capture",
+  );
 }
 
 function assertCurrent0020InputsUnchanged(inputs) {
@@ -879,6 +898,68 @@ function assertCurrent0020InputsUnchanged(inputs) {
     digestOf(readFileSync(resolve(root, "db/bootstrap/manifest.json"), "utf8")),
     inputs.sourceDigests.manifest,
     "bootstrap manifest moved during the head-20 local proof; reject the mixed snapshot",
+  );
+}
+
+function stableCurrent0021Inputs() {
+  const migrationPath = resolve(root, "db/migrations/0021_problem_scoped_claim_identity.sql");
+  const manifestPath = resolve(root, "db/bootstrap/manifest.json");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = {
+      migration: digestOf(readFileSync(migrationPath, "utf8")),
+      manifest: digestOf(readFileSync(manifestPath, "utf8")),
+    };
+    const currentMigrations = readMigrationDirectory(resolve(root, "db/migrations"));
+    const currentManifest = readBootstrapManifest(root);
+    const after = {
+      migration: digestOf(readFileSync(migrationPath, "utf8")),
+      manifest: digestOf(readFileSync(manifestPath, "utf8")),
+    };
+    if (before.migration !== after.migration || before.manifest !== after.manifest) continue;
+
+    const migration0021 = currentMigrations.find((migration) => migration.sequence === 21);
+    assert.ok(migration0021, "current problem-scoped claim migration 0021 must exist");
+    assert.equal(migration0021.id, "0021_problem_scoped_claim_identity.sql");
+    assert.equal(
+      migration0021.digest,
+      before.migration,
+      "the production migration command must use the exact current 0021 bytes",
+    );
+    const schemaHead21 = currentManifest.schema_heads.filter((head) => head.sequence === 21);
+    assert.equal(
+      schemaHead21.length,
+      1,
+      "the production manifest must register exactly one measured head 21",
+    );
+    const migrationsThrough0021 = currentMigrations.filter((migration) => migration.sequence <= 21);
+    assert.equal(
+      migrationsThrough0021.length,
+      21,
+      "the problem-scoped claim proof requires contiguous 0001-0021",
+    );
+    return {
+      migration0021,
+      migrationsThrough0021,
+      manifest: currentManifest,
+      schemaHead21: schemaHead21[0],
+      sourceDigests: before,
+    };
+  }
+  assert.fail("problem-scoped claim migration 0021 or bootstrap manifest moved during local proof");
+}
+
+function assertCurrent0021InputsUnchanged(inputs) {
+  assert.equal(
+    digestOf(
+      readFileSync(resolve(root, "db/migrations/0021_problem_scoped_claim_identity.sql"), "utf8"),
+    ),
+    inputs.sourceDigests.migration,
+    "problem-scoped claim migration 0021 moved during the local proof",
+  );
+  assert.equal(
+    digestOf(readFileSync(resolve(root, "db/bootstrap/manifest.json"), "utf8")),
+    inputs.sourceDigests.manifest,
+    "bootstrap manifest moved during the head-21 local proof",
   );
 }
 
@@ -1318,7 +1399,7 @@ const cases = [
 
       // FD0 OWNER LEASE: only an opaque lease minted after the watchdog's exact
       // canonical echo may admit a deadline-bearing local child.
-      const leaseDeadlineAtMs = 306_250;
+      const leaseDeadlineAtMs = 306_750;
       const authenticatedWatchdogObservation = {};
       const authenticatedLease = await authenticateLocalOwnerLease(leaseDeadlineAtMs, {
         processLeadsOwnedGroup: () => true,
@@ -1517,6 +1598,10 @@ const cases = [
       assert.equal(COMMAND_REAP_RESERVE_MS, 3_750);
       assert.equal(LOCAL_D1_EXECUTION_FLOOR_MS, 3_000);
       assert.equal(LOCAL_D1_COMMAND_WINDOW_MS, 6_750);
+      assert.equal(OWNER_LEASE_HANDSHAKE_MS, 1_000);
+      assert.equal(LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS, 1_500);
+      assert.equal(LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS, 8_250);
+      assert.equal(ACTUAL_CLI_DEFAULT_REMAINING_MS, 24_000);
       assert.equal(SHIPPED_LOCAL_CLEANUP_RESERVE_MS, COMMAND_REAP_RESERVE_MS);
       assert.equal(SHIPPED_LOCAL_EXECUTION_FLOOR_MS, LOCAL_D1_EXECUTION_FLOOR_MS);
       assert.equal(SHIPPED_LOCAL_COMMAND_WINDOW_MS, LOCAL_D1_COMMAND_WINDOW_MS);
@@ -1565,7 +1650,7 @@ const cases = [
       // runner. A fixed epoch makes the exact absolute argv deadline causal too.
       const REFUSAL_EPOCH_MS = 100_000;
       const ACTUAL_CLI_REFUSAL_BUDGET_MS =
-        COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1;
+        COMMAND_REAP_RESERVE_MS + LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS - 1;
       let nestedRunnerEntries = 0;
       const actualCliRefusal = await runActualLocalMigrationCli(
         ["--env", "local"],
@@ -1574,10 +1659,10 @@ const cases = [
           epochNow: () => REFUSAL_EPOCH_MS,
           remainingMs: ACTUAL_CLI_REFUSAL_BUDGET_MS,
           runner: async ({ cmd, timeoutMs }) => {
-            assert.equal(timeoutMs, SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1);
+            assert.equal(timeoutMs, LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS - 1);
             assert.deepEqual(cmd.slice(-2), [
               "--local-command-deadline-at-ms",
-              String(REFUSAL_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1),
+              String(REFUSAL_EPOCH_MS + LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS - 1),
             ]);
             let stderr = "";
             let stdout = "";
@@ -1586,7 +1671,7 @@ const cases = [
               localProcessLeadsOwnedGroup: () => true,
               ownerLeaseWatchdogSpawn: fakeOwnerWatchdogSpawn(
                 authenticatedOwnerWatchdogFrame(
-                  REFUSAL_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1,
+                  REFUSAL_EPOCH_MS + LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS - 1,
                 ),
               ),
               localReadLineageSnapshot: async (
@@ -1601,7 +1686,7 @@ const cases = [
                   { cmd: [process.execPath, "--version"], cwd: root },
                   {
                     deadlineAtMs: receivedDeadlineAtMs,
-                    observedAtMs: REFUSAL_EPOCH_MS,
+                    observedAtMs: REFUSAL_EPOCH_MS + LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS,
                     ownerLease: receivedOwnerLease,
                     processLeadsOwnedGroup: () => true,
                     runner: () => {
@@ -1630,7 +1715,7 @@ const cases = [
       // promise — the production cleanup-settlement boundary — has completed.
       const SETTLEMENT_EPOCH_MS = 200_000;
       const ACTUAL_CLI_ADMISSION_BUDGET_MS =
-        COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS;
+        COMMAND_REAP_RESERVE_MS + LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS;
       const settlementOrder = [];
       const actualCliSettlement = await runActualLocalMigrationCli(
         ["--env", "local"],
@@ -1639,10 +1724,10 @@ const cases = [
           epochNow: () => SETTLEMENT_EPOCH_MS,
           remainingMs: ACTUAL_CLI_ADMISSION_BUDGET_MS,
           runner: async ({ cmd, timeoutMs }) => {
-            assert.equal(timeoutMs, SHIPPED_LOCAL_COMMAND_WINDOW_MS);
+            assert.equal(timeoutMs, LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS);
             assert.deepEqual(cmd.slice(-2), [
               "--local-command-deadline-at-ms",
-              String(SETTLEMENT_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS),
+              String(SETTLEMENT_EPOCH_MS + LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS),
             ]);
             let stderr = "";
             let stdout = "";
@@ -1651,7 +1736,7 @@ const cases = [
               localProcessLeadsOwnedGroup: () => true,
               ownerLeaseWatchdogSpawn: fakeOwnerWatchdogSpawn(
                 authenticatedOwnerWatchdogFrame(
-                  SETTLEMENT_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS,
+                  SETTLEMENT_EPOCH_MS + LOCAL_D1_CLI_ORCHESTRATION_WINDOW_MS,
                 ),
               ),
               localReadLineageSnapshot: async (
@@ -1665,7 +1750,7 @@ const cases = [
                   { cmd: [process.execPath, "--version"], cwd: root },
                   {
                     deadlineAtMs: receivedDeadlineAtMs,
-                    observedAtMs: SETTLEMENT_EPOCH_MS,
+                    observedAtMs: SETTLEMENT_EPOCH_MS + LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS,
                     ownerLease: receivedOwnerLease,
                     processLeadsOwnedGroup: () => true,
                     runner: async (options) => {
@@ -1726,10 +1811,7 @@ const cases = [
         const termIndex = writeFailure.events.indexOf("SIGTERM");
         assert.ok(endIndex >= 0, `${failureMode} never closed the owner lease`);
         assert.ok(termIndex >= 0, `${failureMode} never sent SIGTERM`);
-        assert.ok(
-          endIndex < termIndex,
-          `${failureMode} signalled before closing the owner lease`,
-        );
+        assert.ok(endIndex < termIndex, `${failureMode} signalled before closing the owner lease`);
         const stdoutCancelIndex = writeFailure.events.indexOf("stdout-cancel");
         const stderrCancelIndex = writeFailure.events.indexOf("stderr-cancel");
         assert.ok(stdoutCancelIndex >= 0, `${failureMode} never cancelled stdout`);
@@ -1846,8 +1928,9 @@ const cases = [
       // outer executor's owned group. Its production local-D1 seam starts a
       // non-detached direct child which starts a non-detached descendant; both
       // ignore TERM, and the fixture stalls its event loop before the inner
-      // deadline can run. The outer controller must therefore escalate against
-      // its one exact group and observe both nested PIDs gone before receipt.
+      // JavaScript deadline can run. The authenticated watchdog is independent
+      // of that event loop and retires group zero at the shared deadline; the
+      // outer controller must observe the exact group gone before its receipt.
       const topologyResult = await runBoundedLocalCommand(
         "parent-owned-real-process-topology",
         ({ deadlineAtMs }) => ({
@@ -1861,10 +1944,11 @@ const cases = [
           ownerLeaseDeadlineAtMs: deadlineAtMs,
         }),
         {
-          remainingMs: COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS,
+          remainingMs: ACTUAL_CLI_DEFAULT_REMAINING_MS,
         },
       );
-      assert.equal(topologyResult.outcome, "timeout");
+      assert.equal(topologyResult.outcome, "exited");
+      assert.equal(topologyResult.exitCode, 143);
       assert.equal(topologyResult.containment_scope, "process-group-only");
       const topologyPidRecord = topologyResult.stdout.trim();
       assert.match(
@@ -1943,8 +2027,8 @@ const cases = [
       const second = await runActualLocalMigrationCli(arguments_, "pristine-plan-second");
       assert.equal(first.exitCode, 1, "the historical destructive guard must refuse before apply");
       assert.equal(second.exitCode, 1, "the repeated pristine plan must refuse identically");
-      assert.equal(first.diagnostic.phase, "plan");
-      assert.equal(second.diagnostic.phase, "plan");
+      assert.equal(first.diagnostic.phase, "plan", JSON.stringify(first.diagnostic));
+      assert.equal(second.diagnostic.phase, "plan", JSON.stringify(second.diagnostic));
       assert.equal(first.diagnostic.code, "UNDECLARED_DESTRUCTIVE_MIGRATION");
       assert.equal(second.diagnostic.code, first.diagnostic.code);
       assert.equal(second.diagnostic.detail, first.diagnostic.detail);
@@ -2613,21 +2697,200 @@ END;`,
         "the measured replay-claim schema must produce an empty second plan",
       );
       const replayColumns = (
-        await localJson(databaseName, "PRAGMA table_info(session_write_replays);", "head-20-columns")
+        await localJson(
+          databaseName,
+          "PRAGMA table_info(session_write_replays);",
+          "head-20-columns",
+        )
       ).flatMap((statement) => statement.results ?? []);
       assert.deepEqual(
         replayColumns
           .filter((column) => column.name === "claim_token")
-          .map((column) => ({ name: String(column.name), type: String(column.type), notnull: Number(column.notnull) })),
+          .map((column) => ({
+            name: String(column.name),
+            type: String(column.type),
+            notnull: Number(column.notnull),
+          })),
         [{ name: "claim_token", type: "TEXT", notnull: 0 }],
         "head 20 must retain the nullable replay ownership claim for legacy rows",
       );
       assert.equal(
         catalog.filter(
-          (entry) => entry.type === "index" && entry.name === "session_write_replays_claim_token_idx",
+          (entry) =>
+            entry.type === "index" && entry.name === "session_write_replays_claim_token_idx",
         ).length,
         1,
         "head 20 must retain exactly one non-null replay ownership index",
+      );
+    },
+  },
+  {
+    name: "0021 migrates claim identity to problem scope and rejects contaminated projections atomically",
+    async execute() {
+      const current0021 = stableCurrent0021Inputs();
+      const databaseName = uniqueDatabaseName("head-21-claims");
+
+      await localJson(databaseName, LEDGER_DDL, "head-21-journal-create");
+      await applyMigrations(databaseName, 1, 20);
+      await localJson(
+        databaseName,
+        `INSERT INTO problems (id, created_at, updated_at) VALUES
+           ('P-CLAIM-A', '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z'),
+           ('P-CLAIM-B', '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z');
+         INSERT INTO claims
+           (id, problem_id, statement, payload_sha256, source_seq, created_at)
+         VALUES
+           ('C-1', 'P-CLAIM-A', 'first problem claim', '${"a".repeat(64)}', 1,
+            '2026-08-21T00:00:00.000Z');
+         INSERT INTO claim_projections
+           (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+         VALUES
+           ('C-1', 'P-CLAIM-A', 1, 1, '${"b".repeat(64)}', 0,
+            '2026-08-21T00:00:00.000Z');`,
+        "head-21-valid-history",
+      );
+      await applyMigration(databaseName, 21);
+
+      await localJson(
+        databaseName,
+        `INSERT INTO claims
+           (id, problem_id, statement, payload_sha256, source_seq, created_at)
+         VALUES
+           ('C-1', 'P-CLAIM-B', 'second problem claim', '${"c".repeat(64)}', 1,
+            '2026-08-21T00:00:00.000Z');
+         INSERT INTO claim_projections
+           (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+         VALUES
+           ('C-1', 'P-CLAIM-B', 1, 1, '${"d".repeat(64)}', 0,
+            '2026-08-21T00:00:00.000Z');
+         INSERT INTO claims
+           (id, problem_id, statement, payload_sha256, source_seq, created_at)
+         VALUES
+           ('C-2', 'P-CLAIM-A', 'second sequence', '${"e".repeat(64)}', 2,
+            '2026-08-21T00:00:00.000Z');`,
+        "head-21-problem-scoped-writes",
+      );
+
+      let mismatchedProjection;
+      try {
+        await localJson(
+          databaseName,
+          `INSERT INTO claim_projections
+             (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+           VALUES
+             ('C-1', 'P-CLAIM-A', 2, 1, '${"f".repeat(64)}', 0,
+              '2026-08-21T00:00:00.000Z');`,
+          "head-21-mismatched-projection-refusal",
+        );
+        assert.fail("0021 must reject a projection whose sequence belongs to another claim");
+      } catch (error) {
+        mismatchedProjection = error;
+      }
+      assertSafeCause(mismatchedProjection);
+
+      const proof = oneRow(
+        await localJson(
+          databaseName,
+          `SELECT
+             (SELECT COUNT(*) FROM claims WHERE id = 'C-1') AS shared_claim_ids,
+             (SELECT COUNT(*) FROM claim_projections WHERE claim_id = 'C-1') AS shared_projection_ids,
+             (SELECT COUNT(*) FROM claims WHERE problem_id = 'P-CLAIM-A') AS first_problem_claims,
+             (SELECT COUNT(*) FROM claims WHERE problem_id = 'P-CLAIM-B') AS second_problem_claims,
+             (SELECT COUNT(*) FROM pragma_foreign_key_check) AS foreign_key_errors;`,
+          "head-21-problem-scope-proof",
+        ),
+        "head-21-problem-scope-proof",
+      );
+      assert.deepEqual(
+        {
+          shared_claim_ids: Number(proof.shared_claim_ids),
+          shared_projection_ids: Number(proof.shared_projection_ids),
+          first_problem_claims: Number(proof.first_problem_claims),
+          second_problem_claims: Number(proof.second_problem_claims),
+          foreign_key_errors: Number(proof.foreign_key_errors),
+        },
+        {
+          shared_claim_ids: 2,
+          shared_projection_ids: 2,
+          first_problem_claims: 2,
+          second_problem_claims: 1,
+          foreign_key_errors: 0,
+        },
+      );
+
+      const { catalog, journal } = await readSnapshot(databaseName, "head-21-snapshot");
+      assertCurrent0021InputsUnchanged(current0021);
+      assert.equal(
+        catalogFingerprint(catalog),
+        current0021.schemaHead21.schema_digest,
+        "the production head-21 pin must equal the raw local D1 catalog fingerprint",
+      );
+      assert.deepEqual(
+        journal,
+        current0021.migrationsThrough0021.map((migration) => ({
+          id: migration.id,
+          sequence: migration.sequence,
+          digest: migration.digest,
+        })),
+      );
+      assert.equal(
+        planMigrations(current0021.migrationsThrough0021, journal, localPlanOptions).idempotent,
+        true,
+        "the measured problem-scoped schema must produce an empty second plan",
+      );
+
+      const contaminatedDatabase = uniqueDatabaseName("head-21-contaminated");
+      await localJson(contaminatedDatabase, LEDGER_DDL, "head-21-contaminated-journal-create");
+      await applyMigrations(contaminatedDatabase, 1, 20);
+      await localJson(
+        contaminatedDatabase,
+        `INSERT INTO problems (id, created_at, updated_at)
+         VALUES ('P-CONTAMINATED', '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z');
+         INSERT INTO claims
+           (id, problem_id, statement, payload_sha256, source_seq, created_at)
+         VALUES
+           ('C-1', 'P-CONTAMINATED', 'first', '${"1".repeat(64)}', 1,
+            '2026-08-21T00:00:00.000Z'),
+           ('C-2', 'P-CONTAMINATED', 'second', '${"2".repeat(64)}', 2,
+            '2026-08-21T00:00:00.000Z');
+         INSERT INTO claim_projections
+           (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+         VALUES
+           ('C-1', 'P-CONTAMINATED', 2, 1, '${"3".repeat(64)}', 0,
+            '2026-08-21T00:00:00.000Z');`,
+        "head-21-contaminated-history",
+      );
+      let rejectedMigration;
+      try {
+        await applyMigration(contaminatedDatabase, 21);
+        assert.fail("0021 must atomically reject a mismatched historical projection");
+      } catch (error) {
+        rejectedMigration = error;
+      }
+      assertSafeCause(rejectedMigration);
+      const rollback = oneRow(
+        await localJson(
+          contaminatedDatabase,
+          `SELECT
+             (SELECT COUNT(*) FROM claims) AS claims_count,
+             (SELECT COUNT(*) FROM claim_projections) AS projections_count,
+             (SELECT COUNT(*) FROM sqlite_schema
+               WHERE name IN ('claims_problem_scoped', 'claim_projections_problem_scoped'))
+               AS temporary_tables,
+             (SELECT COUNT(*) FROM ${LEDGER_TABLE} WHERE sequence = 21) AS journal_21;`,
+          "head-21-contaminated-rollback",
+        ),
+        "head-21-contaminated-rollback",
+      );
+      assert.deepEqual(
+        {
+          claims_count: Number(rollback.claims_count),
+          projections_count: Number(rollback.projections_count),
+          temporary_tables: Number(rollback.temporary_tables),
+          journal_21: Number(rollback.journal_21),
+        },
+        { claims_count: 2, projections_count: 1, temporary_tables: 0, journal_21: 0 },
+        "failed 0021 must preserve the exact pre-migration schema and data",
       );
     },
   },

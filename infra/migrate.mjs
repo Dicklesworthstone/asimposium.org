@@ -1497,7 +1497,11 @@ const retireGroup = async () => {
 };
 let stat;
 try { stat = fstatSync(0); } catch { refuse("ABSENT"); }
-if (!terminal && !stat.isFIFO()) {
+// Bun 1.3.8 implements stdin pipe mode with an anonymous local socket on
+// macOS, while other supported runtimes expose a FIFO. Both are live,
+// kernel-owned duplex capabilities whose EOF is tied to the retained parent
+// writer. A regular file or terminal has no such owner-liveness authority.
+if (!terminal && !stat.isFIFO() && !stat.isSocket()) {
   refuse(stat.isCharacterDevice() ? "TERMINAL" : "REGULAR");
 }
 if (!terminal) {
