@@ -170,7 +170,7 @@
   "source_digests": {
     "docs/seed/sp4d/dossier.json": "6e33f0b0e4c5c3c45506e211dcdacc592bc3ae8b693426e53824c79636e3463d",
     "docs/seed/sp4d/SP4D.md": "18a98737dd0ed3119e5f98f1e813ace60833ee43d3bde88f251f15c7b37e618d",
-    "docs/seed/frontier-slate/dossiers.json": "dc12634ea34f9a49ab1a694abe207cb42a6af61487f63af43c97c65da56588b0"
+    "docs/seed/frontier-slate/dossiers.json": "4e37d8c2922c8ce572f29e54267c51720d4e40a04edc40dc96fcbf7fe5f125bd"
   },
   "dossier_digests": {
     "SP4D": "a982bc621f7b1362653cc9bf69c05e8744965a2d281a436ce1e1f54842488415",

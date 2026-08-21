@@ -254,7 +254,10 @@ describe("the enrollment flow handle / device code shape is refused (asimposiumo
   for (const [name, sample] of [
     ["a dotted chain cannot accumulate across the excluded dot", "flow_v1.1.2.3.4.5.6.7.8.9.10.11"],
     ["a tilde is outside the base64url charset", "flow_v1.~one~two~three~four~five~six~seven"],
-    ["prose naming the prefix with a trailing space", "Everything after flow_v1. is a one-time handle."],
+    [
+      "prose naming the prefix with a trailing space",
+      "Everything after flow_v1. is a one-time handle.",
+    ],
     ["a flow_v1 filename mid-line", "see flow_v1.json for the current config"],
     ["an ordinary three-part version chain", "v1.2.3"],
   ] as const) {
@@ -311,18 +314,39 @@ describe("a structurally strict three-segment JWT is refused by shape (asimposiu
 
   for (const [name, sample] of [
     // Causal negatives: each removes exactly one structural requirement.
-    ["a non-eyJ header segment is not the strict header shape", `${"z".repeat(33)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`],
-    ["a non-eyJ payload segment is not the strict claims shape", `eyJ${"a".repeat(30)}.${"b".repeat(40)}.${"c".repeat(43)}`],
-    ["a non-base64url `+` in the header remainder breaks the frame", `eyJ+${"a".repeat(36)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`],
-    ["a non-base64url `+` in the payload breaks the frame", `eyJ${"a".repeat(30)}.eyJ+${"b".repeat(36)}.${"c".repeat(43)}`],
-    ["a non-base64url `+` in the signature breaks the frame", `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}.c+${"c".repeat(43)}`],
+    [
+      "a non-eyJ header segment is not the strict header shape",
+      `${"z".repeat(33)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`,
+    ],
+    [
+      "a non-eyJ payload segment is not the strict claims shape",
+      `eyJ${"a".repeat(30)}.${"b".repeat(40)}.${"c".repeat(43)}`,
+    ],
+    [
+      "a non-base64url `+` in the header remainder breaks the frame",
+      `eyJ+${"a".repeat(36)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`,
+    ],
+    [
+      "a non-base64url `+` in the payload breaks the frame",
+      `eyJ${"a".repeat(30)}.eyJ+${"b".repeat(36)}.${"c".repeat(43)}`,
+    ],
+    [
+      "a non-base64url `+` in the signature breaks the frame",
+      `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}.c+${"c".repeat(43)}`,
+    ],
     ["a merged leading word character defeats the leading boundary", `x${JWT}`],
-    ["a nonempty fourth dotted segment is refused whole, never partially accepted", `${JWT}.${"d".repeat(20)}`],
+    [
+      "a nonempty fourth dotted segment is refused whole, never partially accepted",
+      `${JWT}.${"d".repeat(20)}`,
+    ],
     ["a two-segment eyJ string is not a whole JWT", `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}`],
     ["a non-eyJ three-part dotted string", "service.auth.core"],
     ["an ordinary three-part version chain", "v1.2.3"],
     ["a package coordinate", "@asimposium/wire.core.build"],
-    ["prose naming the header prefix", "A JWT header base64url-encodes to eyJ before the first dot."],
+    [
+      "prose naming the header prefix",
+      "A JWT header base64url-encodes to eyJ before the first dot.",
+    ],
   ] as const) {
     test(`${name} is left alone`, () => {
       expect(redactCredentials(sample)).toBe(sample);

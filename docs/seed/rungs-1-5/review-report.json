@@ -11,8 +11,8 @@
     "docs/seed/rungs-1-5/03-counterexample.md": "4e5a7814758fc92457a55c1137f06cf68857fef73574392878ff38e357c4a29e",
     "docs/seed/rungs-1-5/04-formalization.md": "e68e8259ab373f07ad09df030e62288fd6066fef2eb05088ff65ada7a76457d6",
     "docs/seed/rungs-1-5/05-literature.md": "eb7bc89dcdabc1c5eedaeba80b8478635fc40334ce653dc099abb81f4e988c3a",
-    "docs/seed/rungs-1-5/manifest.json": "445113ddc0a5acee0b4b1831d7bf6a3deb2dade38ac3ca2d3352adc1e9ccc5ca",
-    "docs/seed/rungs-1-5/oracles.json": "efbcbd2d86c038ac59121350249691c16bb1b8dbc267df7cf9bd6b445a27a7c2",
+    "docs/seed/rungs-1-5/manifest.json": "4c6fe087dbef813bb85384397b2e3605611507ac64637646debbaafcd62368f1",
+    "docs/seed/rungs-1-5/oracles.json": "737d89f94052453210aa4b390fc4e8f3f11e25b23a0b8f2f703f7513d8183d68",
     "docs/seed/rungs-1-5/check.mjs": "9dbc9246266989ffefe92d62ecfffcfa8b801dc6002bb33631326975c464ce34",
     "docs/seed/rungs-1-5/check.test.mjs": "c14b30ad12900de4c1560119802a75ef3be639a2f24e242e21cfa7307bb3596c"
   },
@@ -166,7 +166,8 @@
     "Required every rubric_lines_exercised entry to be a non-empty string, closing the blank-line-satisfies-length gap.",
     "Removed external_review_recorded from the permitted approval states entirely. This document cannot authenticate a reviewer, so it now has no cleared state to reach and remains permanently pending.",
     "Constrained per-rung readiness to external_review_pending. The rung field was previously free, so a single rung could read as validated or staging-ready under a globally pending report — the side door a reader would quote.",
-    "Added planted controls for the two branches that had none: a missing negative_verdict_condition and a malformed reviewed_at. Deleting either branch previously left all controls green, so the checks were untested rather than proven."
+    "Added planted controls for the two branches that had none: a missing negative_verdict_condition and a malformed reviewed_at. Deleting either branch previously left all controls green, so the checks were untested rather than proven.",
+    "2026-08-21: re-pinned manifest.json and oracles.json after the 2026-08-19 session-admission refresh updated their exact corpus bytes. The ordinary root seed lane refused both stale bindings before this source-preparation ledger was updated; its external-review-pending boundary is unchanged."
   ],
   "external_review": {
     "required": true,

@@ -174,9 +174,10 @@ test("the pack viewer is audience-discriminated so a public face cannot claim au
     { audience: "public", membership: "none", effective_permissions: ["workshop:read"] },
     { audience: "public", membership: "contributor", effective_permissions: ["promote:write"] },
   ] as const) {
-    expect(PackResponseSchema.safeParse({ ...base, viewer: dishonest }).success, dishonest.membership).toBe(
-      false,
-    );
+    expect(
+      PackResponseSchema.safeParse({ ...base, viewer: dishonest }).success,
+      dishonest.membership,
+    ).toBe(false);
   }
 
   // A session viewer keeps the full membership and permission vocabulary.

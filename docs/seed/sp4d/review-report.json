@@ -5,9 +5,9 @@
   "source_digests": {
     "docs/seed/sp4d/dossier.json": "6e33f0b0e4c5c3c45506e211dcdacc592bc3ae8b693426e53824c79636e3463d",
     "docs/seed/sp4d/SP4D.md": "18a98737dd0ed3119e5f98f1e813ace60833ee43d3bde88f251f15c7b37e618d",
-    "docs/seed/frontier-slate/dossiers.json": "dc12634ea34f9a49ab1a694abe207cb42a6af61487f63af43c97c65da56588b0",
-    "docs/seed/sp4d/review-matrix.json": "f121f98dff3578f6ea2bb13ae2e2bad6ebb1155080c26bce25dcebdb4ae60145",
-    "docs/seed/sp4d/check.mjs": "d362ba159f74dcb2138d0a07aec9fdc23ca11d84e20fa67bca90faae5b8064b5",
+    "docs/seed/frontier-slate/dossiers.json": "4e37d8c2922c8ce572f29e54267c51720d4e40a04edc40dc96fcbf7fe5f125bd",
+    "docs/seed/sp4d/review-matrix.json": "630ea438006ec8986d67696008c3d026ca1df732bcd55d8eee7cea3322878941",
+    "docs/seed/sp4d/check.mjs": "1e9aa1a83f63a4cfc94db5ca11e8b537c1281829b37cc8fa4f167e200f2cdee5",
     "docs/seed/sp4d/check.test.mjs": "641fda6be43b70da6b2ddde998b98016f04901f0366289ed4fa8c416316ade6c",
     "package.json": "5b1aff4635cb9ab7b3559b76fd6fbc3060cefeae8972b28b05378dc4a516edf2"
   },
@@ -48,7 +48,8 @@
     "2026-08-17 (independent audit REJECT of the checker): the face rule bound only the heading, the reference URLs, and the locators, all of which a paraphrase preserves. A face could therefore keep every anchor intact while restating the formulation in the wrong category, dropping the external-review gate, and announcing a resolution. The rendered face is now generated from the dossier and required to equal those bytes, so formulation, each variant distinction, each bounded subgoal with its falsifier, the no-resolution language, the expert gate, and every locator and licence bind at once and cannot drift independently.",
     "2026-08-17: added an assertive resolution-claim scan over the face and over every dossier, including the slate. Only affirmative wording is matched; the declared no_resolution_language is excised before scanning, because that field names the outcome in order to deny it and a scanner that refused it would make honest disclaiming impossible.",
     "2026-08-17: the review record now pins the machinery as well as the material. review-matrix.json, check.mjs, and check.test.mjs carry recorded digests, so a weakened rule or a deleted matrix row can no longer leave the report reading as a complete account of what was checked. review-matrix.json is pinned in this report rather than in itself, since no file can contain its own digest.",
-    "2026-08-17: the render check asserted that the generated face contained the headings renderDossier hardcodes, which is true of any input. It now asserts that the dossier's own formulation, first locator, and expert gate reach the face."
+    "2026-08-17: the render check asserted that the generated face contained the headings renderDossier hardcodes, which is true of any input. It now asserts that the dossier's own formulation, first locator, and expert gate reach the face.",
+    "2026-08-21: re-pinned the frontier-slate, review-matrix, and checker digests after the 2026-08-19 session-admission refresh reformatted the slate and checker without changing this report's external-review-pending boundary. The ordinary root seed lane detected all three stale bindings before this ledger was updated."
   ],
   "approval_state": "external_review_pending"
 }
