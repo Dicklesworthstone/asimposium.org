@@ -3,8 +3,16 @@ import { describe, expect, test } from "bun:test";
 import { gateReviewSubmission, type ReviewSubmission } from "../../src/ledger/review-gate.ts";
 import type { ReviewAttribution } from "../../src/ledger/review-independence.ts";
 
-const AUTHOR: ReviewAttribution = { sponsorId: "SP-1", modelFamily: "claude", methodBasis: "search" };
-const REVIEWER: ReviewAttribution = { sponsorId: "SP-2", modelFamily: "gpt", methodBasis: "proof-search" };
+const AUTHOR: ReviewAttribution = {
+  sponsorId: "SP-1",
+  modelFamily: "claude",
+  methodBasis: "search",
+};
+const REVIEWER: ReviewAttribution = {
+  sponsorId: "SP-2",
+  modelFamily: "gpt",
+  methodBasis: "proof-search",
+};
 
 function submission(overrides: Partial<ReviewSubmission> = {}): ReviewSubmission {
   return {

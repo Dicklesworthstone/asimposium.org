@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-import { firstCyclicEdge, wouldCreateCycle, type ClaimDepEdge } from "../../src/krater/claim-deps.ts";
+import {
+  type ClaimDepEdge,
+  firstCyclicEdge,
+  wouldCreateCycle,
+} from "../../src/krater/claim-deps.ts";
 
-const edge = (claimId: string, dependsOnClaimId: string): ClaimDepEdge => ({ claimId, dependsOnClaimId });
+const edge = (claimId: string, dependsOnClaimId: string): ClaimDepEdge => ({
+  claimId,
+  dependsOnClaimId,
+});
 
 describe("P10 claim-dependency cycle check", () => {
   test("a self-dependency is a cycle", () => {
@@ -21,7 +28,12 @@ describe("P10 claim-dependency cycle check", () => {
   });
 
   test("a diamond is clean (two paths to one root are not a cycle)", () => {
-    const existing = [edge("C-2", "C-1"), edge("C-3", "C-1"), edge("C-4", "C-2"), edge("C-4", "C-3")];
+    const existing = [
+      edge("C-2", "C-1"),
+      edge("C-3", "C-1"),
+      edge("C-4", "C-2"),
+      edge("C-4", "C-3"),
+    ];
     expect(wouldCreateCycle(existing, "C-5", "C-4")).toBe(false);
   });
 

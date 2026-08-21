@@ -7,7 +7,11 @@
  */
 
 import type { ReviewAttribution } from "./review-independence.ts";
-import { independenceTier, reviewerIsAuthor, type IndependenceTier } from "./review-independence.ts";
+import {
+  type IndependenceTier,
+  independenceTier,
+  reviewerIsAuthor,
+} from "./review-independence.ts";
 
 export type ReviewVerdict =
   | "confirm"
@@ -45,7 +49,12 @@ export type ReviewRefusalCode =
 
 export type ReviewGateResult =
   | { readonly ok: true; readonly tier: IndependenceTier; readonly carriesWeight: boolean }
-  | { readonly ok: false; readonly code: ReviewRefusalCode; readonly rule: string; readonly fixHint: string };
+  | {
+      readonly ok: false;
+      readonly code: ReviewRefusalCode;
+      readonly rule: string;
+      readonly fixHint: string;
+    };
 
 /**
  * Gate a review submission. The author can never review their own object (P1).
@@ -69,7 +78,8 @@ export function gateReviewSubmission(input: {
       ok: false,
       code: "REVIEWER_IS_AUTHOR",
       rule: "P1",
-      fixHint: "Reviews are independent by construction. A different Fellow must review this claim.",
+      fixHint:
+        "Reviews are independent by construction. A different Fellow must review this claim.",
     };
   }
 
@@ -93,7 +103,8 @@ export function gateReviewSubmission(input: {
 
   // P5: the capable-of-failure field is mandatory for the review to carry
   // weight. Absent, the review is accepted but tagged assertion-only.
-  const carriesWeight = submission.capableOfFailure !== undefined && submission.capableOfFailure.trim().length > 0;
+  const carriesWeight =
+    submission.capableOfFailure !== undefined && submission.capableOfFailure.trim().length > 0;
   const tier = independenceTier(input.claimAuthorAttribution, input.reviewerAttribution);
 
   return { ok: true, tier, carriesWeight };

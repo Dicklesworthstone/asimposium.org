@@ -22,11 +22,18 @@ export type EvidenceClass = "assertion" | "heuristic" | "citation" | "computatio
 
 export interface EvidenceInput {
   /** `locator` + `excerpt` for a retrieved source; `model_memory` caps at assertion. */
-  readonly source: { readonly kind: "locator" | "model_memory"; readonly locator?: string; readonly excerpt?: string };
+  readonly source: {
+    readonly kind: "locator" | "model_memory";
+    readonly locator?: string;
+    readonly excerpt?: string;
+  };
   /** A computation names its domain or detection floor, else it is not one. */
   readonly computation?: { readonly domainOrFloor?: string };
   /** A certified artifact carries the shape-check evidence (the axiom report). */
-  readonly certifiedArtifact?: { readonly shapeCheckDigest?: string; readonly independentReviewConfirmed?: boolean };
+  readonly certifiedArtifact?: {
+    readonly shapeCheckDigest?: string;
+    readonly independentReviewConfirmed?: boolean;
+  };
   /** Evidence that selected/tuned the hypothesis is disclosed, never a confirmation. */
   readonly selectedHypothesis?: boolean;
   /** Exploratory observations are accepted, labeled, and cannot drive promotion. */
@@ -50,12 +57,18 @@ export function assessEvidenceClass(input: EvidenceInput): EvidenceAssessment {
   }
 
   // P8: a retrieved source needs a locator AND an excerpt, else it is not a citation.
-  const hasLocator = input.source.kind === "locator" && input.source.locator !== undefined && input.source.locator.length > 0;
+  const hasLocator =
+    input.source.kind === "locator" &&
+    input.source.locator !== undefined &&
+    input.source.locator.length > 0;
   const hasExcerpt = input.source.excerpt !== undefined && input.source.excerpt.length > 0;
 
   if (input.certifiedArtifact !== undefined) {
     // Certified requires the shape check AND an independent review confirming it.
-    if (input.certifiedArtifact.shapeCheckDigest !== undefined && input.certifiedArtifact.independentReviewConfirmed === true) {
+    if (
+      input.certifiedArtifact.shapeCheckDigest !== undefined &&
+      input.certifiedArtifact.independentReviewConfirmed === true
+    ) {
       return { class: "certified", flags };
     }
     flags.push("certified_requires_shape_check_plus_independent_review");
@@ -64,7 +77,8 @@ export function assessEvidenceClass(input: EvidenceInput): EvidenceAssessment {
 
   if (input.computation !== undefined) {
     // P5: no stated domain or detection floor → coerced to heuristic, recorded.
-    const hasFloor = input.computation.domainOrFloor !== undefined && input.computation.domainOrFloor.length > 0;
+    const hasFloor =
+      input.computation.domainOrFloor !== undefined && input.computation.domainOrFloor.length > 0;
     if (!hasFloor) {
       flags.push("p5_no_detection_floor_coerced_to_heuristic");
       return { class: "heuristic", flags };
@@ -85,6 +99,9 @@ export function assessEvidenceClass(input: EvidenceInput): EvidenceAssessment {
 }
 
 /** Exploratory evidence can never drive a promotion decision. */
-export function canDrivePromotion(assessment: EvidenceAssessment, mode: "exploratory" | "confirmatory"): boolean {
+export function canDrivePromotion(
+  assessment: EvidenceAssessment,
+  mode: "exploratory" | "confirmatory",
+): boolean {
   return mode === "confirmatory";
 }

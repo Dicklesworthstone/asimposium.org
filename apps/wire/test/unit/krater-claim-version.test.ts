@@ -7,7 +7,11 @@ async function sha(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-const CONTENT = { kind: "conjecture", statement: "The map factors.", falsifier: "A counterexample." };
+const CONTENT = {
+  kind: "conjecture",
+  statement: "The map factors.",
+  falsifier: "A counterexample.",
+};
 
 describe("P9 claim version minting", () => {
   test("an edit mints the next version with a content digest and resets to open", async () => {
@@ -40,7 +44,12 @@ describe("P9 claim version minting", () => {
 
   test("an invalid current version is refused", async () => {
     await expect(
-      mintClaimVersion({ currentVersion: -1, newContent: CONTENT, editorFellowId: "F-1", sha256Hex: sha }),
+      mintClaimVersion({
+        currentVersion: -1,
+        newContent: CONTENT,
+        editorFellowId: "F-1",
+        sha256Hex: sha,
+      }),
     ).rejects.toThrow("CLAIM_VERSION_INVALID");
   });
 });
