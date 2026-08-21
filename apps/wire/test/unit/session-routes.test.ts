@@ -2567,6 +2567,58 @@ describe("session protocol routes", () => {
     expect(closeMutationAt).toBeGreaterThan(closeCommitAt);
   });
 
+  test("the §7.6 intent classifier refuses a claim-shaped note, and force_note is the recorded escape", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "intent-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+
+    // A claim-shaped note (proposition markers) without force_note is refused.
+    const refused = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "intent-note" },
+      body: JSON.stringify({
+        type: "note",
+        title: "A disguised claim",
+        body_md: "Therefore the invariant holds. We prove it below.",
+        relates_to: [],
+      }),
+    });
+    expect(refused.status).toBe(422);
+    const refusedBody = (await refused.json()) as { code?: string };
+    expect(refusedBody.code).toBe("LOOKS_LIKE_CLAIM");
+
+    // The recorded escape hatch: force_note admits the same body as a note.
+    const forced = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "intent-forced" },
+      body: JSON.stringify({
+        type: "note",
+        title: "A disguised claim",
+        body_md: "Therefore the invariant holds. We prove it below.",
+        relates_to: [],
+        force_note: true,
+      }),
+    });
+    expect(forced.status).toBe(201);
+
+    // A plain note (no markers) is accepted without force_note.
+    const plain = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "intent-plain" },
+      body: JSON.stringify({
+        type: "note",
+        title: "A working note",
+        body_md: "Tried the obvious approach; it stalled.",
+        relates_to: [],
+      }),
+    });
+    expect(plain.status).toBe(201);
+  });
+
   test("two working packs at the same cursor byte-compare identical (prompt-cache money)", async () => {
     const { call, db } = await fixture();
     const claimMarker = "DETERMINISM-CLAIM-MARKER";
