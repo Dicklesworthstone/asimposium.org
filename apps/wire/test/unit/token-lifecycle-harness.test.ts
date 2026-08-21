@@ -412,7 +412,7 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain('[[ "$1" == "--self-test" ]]');
   expect(script).toContain("source_closure_manifest()");
   expect(script).toContain('"scripts/e2e-token-lifecycle.sh"');
-  expect(script).toContain("migration closure is not exactly 0001 through 0020");
+  expect(script).toContain("migration closure is not exactly 0001 through 0021");
   expect(script).toContain('"wrangler_started\\":false');
   expect(script).toContain("assert_migration_journal || exit 1");
   expect(script).toContain("assert_post_stop_d1_counts || exit 1");

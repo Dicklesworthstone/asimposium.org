@@ -62,6 +62,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0018_session_write_replays.sql"
   "0019_problem_memberships.sql"
   "0020_session_replay_atomic_claim.sql"
+  "0021_problem_scoped_claim_identity.sql"
 )
 
 STATE_DIR=""
@@ -480,13 +481,14 @@ source_closure_manifest() {
         "0018_session_write_replays.sql",
         "0019_problem_memberships.sql",
         "0020_session_replay_atomic_claim.sql",
+        "0021_problem_scoped_claim_identity.sql",
       ];
       const migrationDirectory = resolve(root, "db/migrations");
       const discovered = readdirSync(migrationDirectory)
         .filter((name) => /^\d{4}_.+\.sql$/.test(name))
         .sort();
       if (JSON.stringify(discovered) !== JSON.stringify(migrations)) {
-        throw new Error("migration closure is not exactly 0001 through 0020");
+        throw new Error("migration closure is not exactly 0001 through 0021");
       }
       const extensions = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".json"];
       const fileFor = (candidate) => {
