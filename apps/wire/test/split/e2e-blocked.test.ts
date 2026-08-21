@@ -2120,6 +2120,7 @@ const options = {
   entrypoints: mode === "production" ? [productionEntrypoint] : [entrypoint],
   format: "esm",
   target: "browser",
+  minify: true,
   external: ["zod"],
 };
 
@@ -2169,7 +2170,15 @@ if (result.outputs.length === 0 || outputBytes === 0) {
 process.stdout.write(JSON.stringify(outputTexts));
 `;
 const ISOLATED_BUILD_SCRIPT_SHA256 =
-  "0f23d2c50db0704ff98e926d6a3499c509a7e53b86f7d57b615e8a72cddf8719";
+  "c1c3ee7f42920f3f0dd204ab03c9883abe9d50b7e003e6be43ec51fb2a0e7370";
+
+const EXPECTED_ISOLATED_BUILD_OPTIONS_SOURCE = `const options = {
+  entrypoints: mode === "production" ? [productionEntrypoint] : [entrypoint],
+  format: "esm",
+  target: "browser",
+  minify: true,
+  external: ["zod"],
+};`;
 
 const EXPECTED_ISOLATED_BUILD_COUNTERFACTUAL_ENTRY_SOURCE = String.raw`        contents: [
           "import productionWorker from " + JSON.stringify(productionEntrypoint) + ";",
@@ -2207,6 +2216,10 @@ function exactScriptSlice(source: string, start: string, end: string): string | 
 
 function isolatedBuildScriptSliceFailures(script: string): string[] {
   const failures: string[] = [];
+  const buildOptions = exactScriptSlice(script, "const options = {", "};");
+  if (buildOptions !== EXPECTED_ISOLATED_BUILD_OPTIONS_SOURCE) {
+    failures.push("BUILD_OPTIONS");
+  }
   const counterfactualEntry = exactScriptSlice(
     script,
     "        contents: [",
@@ -2433,6 +2446,15 @@ test("PLANTED: shipped isolated build source binds real counterfactual output da
       "/s3-local-worker-entry.ts",
     ),
   ).not.toThrow();
+
+  // The evidence channel is deliberately bounded. Removing production
+  // minification makes the canonical JSON bundle exceed that authority on the
+  // current graph, so the exact build option is part of the source contract.
+  const unminifiedBuildMutation = ISOLATED_BUILD_SCRIPT.replace("  minify: true,\n", "");
+  expect(isolatedBuildScriptSliceFailures(unminifiedBuildMutation)).toContain("BUILD_OPTIONS");
+  expect(() => assertIsolatedBuildScriptDataflow(unminifiedBuildMutation)).toThrow(
+    "S3_ISOLATED_BUILD_SOURCE_DATAFLOW:BUILD_OPTIONS",
+  );
 
   // One-axis valid source mutation: removing the local counterfactual import
   // and use leaves a valid virtual entry, but it is no longer the exact entry
@@ -4218,11 +4240,16 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "session_id: sequenceSessionId,",
     "workshop_id: sequenceWorkshopId,",
     "event_id: sequenceEventId,",
+    "counter_session_id: counterSessionId,",
     "route: ",
     "public_seq_before: ",
     "public_seq_after: ",
     "workshop_seq_before: ",
     "workshop_seq_after: ",
+    "counter_own_workshop_count_before: ",
+    "counter_own_workshop_count_after: ",
+    "counter_workshop_seq_before: ",
+    "counter_workshop_seq_after: ",
     "cache_search_export: ",
     "duration_ms: ",
   ]) {
@@ -4250,6 +4277,16 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("const INTEGER_EVIDENCE = [");
   expect(script).toContain("SAFE_EVIDENCE_STRING");
   expect(script).toContain("published[key] = value;");
+  for (const republishedCounterEvidence of [
+    '"counter_session_id",',
+    '"counter_own_workshop_count_before",',
+    '"counter_own_workshop_count_after",',
+    '"counter_workshop_seq_before",',
+    '"counter_workshop_seq_after",',
+    '"public-digest-404-before-after",',
+  ]) {
+    expect(script).toContain(republishedCounterEvidence);
+  }
   expect(checker).toContain("const routeBindingSignatures = routeBindingProbes.map(");
   expect(checker).toContain("new Set(routeBindingProbes.map((probe) => probe.path)).size");
   // The roster guards above constrain descriptors only. They stay green if the

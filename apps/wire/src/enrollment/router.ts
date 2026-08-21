@@ -40,8 +40,8 @@ import {
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
 import {
-  enrollmentCapsuleHtml,
   capsuleUnavailableHtml,
+  enrollmentCapsuleHtml,
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
 } from "./capsule.ts";

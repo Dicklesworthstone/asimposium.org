@@ -1045,6 +1045,7 @@ emit_checked_checker_jsonl() {
         "problem_id",
         "workshop_id",
         "session_id",
+        "counter_session_id",
         "route",
         "request_id",
         "event_id",
@@ -1055,6 +1056,10 @@ emit_checked_checker_jsonl() {
         "public_seq_after",
         "workshop_seq_before",
         "workshop_seq_after",
+        "counter_own_workshop_count_before",
+        "counter_own_workshop_count_after",
+        "counter_workshop_seq_before",
+        "counter_workshop_seq_after",
         "duration_ms",
       ];
       const SAFE_EVIDENCE_STRING = /^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,127}$/u;
@@ -1081,7 +1086,16 @@ emit_checked_checker_jsonl() {
           continue;
         }
         if (key === "cache_search_export") {
-          if (!["absent", "present", "not-probed"].includes(value)) process.exit(1);
+          if (
+            ![
+              "absent",
+              "present",
+              "not-probed",
+              "public-digest-404-before-after",
+            ].includes(value)
+          ) {
+            process.exit(1);
+          }
           published[key] = value;
           continue;
         }
