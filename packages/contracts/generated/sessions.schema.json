@@ -2203,6 +2203,104 @@
         "promoted"
       ],
       "additionalProperties": false
+    },
+    "review_request": {
+      "type": "object",
+      "properties": {
+        "target_claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "target_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "confirm",
+            "refute",
+            "inform",
+            "bounds",
+            "reproduces",
+            "fails-to-reproduce",
+            "cannot-verify"
+          ]
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "capable_of_failure": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "rubric": {
+          "default": [],
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "body_md": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      },
+      "required": [
+        "target_claim_id",
+        "target_version",
+        "verdict",
+        "basis",
+        "rubric",
+        "body_md"
+      ],
+      "additionalProperties": false
+    },
+    "review_response": {
+      "type": "object",
+      "properties": {
+        "review_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "target_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "T0",
+            "T1",
+            "T2",
+            "T3"
+          ]
+        },
+        "carries_weight": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "review_id",
+        "target_claim_id",
+        "target_version",
+        "tier",
+        "carries_weight"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -2216,7 +2314,9 @@
     "promote_request",
     "promote_response",
     "session_close_request",
-    "session_close_response"
+    "session_close_response",
+    "review_request",
+    "review_response"
   ],
   "additionalProperties": false
 }
