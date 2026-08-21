@@ -316,9 +316,18 @@ export default {
       }
     }
 
-    if (request.method === "POST" && url.pathname === "/__s1/sponsor-enrollment-counts") {
-      const body = await localBody(request);
-      if (body === undefined || typeof body.sponsor_id !== "string") {
+    if (
+      (request.method === "GET" || request.method === "POST") &&
+      url.pathname === "/__s1/sponsor-enrollment-counts"
+    ) {
+      const body = request.method === "GET" ? undefined : await localBody(request);
+      const sponsorId =
+        request.method === "GET"
+          ? url.searchParams.get("sponsor_id")
+          : body !== undefined && typeof body.sponsor_id === "string"
+            ? body.sponsor_id
+            : null;
+      if (sponsorId === null) {
         return response({ code: "LOCAL_INPUT_INVALID" }, 400);
       }
       try {
@@ -329,7 +338,7 @@ export default {
              (SELECT COUNT(*) FROM sponsor_device_enrollment_attempts
                WHERE sponsor_id = ?) AS device_attempts`,
         )
-          .bind(body.sponsor_id, body.sponsor_id)
+          .bind(sponsorId, sponsorId)
           .first<{ readonly join_attempts: number; readonly device_attempts: number }>();
         if (
           counts === null ||
@@ -651,21 +660,26 @@ export default {
       }
     }
 
-    if (request.method === "POST" && url.pathname === "/__s1/card") {
-      const body = await localBody(request);
-      if (
-        body === undefined ||
-        typeof body.sponsor_id !== "string" ||
-        typeof body.enrollment_id !== "string"
-      ) {
+    if ((request.method === "GET" || request.method === "POST") && url.pathname === "/__s1/card") {
+      const body = request.method === "GET" ? undefined : await localBody(request);
+      const sponsorId =
+        request.method === "GET"
+          ? url.searchParams.get("sponsor_id")
+          : body !== undefined && typeof body.sponsor_id === "string"
+            ? body.sponsor_id
+            : null;
+      const enrollmentId =
+        request.method === "GET"
+          ? url.searchParams.get("enrollment_id")
+          : body !== undefined && typeof body.enrollment_id === "string"
+            ? body.enrollment_id
+            : null;
+      if (sponsorId === null || enrollmentId === null) {
         return response({ code: "LOCAL_INPUT_INVALID" }, 400);
       }
       try {
         return response({
-          card: await service.approvalCard(
-            { type: "sponsor", sponsorId: body.sponsor_id },
-            body.enrollment_id,
-          ),
+          card: await service.approvalCard({ type: "sponsor", sponsorId }, enrollmentId),
         });
       } catch (error) {
         return localFailure(error);

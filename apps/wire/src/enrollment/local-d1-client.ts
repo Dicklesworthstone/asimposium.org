@@ -345,6 +345,11 @@ if (!import.meta.main) {
       body: JSON.stringify(body),
     });
 
+  const get = (path: string, parameters: Readonly<Record<string, string>>): Promise<Response> => {
+    const query = new URLSearchParams(parameters);
+    return localFetch(`${origin}${path}?${query.toString()}`);
+  };
+
   interface DeviceCounts {
     readonly device_records: number;
     readonly start_attempts: number;
@@ -374,7 +379,7 @@ if (!import.meta.main) {
   };
 
   const readSponsorEnrollmentCounts = async (): Promise<SponsorEnrollmentCounts> => {
-    const result = await post("/__s1/sponsor-enrollment-counts", { sponsor_id: sponsorId });
+    const result = await get("/__s1/sponsor-enrollment-counts", { sponsor_id: sponsorId });
     if (result.status !== 200) throw new Error("sponsor-enrollment-counts-status");
     const body = (await result.json()) as Partial<SponsorEnrollmentCounts>;
     if (
@@ -728,8 +733,9 @@ if (!import.meta.main) {
     if (typeof freshMinted.enrollmentId !== "string" || typeof freshMinted.secret !== "string") {
       throw new Error("nokey-mint-shape");
     }
+    const freshEnrollmentId = freshMinted.enrollmentId;
     const freshClaimRequest = {
-      enrollment_id: freshMinted.enrollmentId,
+      enrollment_id: freshEnrollmentId,
       secret: freshMinted.secret,
       name: "local-nokey-orchid",
       model: "local-model",
@@ -744,9 +750,9 @@ if (!import.meta.main) {
     // comparing exact bytes; requiring pending on both sides would make every
     // fresh run fail before it ever exercised the missing-key refusal.
     const proposalState = async (expected: "absent" | "pending"): Promise<string> => {
-      const card = await post("/__s1/card", {
+      const card = await get("/__s1/card", {
         sponsor_id: sponsorId,
-        enrollment_id: freshMinted.enrollmentId,
+        enrollment_id: freshEnrollmentId,
       });
       const raw = await card.text();
       if (expected === "absent") {
@@ -785,7 +791,7 @@ if (!import.meta.main) {
       if (typeof localCard !== "object" || localCard === null || Array.isArray(localCard)) {
         throw new Error("claim-missing-idempotency-key-pending-card-shape");
       }
-      if (!("enrollmentId" in localCard) || localCard.enrollmentId !== freshMinted.enrollmentId) {
+      if (!("enrollmentId" in localCard) || localCard.enrollmentId !== freshEnrollmentId) {
         throw new Error("claim-missing-idempotency-key-pending-card-id");
       }
       if (!("status" in localCard) || localCard.status !== "pending") {
@@ -823,7 +829,7 @@ if (!import.meta.main) {
     completeCase("claim-missing-idempotency-key-no-write");
 
     for (const enrollmentId of ["ASIMP-EN-7F3K9M2Q8R", minted.enrollmentId]) {
-      const card = await post("/__s1/card", {
+      const card = await get("/__s1/card", {
         sponsor_id: enrollmentId === minted.enrollmentId ? "wrong-local-sponsor" : sponsorId,
         enrollment_id: enrollmentId,
       });
@@ -899,7 +905,7 @@ if (!import.meta.main) {
     );
     await assertDecisionAcknowledged(approvalReplay, "decision-lost-response-replay");
 
-    const approvedCard = await post("/__s1/card", {
+    const approvedCard = await get("/__s1/card", {
       sponsor_id: sponsorId,
       enrollment_id: minted.enrollmentId,
     });
