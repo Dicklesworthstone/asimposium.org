@@ -11,6 +11,7 @@ set -euo pipefail
 #      idempotent replay, same Idempotency-Key         (exit 73 AGENT_DEVICE_FLOW_REPLAY_REFUSED
 #                                                        exit 74 AGENT_DEVICE_FLOW_IDEMPOTENCY_VIOLATION)
 #      intent classifier refuses a claim-shaped note   (exit 84 AGENT_INTENT_CLASSIFIER_MISSING)
+#      near-duplicate promote refused with P11         (exit 85 AGENT_VALIDATOR_P11_MISSING)
 #   4. pairing/session/pack/workshop/promote/delta/close: not yet implemented
 #      on any deployed surface                         (exit 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED)
 #
@@ -354,6 +355,19 @@ if [[ "$cursor_before" =~ ^[0-9]+$ ]] && [[ "$cursor_after" =~ ^[0-9]+$ ]]; then
     e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CURSOR_LAW_VIOLATION" "$reproduce"
     exit 82
   fi
+fi
+
+# Stage: a near-duplicate of the just-promoted claim is refused with P11
+# (DUPLICATE_CLAIM). The norm-hash gate normalizes case and whitespace, so the
+# same statement with different casing and spacing must collide.
+loop_neardup="$(smoke_loop POST "/v1/sessions/$loop_session_id/promote" "{\"workshop_id\":\"$loop_workshop_id\",\"kind\":\"conjecture\",\"statement\":\"  THE SMOKE GATE'S $run_id LOOP COMPLETES ON STAGING.  \",\"falsifier\":\"This run failing to complete would refute it.\",\"relates_to\":[]}" refuse-p11)" || loop_neardup=""
+if [[ "${loop_neardup##*$'\n'}" != "409" && "${loop_neardup##*$'\n'}" != "422" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_VALIDATOR_P11_MISSING" "$reproduce"
+  exit 85
+fi
+if ! printf '%s' "${loop_neardup%$'\n'*}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("code")=="DUPLICATE_CLAIM" and d.get("rule")=="P11") else 1)' 2>/dev/null; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_VALIDATOR_P11_MISSING" "$reproduce"
+  exit 85
 fi
 
 # Stage: close with a handback.
