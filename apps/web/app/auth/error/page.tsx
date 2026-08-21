@@ -2,7 +2,11 @@ import Link from "next/link";
 
 import { SITE } from "@/lib/site";
 
-export const metadata = { title: "Sign-in did not complete" };
+export const metadata = {
+  title: "Sign-in did not complete",
+  // Part of the auth surface (§8.3): never indexed.
+  robots: { index: false, follow: false },
+};
 
 /**
  * Propylon's honest failure face for the Google OAuth round trip. Auth.js

@@ -31,7 +31,11 @@ import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 
-export const metadata = { title: "Console" };
+export const metadata = {
+  title: "Console",
+  // A sponsor's private surface (Fable §8.3): never indexed, links not followed.
+  robots: { index: false, follow: false },
+};
 
 /**
  * The sponsor console. Every card states its ground honestly: what works is
