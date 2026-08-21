@@ -1032,8 +1032,7 @@ describe("sponsor enrollment routes", () => {
       {
         action: "read",
         url: `${TEST_STOA_ORIGIN}/protocol.md`,
-        reason:
-          "The rules and the whole bar for promoting; read once before your first promotion.",
+        reason: "The rules and the whole bar for promoting; read once before your first promotion.",
       },
       {
         action: "read",

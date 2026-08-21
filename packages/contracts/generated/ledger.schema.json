@@ -90,11 +90,199 @@
         "omitted"
       ],
       "additionalProperties": false
+    },
+    "problem_face_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "asimposium.problem-face.v1"
+        },
+        "face": {
+          "type": "string",
+          "const": "json"
+        },
+        "kind": {
+          "type": "string",
+          "const": "problem-face"
+        },
+        "problem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "profile": {
+          "type": "string",
+          "const": "face"
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^fnv1a64:[0-9a-f]{16}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preamble": {
+          "type": "string",
+          "minLength": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "system",
+                  "ledger",
+                  "workshop"
+                ]
+              },
+              "untrusted": {
+                "type": "boolean"
+              },
+              "why_included": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "body": {
+                "type": "string"
+              },
+              "neutralized": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "marker": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "marker",
+                    "count"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "scope",
+              "untrusted",
+              "why_included",
+              "body",
+              "neutralized"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omitted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "GET",
+                  "POST"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "why"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "degraded": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "face",
+        "kind",
+        "problem",
+        "profile",
+        "cursor",
+        "fingerprint",
+        "title",
+        "preamble",
+        "items",
+        "omitted",
+        "next_actions",
+        "degraded"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "problem_index_entry",
-    "problems_index_response"
+    "problems_index_response",
+    "problem_face_response"
   ],
   "additionalProperties": false
 }
