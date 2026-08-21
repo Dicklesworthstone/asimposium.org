@@ -2,9 +2,13 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  closeSync,
   existsSync,
+  constants as fsConstants,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   writeFileSync,
@@ -49,7 +53,7 @@ setDefaultTimeout(60_000);
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s1-cold-enrollment.sh";
-const WRANGLER = resolve(REPO_ROOT, "apps/wire/node_modules/.bin/wrangler");
+const WRANGLER = resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js");
 const TRUSTED_ENV = "/usr/bin/env";
 const STARTUP_CONTROL_NAMES = [
   "BASH_ENV",
@@ -220,6 +224,99 @@ interface CapturedHarness {
   closeCaptures(): void;
 }
 
+interface FileCapturedHarness {
+  child: SpawnedHarness;
+  stdoutPath: string;
+  stderrPath: string;
+}
+
+function spawnFileCapturedHarness(
+  args: readonly string[],
+  env: Record<string, string>,
+  trace: boolean,
+): FileCapturedHarness {
+  const directory = mkdtempSync(join(tmpdir(), "asimposium-s1-test-capture."));
+  const directoryEntry = lstatSync(directory);
+  if (
+    !directoryEntry.isDirectory() ||
+    directoryEntry.isSymbolicLink() ||
+    (directoryEntry.mode & 0o777) !== 0o700
+  ) {
+    throw new Error("S1_FILE_CAPTURE_DIRECTORY_UNTRUSTED");
+  }
+  const stdoutPath = join(directory, "stdout");
+  const stderrPath = join(directory, "stderr");
+  const captureFlags =
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
+  const stdoutDescriptor = openSync(stdoutPath, captureFlags, 0o600);
+  closeSync(stdoutDescriptor);
+  const stderrDescriptor = openSync(stderrPath, captureFlags, 0o600);
+  closeSync(stderrDescriptor);
+  const launch = trace
+    ? 'set -e; stdout="$1"; stderr="$2"; shift 2; exec 1>>"$stdout" 2>>"$stderr"; exec bash -x "$@"'
+    : 'set -e; stdout="$1"; stderr="$2"; shift 2; exec 1>>"$stdout" 2>>"$stderr"; exec bash "$@"';
+  const subprocess = spawn(
+    "bash",
+    ["-c", launch, "s1-test-capture", stdoutPath, stderrPath, SCRIPT, ...args],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env, ...env },
+      // Bun 1.3.8 can close parent-opened numeric descriptors in nested test
+      // children. The wrapper opens these already-created private files itself;
+      // stderr stays inherited only until both redirections have succeeded.
+      stdio: ["ignore", "ignore", "inherit"],
+    },
+  );
+  const exited = new Promise<number>((resolveExit, rejectExit) => {
+    subprocess.once("error", rejectExit);
+    subprocess.once("exit", (code, signal) => {
+      resolveExit(code ?? (signal === null ? 1 : 128));
+    });
+  });
+  return {
+    child: {
+      exited,
+      get exitCode() {
+        return subprocess.exitCode;
+      },
+      kill(signal) {
+        return subprocess.kill(signal);
+      },
+    },
+    stdoutPath,
+    stderrPath,
+  };
+}
+
+function readStableFileCapture(path: string): string {
+  const before = lstatSync(path);
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.nlink !== 1 ||
+    (before.mode & 0o777) !== 0o600 ||
+    before.size > CAPTURE_LIMIT_BYTES
+  ) {
+    throw new Error("S1_FILE_CAPTURE_UNTRUSTED");
+  }
+  const bytes = readFileSync(path);
+  const after = lstatSync(path);
+  if (
+    after.dev !== before.dev ||
+    after.ino !== before.ino ||
+    after.nlink !== 1 ||
+    after.size !== before.size ||
+    bytes.byteLength !== before.size
+  ) {
+    throw new Error("S1_FILE_CAPTURE_DRIFT");
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("S1_FILE_CAPTURE_UTF8_INVALID");
+  }
+}
+
 async function spawnCapturedHarness(
   args: readonly string[],
   env: Record<string, string> = {},
@@ -308,22 +405,24 @@ async function runScript(
   env: Record<string, string> = {},
   trace = false,
 ): Promise<Run> {
-  const harness = await spawnCapturedHarness(args, env, trace);
-  const { child, stdoutCapture, stderrCapture } = harness;
+  // Wrangler/Workerd exits with a ProxyWorker `Network connection lost` error
+  // when this supported Bun starts the complete local-D1 tree beneath the live
+  // TCP capture used by the phase-driven signal tests. Anonymous pipes are also
+  // unreliable under `bun test`. Private regular files give ordinary runs a
+  // stable capture in private, pre-created regular files without changing the
+  // live-reader seam.
+  const { child, stdoutPath, stderrPath } = spawnFileCapturedHarness(args, env, trace);
   try {
     const exitCode = await waitForExitBefore(child.exited, RUN_SCRIPT_TIMEOUT_MS);
     if (exitCode === undefined) {
       const forcedExit = await terminateExactChild(child);
       throw new Error(`script exceeded its test deadline; forced_exit=${String(forcedExit)}`);
     }
-    const [stdout, stderr] = await Promise.all([
-      settleSocketCapture(stdoutCapture),
-      settleSocketCapture(stderrCapture),
-    ]);
+    const stdout = readStableFileCapture(stdoutPath);
+    const stderr = readStableFileCapture(stderrPath);
     return { exitCode, stdout, stderr };
   } finally {
     await terminateExactChild(child);
-    harness.closeCaptures();
   }
 }
 
@@ -1932,6 +2031,60 @@ describe("a pinned port is validated before anything is started", () => {
     expect(ownership).not.toContain("run_named_with_deadline");
   });
 
+  test("PLANTED: S1 pins the repaired proxy runtime without changing the general Wrangler pin", () => {
+    const wireManifest = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "apps/wire/package.json"), "utf8"),
+    ) as { devDependencies?: Record<string, unknown> };
+    const s1WranglerManifest = JSON.parse(
+      readFileSync(
+        resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/package.json"),
+        "utf8",
+      ),
+    ) as { version?: unknown };
+    const proxySource = readFileSync(
+      resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/wrangler-dist/ProxyWorker.js"),
+      "utf8",
+    );
+    const cliSource = readFileSync(
+      resolve(REPO_ROOT, "apps/wire/node_modules/wrangler-s1-local/wrangler-dist/cli.js"),
+      "utf8",
+    );
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    const localClientSource = readFileSync(
+      resolve(REPO_ROOT, "apps/wire/src/enrollment/local-d1-client.ts"),
+      "utf8",
+    );
+    const localWorkerSource = readFileSync(
+      resolve(REPO_ROOT, "apps/wire/src/enrollment/local-d1-worker.ts"),
+      "utf8",
+    );
+
+    expect(wireManifest.devDependencies?.wrangler).toBe("4.123.0");
+    expect(wireManifest.devDependencies?.["wrangler-s1-local"]).toBe(
+      "https://pkg.pr.new/cloudflare/workers-sdk/wrangler@5fc41f0",
+    );
+    expect(s1WranglerManifest.version).toBe("4.124.0");
+    expect(proxySource).toContain(
+      '(request.method === "GET" || request.method === "HEAD") && attempt < 2',
+    );
+    expect(proxySource).toContain("attempt === 0 ? 0 : 250");
+    expect(cliSource).toContain('event.reason.startsWith("Error inside ProxyWorker")');
+    expect(cliSource).toContain("the affected request failed; the dev server continues");
+    expect(source).toContain(
+      'readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"',
+    );
+    expect(source).not.toContain(
+      'readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/.bin/wrangler"',
+    );
+    for (const path of ["sponsor-enrollment-counts", "card"]) {
+      expect(localClientSource).toContain(`get("/__s1/${path}"`);
+      expect(localClientSource).not.toContain(`post("/__s1/${path}"`);
+      expect(localWorkerSource).toContain(`url.pathname === "/__s1/${path}"`);
+    }
+    expect(localClientSource).toContain('post("/__s1/device-lookup"');
+    expect(localClientSource).not.toContain('get("/__s1/device-lookup"');
+  });
+
   test("an unpinned run allocates its own port and says which one", async () => {
     if (!existsSync(WRANGLER)) {
       await assertWranglerBlocked();
@@ -1942,8 +2095,12 @@ describe("a pinned port is validated before anything is started", () => {
       throw new Error(`unscoped local-D1 run failed\n${failureEvidence(run)}`);
     }
     const port = Number(phaseValue(run.stderr, "port-allocated", "port"));
+    const inspectorPort = Number(phaseValue(run.stderr, "inspector-port-allocated", "port"));
     expect(Number.isInteger(port)).toBe(true);
     expect(port).toBeGreaterThanOrEqual(1024);
+    expect(Number.isInteger(inspectorPort)).toBe(true);
+    expect(inspectorPort).toBeGreaterThanOrEqual(1024);
+    expect(inspectorPort).not.toBe(port);
     expect(phaseValue(run.stderr, "port-allocated", "pinned")).toBe("no");
     // Readiness is tied to this run's own D1 state, not merely to "something answered".
     expect(run.stderr).toContain("port-ownership-proven");
@@ -3171,17 +3328,27 @@ describe("lifecycle: parallel runs and signal handling", () => {
       runScript(["--local-d1"]),
     ]);
 
-    const detail = (run: Run) =>
-      `exit=${run.exitCode} port=${phaseValue(run.stderr, "port-allocated", "port")} ` +
-      `code=${String(record(run).code)}`;
+    const detail = (run: Run) => {
+      const lastRecord = records(run).at(-1);
+      const diagnostic = run.exitCode === 0 ? "" : ` ${failureEvidence(run).replaceAll("\n", ";")}`;
+      return (
+        `exit=${run.exitCode} port=${phaseValue(run.stderr, "port-allocated", "port")} ` +
+        `code=${String(lastRecord?.code ?? "none")}${diagnostic}`
+      );
+    };
     expect(`first ${detail(first)} | second ${detail(second)}`).toContain("exit=0 port=");
     expect(first.exitCode).toBe(0);
     expect(second.exitCode).toBe(0);
 
     const firstPort = phaseValue(first.stderr, "port-allocated", "port");
     const secondPort = phaseValue(second.stderr, "port-allocated", "port");
+    const firstInspectorPort = phaseValue(first.stderr, "inspector-port-allocated", "port");
+    const secondInspectorPort = phaseValue(second.stderr, "inspector-port-allocated", "port");
     expect(firstPort).toBeDefined();
     expect(secondPort).not.toBe(firstPort);
+    expect(firstInspectorPort).not.toBe(firstPort);
+    expect(secondInspectorPort).not.toBe(secondPort);
+    expect(firstInspectorPort).not.toBe(secondInspectorPort);
 
     const firstDir = phaseValue(first.stderr, "state-retained", "dir");
     const secondDir = phaseValue(second.stderr, "state-retained", "dir");
