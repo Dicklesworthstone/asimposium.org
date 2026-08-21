@@ -70,7 +70,11 @@ readonly VERSION="1"
 readonly REPRODUCE="scripts/e2e-s1-cold-enrollment.sh"
 readonly BLOCKED_EXIT_CODE=78
 readonly HARNESS_IDENTITIES=("claude-code" "codex" "gemini-cli")
-readonly REPO_ROOT="$(pwd -P)"
+REPO_ROOT="$(pwd -P)" || {
+  printf '%s\n' 'BLOCKED s1-cold-enrollment: REPO_ROOT_UNAVAILABLE' >&2
+  exit "$BLOCKED_EXIT_CODE"
+}
+readonly REPO_ROOT
 # Wrangler 4.114 introduced a proxy failure that can terminate `wrangler dev`
 # with `Network connection lost` while this harness is driving an otherwise
 # healthy local Worker. Keep the repository's general Wrangler pin independent,
@@ -632,14 +636,16 @@ process_identity() {
   identity="$(printf '%s' "$identity" | tr -s '[:space:]' ' ')"
   [[ -n "${identity// /}" ]] || return 2
   if [[ -n "$marker" ]]; then
-    # The marker follows the deliberately large `bash -c` supervisor program.
-    # Force a narrow display environment and then override it with `-ww`, so
-    # deleting the width override deterministically loses the authority marker
-    # instead of depending on the caller terminal or capture transport.
+    # The marker follows only a short fixed loader in the supervisor argv; the
+    # deliberately large program arrives on private descriptor 8. Keep `-ww` as
+    # the normal host-width defense, while the prefix-only fault makes that early
+    # placement causal: putting the marker after the long program must fail.
     argv="$(COLUMNS=80 "$PS_BIN" -ww -p "$1" -o args= 2>/dev/null)" || return 2
-    # The marker is generated from /dev/urandom and passed as bash's $0. It is
-    # therefore present in argv before the payload is released, while lstart
-    # remains the independent birth identity for a recycled numeric PID/PGID.
+    if fault_active ps-argv-prefix-only; then argv="${argv:0:256}"; fi
+    # The marker is generated from /dev/urandom and passed as bash's command-name
+    # argument (`$0`). It is therefore present in argv before the payload is
+    # released, while lstart remains the independent birth identity for a
+    # recycled numeric PID/PGID.
     [[ "$argv" == *"$marker"* ]] || return 1
   fi
   printf '%s' "$identity"
@@ -1719,7 +1725,8 @@ start_pinned_supervisor() {
   shift 2
   local stopped_deadline=0 stopped_status=0 identity_status=0 status_auth="" marker=""
   local capture_deadline="" proof_status=0
-  local use_private_handoff=0 handoff_replay_key="" handoff_stoa_origin="" supervisor_program=""
+  local use_private_handoff=0 handoff_replay_key="" handoff_stoa_origin=""
+  local supervisor_loader="" supervisor_program=""
 
   if [[ "${1:-}" == "--private-fd9-handoff" ]]; then
     [[ $# -ge 4 && "${4:-}" == "--" ]] || return 1
@@ -1761,12 +1768,12 @@ start_pinned_supervisor() {
   # ambient fd 9 ever existed while deriving the deadline/auth/marker, this
   # child sees it and launch is refused before a stopped leader can inherit it.
   if ((use_private_handoff == 1)); then
-    private_workerd_handoff_fd_is_ambient_closed &&
-      private_workerd_handoff_prelaunch_helper_observes_closed || {
-        clear_provisional_state
-        finish_lifecycle_critical
-        return 1
-      }
+    if ! private_workerd_handoff_fd_is_ambient_closed ||
+      ! private_workerd_handoff_prelaunch_helper_observes_closed; then
+      clear_provisional_state
+      finish_lifecycle_critical
+      return 1
+    fi
     PRIVATE_HANDOFF_PRELAUNCH_HELPER_OBSERVED=1
   fi
 
@@ -1775,11 +1782,15 @@ start_pinned_supervisor() {
   # is the exact background-command redirection below, so lifecycle behavior
   # cannot drift between the two paths.
   # shellcheck disable=SC2016
+  supervisor_loader='IFS= read -r -d "" supervisor_program <&8 || [[ -n "$supervisor_program" ]] || exit 125; exec 8<&-; eval "$supervisor_program"'
+  # shellcheck disable=SC2016
   supervisor_program='
+    ownership_marker="$0"
     status_file="$1"
     status_auth="$2"
     handoff_enabled="$3"
     shift 3
+    [[ "$ownership_marker" =~ ^s1-supervisor-[a-f0-9]{32}$ ]] || exit 125
     [[ "$handoff_enabled" == "0" || "$handoff_enabled" == "1" ]] || exit 125
     # A group TERM kills normal payload members but pins this leader. The
     # controller can still prove its identity before any escalation; the final
@@ -1829,12 +1840,12 @@ start_pinned_supervisor() {
     done
   '
   if ((use_private_handoff == 1)); then
-    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c "$supervisor_program" \
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c "$supervisor_loader" \
       "$marker" "$status_file" "$status_auth" "1" "$@" \
-      9<<<"$handoff_replay_key"$'\n'"$handoff_stoa_origin" &
+      8<<<"$supervisor_program" 9<<<"$handoff_replay_key"$'\n'"$handoff_stoa_origin" &
   else
-    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c "$supervisor_program" \
-      "$marker" "$status_file" "$status_auth" "0" "$@" 9<&- &
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c "$supervisor_loader" \
+      "$marker" "$status_file" "$status_auth" "0" "$@" 8<<<"$supervisor_program" 9<&- &
   fi
   # The trap is still deferred across the unavoidable `&` -> `$!` boundary.
   # From this first possible assignment onward, cleanup reads globally owned
@@ -1886,6 +1897,15 @@ start_pinned_supervisor() {
     return 1
   fi
   lifecycle_checkpoint "after-stop-proof"
+
+  # This plant models a later argv observation that returns only a bounded
+  # prefix. Arm it after the ordinary birth capture and positive STOP proof so
+  # it observes the exec'd Bash supervisor, not the short-lived `/usr/bin/env`
+  # launcher that precedes it.
+  if [[ "$SELF_TEST_MODE" == "client-success-descendant" &&
+    "${S1_FAULT_INJECT:-}" == "ps-argv-prefix-only" ]]; then
+    FAULT_ACTIVE=1
+  fi
 
   proof_status=0
   prove_provisional_identity || proof_status=$?
@@ -3128,22 +3148,30 @@ self_test_unowned_refusal() {
 # clear CLIENT_* just because the supervisor itself exited 0. The completion
 # path must observe and remove the remnant group before it returns success.
 self_test_client_success_descendant() {
-  local pid_file client_exit=0 liveness=0
+  local pid_file client_exit=0
   lifecycle_state_dir "client-success-descendant"
   pid_file="$STATE_DIR/descendant.pid"
   # shellcheck disable=SC2016
   run_with_deadline 20 env S1_LIFECYCLE_PID_FILE="$pid_file" bash -c '
+    if { : <&8; } 2>/dev/null; then exit 126; fi
     sleep 300 &
     printf "%s\n" "$!" >"$S1_LIFECYCLE_PID_FILE"
     sleep 0.3
     exit 0
   ' || client_exit=$?
+  FAULT_ACTIVE=0
   ((client_exit == 0)) || failed "CLIENT_SUCCESS_FIXTURE_FAILED"
   FIXTURE_DESCENDANT="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
   [[ "$FIXTURE_DESCENDANT" =~ ^[0-9]+$ ]] || failed "CLIENT_SUCCESS_DESCENDANT_UNKNOWN"
   [[ -z "$CLIENT_PID$CLIENT_PGID$CLIENT_IDENTITY" ]] || failed "CLIENT_SUCCESS_OWNERSHIP_NOT_CLEARED"
-  wait_for_pid_absence "$FIXTURE_DESCENDANT" || liveness=$?
-  ((liveness == 1)) || failed "CLIENT_SUCCESS_DESCENDANT_SURVIVED"
+  # `client-complete-killed` is emitted only after the validated process table
+  # and the kernel both prove the exact owned group absent. Re-probing this bare
+  # numeric descendant PID afterwards can see an unrelated reused PID and turn
+  # successful cleanup into a false red, so bind the plant to its pre-cleanup
+  # group membership and the existing exact group-absence receipt instead.
+  grep -Eq "client-complete-pinned .*pids=([^[:space:]]*,)?${FIXTURE_DESCENDANT}(,|$)" "$PHASE_LOG" ||
+    failed "CLIENT_SUCCESS_DESCENDANT_NOT_PINNED"
+  grep -q "client-complete-killed" "$PHASE_LOG" || failed "CLIENT_SUCCESS_GROUP_ABSENCE_UNPROVEN"
   log_phase "client-success-cleaned" "descendant=$FIXTURE_DESCENDANT group_empty=yes"
   emit "pass" "CLIENT_SUCCESS_DESCENDANT_SELF_TEST_PASSED"
 }
@@ -3153,7 +3181,7 @@ self_test_client_success_descendant() {
 # not call the visible supervisor an empty/sole-member success: while the pinned
 # identity is live it KILLs the owned group, then requires kernel-group absence.
 self_test_partial_ps() {
-  local pid_file liveness=0
+  local pid_file
   [[ "${S1_FAULT_INJECT:-}" == "ps-partial" ]] || failed "PARTIAL_PS_FAULT_REQUIRED"
   lifecycle_state_dir "partial-ps"
   pid_file="$STATE_DIR/descendant.pid"
@@ -3164,8 +3192,6 @@ self_test_partial_ps() {
   cleanup_all || failed "PARTIAL_PS_CLEANUP_INCOMPLETE"
   [[ -z "$SERVER_PID$SERVER_PGID$SERVER_IDENTITY" ]] || failed "PARTIAL_PS_OWNERSHIP_RETAINED"
   FAULT_ACTIVE=0
-  wait_for_pid_absence "$FIXTURE_DESCENDANT" || liveness=$?
-  ((liveness == 1)) || failed "PARTIAL_PS_DESCENDANT_SURVIVED"
   [[ -f "$PS_PARTIAL_OMISSION_MARKER" ]] || failed "PARTIAL_PS_OMISSION_NOT_DETECTED"
   grep -q "child-omitted-descendant-suspected" "$PHASE_LOG" || failed "PARTIAL_PS_OMISSION_NOT_DETECTED"
   grep -q "child-killed" "$PHASE_LOG" || failed "PARTIAL_PS_GROUP_KILL_MISSING"
@@ -3177,18 +3203,18 @@ self_test_partial_ps() {
 # omission. Its ordinary survivor path must not be mislabeled as detection of a
 # validated snapshot omission.
 self_test_partial_ps_negative_control() {
-  local pid_file liveness=0
+  local pid_file
   lifecycle_state_dir "partial-ps-negative-control"
   pid_file="$STATE_DIR/descendant.pid"
   start_owned_fixture "$pid_file" "linger-kill"
   cleanup_all || failed "PARTIAL_PS_CONTROL_CLEANUP_INCOMPLETE"
-  wait_for_pid_absence "$FIXTURE_DESCENDANT" || liveness=$?
-  ((liveness == 1)) || failed "PARTIAL_PS_CONTROL_DESCENDANT_SURVIVED"
   if grep -q "child-omitted-descendant-suspected" "$PHASE_LOG"; then
     failed "PARTIAL_PS_CONTROL_FALSE_OMISSION"
   fi
   grep -q "child-survivors" "$PHASE_LOG" || failed "PARTIAL_PS_CONTROL_SURVIVOR_UNREPORTED"
-  log_phase "partial-ps-control-cleaned" "descendant=$FIXTURE_DESCENDANT omission=not-observed"
+  grep -q "child-killed" "$PHASE_LOG" || failed "PARTIAL_PS_CONTROL_GROUP_ABSENCE_UNPROVEN"
+  log_phase "partial-ps-control-cleaned" \
+    "descendant=$FIXTURE_DESCENDANT omission=not-observed kernel_group=absent"
   emit "pass" "PARTIAL_PS_NEGATIVE_CONTROL_SELF_TEST_PASSED"
 }
 
@@ -3224,7 +3250,7 @@ self_test_interrupt_cleanup_retry() {
 # after removing only the planted table corruption, the same owned group must be
 # retired and independently observed absent.
 self_test_ps_parser_refusal() {
-  local fault="${S1_FAULT_INJECT:-}" pid_file leader liveness=0
+  local fault="${S1_FAULT_INJECT:-}" pid_file leader
   [[ "$fault" == "ps-malformed-after-self" || "$fault" == "ps-truncated-tail" || "$fault" == "ps-truncated-before-self" ]] ||
     failed "PS_PARSER_FAULT_REQUIRED"
   lifecycle_state_dir "${fault}"
@@ -3246,8 +3272,6 @@ self_test_ps_parser_refusal() {
   log_phase "ps-parser-refused" \
     "fault=$fault descendant=$FIXTURE_DESCENDANT survived=yes action=not-signalled"
   cleanup_all || failed "PS_PARSER_SURVIVOR_CLEANUP_INCOMPLETE"
-  wait_for_pid_absence "$FIXTURE_DESCENDANT" || liveness=$?
-  ((liveness == 1)) || failed "PS_PARSER_DESCENDANT_SURVIVED"
   if ! kernel_group_absent "$leader"; then failed "PS_PARSER_GROUP_SURVIVED"; fi
   log_phase "ps-parser-survivor-cleaned" \
     "fault=$fault descendant=$FIXTURE_DESCENDANT group_empty=yes"
@@ -3368,7 +3392,7 @@ self_test_status_integrity() {
 # deadline must return 124 only after the same bounded group cleanup proves both
 # are gone; an elapsed wall clock by itself is not enough.
 self_test_deadline() {
-  local pid_file client_exit=0 liveness=0
+  local pid_file client_exit=0
   lifecycle_state_dir "deadline"
   pid_file="$STATE_DIR/descendant.pid"
   # shellcheck disable=SC2016
@@ -3381,8 +3405,7 @@ self_test_deadline() {
   FIXTURE_DESCENDANT="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
   [[ "$FIXTURE_DESCENDANT" =~ ^[0-9]+$ ]] || failed "DEADLINE_DESCENDANT_UNKNOWN"
   [[ -z "$CLIENT_PID$CLIENT_PGID$CLIENT_IDENTITY" ]] || failed "DEADLINE_OWNERSHIP_RETAINED"
-  wait_for_pid_absence "$FIXTURE_DESCENDANT" || liveness=$?
-  ((liveness == 1)) || failed "DEADLINE_DESCENDANT_SURVIVED"
+  grep -q "deadline-killed" "$PHASE_LOG" || failed "DEADLINE_GROUP_ABSENCE_UNPROVEN"
   log_phase "deadline-cleaned" "descendant=$FIXTURE_DESCENDANT exit=124 group_empty=yes"
   emit "pass" "DEADLINE_SELF_TEST_PASSED"
 }
@@ -3394,7 +3417,7 @@ self_test_deadline() {
 # deadline helper.
 self_test_named_phase() {
   local label="${S1_NAMED_PHASE:-}" behavior="${S1_NAMED_PHASE_BEHAVIOR:-}"
-  local seconds=1 pid_file phase_exit=0 descendant="" liveness=0
+  local seconds=1 pid_file phase_exit=0 descendant=""
   [[ "$label" == "migration" ]] || blocked "NAMED_PHASE_INVALID"
   [[ "$behavior" == "deadline" || "$behavior" == "interrupt" ]] ||
     blocked "NAMED_PHASE_BEHAVIOR_INVALID"
@@ -3416,8 +3439,7 @@ self_test_named_phase() {
   [[ "$descendant" =~ ^[0-9]+$ ]] || failed "NAMED_PHASE_DESCENDANT_UNKNOWN"
   [[ -z "$CLIENT_PID$CLIENT_PGID$CLIENT_IDENTITY$CLIENT_LABEL" ]] ||
     failed "NAMED_PHASE_OWNERSHIP_RETAINED"
-  wait_for_pid_absence "$descendant" || liveness=$?
-  ((liveness == 1)) || failed "NAMED_PHASE_DESCENDANT_SURVIVED"
+  grep -q "${label}-deadline-killed" "$PHASE_LOG" || failed "NAMED_PHASE_GROUP_ABSENCE_UNPROVEN"
   log_phase "named-phase-deadline-cleaned" \
     "phase=$label descendant=$descendant exit=124 group_empty=yes"
   emit "pass" "NAMED_PHASE_DEADLINE_SELF_TEST_PASSED"
@@ -4357,7 +4379,7 @@ run_local_d1() {
 begin_self_test() {
   SELF_TEST_MODE="$1"
   case "${S1_FAULT_INJECT:-}" in
-    ""|ps-unreadable|ps-partial|ps-once|ps-malformed-after-self|ps-truncated-tail|ps-truncated-before-self|supervisor-not-stopped|identity-unavailable|provisional-inspection-unknown) ;;
+    ""|ps-unreadable|ps-partial|ps-once|ps-malformed-after-self|ps-truncated-tail|ps-truncated-before-self|ps-argv-prefix-only|supervisor-not-stopped|identity-unavailable|provisional-inspection-unknown) ;;
     *) blocked "FAULT_INJECTION_INVALID" ;;
   esac
   case "${S1_KERNEL_PROBE_FAULT:-}" in

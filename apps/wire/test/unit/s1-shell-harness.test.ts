@@ -2966,6 +2966,19 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
 });
 
 describe("lifecycle: containment failures stay fail-closed", () => {
+  test("PLANTED: the identity marker survives an argv prefix-only observation", async () => {
+    const run = await runScript(["--self-test-client-success-descendant"], {
+      S1_FAULT_INJECT: "ps-argv-prefix-only",
+    });
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("CLIENT_SUCCESS_DESCENDANT_SELF_TEST_PASSED");
+    expect(run.stderr).toContain("client-complete-pinned");
+    expect(run.stderr).toContain("client-complete-killed");
+    const descendant = Number(phaseValue(run.stderr, "client-success-cleaned", "descendant"));
+    expect(Number.isInteger(descendant)).toBe(true);
+    expect(phaseValue(run.stderr, "client-success-cleaned", "group_empty")).toBe("yes");
+  }, 60_000);
+
   test("PLANTED: repeated exit-0 clients with live descendants launch and clean deterministically", async () => {
     for (let attempt = 1; attempt <= 12; attempt += 1) {
       const run = await runScript(["--self-test-client-success-descendant"]);
@@ -2976,7 +2989,8 @@ describe("lifecycle: containment failures stay fail-closed", () => {
       expect(run.stderr).toContain("client-complete-pinned");
       expect(run.stderr).toContain("client-complete-killed");
       const descendant = Number(phaseValue(run.stderr, "client-success-cleaned", "descendant"));
-      expect(await waitForExit(descendant)).toBe(true);
+      expect(Number.isInteger(descendant)).toBe(true);
+      expect(phaseValue(run.stderr, "client-success-cleaned", "group_empty")).toBe("yes");
     }
   }, 120_000);
 
@@ -2989,7 +3003,8 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     expect(run.stderr).toContain("child-omitted-descendant-suspected");
     expect(run.stderr).toContain("child-killed");
     const descendant = Number(phaseValue(run.stderr, "partial-ps-killed", "descendant"));
-    expect(await waitForExit(descendant)).toBe(true);
+    expect(Number.isInteger(descendant)).toBe(true);
+    expect(phaseValue(run.stderr, "partial-ps-killed", "kernel_group")).toBe("absent");
 
     const control = await runScript(["--self-test-partial-ps-negative-control"]);
     expect(control.exitCode).toBe(0);
@@ -3016,7 +3031,7 @@ describe("lifecycle: containment failures stay fail-closed", () => {
       expect(phaseValue(run.stderr, "ps-parser-refused", "action")).toBe("not-signalled");
       const descendant = Number(phaseValue(run.stderr, "ps-parser-survivor-cleaned", "descendant"));
       expect(Number.isInteger(descendant)).toBe(true);
-      expect(await waitForExit(descendant)).toBe(true);
+      expect(phaseValue(run.stderr, "ps-parser-survivor-cleaned", "group_empty")).toBe("yes");
       const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
       const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
       expect(phases.indexOf("ps-parser-refused")).toBeLessThan(
@@ -3188,7 +3203,8 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     expect(record(run).code).toBe("DEADLINE_SELF_TEST_PASSED");
     expect(run.stderr).toContain("deadline-killed");
     const descendant = Number(phaseValue(run.stderr, "deadline-cleaned", "descendant"));
-    expect(await waitForExit(descendant)).toBe(true);
+    expect(Number.isInteger(descendant)).toBe(true);
+    expect(phaseValue(run.stderr, "deadline-cleaned", "group_empty")).toBe("yes");
   }, 60_000);
 
   test("PLANTED: the named Wrangler phase times out only after its stubborn group is gone", async () => {
@@ -3208,8 +3224,9 @@ describe("lifecycle: containment failures stay fail-closed", () => {
       const leader = Number(phaseValue(run.stderr, `${phase}-started`, "pid"));
       expect(Number.isInteger(descendant), phase).toBe(true);
       expect(Number.isInteger(leader), phase).toBe(true);
-      expect(await waitForExit(descendant), phase).toBe(true);
-      expect(await waitForGroupExit(leader), phase).toBe(true);
+      expect(phaseValue(run.stderr, "named-phase-deadline-cleaned", "group_empty"), phase).toBe(
+        "yes",
+      );
     }
   }, 90_000);
 
