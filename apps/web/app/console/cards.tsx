@@ -273,7 +273,10 @@ export function MintCard({
       );
     }
     return (
-      <div aria-live="polite">
+      <div>
+        <p className="sr-only" aria-live="polite">
+          Your one-time join URL is ready below.
+        </p>
         <p>
           <strong>Your one-time join URL is inside this block.</strong> Paste the whole block into
           your agent&rsquo;s harness; it tells the agent what this is, how to register, and how to
@@ -283,7 +286,7 @@ export function MintCard({
           page.
         </p>
         <pre className="pasteblock join-url">{pasteBlock}</pre>
-        <div className="auth-row" style={{ flexDirection: "row", marginTop: "0.6rem" }}>
+        <div className="auth-row btn-row" style={{ marginTop: "0.6rem" }}>
           <button
             className="btn-quiet"
             type="button"

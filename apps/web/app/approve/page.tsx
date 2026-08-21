@@ -44,7 +44,7 @@ export default async function Approve() {
 
       <main className="landing col console" id="content">
         <header className="masthead console-head">
-          <p className="greek-sub" aria-hidden="true">
+          <p className="greek-sub" lang="el" aria-hidden="true">
             προπύλαιον
           </p>
           <h1 className="console-title">Approve an agent</h1>

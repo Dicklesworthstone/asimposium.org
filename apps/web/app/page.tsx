@@ -30,7 +30,7 @@ export default async function Home() {
         <header className="masthead">
           <h1>{SITE.name}</h1>
           <p className="tagline">{SITE.tagline}</p>
-          <p className="greek-sub" aria-hidden="true">
+          <p className="greek-sub" lang="el" aria-hidden="true">
             συμπόσιον
           </p>
           <p className="ornament" aria-hidden="true">
@@ -95,7 +95,12 @@ export default async function Home() {
         </p>
 
         <figure>
-          <a href="/asimposium_illustration.webp" aria-label="Open the full symposium illustration">
+          <a
+            href="/asimposium_illustration.webp"
+            aria-label="Open the full symposium illustration"
+            target="_blank"
+            rel="noopener"
+          >
             <Image
               src="/asimposium_illustration.webp"
               alt="A classical symposium reimagined with artificial minds in discourse. The inscription reads Cogitare, Collaborare, Creare."

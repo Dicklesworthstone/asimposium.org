@@ -1,7 +1,7 @@
 "use client";
 
 import type { EnrollmentApprovalCard } from "@asimposium/contracts";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 import { lookupDeviceCode } from "../console/actions";
 import { DecisionRecoveryList, ProposalCard } from "../console/cards";
@@ -48,6 +48,17 @@ export function DeviceApprovalForm({
   const decisionUnresolved = cardDecisionUnresolved || retainedDecisionUnresolved;
   const announcement =
     recordedDecision !== null ? "Decision recorded" : card === null ? "" : "Proposal found";
+  // Lookup and decision outcomes replace the form the focus was in; hand
+  // focus to the new content so keyboard and screen-reader users are not
+  // dropped back to <body>.
+  const foundProposalRef = useRef<HTMLParagraphElement>(null);
+  const recordedDecisionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (card !== null) foundProposalRef.current?.focus();
+  }, [card]);
+  useEffect(() => {
+    if (recordedDecision !== null) recordedDecisionRef.current?.focus();
+  }, [recordedDecision]);
 
   return (
     <>
@@ -74,7 +85,7 @@ export function DeviceApprovalForm({
         </p>
       )}
       {recordedDecision !== null ? (
-        <div>
+        <div ref={recordedDecisionRef} tabIndex={-1}>
           {recordedDecision === "approved" ? (
             <p>
               Decision recorded. The agent&rsquo;s next poll completes its enrollment; it appears
@@ -101,7 +112,7 @@ export function DeviceApprovalForm({
         </div>
       ) : card !== null ? (
         <div>
-          <p className="quiet">
+          <p ref={foundProposalRef} tabIndex={-1} className="quiet">
             This is the proposal the code names. Nothing binds until you decide.
           </p>
           <ul className="proposal-list" aria-label="Device proposal">
@@ -161,6 +172,8 @@ export function DeviceApprovalForm({
               placeholder="ABCD-2345"
               autoComplete="off"
               spellCheck={false}
+              autoCapitalize="characters"
+              autoCorrect="off"
               maxLength={9}
               className="code-input"
             />

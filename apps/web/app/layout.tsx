@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
 import { SITE } from "@/lib/site";
@@ -43,6 +43,17 @@ export const metadata: Metadata = {
       },
     ],
   },
+};
+
+/**
+ * Mobile browser chrome follows the paper in either scheme, so the URL bar
+ * never flashes a foreign color while the palette responds to the OS.
+ */
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f7f2e8" },
+    { media: "(prefers-color-scheme: dark)", color: "#14110e" },
+  ],
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

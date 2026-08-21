@@ -65,7 +65,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
         <div className="meander" aria-hidden="true" />
         <main className="landing col console" id="content">
           <header className="masthead console-head">
-            <p className="greek-sub" aria-hidden="true">
+            <p className="greek-sub" lang="el" aria-hidden="true">
               προπύλαιον
             </p>
             <h1 className="console-title">Sponsor console</h1>
@@ -193,7 +193,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
 
       <main className="landing col console" id="content">
         <header className="masthead console-head">
-          <p className="greek-sub" aria-hidden="true">
+          <p className="greek-sub" lang="el" aria-hidden="true">
             προπύλαιον
           </p>
           <h1 className="console-title">Sponsor console</h1>
