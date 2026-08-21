@@ -10,6 +10,7 @@
  */
 
 import { byteLength, contentFingerprint, stableStringify } from "./canonical.ts";
+import { codePointCountThroughLimit, MAX_BODY_CODE_POINTS } from "./prepare.ts";
 import { renderProjection } from "./render.ts";
 import {
   fenceFor,
@@ -217,6 +218,34 @@ function assertScalarText(value: unknown, field: string): string {
   return value;
 }
 
+/**
+ * Candidate bodies enter the whole-item fixed point below, which neutralizes
+ * and serializes them before deciding whether they fit the token bucket. Keep
+ * the renderer's body ceiling at this first read so an oversized candidate
+ * cannot make that accounting path process attacker-controlled megabytes.
+ *
+ * Count before looking for an unpaired surrogate: the counter stops at the
+ * first code point above the ceiling, while the surrogate scan is then bounded
+ * by the accepted 20,000-code-point input. Both use scalar semantics, so an
+ * astral character counts once in each check.
+ */
+function assertCandidateBody(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    return refuse("INVALID_INPUT", `${field} must be a non-empty string`);
+  }
+  if (codePointCountThroughLimit(value, MAX_BODY_CODE_POINTS) > MAX_BODY_CODE_POINTS) {
+    return refuse(
+      "INVALID_CANDIDATE",
+      `candidate body exceeds the renderer's ${MAX_BODY_CODE_POINTS}-code-point limit`,
+    );
+  }
+  const offset = firstUnpairedUtf16SurrogateOffset(value);
+  if (offset !== undefined) {
+    return refuse("INVALID_INPUT", `${field} contains an unpaired UTF-16 surrogate at ${offset}`);
+  }
+  return value;
+}
+
 function assertHeaderToken(value: unknown, field: string): string {
   const text = assertScalarText(value, field);
   if (!isSafeHeaderValue(text)) {
@@ -330,7 +359,7 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
       scope,
       tokens: assertTokenEstimate(candidate.tokens, `candidates[${index}].tokens`),
       untrusted: candidate.untrusted,
-      body: assertScalarText(candidate.body, `candidates[${index}].body`),
+      body: assertCandidateBody(candidate.body, `candidates[${index}].body`),
       why_included: assertScalarText(candidate.why_included, `candidates[${index}].why_included`),
       stable_prefix: assertStablePrefix(
         candidate.stable_prefix,
@@ -597,6 +626,7 @@ export function composePack(input: PackComposerInput): ComposedPack {
 
   const source = input as unknown as Record<string, unknown>;
   const viewer = assertViewer(source.viewer);
+  const publicAudience = viewer.audience === "public";
   const budgetTokens = bucketizePackBudget(source.requested_max_tokens as number);
   const common = {
     schema: assertHeaderToken(source.schema, "schema"),
@@ -607,13 +637,20 @@ export function composePack(input: PackComposerInput): ComposedPack {
     budget_tokens: budgetTokens,
     preamble: PACK_PREAMBLE,
     degraded: assertDegraded(source.degraded),
-    // The pack honestly echoes the caller's audience, membership, and effective
-    // permissions so the caller knows what it can do (and a reviewer can see the
-    // access the pack was composed under) — response metadata, never a face body.
+    // A session pack honestly echoes the caller's membership and effective
+    // permissions so the caller knows what it can do and a reviewer can see the
+    // access the pack was composed under — response metadata, never a face body.
+    //
+    // A public face has no authenticated principal, so caller-supplied
+    // membership and permissions carry no authority and were filtered with the
+    // empty set below. Normalize the echoed viewer to none/[] HERE, before this
+    // value reaches any face or the canonical fingerprint, so a public pack can
+    // neither report authority it ignored (Rule A4) nor let irrelevant claimed
+    // membership/permissions perturb its canonical bytes and ETag.
     viewer: {
       audience: viewer.audience,
-      membership: viewer.membership,
-      effective_permissions: viewer.permissions,
+      membership: publicAudience ? ("none" as const) : viewer.membership,
+      effective_permissions: publicAudience ? [] : viewer.permissions,
     },
   } as const;
 
@@ -642,7 +679,7 @@ export function composePack(input: PackComposerInput): ComposedPack {
   // therefore have no authority there: unrestricted public GETs still pass
   // because they require nothing, while every restricted item/action is
   // filtered using this empty set.
-  const permissions = new Set(viewer.audience === "public" ? [] : viewer.permissions);
+  const permissions = new Set(publicAudience ? [] : viewer.permissions);
   const visible: ValidatedCandidate[] = [];
   let itemPermissionExcluded = 0;
 

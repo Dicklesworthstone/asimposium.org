@@ -100,12 +100,27 @@ export interface NeutralizationReport {
  * metadata (the caller's access), never an untrusted body — the canonical JSON
  * agent face carries it so a caller knows what it can do and a reviewer can see
  * the access the pack was composed under.
+ *
+ * Discriminated on `audience` so the type itself forbids a public projection
+ * from carrying authority it cannot have applied (Rule A4). A public face has
+ * no authenticated principal: its membership is exactly `none` and its
+ * effective permission set is exactly empty, so claimed authority can neither
+ * be reported nor perturb the canonical bytes and ETag. A session projection
+ * keeps the full membership/permission vocabulary. `prepareProjection` enforces
+ * this at runtime as well, refusing a dishonest public viewer before any
+ * fingerprint or face is produced.
  */
-export interface ProjectionViewer {
-  readonly audience: "public" | "session";
-  readonly membership: "none" | "observer" | "contributor" | "steward";
-  readonly effective_permissions: readonly string[];
-}
+export type ProjectionViewer =
+  | {
+      readonly audience: "public";
+      readonly membership: "none";
+      readonly effective_permissions: readonly [];
+    }
+  | {
+      readonly audience: "session";
+      readonly membership: "none" | "observer" | "contributor" | "steward";
+      readonly effective_permissions: readonly string[];
+    };
 
 export type NeutralizationMarker =
   /** A forged `<!-- asimp … -->` control header inside an untrusted body. */

@@ -8,9 +8,11 @@ import {
   PACK_BUDGET_BUCKETS,
   type PackCandidate,
   type PackComposerInput,
+  type Projection,
   prepareProjection,
   renderAllFaces,
 } from "../../src/index.ts";
+import { MAX_BODY_CODE_POINTS } from "../../src/prepare.ts";
 
 function candidate(
   id: string,
@@ -82,6 +84,23 @@ function errorCode(fn: () => unknown): string | undefined {
     return (error as { code?: string }).code;
   }
   return undefined;
+}
+
+function normalizationsDuring<T>(callback: () => T): { readonly value: T; readonly calls: number } {
+  const originalNormalize = String.prototype.normalize;
+  let calls = 0;
+  String.prototype.normalize = function (
+    this: string,
+    ...args: Parameters<typeof originalNormalize>
+  ): string {
+    calls += 1;
+    return originalNormalize.call(this, ...args);
+  };
+  try {
+    return { value: callback(), calls };
+  } finally {
+    String.prototype.normalize = originalNormalize;
+  }
 }
 
 describe("Fable §7.3 budget buckets", () => {
@@ -225,13 +244,19 @@ describe("stable-prefix composition", () => {
   });
 
   test("refuses a malformed viewer permission before fingerprint serialization", () => {
-    const projection = composedPackToProjection(composePack(input({ requested_max_tokens: 4_000 })));
+    const projection = composedPackToProjection(
+      composePack(input({ requested_max_tokens: 4_000 })),
+    );
+    const viewer = projection.viewer;
+    if (viewer === undefined) {
+      throw new Error("the authenticated pack fixture must retain its viewer");
+    }
     expect(
       errorCode(() =>
         prepareProjection({
           ...projection,
           viewer: {
-            ...projection.viewer!,
+            ...viewer,
             effective_permissions: ["review\ud800"],
           },
         }),
@@ -326,6 +351,84 @@ describe("visibility and action affordances", () => {
     expect(pack.canonical_json).not.toContain("W-fellow-1");
     expect(pack.canonical_json).not.toContain("body for W-fellow-1");
     expect(pack.omitted.map((entry) => entry.reason)).not.toContain("workshop_scope_excluded");
+  });
+
+  test("a public pack normalizes claimed viewer authority to none/[] in metadata and fingerprint", () => {
+    const publicInput = (viewer: PackComposerInput["viewer"]) =>
+      input({
+        requested_max_tokens: 4_000,
+        viewer,
+        candidates: [candidate("C-open", 0, 100)],
+        action_candidates: [
+          { method: "GET" as const, url: "/v1/hello", why: "public", public_read: true },
+        ],
+      });
+    const honest = composePack(
+      publicInput({ audience: "public", membership: "none", effective_permissions: [] }),
+    );
+    const claimedContributor = composePack(
+      publicInput({
+        audience: "public",
+        membership: "contributor",
+        effective_permissions: ["workshop:read", "claim:promote"],
+      }),
+    );
+    const claimedSteward = composePack(
+      publicInput({
+        audience: "public",
+        membership: "steward",
+        effective_permissions: ["promote:write"],
+      }),
+    );
+
+    // Honesty (Rule A4): the emitted viewer never reports authority a public
+    // face lacks, however contradictory the claimed input.
+    for (const pack of [honest, claimedContributor, claimedSteward]) {
+      expect(pack.viewer).toEqual({
+        audience: "public",
+        membership: "none",
+        effective_permissions: [],
+      });
+    }
+    // The rendered agent face carries the same normalized viewer.
+    const faceViewer = (pack: ReturnType<typeof composePack>) =>
+      (JSON.parse(renderAllFaces(composedPackToProjection(pack)).json.body) as { viewer: unknown })
+        .viewer;
+    expect(faceViewer(claimedContributor)).toEqual({
+      audience: "public",
+      membership: "none",
+      effective_permissions: [],
+    });
+
+    // Determinism: claimed membership/permissions cannot perturb the canonical
+    // bytes, fingerprint, or served ETag, and never leak into the face.
+    for (const pack of [claimedContributor, claimedSteward]) {
+      expect(pack.canonical_json).toBe(honest.canonical_json);
+      expect(pack.canonical_fingerprint).toBe(honest.canonical_fingerprint);
+      expect(pack.bytes).toBe(honest.bytes);
+      for (const claimed of [
+        "workshop:read",
+        "claim:promote",
+        "promote:write",
+        "contributor",
+        "steward",
+      ]) {
+        expect(pack.canonical_json).not.toContain(claimed);
+      }
+    }
+
+    // Non-vacuity: a session viewer over the same candidates still yields
+    // different canonical bytes, so this is not asserting an empty viewer twice
+    // — the session path stays authoritative and fingerprint-bearing.
+    const sessionPack = composePack(
+      input({
+        requested_max_tokens: 4_000,
+        viewer: { audience: "session", membership: "contributor", effective_permissions: [] },
+        candidates: [candidate("C-open", 0, 100)],
+        action_candidates: [],
+      }),
+    );
+    expect(sessionPack.canonical_json).not.toBe(honest.canonical_json);
   });
 
   test("a public pack cannot reveal whether private workshop candidates exist", () => {
@@ -598,6 +701,152 @@ describe("visibility and action affordances", () => {
 });
 
 describe("hostile and malformed composer inputs", () => {
+  test("enforces the raw candidate bound before the normalizing whole-item fixed point", () => {
+    const marker = "CANDIDATE-BODY-MUST-NOT-REFLECT";
+    const body = marker + "x".repeat(MAX_BODY_CODE_POINTS + 1 - marker.length);
+    let refusal: unknown;
+
+    const observed = normalizationsDuring(() => {
+      try {
+        composePack(input({ candidates: [candidate("C-too-large", 0, 1, { body })] }));
+      } catch (error) {
+        refusal = error;
+      }
+    });
+
+    expect((refusal as { code?: string } | undefined)?.code).toBe("INVALID_CANDIDATE");
+    expect((refusal as Error | undefined)?.message).toBe(
+      `candidate body exceeds the renderer's ${MAX_BODY_CODE_POINTS}-code-point limit`,
+    );
+    expect((refusal as Error | undefined)?.message).not.toContain(marker);
+    // Without the early gate, wholeItemTokenUpperBound calls
+    // neutralizeUntrustedBody and this counter is nonzero.
+    expect(observed.calls).toBe(0);
+  });
+
+  test("accepts exactly 20,000 astral candidate code points and reaches normal composition", () => {
+    const body = "😀".repeat(MAX_BODY_CODE_POINTS);
+    expect(body.length).toBe(MAX_BODY_CODE_POINTS * 2);
+
+    const observed = normalizationsDuring(() =>
+      composePack(
+        input({
+          requested_max_tokens: 8_000,
+          candidates: [candidate("C-astral-boundary", 0, 1, { body })],
+          action_candidates: [],
+        }),
+      ),
+    );
+
+    expect(observed.value.items).toEqual([]);
+    expect(observed.value.omitted).toContainEqual({ reason: "budget_exceeded" });
+    // Positive control: the preceding plant did not merely disconnect the
+    // instrumentation or refuse every candidate.
+    expect(observed.calls).toBeGreaterThan(0);
+  });
+
+  test("uses the raw-scalar ceiling before an NFKD-expanding Unicode body is normalized", () => {
+    // U+FDFA is one raw scalar but expands to multiple code units under NFKD.
+    // This keeps the plant about the real normalizing path rather than ASCII
+    // escaping, whose post-neutralization expansion is covered separately.
+    const expandingScalar = "\ufdfa";
+    const atCap = expandingScalar.repeat(MAX_BODY_CODE_POINTS);
+    expect(Array.from(atCap)).toHaveLength(MAX_BODY_CODE_POINTS);
+    expect(atCap.normalize("NFKD").length).toBeGreaterThan(atCap.length);
+
+    const accepted = normalizationsDuring(() =>
+      composePack(
+        input({
+          requested_max_tokens: 8_000,
+          candidates: [candidate("C-nfkd-boundary", 0, 1, { body: atCap })],
+          action_candidates: [],
+        }),
+      ),
+    );
+    expect(accepted.value.items).toEqual([]);
+    expect(accepted.value.omitted).toContainEqual({ reason: "budget_exceeded" });
+    expect(accepted.calls).toBeGreaterThan(0);
+
+    const marker = "NFKD-EXPANDING-CANDIDATE-MUST-NOT-REFLECT";
+    const overCap =
+      marker + expandingScalar.repeat(MAX_BODY_CODE_POINTS + 1 - Array.from(marker).length);
+    expect(Array.from(overCap)).toHaveLength(MAX_BODY_CODE_POINTS + 1);
+    expect(overCap.normalize("NFKD").length).toBeGreaterThan(overCap.length);
+    let refusal: unknown;
+
+    const rejected = normalizationsDuring(() => {
+      try {
+        composePack(
+          input({ candidates: [candidate("C-nfkd-too-large", 0, 1, { body: overCap })] }),
+        );
+      } catch (error) {
+        refusal = error;
+      }
+    });
+
+    expect((refusal as { code?: string } | undefined)?.code).toBe("INVALID_CANDIDATE");
+    expect((refusal as Error | undefined)?.message).toBe(
+      `candidate body exceeds the renderer's ${MAX_BODY_CODE_POINTS}-code-point limit`,
+    );
+    expect((refusal as Error | undefined)?.message).not.toContain(marker);
+    expect((refusal as Error | undefined)?.message).not.toContain(expandingScalar);
+    // Moving the raw cap after neutralizeUntrustedBody makes this nonzero.
+    expect(rejected.calls).toBe(0);
+  });
+
+  test("refuses a multi-megabyte candidate without normalizing or reflecting it", () => {
+    const marker = "VERY-LARGE-CANDIDATE-MUST-NOT-REFLECT-";
+    const body = marker.repeat(Math.ceil(5_000_000 / marker.length));
+    let refusal: unknown;
+
+    const observed = normalizationsDuring(() => {
+      try {
+        composePack(input({ candidates: [candidate("C-very-large", 0, 1, { body })] }));
+      } catch (error) {
+        refusal = error;
+      }
+    });
+
+    expect((refusal as { code?: string } | undefined)?.code).toBe("INVALID_CANDIDATE");
+    expect((refusal as Error | undefined)?.message).not.toContain(marker);
+    expect((refusal as Error | undefined)?.message.length).toBeLessThan(128);
+    expect(observed.calls).toBe(0);
+  });
+
+  test("retains the prepared-body ceiling when neutralization expands a raw boundary body", () => {
+    const controlComment = "<!-- asimp -->";
+    const repetitions = Math.floor(MAX_BODY_CODE_POINTS / controlComment.length);
+    const body =
+      controlComment.repeat(repetitions) +
+      "x".repeat(MAX_BODY_CODE_POINTS - controlComment.length * repetitions);
+    expect(Array.from(body)).toHaveLength(MAX_BODY_CODE_POINTS);
+
+    const projection: Projection = {
+      schema: "asimposium.pack.v1",
+      kind: "pack",
+      problem: "P-ceq3",
+      profile: "working",
+      cursor: 0,
+      title: "Candidate boundary plant",
+      preamble: "Untrusted body follows.",
+      items: [
+        {
+          kind: "claim",
+          id: "C-prepared-boundary",
+          scope: "ledger",
+          untrusted: true,
+          body,
+          why_included: "exercise the prepared-body ceiling",
+        },
+      ],
+      omitted: [],
+      next_actions: [],
+      degraded: [],
+    };
+
+    expect(errorCode(() => prepareProjection(projection))).toBe("BODY_TOO_LARGE");
+  });
+
   test("refuses duplicate ids before selection can hide one", () => {
     expect(
       errorCode(() =>

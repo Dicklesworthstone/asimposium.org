@@ -22,6 +22,7 @@ import {
   type ItemScope,
   type NeutralizationReport,
   type Projection,
+  type ProjectionViewer,
 } from "./types.ts";
 
 /** Public ids stay problem-scoped and boring (Fable §6.1). */
@@ -35,7 +36,7 @@ export const MAX_BODY_CODE_POINTS = 20_000;
  * A valid surrogate pair is one Unicode code point; an unpaired surrogate is
  * one malformed code unit and is conservatively counted as one character.
  */
-function codePointCountThroughLimit(text: string, maximum: number): number {
+export function codePointCountThroughLimit(text: string, maximum: number): number {
   let count = 0;
 
   for (let cursor = 0; cursor < text.length; ) {
@@ -78,11 +79,7 @@ export interface PreparedProjection {
   readonly omitted: readonly { reason: string; detail?: string }[];
   readonly next_actions: readonly { method: "GET" | "POST"; url: string; why: string }[];
   readonly degraded: readonly string[];
-  readonly viewer?: {
-    readonly audience: "public" | "session";
-    readonly membership: "none" | "observer" | "contributor" | "steward";
-    readonly effective_permissions: readonly string[];
-  };
+  readonly viewer?: ProjectionViewer;
   readonly fingerprint: string;
   /** Flat per-item report, in item order. */
   readonly neutralized: readonly NeutralizationReport[];
@@ -105,6 +102,296 @@ function refuse(
     fix_hint,
     ...(rule === undefined ? {} : { rule }),
   });
+}
+
+type RuntimeRecord = Record<PropertyKey, unknown>;
+
+function refuseUnreadableProjection(field: string): never {
+  refuse(
+    "INVALID_HEADER_VALUE",
+    "Projection data must be a readable object graph",
+    `${field} could not be read while the renderer was taking its immutable input snapshot`,
+    "Pass plain projection data whose expected fields can each be read exactly once. Do not pass throwing accessors or revocable proxies.",
+    "A1",
+  );
+}
+
+function refuseProjectionShape(field: string, expected: string): never {
+  refuse(
+    "INVALID_HEADER_VALUE",
+    "Projection data has an invalid runtime shape",
+    `${field} must be ${expected}`,
+    "Build the projection from the shared Projection contract and pass plain arrays and objects to the renderer.",
+    "A1",
+  );
+}
+
+function projectionValueIsArray(value: unknown, field: string): value is readonly unknown[] {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return refuseUnreadableProjection(field);
+  }
+}
+
+function runtimeRecord(value: unknown, field: string): RuntimeRecord {
+  if (typeof value !== "object" || value === null || projectionValueIsArray(value, field)) {
+    refuseProjectionShape(field, "an object");
+  }
+  return value as RuntimeRecord;
+}
+
+function readProjectionMember(source: RuntimeRecord, key: string | number, field: string): unknown {
+  try {
+    return Reflect.get(source, key);
+  } catch {
+    return refuseUnreadableProjection(field);
+  }
+}
+
+function projectionArray(value: unknown, field: string): readonly unknown[] {
+  if (!projectionValueIsArray(value, field)) refuseProjectionShape(field, "an array");
+  return value;
+}
+
+function snapshotArray<T>(
+  value: unknown,
+  field: string,
+  snapshotMember: (member: unknown, field: string) => T,
+): T[] {
+  const array = projectionArray(value, field);
+  const source = array as unknown as RuntimeRecord;
+  const length = readProjectionMember(source, "length", `${field}.length`);
+  if (!Number.isSafeInteger(length) || (length as number) < 0) {
+    refuseProjectionShape(`${field}.length`, "a non-negative safe integer");
+  }
+
+  const snapshot: T[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    snapshot.push(
+      snapshotMember(
+        readProjectionMember(source, index, `${field}[${index}]`),
+        `${field}[${index}]`,
+      ),
+    );
+  }
+  return snapshot;
+}
+
+function snapshotString(value: unknown, field: string): string {
+  if (typeof value !== "string") refuseProjectionShape(field, "a string");
+  return value;
+}
+
+function snapshotNumber(value: unknown, field: string): number {
+  if (typeof value !== "number") refuseProjectionShape(field, "a number");
+  return value;
+}
+
+function snapshotOptionalString(value: unknown, field: string): string | undefined {
+  return value === undefined ? undefined : snapshotString(value, field);
+}
+
+function snapshotOptionalNumber(value: unknown, field: string): number | undefined {
+  return value === undefined ? undefined : snapshotNumber(value, field);
+}
+
+/**
+ * Copy the complete expected Projection graph before inspecting any value.
+ *
+ * A Projection normally arrives as plain contract output, but the public API is
+ * still callable with a getter or Proxy. Validation used to read those sources
+ * first and the render/fingerprint path read them again, allowing a caller to
+ * validate one value and publish another. This snapshot is the single authority
+ * for every later decision and deliberately ignores unexpected properties.
+ */
+const PROJECTION_MEMBERSHIPS = ["none", "observer", "contributor", "steward"] as const;
+
+/**
+ * Snapshot the viewer once and refuse a dishonest one before any face or
+ * fingerprint exists.
+ *
+ * A public face has no authenticated principal, so it may claim neither a
+ * membership nor an effective permission. This gate REFUSES such a viewer
+ * rather than silently normalizing it: `prepareProjection`/`renderProjection`
+ * are exported entry points a caller can reach without the composer, so the
+ * only way a public face cannot report — or fingerprint — authority it never
+ * held is to reject it here (Rule A4). An unrecognized audience or membership is
+ * refused for the same reason: the face must never announce an access class the
+ * platform does not grant. The composer normalizes its own input upstream; this
+ * is the last, type- and runtime-enforced gate. Permission-string surrogate and
+ * control-comment checks stay in `validateProjectionStrings`, so a session
+ * permission is snapshotted here and validated there exactly as before.
+ */
+function snapshotViewer(viewerValue: unknown): ProjectionViewer {
+  const viewerSource = runtimeRecord(viewerValue, "viewer");
+  const audience = snapshotString(
+    readProjectionMember(viewerSource, "audience", "viewer.audience"),
+    "viewer.audience",
+  );
+  const membership = snapshotString(
+    readProjectionMember(viewerSource, "membership", "viewer.membership"),
+    "viewer.membership",
+  );
+  const effective_permissions = snapshotArray(
+    readProjectionMember(viewerSource, "effective_permissions", "viewer.effective_permissions"),
+    "viewer.effective_permissions",
+    snapshotString,
+  );
+  if (audience !== "public" && audience !== "session") {
+    refuse(
+      "INVALID_HEADER_VALUE",
+      "The pack viewer audience is not a recognized access class",
+      `viewer.audience ${JSON.stringify(audience)} is not "public" or "session"; the face would announce an access class the platform never grants`,
+      'Set viewer.audience to "public" (anonymous) or "session" (an authenticated Fellow).',
+      "A4",
+    );
+  }
+  if (!(PROJECTION_MEMBERSHIPS as readonly string[]).includes(membership)) {
+    refuse(
+      "INVALID_HEADER_VALUE",
+      "The pack viewer membership is not a recognized role",
+      `viewer.membership ${JSON.stringify(membership)} is not one of ${PROJECTION_MEMBERSHIPS.join(", ")}`,
+      "Use a recognized problem membership (observer, contributor, steward) or none.",
+      "A4",
+    );
+  }
+  const membershipRole = membership as ProjectionViewer["membership"];
+  if (audience === "public") {
+    if (membershipRole !== "none" || effective_permissions.length > 0) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "A public pack viewer may not claim membership or effective permissions",
+        `a public viewer declares membership=${JSON.stringify(membershipRole)} and ${effective_permissions.length} effective permission(s); a public face has no authenticated principal, so it must be none / [] and cannot report or fingerprint authority it never held`,
+        'Compose the public pack with viewer { audience: "public", membership: "none", effective_permissions: [] }. Authority belongs to session packs.',
+        "A4",
+      );
+    }
+    return { audience: "public", membership: "none", effective_permissions: [] };
+  }
+  return { audience: "session", membership: membershipRole, effective_permissions };
+}
+
+function snapshotProjection(value: Projection): Projection {
+  const source = runtimeRecord(value, "projection");
+  const schema = snapshotString(readProjectionMember(source, "schema", "schema"), "schema");
+  const kind = snapshotString(readProjectionMember(source, "kind", "kind"), "kind");
+  const session = snapshotOptionalString(
+    readProjectionMember(source, "session", "session"),
+    "session",
+  );
+  const problem = snapshotString(readProjectionMember(source, "problem", "problem"), "problem");
+  const profile = snapshotString(readProjectionMember(source, "profile", "profile"), "profile");
+  const cursor = snapshotNumber(readProjectionMember(source, "cursor", "cursor"), "cursor");
+  const budgetTokens = snapshotOptionalNumber(
+    readProjectionMember(source, "budget_tokens", "budget_tokens"),
+    "budget_tokens",
+  );
+  const tokensEstimate = snapshotOptionalNumber(
+    readProjectionMember(source, "tokens_estimate", "tokens_estimate"),
+    "tokens_estimate",
+  );
+  const title = snapshotString(readProjectionMember(source, "title", "title"), "title");
+  const preamble = snapshotString(readProjectionMember(source, "preamble", "preamble"), "preamble");
+
+  const items = snapshotArray(
+    readProjectionMember(source, "items", "items"),
+    "items",
+    (member, field) => {
+      const item = runtimeRecord(member, field);
+      const tokens = snapshotOptionalNumber(
+        readProjectionMember(item, "tokens", `${field}.tokens`),
+        `${field}.tokens`,
+      );
+      const untrusted = readProjectionMember(item, "untrusted", `${field}.untrusted`);
+      if (typeof untrusted !== "boolean") {
+        refuseProjectionShape(`${field}.untrusted`, "a boolean");
+      }
+      return {
+        kind: snapshotString(readProjectionMember(item, "kind", `${field}.kind`), `${field}.kind`),
+        id: snapshotString(readProjectionMember(item, "id", `${field}.id`), `${field}.id`),
+        scope: snapshotString(
+          readProjectionMember(item, "scope", `${field}.scope`),
+          `${field}.scope`,
+        ) as Projection["items"][number]["scope"],
+        untrusted,
+        body: snapshotString(readProjectionMember(item, "body", `${field}.body`), `${field}.body`),
+        why_included: snapshotString(
+          readProjectionMember(item, "why_included", `${field}.why_included`),
+          `${field}.why_included`,
+        ),
+        ...(tokens === undefined ? {} : { tokens }),
+      };
+    },
+  );
+
+  const omittedValue = readProjectionMember(source, "omitted", "omitted");
+  if (!projectionValueIsArray(omittedValue, "omitted")) {
+    refuse(
+      "MISSING_OMITTED",
+      "Every projection must declare what it left out",
+      "projection.omitted is not an array",
+      "Pass omitted: [] when nothing was dropped. A projection that cannot say what it omitted is an editorial, not a pack.",
+      "A1",
+    );
+  }
+  const omitted = snapshotArray(omittedValue, "omitted", (member, field) => {
+    const entry = runtimeRecord(member, field);
+    const detail = snapshotOptionalString(
+      readProjectionMember(entry, "detail", `${field}.detail`),
+      `${field}.detail`,
+    );
+    return {
+      reason: snapshotString(
+        readProjectionMember(entry, "reason", `${field}.reason`),
+        `${field}.reason`,
+      ),
+      ...(detail === undefined ? {} : { detail }),
+    };
+  });
+
+  const nextActions = snapshotArray(
+    readProjectionMember(source, "next_actions", "next_actions"),
+    "next_actions",
+    (member, field) => {
+      const action = runtimeRecord(member, field);
+      return {
+        method: snapshotString(
+          readProjectionMember(action, "method", `${field}.method`),
+          `${field}.method`,
+        ) as Projection["next_actions"][number]["method"],
+        url: snapshotString(readProjectionMember(action, "url", `${field}.url`), `${field}.url`),
+        why: snapshotString(readProjectionMember(action, "why", `${field}.why`), `${field}.why`),
+      };
+    },
+  );
+
+  const degraded = snapshotArray(
+    readProjectionMember(source, "degraded", "degraded"),
+    "degraded",
+    snapshotString,
+  );
+
+  const viewerValue = readProjectionMember(source, "viewer", "viewer");
+  const viewer = viewerValue === undefined ? undefined : snapshotViewer(viewerValue);
+
+  return {
+    schema,
+    kind,
+    ...(session === undefined ? {} : { session }),
+    problem,
+    profile,
+    cursor,
+    ...(budgetTokens === undefined ? {} : { budget_tokens: budgetTokens }),
+    ...(tokensEstimate === undefined ? {} : { tokens_estimate: tokensEstimate }),
+    title,
+    preamble,
+    items,
+    omitted,
+    next_actions: nextActions,
+    degraded,
+    ...(viewer === undefined ? {} : { viewer }),
+  };
 }
 
 interface ProjectionString {
@@ -133,8 +420,16 @@ function projectionStrings(projection: Projection): ProjectionString[] {
   }
   if (projection.viewer !== undefined) {
     fields.push(
-      { field: "viewer.audience", value: projection.viewer.audience, reject_control_comment: false },
-      { field: "viewer.membership", value: projection.viewer.membership, reject_control_comment: false },
+      {
+        field: "viewer.audience",
+        value: projection.viewer.audience,
+        reject_control_comment: false,
+      },
+      {
+        field: "viewer.membership",
+        value: projection.viewer.membership,
+        reject_control_comment: false,
+      },
     );
     for (const [index, permission] of projection.viewer.effective_permissions.entries()) {
       fields.push({
@@ -197,20 +492,33 @@ function validateProjectionStrings(projection: Projection): void {
   const fields = projectionStrings(projection);
 
   // Complete the scalar-value pass first. `hasAsimpControlComment` uses
-  // Unicode normalization, so it must not run until no field can carry a
-  // malformed half that normalization or TextEncoder would replace.
+  // Unicode normalization, so it must not run until no field can carry either
+  // a malformed half that TextEncoder would replace or U+0000, which an HTML
+  // parser replaces even though JSON and Markdown can preserve it.
   for (const { field, value } of fields) {
     const offset = firstUnpairedUtf16SurrogateOffset(value);
-    if (offset === undefined) continue;
-    const codeUnit = value.charCodeAt(offset);
-    const half = codeUnit <= 0xdbff ? "high" : "low";
-    refuse(
-      "INVALID_HEADER_VALUE",
-      "Projection text must contain only Unicode scalar values",
-      `${field} contains an unpaired UTF-16 ${half} surrogate at code-unit offset ${offset}; encoding would replace it before the renderer could fingerprint or project the original text`,
-      "Replace the lone surrogate with a Unicode scalar value. Astral characters are valid only as their complete high-surrogate/low-surrogate pair.",
-      "A1",
-    );
+    if (offset !== undefined) {
+      const codeUnit = value.charCodeAt(offset);
+      const half = codeUnit <= 0xdbff ? "high" : "low";
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Projection text must contain only Unicode scalar values",
+        `${field} contains an unpaired UTF-16 ${half} surrogate at code-unit offset ${offset}; encoding would replace it before the renderer could fingerprint or project the original text`,
+        "Replace the lone surrogate with a Unicode scalar value. Astral characters are valid only as their complete high-surrogate/low-surrogate pair.",
+        "A1",
+      );
+    }
+
+    const nulOffset = value.indexOf("\0");
+    if (nulOffset !== -1) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Projection text must be representable identically in every face",
+        `${field} contains U+0000 at code-unit offset ${nulOffset}; an HTML parser would replace it and disagree with the canonical JSON and Markdown faces`,
+        "Remove the NUL character. Use ordinary Unicode scalar values and line breaks for textual content.",
+        "A1",
+      );
+    }
   }
 
   for (const { field, value, reject_control_comment } of fields) {
@@ -225,16 +533,8 @@ function validateProjectionStrings(projection: Projection): void {
   }
 }
 
-export function prepareProjection(projection: Projection): PreparedProjection {
-  if (!Array.isArray(projection.omitted)) {
-    refuse(
-      "MISSING_OMITTED",
-      "Every projection must declare what it left out",
-      "projection.omitted is not an array",
-      "Pass omitted: [] when nothing was dropped. A projection that cannot say what it omitted is an editorial, not a pack.",
-      "A1",
-    );
-  }
+export function prepareProjection(rawProjection: Projection): PreparedProjection {
+  const projection = snapshotProjection(rawProjection);
   validateProjectionStrings(projection);
   if (projection.items.length === 0 && projection.omitted.length === 0) {
     refuse(
@@ -351,12 +651,12 @@ export function prepareProjection(projection: Projection): PreparedProjection {
   let itemTokenTotal = 0;
 
   for (const item of projection.items) {
-    if (!ITEM_ID_PATTERN.test(item.id)) {
+    if (!ITEM_ID_PATTERN.test(item.id) || !isSafeHeaderValue(item.id)) {
       refuse(
         "INVALID_ITEM_ID",
-        "Item ids are problem-scoped public ids",
-        `item id ${JSON.stringify(item.id)} does not match ${ITEM_ID_PATTERN.source}`,
-        "Use the public id grammar: C-12, H-3@2, W-fermat-descent-01.",
+        "Item ids are problem-scoped public ids and safe control tokens",
+        `item id ${JSON.stringify(item.id)} does not match ${ITEM_ID_PATTERN.source} or contains a sequence that is illegal in an HTML control comment`,
+        "Use the public id grammar without consecutive hyphens: C-12, H-3@2, W-fermat-descent-01.",
         "A1",
       );
     }
@@ -475,6 +775,21 @@ export function prepareProjection(projection: Projection): PreparedProjection {
 
     if (item.untrusted) {
       const result = neutralizeUntrustedBody(item.body);
+      // The classifier uses Unicode normalization only as an interpretation;
+      // it preserves the source spelling in the body. Neutralization itself
+      // can still expand an accepted raw body (for example, `<` becomes
+      // `&lt;` in a forged control comment), so constrain the actual prepared
+      // result before any face or fingerprint materializes it.
+      const preparedBodyCodePoints = codePointCountThroughLimit(result.text, MAX_BODY_CODE_POINTS);
+      if (preparedBodyCodePoints > MAX_BODY_CODE_POINTS) {
+        refuse(
+          "BODY_TOO_LARGE",
+          "An item body exceeds the renderer's 20,000-character contract",
+          `item ${item.id} contains at least ${preparedBodyCodePoints} Unicode code points after neutralization; body_md is limited to ${MAX_BODY_CODE_POINTS}`,
+          "Keep body_md at 20,000 Unicode code points or fewer after renderer neutralization. An astral character such as 😀 counts as one character, not two UTF-16 units or four UTF-8 bytes.",
+          "A1",
+        );
+      }
       // Markdown computes its quarantine delimiter from this prepared body.
       // Record the same fact here, once, so every face exposes the decision
       // rather than leaving JSON and HTML to claim nothing happened.
@@ -540,11 +855,18 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     ...(projection.viewer === undefined
       ? {}
       : {
-          viewer: {
-            audience: projection.viewer.audience,
-            membership: projection.viewer.membership,
-            effective_permissions: [...projection.viewer.effective_permissions],
-          },
+          viewer:
+            projection.viewer.audience === "public"
+              ? {
+                  audience: "public" as const,
+                  membership: "none" as const,
+                  effective_permissions: [],
+                }
+              : {
+                  audience: "session" as const,
+                  membership: projection.viewer.membership,
+                  effective_permissions: [...projection.viewer.effective_permissions],
+                },
         }),
   });
 
@@ -578,11 +900,18 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     ...(projection.viewer === undefined
       ? {}
       : {
-          viewer: {
-            audience: projection.viewer.audience,
-            membership: projection.viewer.membership,
-            effective_permissions: [...projection.viewer.effective_permissions],
-          },
+          viewer:
+            projection.viewer.audience === "public"
+              ? {
+                  audience: "public" as const,
+                  membership: "none" as const,
+                  effective_permissions: [],
+                }
+              : {
+                  audience: "session" as const,
+                  membership: projection.viewer.membership,
+                  effective_permissions: [...projection.viewer.effective_permissions],
+                },
         }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,

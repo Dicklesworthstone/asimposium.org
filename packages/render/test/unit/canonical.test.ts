@@ -26,6 +26,68 @@ describe("stableStringify", () => {
   test("indents when asked, for the JSON face", () => {
     expect(stableStringify({ b: 1, a: 2 }, 2)).toBe('{\n  "a": 2,\n  "b": 1\n}');
   });
+
+  test("preserves prototype-sensitive own keys from parsed JSON", () => {
+    const input = JSON.parse(
+      '{"prototype":"p","__proto__":{"polluted":true},"constructor":"c","nested":{"z":1,"__proto__":"n"}}',
+    ) as unknown;
+
+    expect(stableStringify(input)).toBe(
+      '{"__proto__":{"polluted":true},"constructor":"c","nested":{"__proto__":"n","z":1},"prototype":"p"}',
+    );
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  test("snapshots each enumerable own value exactly once", () => {
+    let reads = 0;
+    const input: Record<string, unknown> = {};
+    Object.defineProperty(input, "value", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return reads === 1 ? { b: 2, a: 1 } : "changed-on-reread";
+      },
+    });
+
+    expect(stableStringify(input)).toBe('{"value":{"a":1,"b":2}}');
+    expect(reads).toBe(1);
+  });
+
+  test("does not let an enumerable toJSON function replace canonical data", () => {
+    const input = {
+      retained: { b: 2, a: 1 },
+      toJSON: () => ({ forged: true }),
+    };
+
+    expect(stableStringify(input)).toBe('{"retained":{"a":1,"b":2}}');
+    expect(stableStringify({ nested: input })).toBe('{"nested":{"retained":{"a":1,"b":2}}}');
+  });
+
+  test("preserves JSON array handling for functions and symbols", () => {
+    expect(stableStringify([() => "forged", Symbol("forged"), 1])).toBe("[null,null,1]");
+  });
+
+  test("returns canonical JSON text for supported scalar roots", () => {
+    expect(stableStringify(null)).toBe("null");
+    expect(stableStringify(false)).toBe("false");
+    expect(stableStringify(0)).toBe("0");
+    expect(stableStringify("text")).toBe('"text"');
+  });
+
+  test("refuses roots with no JSON representation without reflecting them", () => {
+    const unsupported: readonly unknown[] = [
+      undefined,
+      () => "caller-controlled-function-result",
+      Symbol("caller-controlled-symbol-description"),
+    ];
+
+    for (const value of unsupported) {
+      expect(() => stableStringify(value)).toThrow(TypeError);
+      expect(() => stableStringify(value)).toThrow(
+        "stableStringify root has no JSON representation",
+      );
+    }
+  });
 });
 
 describe("contentFingerprint", () => {

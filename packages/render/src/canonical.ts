@@ -8,16 +8,28 @@
 
 /** Recursively key-sorted JSON. `undefined` members are dropped, as in JSON. */
 export function stableStringify(value: unknown, indent = 0): string {
-  return JSON.stringify(sortValue(value), null, indent);
+  const serialized = JSON.stringify(sortValue(value), null, indent);
+  if (serialized === undefined) {
+    // JSON.stringify has a deliberately wider runtime return type than this
+    // canonical face boundary: unsupported root values produce `undefined`,
+    // even though the same values are omitted from objects or become null in
+    // arrays. Refuse with a fixed message instead of violating our `string`
+    // contract or reflecting a caller-controlled value into diagnostics.
+    throw new TypeError("stableStringify root has no JSON representation");
+  }
+  return serialized;
 }
 
 function sortValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortValue);
   if (value === null || typeof value !== "object") return value;
   const source = value as Record<string, unknown>;
-  const sorted: Record<string, unknown> = {};
+  const sorted = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(source).sort()) {
-    if (source[key] !== undefined) sorted[key] = sortValue(source[key]);
+    const member = source[key];
+    if (member !== undefined && typeof member !== "function" && typeof member !== "symbol") {
+      sorted[key] = sortValue(member);
+    }
   }
   return sorted;
 }
