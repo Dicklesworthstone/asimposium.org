@@ -72,6 +72,25 @@ if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGORA_BASE_URL" "/approve"; then
   exit 69
 fi
 
+# S-3/S-6 sponsor boundary (anonymous side): the console must present a sign-in
+# prompt to an anonymous visitor and carry no sponsor data (no Fellow names,
+# workshop objects, or proposals). The product copy may describe the workshop;
+# it must never render one.
+console_anonymous="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGORA_BASE_URL/console" 2>/dev/null)"
+if ! printf '%s' "$console_anonymous" | python3 -c '
+import sys, re
+html = sys.stdin.read()
+if not re.search(r"sign in|google|authenticate", html, re.I):
+    sys.exit(1)  # no sign-in prompt for an anonymous visitor
+# A Fellow/workshop object id or a proposal id in the anonymous console is a leak.
+if re.search(r"\bF-[0-9A-Z]|\bW-[a-z]|ASIMP-EN-|usr_", html):
+    sys.exit(2)
+sys.exit(0)
+' 2>/dev/null; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GALLERY_CONSOLE_LEAKS_ANONYMOUSLY" "$reproduce"
+  exit 89
+fi
+
 # The authenticated sponsor + anonymous-public comparison belongs to W3. This
 # entry point deliberately refuses to claim that a workshop/private-cache test
 # has passed until the staging flow and test principals exist.
