@@ -726,6 +726,16 @@
   overflow-y: auto;
 }
 
+/*
+ * Nowrap strips that can overflow on narrow screens keep a visible, thin
+ * scrollbar instead of silently clipping their tail.
+ */
+.landing .loop,
+.console .pasteblock {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-rule) transparent;
+}
+
 /* ── touch: comfortable targets, no iOS focus zoom ─────── */
 @media (pointer: coarse) {
   .btn-google,
