@@ -976,6 +976,17 @@ export const SponsorProposalListResponseSchema = z
   })
   .strict();
 
+/**
+ * The most active bearer credentials one Fellow may hold (W3.7, asimposiumorg-9p4).
+ *
+ * Storage is the authority, not this constant: the `enrollment_credentials_active_cap`
+ * trigger in `db/migrations/0006_fellow_credential_lifecycle.sql` refuses the fourth
+ * insert at commit time, counting same-Fellow rows that are unrevoked, unexpired and
+ * post-panic against the new row's server-authored `issued_at`. Exporting the number
+ * here keeps the response bound and that trigger from drifting apart silently.
+ */
+export const FELLOW_ACTIVE_CREDENTIAL_LIMIT = 3;
+
 /** Non-secret hygiene for one currently live credential record. */
 export const SponsorCredentialSummarySchema = z
   .object({
@@ -1001,7 +1012,7 @@ export const SponsorFellowSummarySchema = z
     granted_at: z.number().int().positive(),
     // Current inventory, not history. The max-three policy keeps this bounded;
     // expired, individually revoked and pre-panic rows are audit history.
-    credentials: z.array(SponsorCredentialSummarySchema).max(3),
+    credentials: z.array(SponsorCredentialSummarySchema).max(FELLOW_ACTIVE_CREDENTIAL_LIMIT),
   })
   .strict();
 

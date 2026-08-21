@@ -50,8 +50,32 @@ const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
   "../fixtures/invalid/problem-unknown-format-no-allowed.json",
   import.meta.url,
 );
+const INVALID_UNKNOWN_PROFILE_WITHOUT_ALLOWED = new URL(
+  "../fixtures/invalid/problem-unknown-profile-no-allowed.json",
+  import.meta.url,
+);
 const INVALID_FELLOW_LIST_CURSOR_INVALID_UNTAUGHT = new URL(
   "../fixtures/invalid/problem-fellow-list-cursor-invalid-untaught.json",
+  import.meta.url,
+);
+const INVALID_WORKSHOP_READ_BODY_INVALID_UNTAUGHT = new URL(
+  "../fixtures/invalid/problem-workshop-read-body-invalid-untaught.json",
+  import.meta.url,
+);
+const INVALID_WORKSHOP_NOT_FOUND_TAUGHT = new URL(
+  "../fixtures/invalid/problem-workshop-not-found-taught.json",
+  import.meta.url,
+);
+const INVALID_FELLOW_CREDENTIAL_CAP_REACHED_TAUGHT = new URL(
+  "../fixtures/invalid/problem-fellow-credential-cap-reached-taught.json",
+  import.meta.url,
+);
+const VALID_SESSION_CLOSE_ACTIONS_UNAVAILABLE = new URL(
+  "../fixtures/valid/problem-session-close-actions-unavailable.json",
+  import.meta.url,
+);
+const INVALID_SESSION_CLOSE_ACTIONS_UNAVAILABLE_UNTAUGHT = new URL(
+  "../fixtures/invalid/problem-session-close-actions-unavailable-untaught.json",
   import.meta.url,
 );
 
@@ -101,6 +125,14 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ],
   ["problem-device-start-rate-limited.json", "DEVICE_START_RATE_LIMITED", 429, "opaque"],
   ["problem-unknown-format.json", "UNKNOWN_FORMAT", 400, "contract"],
+  ["problem-unknown-profile.json", "UNKNOWN_PROFILE", 400, "contract"],
+  ["problem-workshop-read-body-invalid.json", "WORKSHOP_READ_BODY_INVALID", 422, "contract"],
+  ["problem-workshop-not-found.json", "WORKSHOP_NOT_FOUND", 404, "opaque"],
+  ["problem-fellow-credential-cap-reached.json", "FELLOW_CREDENTIAL_CAP_REACHED", 409, "opaque"],
+  ["problem-session-open-body-invalid.json", "SESSION_OPEN_BODY_INVALID", 422, "contract"],
+  ["problem-workshop-push-body-invalid.json", "WORKSHOP_PUSH_BODY_INVALID", 422, "contract"],
+  ["problem-promote-body-invalid.json", "PROMOTE_BODY_INVALID", 422, "contract"],
+  ["problem-session-close-body-invalid.json", "SESSION_CLOSE_BODY_INVALID", 422, "contract"],
 ] as const;
 
 async function fixture(url: URL): Promise<unknown> {
@@ -165,6 +197,83 @@ test("a contract refusal that teaches nothing is not a valid contract refusal", 
   expect(
     ContractProblemSchema.safeParse(await fixture(INVALID_FELLOW_LIST_CURSOR_INVALID_UNTAUGHT))
       .success,
+  ).toBe(false);
+  expect(
+    ContractProblemSchema.safeParse(await fixture(INVALID_WORKSHOP_READ_BODY_INVALID_UNTAUGHT))
+      .success,
+  ).toBe(false);
+  expect(
+    ContractProblemSchema.safeParse(
+      await fixture(INVALID_SESSION_CLOSE_ACTIONS_UNAVAILABLE_UNTAUGHT),
+    ).success,
+  ).toBe(false);
+});
+
+test("session close actions unavailable is a teaching contract refusal", async () => {
+  const document = await fixture(VALID_SESSION_CLOSE_ACTIONS_UNAVAILABLE);
+  const parsed = ProblemDocumentSchema.safeParse(document);
+  expect(parsed.success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(false);
+  expect(CONTRACT_PROBLEM_CODES).toContain("SESSION_CLOSE_ACTIONS_UNAVAILABLE");
+  expect(OPAQUE_PROBLEM_CODES).not.toContain("SESSION_CLOSE_ACTIONS_UNAVAILABLE" as never);
+  if (!parsed.success) return;
+  expect(parsed.data).toMatchObject({
+    code: "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+    status: 422,
+    rule: "A5",
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    example: {
+      handback: "The next session should examine the boundary case.",
+      promote: [],
+      keep: [],
+      discard: [],
+    },
+  });
+});
+
+test("the credential cap refusal stays opaque and carries no credential material", async () => {
+  const valid = (await fixture(
+    new URL("../fixtures/valid/problem-fellow-credential-cap-reached.json", import.meta.url),
+  )) as Record<string, unknown>;
+  expect(ProblemDocumentSchema.safeParse(valid).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(valid).success).toBe(true);
+  // The cap is a policy refusal, not a malformed request: there is no corrected
+  // body to hand back, so the teaching triple is forbidden rather than optional.
+  expect(ContractProblemSchema.safeParse(valid).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_FELLOW_CREDENTIAL_CAP_REACHED_TAUGHT))
+      .success,
+  ).toBe(false);
+  // A `type` that disagrees with `code` is one document lying about itself.
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...valid,
+      type: `${PROBLEM_TYPE_PREFIX}FELLOW_CAP_REACHED`,
+    }).success,
+  ).toBe(false);
+  // The refusal names capacity, never a credential id, hash, count or expiry.
+  const serialized = JSON.stringify(valid);
+  for (const forbidden of ["credential_id", "token", "hash", "expires_at", "cred-"]) {
+    expect(serialized.includes(forbidden), forbidden).toBe(false);
+  }
+});
+
+test("workshop not-found refuses to become a sponsor-visibility oracle", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/problem-workshop-not-found.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(valid).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(valid).success).toBe(true);
+  expect(ContractProblemSchema.safeParse(valid).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_WORKSHOP_NOT_FOUND_TAUGHT)).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(valid as Record<string, unknown>),
+      type: `${PROBLEM_TYPE_PREFIX}WORKSHOP_READ_BODY_INVALID`,
+    }).success,
   ).toBe(false);
 });
 
@@ -253,6 +362,30 @@ test("UNKNOWN_FORMAT is a teaching code with a bounded allowed list", async () =
   ).toBe(false);
 });
 
+test("UNKNOWN_PROFILE is a teaching code with a bounded allowed list", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-unknown-profile.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(CONTRACT_PROBLEM_CODES).toContain("UNKNOWN_PROFILE");
+  expect(OPAQUE_PROBLEM_CODES).not.toContain("UNKNOWN_PROFILE" as never);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_UNKNOWN_PROFILE_WITHOUT_ALLOWED)).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      allowed: [],
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      allowed: Array.from({ length: 13 }, (_, index) => `profile-${index}`),
+    }).success,
+  ).toBe(false);
+});
+
 test("an opaque refusal may not acquire the teaching fields", async () => {
   const base = {
     type: `${PROBLEM_TYPE_PREFIX}ENROLLMENT_UNAVAILABLE`,
@@ -328,4 +461,120 @@ test("`type` must be the errors URI for its own code", () => {
     example: { requested_scopes: ["promote"] },
   };
   expect(ProblemDocumentSchema.safeParse(mismatched).success).toBe(false);
+});
+
+test("mounted session-write body errors are teaching contract refusals with the full A5 tuple", async () => {
+  // ZDZ.9: each mounted authenticated session write emits a teaching refusal the
+  // Worker's own responses must validate against. The tuple (code, rule, schema,
+  // example) is discriminated exactly, so a route that drops the rule or example,
+  // or reclassifies the code as opaque, reds here rather than at a downstream parse.
+  const SESSIONS_SCHEMA = "https://a.asimposium.org/schemas/sessions.v1.json";
+  const cases = [
+    [
+      "problem-session-open-body-invalid.json",
+      "SESSION_OPEN_BODY_INVALID",
+      { problem_id: "P-4DSP", intent: "prove" },
+    ],
+    [
+      "problem-workshop-push-body-invalid.json",
+      "WORKSHOP_PUSH_BODY_INVALID",
+      {
+        type: "draft",
+        title: "Orbit count under toggles",
+        body_md: "Burnside average over the eight toggles…",
+        relates_to: ["C-12"],
+      },
+    ],
+    [
+      "problem-promote-body-invalid.json",
+      "PROMOTE_BODY_INVALID",
+      {
+        workshop_id: "W-4DSP-01JXYZ",
+        kind: "conjecture",
+        statement: "The orbit count is invariant under all eight toggles.",
+        falsifier: "A toggle sequence that changes the orbit count.",
+        relates_to: [],
+      },
+    ],
+    [
+      "problem-session-close-body-invalid.json",
+      "SESSION_CLOSE_BODY_INVALID",
+      {
+        handback: "Next session should examine the boundary case.",
+        promote: [],
+        keep: [],
+        discard: [],
+      },
+    ],
+  ] as const;
+  for (const [filename, code, example] of cases) {
+    const document = await fixture(new URL(`../fixtures/valid/${filename}`, import.meta.url));
+    const parsed = ProblemDocumentSchema.safeParse(document);
+    expect(parsed.success, code).toBe(true);
+    // Teaching, never opaque: a malformed write body has a corrected shape to hand back.
+    expect(ContractProblemSchema.safeParse(document).success, code).toBe(true);
+    expect(OpaqueProblemSchema.safeParse(document).success, code).toBe(false);
+    expect(CONTRACT_PROBLEM_CODES, code).toContain(code);
+    expect(OPAQUE_PROBLEM_CODES, code).not.toContain(code as never);
+    if (!parsed.success) continue;
+    expect(parsed.data, code).toMatchObject({
+      code,
+      status: 422,
+      rule: "A5",
+      schema: SESSIONS_SCHEMA,
+      example,
+    });
+    // `type` must agree with `code`, or the document lies about itself.
+    expect(parsed.data.type, code).toBe(`${PROBLEM_TYPE_PREFIX}${code}`);
+    // An extra field is refused by the strict teaching schema.
+    expect(
+      ProblemDocumentSchema.safeParse({ ...(document as Record<string, unknown>), injected: "x" })
+        .success,
+      code,
+    ).toBe(false);
+  }
+});
+
+test("a mounted session-write refusal that omits its A5 rule is not a valid contract refusal", async () => {
+  // The untaught twins carry code, schema and example but no rule: an incomplete
+  // teaching tuple is exactly the regression these fixtures exist to fail on.
+  for (const filename of [
+    "problem-session-open-body-invalid-untaught.json",
+    "problem-workshop-push-body-invalid-untaught.json",
+    "problem-promote-body-invalid-untaught.json",
+    "problem-session-close-body-invalid-untaught.json",
+  ] as const) {
+    const untaught = (await fixture(
+      new URL(`../fixtures/invalid/${filename}`, import.meta.url),
+    )) as Record<string, unknown>;
+    expect(untaught.rule, filename).toBeUndefined();
+    expect(ProblemDocumentSchema.safeParse(untaught).success, filename).toBe(false);
+    expect(ContractProblemSchema.safeParse(untaught).success, filename).toBe(false);
+  }
+});
+
+test("the four mounted session-write codes are unique, teaching, and in declared source order", () => {
+  const sessionCodes = [
+    "SESSION_OPEN_BODY_INVALID",
+    "WORKSHOP_PUSH_BODY_INVALID",
+    "PROMOTE_BODY_INVALID",
+    "SESSION_CLOSE_BODY_INVALID",
+  ] as const;
+  for (const code of sessionCodes) {
+    expect(CONTRACT_PROBLEM_CODES).toContain(code);
+    expect(OPAQUE_PROBLEM_CODES).not.toContain(code as never);
+  }
+  // The whole closed vocabulary carries no duplicate code across the two classes.
+  const all = [...CONTRACT_PROBLEM_CODES, ...OPAQUE_PROBLEM_CODES];
+  expect(new Set(all).size).toBe(all.length);
+  // The four sit as one contiguous block in exact session-lifecycle order, so an
+  // omission or a reordering of any of them reds here.
+  const firstIndex = CONTRACT_PROBLEM_CODES.indexOf(sessionCodes[0]);
+  expect(firstIndex).toBeGreaterThanOrEqual(0);
+  expect(sessionCodes.map((code) => CONTRACT_PROBLEM_CODES.indexOf(code))).toEqual([
+    firstIndex,
+    firstIndex + 1,
+    firstIndex + 2,
+    firstIndex + 3,
+  ]);
 });

@@ -54,6 +54,7 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "REGISTRATION_BODY_INVALID",
   "SCOPE_ESCALATION",
   "SCOPE_NOT_REDUCED",
+  "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
   "SPONSOR_BOOTSTRAP_BODY_INVALID",
   "CREDENTIAL_REVOKE_BODY_INVALID",
   "FELLOW_LIFECYCLE_BODY_INVALID",
@@ -61,11 +62,22 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "OPERATOR_FELLOW_CAP_BODY_INVALID",
   "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
   "SPONSOR_PANIC_BODY_INVALID",
+  "WORKSHOP_READ_BODY_INVALID",
+  // Mounted authenticated session-write body refusals (Fable §7.2). Each names
+  // which write contract the JSON body missed so the caller can repair it, in
+  // session-lifecycle order: open → workshop push → promote → close. These are
+  // teaching codes, never opaque: a malformed write body has a corrected shape
+  // to hand back, unlike a policy refusal.
+  "SESSION_OPEN_BODY_INVALID",
+  "WORKSHOP_PUSH_BODY_INVALID",
+  "PROMOTE_BODY_INVALID",
+  "SESSION_CLOSE_BODY_INVALID",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
   ...GENERAL_CONTRACT_PROBLEM_CODES,
   "UNKNOWN_FORMAT",
+  "UNKNOWN_PROFILE",
 ] as const;
 
 /**
@@ -81,6 +93,7 @@ export const OPAQUE_PROBLEM_CODES = [
   "DEVICE_START_RATE_LIMITED",
   "ENROLLMENT_UNAVAILABLE",
   "FELLOW_CAP_REACHED",
+  "FELLOW_CREDENTIAL_CAP_REACHED",
   "FELLOW_TOKEN_INVALID",
   "FELLOW_LIFECYCLE_NOT_CURRENT",
   "OPERATOR_AUTH_UNAVAILABLE",
@@ -97,6 +110,7 @@ export const OPAQUE_PROBLEM_CODES = [
   "SPONSOR_AUTH_UNAVAILABLE",
   "STEP_UP_REQUIRED",
   "UNAUTHORIZED",
+  "WORKSHOP_NOT_FOUND",
   "WRONG_PRINCIPAL",
 ] as const;
 
@@ -149,9 +163,20 @@ const unknownFormatProblem = z
   })
   .strict();
 
+const unknownProfileProblem = z
+  .object({
+    ...problemBase,
+    code: z.literal("UNKNOWN_PROFILE"),
+    ...teachingFields,
+    /** Pack profiles accepted by the route. Required only for UNKNOWN_PROFILE. */
+    allowed: z.array(z.string().min(1).max(32)).min(1).max(12),
+  })
+  .strict();
+
 export const ContractProblemSchema = z.discriminatedUnion("code", [
   generalContractProblem,
   unknownFormatProblem,
+  unknownProfileProblem,
 ]);
 
 /**

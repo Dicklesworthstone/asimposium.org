@@ -53,6 +53,7 @@ export {
   EnrollmentSlowDownResponseSchema,
   encodeOperatorFellowCapAuditCursor,
   encodeSponsorFellowCursor,
+  FELLOW_ACTIVE_CREDENTIAL_LIMIT,
   type FellowCredentialId,
   FellowCredentialIdSchema,
   type FellowCredentialProfile,

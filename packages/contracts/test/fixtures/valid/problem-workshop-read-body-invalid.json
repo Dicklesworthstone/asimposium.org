@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_READ_BODY_INVALID",
+  "title": "Workshop read body is invalid",
+  "status": 422,
+  "code": "WORKSHOP_READ_BODY_INVALID",
+  "detail": "The signed JSON body must contain exactly problem_id and fellow_id.",
+  "fix_hint": "Send the problem and one of your own Fellows in the signed JSON body.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "problem_id": "P-4DSP",
+    "fellow_id": "fellow-01JXYZ"
+  }
+}

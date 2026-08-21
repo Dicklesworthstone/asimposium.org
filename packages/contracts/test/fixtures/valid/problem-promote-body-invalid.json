@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/PROMOTE_BODY_INVALID",
+  "title": "The promotion does not match the contract",
+  "status": 422,
+  "code": "PROMOTE_BODY_INVALID",
+  "detail": "The JSON body does not match the promote contract.",
+  "fix_hint": "Send {workshop_id, kind, statement, falsifier?, relates_to?}.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "workshop_id": "W-4DSP-01JXYZ",
+    "kind": "conjecture",
+    "statement": "The orbit count is invariant under all eight toggles.",
+    "falsifier": "A toggle sequence that changes the orbit count.",
+    "relates_to": []
+  }
+}

@@ -6,6 +6,7 @@ import {
   redactCredentials,
 } from "../../src/diagnostic-safety.ts";
 import { REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
+import { EnrollmentFlowHandleSchema, EnrollmentSecretSchema } from "../../src/enrollment.ts";
 
 /**
  * The shared never-log scanner (bead asimposiumorg-233, OPS.2a).
@@ -74,6 +75,290 @@ describe("full credential classes are refused", () => {
     const truncated = "-----BEGIN TEST PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQ";
     expect(redactCredentials(truncated)).toBe(REDACTED_TOKEN);
   });
+});
+
+describe("the bare enrollment fragment secret is refused (ADR-20)", () => {
+  // The secret is minted, submitted, and stored WITHOUT the `#`; the `#` is only
+  // the URL-fragment delimiter, never part of the secret. Matching only the
+  // `#v1.` form left the shape a diagnostic actually meets — bare `v1.<material>`
+  // — printable, and left this canonical scanner strictly weaker than the sibling
+  // `apps/wire/src/http/redact.ts` for the one family they share (bead
+  // asimposiumorg-diagnostic-safety-bare-v1-secret).
+
+  // 43 base64url characters: the exact minted frame (32 random bytes).
+  const MINTED_MATERIAL = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_ABCDE";
+  const BARE_SECRET = `v1.${MINTED_MATERIAL}`;
+
+  test("the plant is the real minted frame, not an arbitrary literal", () => {
+    // Causal tie: the plant is exactly what `EnrollmentSecretSchema` mints and
+    // accepts, so if the frame ever changes this guard fails before the redaction
+    // assertions can pass vacuously.
+    expect(MINTED_MATERIAL.length).toBe(43);
+    expect(EnrollmentSecretSchema.safeParse(BARE_SECRET).success).toBe(true);
+    // The `#`-anchored form is a URL artefact the schema rejects, proving the
+    // secret itself carries no `#` and the bare shape is the one to catch.
+    expect(EnrollmentSecretSchema.safeParse(`#${BARE_SECRET}`).success).toBe(false);
+  });
+
+  test("the bare minted secret is replaced entirely", () => {
+    expect(redactCredentials(BARE_SECRET)).toBe(REDACTED_TOKEN);
+    expect(containsCredentialShape(BARE_SECRET)).toBe(true);
+  });
+
+  test("a bare secret in a non-secret field is caught by shape alone", () => {
+    // `note` is not a labelled never-log field, so only the shape class can
+    // catch the pasted secret — this proves the fix, not the label rule.
+    const redacted = redactCredentials(`{"note":"pasted ${BARE_SECRET} by mistake"}`);
+    expect(redacted).not.toContain(MINTED_MATERIAL);
+    expect(redacted).toContain(REDACTED_TOKEN);
+    expect(redacted).toContain("by mistake");
+  });
+
+  test("a capture-clipped bare secret is still replaced", () => {
+    // A buffer cut the 43-char secret; a clipped secret is no safer than a whole
+    // one. 28 base64url characters remain — above the 24 floor — so the shape
+    // class still fires, which is why this family needs no terminal sub-floor
+    // variant the way `#v1.`, `asimp_ag_` and `Bearer` do.
+    const clipped = `v1.${"AbCdEfGhIjKlMnOpQrStUvWx1234"}`;
+    expect(clipped.length).toBe("v1.".length + 28);
+    expect(redactCredentials(clipped)).toBe(REDACTED_TOKEN);
+    expect(containsCredentialShape(clipped)).toBe(true);
+  });
+
+  test("a bare secret at the end of a longer capture keeps the prose", () => {
+    expect(redactCredentials(`minted at 12:04 for run 7: ${BARE_SECRET}`)).toBe(
+      `minted at 12:04 for run 7: ${REDACTED_TOKEN}`,
+    );
+  });
+
+  test("a bare secret followed by a captured newline loses its value", () => {
+    const redacted = redactCredentials(`${BARE_SECRET}\n`);
+    expect(redacted).not.toContain(MINTED_MATERIAL);
+    expect(redacted).toBe(`${REDACTED_TOKEN}\n`);
+  });
+
+  test("the floor is exactly 24 base64url characters", () => {
+    // One below the floor survives; the floor itself is refused. This pins the
+    // number so a mutation in either direction fails here.
+    const belowFloor = `v1.${"A".repeat(23)}`;
+    const atFloor = `v1.${"A".repeat(24)}`;
+    expect(redactCredentials(belowFloor)).toBe(belowFloor);
+    expect(containsCredentialShape(belowFloor)).toBe(false);
+    expect(redactCredentials(atFloor)).toBe(REDACTED_TOKEN);
+    expect(containsCredentialShape(atFloor)).toBe(true);
+  });
+
+  // Near-miss negatives: ordinary `v1.` version tokens must survive, or the
+  // scanner becomes an outage in the evidence path. The sibling path redactor
+  // can redact every `v1.` because a URL path segment is not prose; a free-form
+  // diagnostic scanner cannot, so the frame — base64url only, 24-char floor — is
+  // what keeps these alive while the minted secret above is refused.
+  for (const [name, sample] of [
+    ["minor version token", "v1.2"],
+    ["prerelease version token", "v1.x"],
+    ["patch version chain", "v1.2.3"],
+    ["dotted schema coordinate", "enrollment-capsule.v1.json"],
+    ["build metadata below the floor", "v1.0-rc1-build-2026a"],
+    // `.` is not base64url, so a dotted chain cannot accumulate length across its
+    // separators however long it runs; widening the charset would break this.
+    ["long dotted version chain", "v1.1.2.3.4.5.6.7.8.9.10.11.12.13.14"],
+    ["twenty base64url chars below the floor", "v1.AbCdEfGhIj0123456789"],
+  ] as const) {
+    test(`${name} is left alone`, () => {
+      expect(redactCredentials(sample)).toBe(sample);
+      expect(containsCredentialShape(sample)).toBe(false);
+    });
+  }
+});
+
+describe("the enrollment flow handle / device code shape is refused (asimposiumorg-233.1)", () => {
+  // EnrollmentFlowHandleSchema (enrollment.ts) is `^flow_v1\.<43 base64url>$` and is
+  // the type of both `flow_handle` (the opaque body-only polling credential) and the
+  // device flow's `device_code`. The minted `flow_v1.` prefix — distinct from a bare
+  // `v1.` version token — is redacted by shape, and, being self-declaring, also
+  // carries a terminal-clipped form. A separate pattern is required rather than
+  // widening bare `v1.`, because `\bv1\.` cannot match inside `flow_v1.`: the `_v`
+  // seam has no word boundary.
+  const FLOW_MATERIAL = "a".repeat(43);
+  const FLOW_HANDLE = `flow_v1.${FLOW_MATERIAL}`;
+
+  test("the plant is the real minted flow-handle frame, not an arbitrary literal", () => {
+    expect(FLOW_MATERIAL.length).toBe(43);
+    expect(EnrollmentFlowHandleSchema.safeParse(FLOW_HANDLE).success).toBe(true);
+    // The schema pins the exact 43-scalar frame, so this plant cannot pass vacuously
+    // on a short literal: a bare or clipped prefix is not itself a valid handle.
+    expect(EnrollmentFlowHandleSchema.safeParse("flow_v1.aaa").success).toBe(false);
+  });
+
+  test("the whole flow handle is replaced by the shape alone", () => {
+    expect(redactCredentials(FLOW_HANDLE)).toBe(REDACTED_TOKEN);
+    expect(containsCredentialShape(FLOW_HANDLE)).toBe(true);
+  });
+
+  test("a flow handle pasted into a non-secret field is caught by shape", () => {
+    const redacted = redactCredentials(`{"note":"polled ${FLOW_HANDLE} once"}`);
+    expect(redacted).not.toContain(FLOW_MATERIAL);
+    expect(redacted).toContain(REDACTED_TOKEN);
+    expect(redacted).toContain("once");
+  });
+
+  test("a capture-clipped flow handle above the floor is still replaced", () => {
+    expect(redactCredentials(`flow_v1.${"a".repeat(28)}`)).toBe(REDACTED_TOKEN);
+  });
+
+  test("a flow handle clipped below the floor is refused only at the end of a capture", () => {
+    // Unlike the bare `v1.` family, `flow_v1.` is self-declaring, so a short
+    // truncation at end-of-input is redacted; the terminal `\s*$` consumes a
+    // captured newline, exactly as the other clipped classes do.
+    expect(redactCredentials(`flow_v1.${"a".repeat(10)}`)).toBe(REDACTED_TOKEN);
+    expect(redactCredentials(`flow_v1.${"a".repeat(10)}\n`)).toBe(REDACTED_TOKEN);
+    // Both declared clipped-range endpoints are load-bearing: a bare prefix (zero
+    // remainder) and exactly 23 base64url characters are each wholly redacted at end
+    // of input; the 24-char mid-line case below proves the handoff to the full pattern.
+    expect(redactCredentials("flow_v1.")).toBe(REDACTED_TOKEN);
+    expect(redactCredentials(`flow_v1.${"a".repeat(23)}`)).toBe(REDACTED_TOKEN);
+    // ...but a short remainder mid-line is left to the label class, not eaten.
+    expect(redactCredentials(`flow_v1.${"a".repeat(10)} then more prose`)).toBe(
+      `flow_v1.${"a".repeat(10)} then more prose`,
+    );
+  });
+
+  test("the flow_v1 dot separator is load-bearing", () => {
+    // A colon (a non-dot the `.` metacharacter would match) between `flow_v1` and 43
+    // otherwise-valid base64url characters stays unmatched under the literal `\.`, so
+    // it survives — but mutating that escaped dot to a bare wildcard would match the
+    // colon and redact, reddening this test. `flow_v1.json` cannot prove this: its four
+    // characters are below the 24-char floor, so an unescaped-dot mutant still misses.
+    const colonSeparated = `flow_v1:${"a".repeat(43)}`;
+    expect(redactCredentials(colonSeparated)).toBe(colonSeparated);
+    expect(containsCredentialShape(colonSeparated)).toBe(false);
+  });
+
+  test("the shape floor is exactly 24 base64url characters", () => {
+    // Mid-line (a trailing word, not end-of-input) so only the full pattern's floor
+    // decides; the terminal-clipped form cannot fire here.
+    const belowFloor = `flow_v1.${"a".repeat(23)} tail`;
+    const atFloor = `flow_v1.${"a".repeat(24)} tail`;
+    expect(redactCredentials(belowFloor)).toBe(belowFloor);
+    expect(redactCredentials(atFloor)).toBe(`${REDACTED_TOKEN} tail`);
+  });
+
+  test("the word boundary keeps the scanner off `workflow_v1.`", () => {
+    // `flow_v1.` is only a substring of `workflow_v1.`; the anchor must not match it,
+    // or an ordinary versioned workflow reference would be eaten.
+    const workflow = `workflow_v1.${FLOW_MATERIAL}`;
+    expect(redactCredentials(workflow)).toBe(workflow);
+    expect(containsCredentialShape(workflow)).toBe(false);
+  });
+
+  for (const [name, sample] of [
+    ["a dotted chain cannot accumulate across the excluded dot", "flow_v1.1.2.3.4.5.6.7.8.9.10.11"],
+    ["a tilde is outside the base64url charset", "flow_v1.~one~two~three~four~five~six~seven"],
+    ["prose naming the prefix with a trailing space", "Everything after flow_v1. is a one-time handle."],
+    ["a flow_v1 filename mid-line", "see flow_v1.json for the current config"],
+    ["an ordinary three-part version chain", "v1.2.3"],
+  ] as const) {
+    test(`${name} is left alone`, () => {
+      expect(redactCredentials(sample)).toBe(sample);
+      expect(containsCredentialShape(sample)).toBe(false);
+    });
+  }
+});
+
+describe("a structurally strict three-segment JWT is refused by shape (asimposiumorg-233.1)", () => {
+  // A bearer JWS is three base64url segments joined by dots whose first two are JSON
+  // objects — the `{"alg":…}` header and the `{…}` claims — so both encode to `eyJ`.
+  // The trailing boundary refuses a fourth dotted segment or base64url tail, so a JWE
+  // is never partially accepted; the labelled `id_token` class is the defence there.
+  const JWT = `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`;
+
+  test("a bare JWT is replaced whole by its shape", () => {
+    expect(redactCredentials(JWT)).toBe(REDACTED_TOKEN);
+    expect(containsCredentialShape(JWT)).toBe(true);
+  });
+
+  test("a JWT in an unlabelled field is caught by shape, not label", () => {
+    const redacted = redactCredentials(`{"note":"authenticated with ${JWT} earlier"}`);
+    expect(redacted).not.toContain(JWT);
+    expect(redacted).toContain(REDACTED_TOKEN);
+    expect(redacted).toContain("earlier");
+  });
+
+  test("a JWT ending a sentence is redacted and the punctuation survives", () => {
+    // The terminal-dot rule allows a period before a space or end of input, so a JWT
+    // that ends a sentence is still caught rather than missed by the boundary.
+    expect(redactCredentials(`${JWT} at 12:04`)).toBe(`${REDACTED_TOKEN} at 12:04`);
+    expect(redactCredentials(`(${JWT})`)).toBe(`(${REDACTED_TOKEN})`);
+    expect(redactCredentials(`saw ${JWT}. Then more.`)).toBe(`saw ${REDACTED_TOKEN}. Then more.`);
+    expect(redactCredentials(`${JWT}.`)).toBe(`${REDACTED_TOKEN}.`);
+  });
+
+  test("the two escaped dot separators are load-bearing", () => {
+    // Each sample is a valid eyJ-header / eyJ-claims / signature triple joined with a
+    // colon — a non-dot that the `.` metacharacter would match — at exactly ONE
+    // separator position. Under the literal `\.` neither matches, so both survive; but
+    // mutating THAT escaped dot to a bare wildcard would match its colon and redact,
+    // reddening this test. Colonising a single position (not both) is what makes each
+    // dot individually load-bearing: a single-dot mutation is caught, not only the
+    // simultaneous mutation of both.
+    const colonAtFirst = `eyJ${"a".repeat(30)}:eyJ${"b".repeat(37)}.${"c".repeat(43)}`;
+    const colonAtSecond = `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}:${"c".repeat(43)}`;
+    expect(redactCredentials(colonAtFirst)).toBe(colonAtFirst);
+    expect(containsCredentialShape(colonAtFirst)).toBe(false);
+    expect(redactCredentials(colonAtSecond)).toBe(colonAtSecond);
+    expect(containsCredentialShape(colonAtSecond)).toBe(false);
+  });
+
+  for (const [name, sample] of [
+    // Causal negatives: each removes exactly one structural requirement.
+    ["a non-eyJ header segment is not the strict header shape", `${"z".repeat(33)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`],
+    ["a non-eyJ payload segment is not the strict claims shape", `eyJ${"a".repeat(30)}.${"b".repeat(40)}.${"c".repeat(43)}`],
+    ["a non-base64url `+` in the header remainder breaks the frame", `eyJ+${"a".repeat(36)}.eyJ${"b".repeat(37)}.${"c".repeat(43)}`],
+    ["a non-base64url `+` in the payload breaks the frame", `eyJ${"a".repeat(30)}.eyJ+${"b".repeat(36)}.${"c".repeat(43)}`],
+    ["a non-base64url `+` in the signature breaks the frame", `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}.c+${"c".repeat(43)}`],
+    ["a merged leading word character defeats the leading boundary", `x${JWT}`],
+    ["a nonempty fourth dotted segment is refused whole, never partially accepted", `${JWT}.${"d".repeat(20)}`],
+    ["a two-segment eyJ string is not a whole JWT", `eyJ${"a".repeat(30)}.eyJ${"b".repeat(37)}`],
+    ["a non-eyJ three-part dotted string", "service.auth.core"],
+    ["an ordinary three-part version chain", "v1.2.3"],
+    ["a package coordinate", "@asimposium/wire.core.build"],
+    ["prose naming the header prefix", "A JWT header base64url-encodes to eyJ before the first dot."],
+  ] as const) {
+    test(`${name} is left alone`, () => {
+      expect(redactCredentials(sample)).toBe(sample);
+      expect(containsCredentialShape(sample)).toBe(false);
+    });
+  }
+});
+
+describe("the enrollment flow labelled fields withhold their value (asimposiumorg-233.1)", () => {
+  // flow_handle, device_code, and user_code are never-log by their label (Fable
+  // §5.5): the opaque body-only polling handle, the device-flow code that carries the
+  // same value, and the code that authorizes a sponsor-side pending-proposal lookup.
+  // They are exact scalar labels — the shape class already redacts a `flow_v1.<…>`
+  // value, so these controls use a non-shape value to prove the LABEL withholds it.
+  for (const field of ["flow_handle", "device_code", "user_code"] as const) {
+    test(`${field} keeps its label and drops an unquoted value`, () => {
+      expect(redactCredentials(`${field}: opaque-value-123 status=ok`)).toBe(
+        `${field}: ${REDACTED_TOKEN} status=ok`,
+      );
+      expect(redactCredentials(`${field}=opaque-value-123&next=2`)).toBe(
+        `${field}=${REDACTED_TOKEN}&next=2`,
+      );
+    });
+
+    test(`${field} consumes a quoted value whole so a JSON sibling survives`, () => {
+      expect(redactCredentials(`{"${field}":"a value with spaces","step":"3"}`)).toBe(
+        `{"${field}":${REDACTED_TOKEN},"step":"3"}`,
+      );
+    });
+
+    test(`${field} named in prose without a separator is left alone`, () => {
+      const prose = `The ${field} is opaque and is never written to a log.`;
+      expect(redactCredentials(prose)).toBe(prose);
+      expect(containsCredentialShape(prose)).toBe(false);
+    });
+  }
 });
 
 describe("clipped credential classes are refused at the end of a capture", () => {

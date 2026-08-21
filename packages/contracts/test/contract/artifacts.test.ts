@@ -116,19 +116,129 @@ test("planted stale enrollment schema is rejected by the artifact manifest", () 
   });
 });
 
-test("the generated TypeScript face exports the complete device-flow contract", () => {
+test("the generated enrollment TypeScript face exports the exact public contract roster", () => {
   const artifact = generatedArtifacts().find(
     (candidate) => candidate.relativePath === "generated/enrollment.types.ts",
   );
   expect(artifact).toBeDefined();
-  for (const typeName of [
+  const typeNames = [
     "DeviceCodeStartRequest",
     "DeviceCodeStartResponse",
     "DeviceLookupRequest",
     "DeviceLookupResponse",
-  ]) {
-    expect(artifact?.content, typeName).toContain(typeName);
+    "EnrollmentFlowPollRequest",
+    "EnrollmentApprovalCard",
+    "EnrollmentCapsuleProjection",
+    "EnrollmentClaimResponse",
+    "EnrollmentFlowHandle",
+    "EnrollmentGrantReduction",
+    "EnrollmentId",
+    "EnrollmentHelloResponse",
+    "EnrollmentSecret",
+    "EnrollmentNextAction",
+    "FellowCredentialProfile",
+    "FellowRegistrationRequest",
+    "FellowId",
+    "FellowCredentialId",
+    "FellowLifecycleEventId",
+    "FellowLifecycleStatus",
+    "FellowToken",
+    "MintEnrollmentRequest",
+    "MintEnrollmentResponse",
+    "OperatorFellowCapAuditCursor",
+    "OperatorFellowCapAuditCursorKey",
+    "OperatorFellowCapAuditEvent",
+    "OperatorFellowCapAuditEventId",
+    "OperatorFellowCapAuditPageResponse",
+    "OperatorFellowCapOverrideRequest",
+    "OperatorFellowCapOverrideResponse",
+    "OperatorFellowCapSignerKid",
+    "OperatorFellowCapStateResponse",
+    "RequestedScope",
+    "SponsorBootstrapRequest",
+    "SponsorBootstrapResponse",
+    "SponsorCredentialSummary",
+    "SponsorEnrollmentDecision",
+    "SponsorEnrollmentDecisionCommand",
+    "SponsorEnrollmentDecisionResponse",
+    "SponsorCredentialRevokeRequest",
+    "SponsorCredentialRevokeResponse",
+    "SponsorFellowLifecycleRequest",
+    "SponsorFellowLifecycleResponse",
+    "SponsorFellowLifecycleTarget",
+    "SponsorFellowCursor",
+    "SponsorFellowCursorKey",
+    "SponsorFellowListResponse",
+    "SponsorFellowSummary",
+    "SponsorPanicRequest",
+    "SponsorPanicResponse",
+    "SponsorProposalListResponse",
+  ] as const;
+  expect(artifact?.content).toBe(
+    [
+      "// Generated from src/enrollment.ts by `bun run generate`. Do not edit.",
+      `export type { ${typeNames.join(", ")} } from "../src/enrollment.ts";`,
+      "",
+    ].join("\n"),
+  );
+});
+
+/**
+ * The one name the curated public face deliberately withholds.
+ *
+ * `ParsedStoaJoinUrl` is the return shape of the internal `parseStoaJoinUrl`
+ * helper, not a wire contract, so it is excluded by decision rather than by
+ * oversight. It is named here so that decision is reviewable: the assertion
+ * below refuses a silent subtraction, so if the name is ever renamed or
+ * removed this list stops matching and the exclusion must be re-justified.
+ */
+const ENROLLMENT_FACE_EXCLUSIONS: readonly string[] = ["ParsedStoaJoinUrl"];
+
+test("the generated enrollment face is complete against independently derived source exports", async () => {
+  // The two sides are derived INDEPENDENTLY, which is the whole point: the
+  // source side is parsed out of src/enrollment.ts, the roster side out of the
+  // generator's own emitted re-export line. Neither is a hand-copied list, so
+  // neither can be satisfied by editing the other — the failure mode the
+  // existing roster test above cannot detect, because it compares one hand-copy
+  // against output derived from a second hand-copy.
+  const source = await Bun.file(new URL("../../src/enrollment.ts", import.meta.url)).text();
+  const declared = [...source.matchAll(/^export (?:type|interface) (\w+)/gm)].map((match) => {
+    // Same noUncheckedIndexedAccess discipline the fixture inventory uses: a
+    // capture that did not capture is a broken derivation, not a name.
+    const name = match[1];
+    if (name === undefined) throw new Error("enrollment export match captured no name");
+    return name;
+  });
+  // A regex that silently matched nothing would make every assertion below
+  // vacuously true, so the derived side must be non-empty before it is used.
+  expect(declared.length).toBeGreaterThan(0);
+
+  const excluded = new Set(ENROLLMENT_FACE_EXCLUSIONS);
+  // Every declared exclusion must actually be present in source. Without this a
+  // renamed or deleted exclusion would be subtracted from nothing and the face
+  // would silently lose a type with the census still green.
+  for (const name of ENROLLMENT_FACE_EXCLUSIONS) {
+    expect(declared, name).toContain(name);
   }
+  const expectedFace = declared.filter((name) => !excluded.has(name)).sort();
+
+  const artifact = generatedArtifacts().find(
+    (candidate) => candidate.relativePath === "generated/enrollment.types.ts",
+  );
+  expect(artifact).toBeDefined();
+  const reExport = /^export type \{ (.+) \} from "\.\.\/src\/enrollment\.ts";$/m.exec(
+    artifact?.content ?? "",
+  );
+  if (reExport === null) throw new Error("generated enrollment face has no re-export line");
+  const emittedNames = reExport[1];
+  if (emittedNames === undefined) {
+    throw new Error("generated enrollment face re-export line captured no names");
+  }
+  const emittedFace = emittedNames.split(", ").sort();
+
+  // Set equality in BOTH directions, with the offending names in the message: a
+  // one-way subset check is exactly how a face can go stale while staying green.
+  expect(emittedFace).toEqual(expectedFace);
 });
 
 async function jsonFixture(url: URL): Promise<unknown> {

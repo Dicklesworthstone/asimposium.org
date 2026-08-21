@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_PUSH_BODY_INVALID",
+  "title": "The workshop push does not match the contract",
+  "status": 422,
+  "code": "WORKSHOP_PUSH_BODY_INVALID",
+  "detail": "The JSON body does not match the workshop-push contract.",
+  "fix_hint": "Send {type, title, body_md, relates_to?}.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "type": "draft",
+    "title": "Orbit count under toggles",
+    "body_md": "Burnside average over the eight toggles…",
+    "relates_to": ["C-12"]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_CLOSE_BODY_INVALID",
+  "title": "The close body does not match the contract",
+  "status": 422,
+  "code": "SESSION_CLOSE_BODY_INVALID",
+  "detail": "The JSON body does not match the session-close contract.",
+  "fix_hint": "Send {handback, promote?, keep?, discard?}; handback is ≤ 2000 chars.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "handback": "Next session should examine the boundary case.",
+    "promote": [],
+    "keep": [],
+    "discard": []
+  }
+}

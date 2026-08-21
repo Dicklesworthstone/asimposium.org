@@ -38,7 +38,62 @@
 const CREDENTIAL_PATTERNS: readonly RegExp[] = [
   // ASImposium Fellow bearer tokens and enrollment fragment secrets (Fable §5.2, §5.5).
   /asimp_ag_[A-Za-z0-9_-]{4,}/g,
+  // The enrollment fragment secret in both forms it actually travels in.
+  //
+  // The `#`-anchored form is the join URL a confused client may paste whole. The
+  // bare form is the one the secret is *minted, submitted, and stored* in
+  // (ADR-20: "submit the secret, without #, only in the registration JSON
+  // body"; `EnrollmentSecretSchema` in `enrollment.ts` is `^v1\.<43 base64url>$`
+  // with no `#`), so `v1.<material>` — not `#v1.<material>` — is the shape a
+  // diagnostic actually meets, and matching only the `#` form left it printable.
+  // The sibling `apps/wire/src/http/redact.ts` already caught the bare form via a
+  // `"v1."` prefix, so before this line the "canonical union" was strictly weaker
+  // than an existing runner — the very divergence bead asimposiumorg-233 exists
+  // to end.
+  //
+  // The two forms are pinned differently because their prefixes carry different
+  // intent. A `#` already declares a fragment, so that form tolerates a loose
+  // charset and an 8-char floor. `v1.` alone does not: it opens an ordinary
+  // version token (`v1.2`, `v1.0-rc1-build-2026`, `capsule.v1.json`), so the bare
+  // form is held to the real frame — base64url only (`.` and `~` excluded, so a
+  // dotted version chain cannot accumulate length across its separators) and a
+  // 24-char floor aligned with that redactor's `MAX_SEGMENT_LENGTH`. The 43-char
+  // minted secret and any capture-clipped remainder of it clear that floor; a
+  // `v1.<fewer-than-24>` version token does not.
+  //
+  // There is deliberately no terminal sub-floor variant for this family, unlike
+  // the `#v1.`, `asimp_ag_` and `Bearer` families below. Those prefixes are
+  // self-declaring even with nothing after them, so a `{0,N}\s*$` clipped form is
+  // safe. `v1.` is not: a terminal `v1.<short>$` would rewrite an innocent
+  // version string that happened to end a line, which is the evidence-path outage
+  // this module refuses (see the "no generic-entropy heuristic" note above). A
+  // secret truncated below 24 characters is therefore indistinguishable from a
+  // version token by shape alone and is left to the labelled-field and `#`-form
+  // classes, exactly as the module's anti-false-positive contract requires.
   /#v1\.[A-Za-z0-9._~-]{8,}/g,
+  /\bv1\.[A-Za-z0-9_-]{24,}/g,
+  // The enrollment flow handle and the device flow's device code share one frame:
+  // `EnrollmentFlowHandleSchema` (enrollment.ts) is `^flow_v1\.<43 base64url>$`, and
+  // it is the type of both `flow_handle` — the opaque body-only polling credential —
+  // and `device_code`. Unlike bare `v1.`, the minted `flow_v1.` prefix never opens an
+  // ordinary version token, so it is held to the same base64url frame and 24-char
+  // floor as the bare secret AND, because the prefix is self-declaring, additionally
+  // carries a terminal-clipped form below. The word boundary keeps the scanner off
+  // `workflow_v1.<…>`, where `flow_v1.` is only a substring.
+  /\bflow_v1\.[A-Za-z0-9_-]{24,}/g,
+  // A JSON Web Token, structurally strict: three base64url segments joined by dots
+  // whose first TWO are JSON objects — the `{"alg":…}` header and the `{…}` claims —
+  // so both base64url-encode to the `eyJ` anchor. Requiring `eyJ` on the header AND
+  // the payload is what keeps this an Auth.js/Google JWS rather than a heuristic over
+  // any dotted string (`a.b.c`, `v1.2.3`). The trailing boundary refuses an adjacent
+  // base64url character and a dot that opens a further base64url segment — so a fourth
+  // segment or a JWE (five segments) is never partially accepted, left instead to the
+  // labelled `id_token` defence — while it deliberately allows a terminal dot before a
+  // space or end of input, so a JWT that ends a sentence is still redacted rather than
+  // missed. These lookaheads are safe here, unlike on the `{0,N}` clipped families
+  // below, because the two required `eyJ` segments can never be satisfied by prose. It
+  // catches a bearer JWT travelling in an unlabelled field, callback, or log.
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9_-])/g,
   /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}={0,2}/gi,
   // Common third-party credential shapes, so a misconfigured child never leaks through a
   // dispatcher-authored field.
@@ -67,6 +122,12 @@ const CREDENTIAL_PATTERNS: readonly RegExp[] = [
 const CLIPPED_CREDENTIAL_PATTERNS: readonly RegExp[] = [
   /asimp_ag_[A-Za-z0-9_-]{0,3}\s*$/g,
   /#v1\.[A-Za-z0-9._~-]{0,7}\s*$/g,
+  // The minted `flow_v1.` prefix is self-declaring, so a truncation is safe to close
+  // on end-of-input even below the 24-char floor: there is no benign
+  // `flow_v1.<short>` version token to protect, in contrast to the bare `v1.` family
+  // which deliberately has no terminal form. The word boundary still excludes
+  // `workflow_v1.` at a line end.
+  /\bflow_v1\.[A-Za-z0-9_-]{0,23}\s*$/g,
   /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{0,7}\s*$/gi,
   // The `_live_`/`_test_` prefix has no benign reading, so any remainder is
   // clipped. The bare hyphen form does: `pk-3` and `sk-1` are ordinary version
@@ -145,7 +206,13 @@ const LABELLED_SECRET_PATTERNS: readonly RegExp[] = [
   // `signature` precedes `sig` so the longer field wins the alternation, and
   // `authorization_code` is scalar even though `authorization` is line-valued:
   // the separator requirement keeps the line rule from matching its prefix.
-  /(\b(?:token|access_token|refresh_token|id_token|secret|password|signature|sig|authorization_code)"?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
+  // `flow_handle`, `device_code`, and `user_code` are the enrollment flow's never-log
+  // credentials (Fable §5.5): the opaque body-only polling handle, the device-flow
+  // code that carries the same value, and the code that authorizes a sponsor-side
+  // pending-proposal lookup. They join here as exact scalar labels — the shape class
+  // above already redacts a `flow_v1.<…>` value, but the label withholds any value a
+  // caller places under these names, whatever its shape.
+  /(\b(?:token|access_token|refresh_token|id_token|secret|password|signature|sig|authorization_code|flow_handle|device_code|user_code)"?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
   // Query form: `?token=…`, `&code=…`. The value ends at the next parameter,
   // fragment or whitespace.
   /([?&](?:token|access_token|code|signature|sig)=)[^&#\s]+/gi,

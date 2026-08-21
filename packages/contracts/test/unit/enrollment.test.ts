@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
 
+import type {
+  SponsorBootstrapRequest as GeneratedSponsorBootstrapRequest,
+  SponsorBootstrapResponse as GeneratedSponsorBootstrapResponse,
+} from "../../generated/enrollment.types.ts";
+import type { SponsorBootstrapRequest, SponsorBootstrapResponse } from "../../src/enrollment.ts";
 import {
   DeviceCodeStartRequestSchema,
   DeviceCodeStartResponseSchema,
@@ -197,6 +202,16 @@ test("generated enrollment types export the complete operator Fellow-cap surface
       "OperatorFellowCapAuditPageResponse",
     ]),
   );
+});
+
+test("generated enrollment types keep fragment-secret parsing internals private", () => {
+  // @ts-expect-error ParsedStoaJoinUrl is deliberately not part of the generated public type face.
+  const excluded: import("../../generated/enrollment.types.ts").ParsedStoaJoinUrl = {
+    origin: "https://a.asimposium.org",
+    enrollmentId: "ASIMP-EN-0123456789ABCDEF",
+    secret: "v1.secret",
+  };
+  expect(excluded.origin).toBe("https://a.asimposium.org");
 });
 
 test("operator Fellow-cap reasons use SQLite's code-point length, not UTF-16 length", () => {
@@ -495,9 +510,14 @@ test("resource-grant fixtures prove strict mint and reduce contract boundaries",
 });
 
 test("sponsor bootstrap is the strict empty JSON object", async () => {
-  expect(
-    SponsorBootstrapRequestSchema.safeParse(await fixture(VALID_BOOTSTRAP_REQUEST_FIXTURE)).success,
-  ).toBe(true);
+  const generatedRequest: GeneratedSponsorBootstrapRequest = SponsorBootstrapRequestSchema.parse(
+    await fixture(VALID_BOOTSTRAP_REQUEST_FIXTURE),
+  );
+  const sourceRequest: SponsorBootstrapRequest = generatedRequest;
+  expect(sourceRequest).toEqual({});
+  const generatedResponse: GeneratedSponsorBootstrapResponse | undefined = undefined;
+  const sourceResponse: SponsorBootstrapResponse | undefined = generatedResponse;
+  expect(sourceResponse).toBeUndefined();
   expect(
     SponsorBootstrapRequestSchema.safeParse(await fixture(INVALID_BOOTSTRAP_REQUEST_FIXTURE))
       .success,

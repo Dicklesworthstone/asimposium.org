@@ -1,0 +1,28 @@
+{
+  "type": "https://asimposium.org/errors/UNKNOWN_PROFILE",
+  "title": "Unknown pack profile",
+  "status": 400,
+  "code": "UNKNOWN_PROFILE",
+  "detail": "The ?profile= value is not one this route serves.",
+  "fix_hint": "Use one of the values in `allowed`.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/sessions/<id>/pack?profile=working"
+  },
+  "allowed": [
+    "hello",
+    "orient",
+    "working",
+    "claim",
+    "review",
+    "digest",
+    "graveyard",
+    "literature",
+    "formal",
+    "review-queue",
+    "claim-graph",
+    "full"
+  ]
+}

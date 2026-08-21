@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_NOT_FOUND",
+  "title": "No such workshop",
+  "status": 404,
+  "code": "WORKSHOP_NOT_FOUND",
+  "detail": "No workshop visible to this sponsor matches the query.",
+  "fix_hint": "Check the fellow id against your console's Fellows list.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "problem_id": "P-4DSP",
+    "fellow_id": "fellow-01JXYZ"
+  }
+}

@@ -49,13 +49,15 @@
                     "REGISTRATION_BODY_INVALID",
                     "SCOPE_ESCALATION",
                     "SCOPE_NOT_REDUCED",
+                    "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
                     "SPONSOR_BOOTSTRAP_BODY_INVALID",
                     "CREDENTIAL_REVOKE_BODY_INVALID",
                     "FELLOW_LIFECYCLE_BODY_INVALID",
                     "FELLOW_LIST_CURSOR_INVALID",
                     "OPERATOR_FELLOW_CAP_BODY_INVALID",
                     "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
-                    "SPONSOR_PANIC_BODY_INVALID"
+                    "SPONSOR_PANIC_BODY_INVALID",
+                    "WORKSHOP_READ_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -187,6 +189,83 @@
                 "allowed"
               ],
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 400,
+                  "maximum": 599
+                },
+                "code": {
+                  "type": "string",
+                  "const": "UNKNOWN_PROFILE"
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "fix_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "rule": {
+                  "type": "string",
+                  "enum": [
+                    "A5",
+                    "ADR-20",
+                    "P-EN-NAME"
+                  ]
+                },
+                "schema": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "format": "uri"
+                },
+                "example": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "allowed": {
+                  "minItems": 1,
+                  "maxItems": 12,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "status",
+                "code",
+                "detail",
+                "fix_hint",
+                "rule",
+                "schema",
+                "example",
+                "allowed"
+              ],
+              "additionalProperties": false
             }
           ]
         },
@@ -218,6 +297,7 @@
                 "DEVICE_START_RATE_LIMITED",
                 "ENROLLMENT_UNAVAILABLE",
                 "FELLOW_CAP_REACHED",
+                "FELLOW_CREDENTIAL_CAP_REACHED",
                 "FELLOW_TOKEN_INVALID",
                 "FELLOW_LIFECYCLE_NOT_CURRENT",
                 "OPERATOR_AUTH_UNAVAILABLE",
@@ -234,6 +314,7 @@
                 "SPONSOR_AUTH_UNAVAILABLE",
                 "STEP_UP_REQUIRED",
                 "UNAUTHORIZED",
+                "WORKSHOP_NOT_FOUND",
                 "WRONG_PRINCIPAL"
               ]
             },
@@ -302,13 +383,15 @@
                 "REGISTRATION_BODY_INVALID",
                 "SCOPE_ESCALATION",
                 "SCOPE_NOT_REDUCED",
+                "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
                 "SPONSOR_BOOTSTRAP_BODY_INVALID",
                 "CREDENTIAL_REVOKE_BODY_INVALID",
                 "FELLOW_LIFECYCLE_BODY_INVALID",
                 "FELLOW_LIST_CURSOR_INVALID",
                 "OPERATOR_FELLOW_CAP_BODY_INVALID",
                 "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
-                "SPONSOR_PANIC_BODY_INVALID"
+                "SPONSOR_PANIC_BODY_INVALID",
+                "WORKSHOP_READ_BODY_INVALID"
               ]
             },
             "detail": {
@@ -440,6 +523,83 @@
             "allowed"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 200,
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "code": {
+              "type": "string",
+              "const": "UNKNOWN_PROFILE"
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "fix_hint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "rule": {
+              "type": "string",
+              "enum": [
+                "A5",
+                "ADR-20",
+                "P-EN-NAME"
+              ]
+            },
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "format": "uri"
+            },
+            "example": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "allowed": {
+              "minItems": 1,
+              "maxItems": 12,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              }
+            }
+          },
+          "required": [
+            "type",
+            "title",
+            "status",
+            "code",
+            "detail",
+            "fix_hint",
+            "rule",
+            "schema",
+            "example",
+            "allowed"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -471,6 +631,7 @@
             "DEVICE_START_RATE_LIMITED",
             "ENROLLMENT_UNAVAILABLE",
             "FELLOW_CAP_REACHED",
+            "FELLOW_CREDENTIAL_CAP_REACHED",
             "FELLOW_TOKEN_INVALID",
             "FELLOW_LIFECYCLE_NOT_CURRENT",
             "OPERATOR_AUTH_UNAVAILABLE",
@@ -487,6 +648,7 @@
             "SPONSOR_AUTH_UNAVAILABLE",
             "STEP_UP_REQUIRED",
             "UNAUTHORIZED",
+            "WORKSHOP_NOT_FOUND",
             "WRONG_PRINCIPAL"
           ]
         },
@@ -533,6 +695,7 @@
         "REGISTRATION_BODY_INVALID",
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
+        "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
         "SPONSOR_BOOTSTRAP_BODY_INVALID",
         "CREDENTIAL_REVOKE_BODY_INVALID",
         "FELLOW_LIFECYCLE_BODY_INVALID",
@@ -540,7 +703,9 @@
         "OPERATOR_FELLOW_CAP_BODY_INVALID",
         "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
         "SPONSOR_PANIC_BODY_INVALID",
+        "WORKSHOP_READ_BODY_INVALID",
         "UNKNOWN_FORMAT",
+        "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",
         "DEVICE_CODE_UNKNOWN",
@@ -548,6 +713,7 @@
         "DEVICE_START_RATE_LIMITED",
         "ENROLLMENT_UNAVAILABLE",
         "FELLOW_CAP_REACHED",
+        "FELLOW_CREDENTIAL_CAP_REACHED",
         "FELLOW_TOKEN_INVALID",
         "FELLOW_LIFECYCLE_NOT_CURRENT",
         "OPERATOR_AUTH_UNAVAILABLE",
@@ -564,6 +730,7 @@
         "SPONSOR_AUTH_UNAVAILABLE",
         "STEP_UP_REQUIRED",
         "UNAUTHORIZED",
+        "WORKSHOP_NOT_FOUND",
         "WRONG_PRINCIPAL"
       ]
     }

@@ -157,14 +157,31 @@ const PackResponseContentsSchema = z.object({
   next_actions: z.array(NextActionSchema),
   degraded: z.array(z.string().min(1)),
   /** The access this pack was composed under — echoed so the caller knows what
-   * it can do and a reviewer can see the composition's access. */
+   * it can do and a reviewer can see the composition's access.
+   *
+   * Discriminated on `audience` so the shape itself forbids a public pack from
+   * carrying authority it cannot have applied (Rule A4). A public face has no
+   * authenticated principal, so its membership is exactly `none` and its
+   * effective permission set is exactly empty; claimed authority can therefore
+   * neither be reported nor perturb the canonical bytes and ETag. A session
+   * viewer keeps the full membership/permission vocabulary. */
   viewer: z
-    .object({
-      audience: z.enum(["public", "session"]),
-      membership: z.enum(["none", "observer", "contributor", "steward"]),
-      effective_permissions: z.array(z.string().min(1)),
-    })
-    .strict()
+    .discriminatedUnion("audience", [
+      z
+        .object({
+          audience: z.literal("public"),
+          membership: z.literal("none"),
+          effective_permissions: z.array(z.string().min(1)).max(0),
+        })
+        .strict(),
+      z
+        .object({
+          audience: z.literal("session"),
+          membership: z.enum(["none", "observer", "contributor", "steward"]),
+          effective_permissions: z.array(z.string().min(1)),
+        })
+        .strict(),
+    ])
     .optional(),
 });
 

@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+  "title": "Session close actions are unavailable",
+  "status": 422,
+  "code": "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+  "detail": "Session close records a handback only; send promotion requests to POST /v1/sessions/:id/promote before closing.",
+  "fix_hint": "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "handback": "The next session should examine the boundary case.",
+    "promote": [],
+    "keep": [],
+    "discard": []
+  }
+}

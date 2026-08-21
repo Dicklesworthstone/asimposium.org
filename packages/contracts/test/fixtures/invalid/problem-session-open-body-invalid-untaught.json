@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_OPEN_BODY_INVALID",
+  "title": "The session-open body does not match the contract",
+  "status": 422,
+  "code": "SESSION_OPEN_BODY_INVALID",
+  "detail": "The JSON body does not match the session-open contract.",
+  "fix_hint": "Send {problem_id, intent?} with a problem id like P-4DSP.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "problem_id": "P-4DSP",
+    "intent": "prove"
+  }
+}

@@ -13,17 +13,22 @@ import {
   EnrollmentCapsuleProjectionSchema,
   type EnrollmentClaimResponse,
   EnrollmentContractsSchema,
+  type EnrollmentFlowHandle,
   type EnrollmentFlowPollRequest,
   type EnrollmentGrantReduction,
   type EnrollmentHelloResponse,
   type EnrollmentId,
+  type EnrollmentNextAction,
   type EnrollmentSecret,
   type FellowCredentialId,
+  type FellowCredentialProfile,
   type FellowId,
   type FellowLifecycleEventId,
+  type FellowLifecycleStatus,
   type FellowRegistrationRequest,
   type FellowToken,
   type MintEnrollmentRequest,
+  type MintEnrollmentResponse,
   type OperatorFellowCapAuditCursor,
   type OperatorFellowCapAuditCursorKey,
   type OperatorFellowCapAuditEvent,
@@ -34,18 +39,24 @@ import {
   type OperatorFellowCapSignerKid,
   type OperatorFellowCapStateResponse,
   type RequestedScope,
+  type SponsorBootstrapRequest,
+  type SponsorBootstrapResponse,
   type SponsorCredentialRevokeRequest,
   type SponsorCredentialRevokeResponse,
+  type SponsorCredentialSummary,
   type SponsorEnrollmentDecision,
   type SponsorEnrollmentDecisionCommand,
+  type SponsorEnrollmentDecisionResponse,
   type SponsorFellowCursor,
   type SponsorFellowCursorKey,
   type SponsorFellowLifecycleRequest,
   type SponsorFellowLifecycleResponse,
   type SponsorFellowLifecycleTarget,
   type SponsorFellowListResponse,
+  type SponsorFellowSummary,
   type SponsorPanicRequest,
   type SponsorPanicResponse,
+  type SponsorProposalListResponse,
 } from "./enrollment.ts";
 import {
   LedgerContractsSchema,
@@ -207,16 +218,21 @@ function generatedEnrollmentTypes(): string {
     "EnrollmentApprovalCard",
     "EnrollmentCapsuleProjection",
     "EnrollmentClaimResponse",
+    "EnrollmentFlowHandle",
     "EnrollmentGrantReduction",
     "EnrollmentId",
     "EnrollmentHelloResponse",
     "EnrollmentSecret",
+    "EnrollmentNextAction",
+    "FellowCredentialProfile",
     "FellowRegistrationRequest",
     "FellowId",
     "FellowCredentialId",
     "FellowLifecycleEventId",
+    "FellowLifecycleStatus",
     "FellowToken",
     "MintEnrollmentRequest",
+    "MintEnrollmentResponse",
     "OperatorFellowCapAuditCursor",
     "OperatorFellowCapAuditCursorKey",
     "OperatorFellowCapAuditEvent",
@@ -227,8 +243,12 @@ function generatedEnrollmentTypes(): string {
     "OperatorFellowCapSignerKid",
     "OperatorFellowCapStateResponse",
     "RequestedScope",
+    "SponsorBootstrapRequest",
+    "SponsorBootstrapResponse",
+    "SponsorCredentialSummary",
     "SponsorEnrollmentDecision",
     "SponsorEnrollmentDecisionCommand",
+    "SponsorEnrollmentDecisionResponse",
     "SponsorCredentialRevokeRequest",
     "SponsorCredentialRevokeResponse",
     "SponsorFellowLifecycleRequest",
@@ -237,8 +257,10 @@ function generatedEnrollmentTypes(): string {
     "SponsorFellowCursor",
     "SponsorFellowCursorKey",
     "SponsorFellowListResponse",
+    "SponsorFellowSummary",
     "SponsorPanicRequest",
     "SponsorPanicResponse",
+    "SponsorProposalListResponse",
   ] as const satisfies readonly (keyof {
     DeviceCodeStartRequest: DeviceCodeStartRequest;
     DeviceCodeStartResponse: DeviceCodeStartResponse;
@@ -248,16 +270,21 @@ function generatedEnrollmentTypes(): string {
     EnrollmentApprovalCard: EnrollmentApprovalCard;
     EnrollmentCapsuleProjection: EnrollmentCapsuleProjection;
     EnrollmentClaimResponse: EnrollmentClaimResponse;
+    EnrollmentFlowHandle: EnrollmentFlowHandle;
     EnrollmentGrantReduction: EnrollmentGrantReduction;
     EnrollmentId: EnrollmentId;
     EnrollmentHelloResponse: EnrollmentHelloResponse;
     EnrollmentSecret: EnrollmentSecret;
+    EnrollmentNextAction: EnrollmentNextAction;
+    FellowCredentialProfile: FellowCredentialProfile;
     FellowCredentialId: FellowCredentialId;
     FellowId: FellowId;
     FellowLifecycleEventId: FellowLifecycleEventId;
+    FellowLifecycleStatus: FellowLifecycleStatus;
     FellowRegistrationRequest: FellowRegistrationRequest;
     FellowToken: FellowToken;
     MintEnrollmentRequest: MintEnrollmentRequest;
+    MintEnrollmentResponse: MintEnrollmentResponse;
     OperatorFellowCapAuditCursor: OperatorFellowCapAuditCursor;
     OperatorFellowCapAuditCursorKey: OperatorFellowCapAuditCursorKey;
     OperatorFellowCapAuditEvent: OperatorFellowCapAuditEvent;
@@ -268,8 +295,12 @@ function generatedEnrollmentTypes(): string {
     OperatorFellowCapSignerKid: OperatorFellowCapSignerKid;
     OperatorFellowCapStateResponse: OperatorFellowCapStateResponse;
     RequestedScope: RequestedScope;
+    SponsorBootstrapRequest: SponsorBootstrapRequest;
+    SponsorBootstrapResponse: SponsorBootstrapResponse;
+    SponsorCredentialSummary: SponsorCredentialSummary;
     SponsorEnrollmentDecision: SponsorEnrollmentDecision;
     SponsorEnrollmentDecisionCommand: SponsorEnrollmentDecisionCommand;
+    SponsorEnrollmentDecisionResponse: SponsorEnrollmentDecisionResponse;
     SponsorCredentialRevokeRequest: SponsorCredentialRevokeRequest;
     SponsorCredentialRevokeResponse: SponsorCredentialRevokeResponse;
     SponsorFellowLifecycleRequest: SponsorFellowLifecycleRequest;
@@ -278,8 +309,10 @@ function generatedEnrollmentTypes(): string {
     SponsorFellowCursor: SponsorFellowCursor;
     SponsorFellowCursorKey: SponsorFellowCursorKey;
     SponsorFellowListResponse: SponsorFellowListResponse;
+    SponsorFellowSummary: SponsorFellowSummary;
     SponsorPanicRequest: SponsorPanicRequest;
     SponsorPanicResponse: SponsorPanicResponse;
+    SponsorProposalListResponse: SponsorProposalListResponse;
   })[];
   return [
     "// Generated from src/enrollment.ts by `bun run generate`. Do not edit.",
