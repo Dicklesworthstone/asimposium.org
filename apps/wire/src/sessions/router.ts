@@ -1009,6 +1009,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
+    // W2.6: the digest profile surfaces the projection staleness line — how many
+    // of this problem's claim projections are flagged stale (drifted from the
+    // log). A stale projection is served WITH the warning, never as fabricated
+    // fresh state (the projection rebuild discipline).
+    if (profile === "digest") {
+      const staleness = await db
+        .prepare(
+          `SELECT COUNT(*) AS total,
+                  COALESCE(SUM(stale), 0) AS stale_count
+           FROM claim_projections WHERE problem_id = ?`,
+        )
+        .bind(session.problem_id)
+        .first<{ total: number; stale_count: number }>();
+      const total = staleness?.total ?? 0;
+      const staleCount = staleness?.stale_count ?? 0;
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-projection-staleness",
+        scope: "system",
+        tokens: 1,
+        untrusted: false,
+        body:
+          staleCount === 0
+            ? `Projection health: ${total} claim projection(s) current, none stale.`
+            : `Projection health: ${staleCount} of ${total} claim projection(s) are STALE (drifted from the log; the log wins and a rebuild is owed).`,
+        why_included: "surface projection staleness honestly in the digest",
+        stable_prefix: 400,
+      });
+    }
+
     if (profile === "working") {
       const heads = await db
         .prepare(
@@ -1058,7 +1088,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: ["claim-detail"],
       review: ["rubric", "author-isolation-proof"],
-      digest: ["staleness-line"],
       graveyard: ["dead-ends", "killed-hypotheses"],
       literature: ["citations"],
       formal: ["proof-gaps", "verification-records"],

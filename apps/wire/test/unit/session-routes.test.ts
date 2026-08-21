@@ -2567,6 +2567,33 @@ describe("session protocol routes", () => {
     expect(closeMutationAt).toBeGreaterThan(closeCommitAt);
   });
 
+  test("the digest pack surfaces projection staleness honestly (W2.6)", async () => {
+    const { call, db } = await fixture();
+    // Seed a problem with one current and one stale claim projection.
+    await db
+      .prepare(
+        "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES ('C-1', 'P-4DSP', 'claim one', 'aa', 1, '2026-08-20'), ('C-2', 'P-4DSP', 'claim two', 'bb', 2, '2026-08-20')",
+      )
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO claim_projections (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at) VALUES ('C-1', 'P-4DSP', 1, 1, 'd1', 0, '2026-08-20'), ('C-2', 'P-4DSP', 2, 1, 'd2', 1, '2026-08-20')",
+      )
+      .run();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "digest-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=digest`);
+    expect(pack.status).toBe(200);
+    const body = await pack.text();
+    // The staleness line names the stale projection — never fabricated-fresh state.
+    expect(body).toContain("STALE");
+    expect(body).toContain("1 of 2");
+  });
+
   test("the §7.6 intent classifier refuses a claim-shaped note, and force_note is the recorded escape", async () => {
     const { call } = await fixture();
     const opened = await call("/v1/sessions", {
