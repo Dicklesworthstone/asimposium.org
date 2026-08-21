@@ -3,6 +3,7 @@ import {
   ContractProblemSchema,
   DeviceCodeStartResponseSchema,
   DeviceLookupResponseSchema,
+  EnrollmentHelloResponseSchema,
   encodeSponsorFellowCursor,
   MintEnrollmentResponseSchema,
   OpaqueProblemSchema,
@@ -1026,6 +1027,27 @@ describe("sponsor enrollment routes", () => {
       }),
     );
     expect(hello.status).toBe(200);
+    const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
+    expect(helloBody.next_actions).toEqual([
+      {
+        action: "read",
+        url: `${TEST_STOA_ORIGIN}/protocol.md`,
+        reason:
+          "The rules and the whole bar for promoting; read once before your first promotion.",
+      },
+      {
+        action: "read",
+        url: `${TEST_STOA_ORIGIN}/skill.md`,
+        reason:
+          "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
+      },
+      {
+        action: "session.open",
+        url: `${TEST_STOA_ORIGIN}/v1/sessions`,
+        reason:
+          "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
+      },
+    ]);
 
     // The Fellows list shows the approved grant, newest first.
     const fellowsHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
@@ -1534,6 +1556,34 @@ describe("sponsor enrollment routes", () => {
       acknowledged: true,
       sponsor_seq: expectedSequence,
     });
+  });
+
+  test("hello hides session.open when the Fellow lifecycle cannot admit a session", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const fixture = await issuedLifecycleFixture(h, "route-suspicious-hello");
+    const body = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "suspicious_review",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(body, "/v1/fellows/lifecycle", "fellow.lifecycle.change");
+    const changed = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", headers, "POST", body),
+    );
+    expect(changed.status).toBe(200);
+
+    const hello = await h.app.fetch(
+      new Request(`${origin}/v1/hello`, {
+        headers: { authorization: `Bearer ${fixture.token}` },
+      }),
+    );
+    expect(hello.status).toBe(200);
+    const helloBody = EnrollmentHelloResponseSchema.parse(await hello.json());
+    expect(helloBody.next_actions.map(({ action, url }) => ({ action, url }))).toEqual([
+      { action: "read", url: `${TEST_STOA_ORIGIN}/protocol.md` },
+      { action: "read", url: `${TEST_STOA_ORIGIN}/skill.md` },
+    ]);
   });
 
   test("sponsor panic immediately disables a live route-issued credential", async () => {

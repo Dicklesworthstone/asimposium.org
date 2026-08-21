@@ -1252,6 +1252,16 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
             reason:
               "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
           },
+          ...(binding.fellowStatus === "active"
+            ? [
+                {
+                  action: "session.open",
+                  url: `${options.service.stoaOrigin}/v1/sessions`,
+                  reason:
+                    "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
+                },
+              ]
+            : []),
         ],
       });
       return c.json(response, 200, { "cache-control": "no-store" });
