@@ -125,9 +125,20 @@ const S3_OWNED_KILL_REAP_MS = 500;
 const S3_OWNED_PIPE_DRAIN_MS = 500;
 const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
-// Bundle bytes are evidence rather than a summary receipt. Reuse the accepted
-// owned-command ceiling; this introduces no wider retention budget.
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = S3_OWNED_OUTPUT_BYTES;
+/**
+ * The raw bundle is evidence, not a diagnostic. A one-command measurement of
+ * the exact production/counterfactual build on 2026-08-20 observed maxima of
+ * 1,186,765 raw canonical-evidence bytes and 1,291,325 nested-result bytes.
+ *
+ * Keep the ordinary owned-command diagnostics at 1 MB. This narrowly gives
+ * the isolated graph proof 13,235 bytes above its measured raw maximum. Its
+ * canonical fresh result remains below the existing 3 MB pinned-result cap:
+ * strict canonical JSON cannot contain a literal control byte, and nesting it
+ * in the result JSON expands only quote/backslash bytes, at most twofold. The
+ * derived bound below verifies that relationship. A future larger bundle fails
+ * closed at the isolated limit rather than widening any other transport.
+ */
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 1_200_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 3 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -2019,6 +2030,35 @@ function decodeIsolatedProductionBuildOutputEvidence(stdout: string): readonly s
   return outputTexts;
 }
 
+function isolatedBuildFreshResultUpperBound(rawEvidenceBytes: number): number {
+  if (!Number.isSafeInteger(rawEvidenceBytes) || rawEvidenceBytes < 0) {
+    throw new Error("S3_ISOLATED_BUILD_RESULT_BOUND_INVALID");
+  }
+  // `stdout` is the strict `JSON.stringify(outputTexts)` value above. Nested
+  // JSON can therefore add at most one byte per raw byte (only `"` and `\\`
+  // require escaping); the rest of the result record is measured exactly.
+  const fixedPublicationBytes = Buffer.byteLength(
+    JSON.stringify({
+      nonce: "00000000-0000-4000-8000-000000000000",
+      kind: "result",
+      result: {
+        outcome: "exited",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        retainedStdoutBytes: rawEvidenceBytes,
+        retainedStderrBytes: 0,
+        retainedOutputBytes: rawEvidenceBytes,
+      },
+      cleanupProven: true,
+    }) + "\n",
+    "utf8",
+  );
+  const bound = fixedPublicationBytes + 2 * rawEvidenceBytes;
+  if (!Number.isSafeInteger(bound)) throw new Error("S3_ISOLATED_BUILD_RESULT_BOUND_INVALID");
+  return bound;
+}
+
 function isolatedProductionBuildReceiptFromOutputEvidence(
   mode: IsolatedProductionBuildMode,
   outputTexts: readonly string[],
@@ -2248,6 +2288,12 @@ async function isolatedProductionBundle(
   // Keep the graph proof outside Bun's long-lived test process. Actual build
   // output crosses only the existing fresh-owned, pinned-result authority;
   // the parent derives every receipt field after strictly decoding that output.
+  if (
+    isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES) >
+    S3_FRESH_RUNTIME_RESULT_MAX_BYTES
+  ) {
+    throw new Error("S3_ISOLATED_BUILD_RESULT_CAP_INVALID");
+  }
   const { result, cleanupProven } = await runFreshOwnedS3Command(
     isolatedBuildCommand(mode, productionEntrypoint, localWorkerEntrypoint),
     "S3_ISOLATED_BUILD",
@@ -2315,11 +2361,22 @@ test("isolated build output evidence refuses fake fields, malformed, empty, nonc
   expect(() => decodeIsolatedProductionBuildOutputEvidence('["\\uFFFD"]')).toThrow(
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NON_UTF8",
   );
-  expect(() =>
-    decodeIsolatedProductionBuildOutputEvidence(
-      JSON.stringify(["x".repeat(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES)]),
+  const oneByteOverEvidence = JSON.stringify([
+    "x".repeat(
+      S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES +
+        1 -
+        Buffer.byteLength('[""]', "utf8"),
     ),
+  ]);
+  expect(Buffer.byteLength(oneByteOverEvidence, "utf8")).toBe(
+    S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES + 1,
+  );
+  expect(() =>
+    decodeIsolatedProductionBuildOutputEvidence(oneByteOverEvidence),
   ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN");
+  expect(
+    isolatedBuildFreshResultUpperBound(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES),
+  ).toBeLessThanOrEqual(S3_FRESH_RUNTIME_RESULT_MAX_BYTES);
   expect(() => decodeIsolatedProductionBuildOutputEvidence('["export default {};" ]')).toThrow(
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NONCANONICAL",
   );
@@ -3829,6 +3886,11 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "async function promoteWorkshop(",
     "async function publicProblemExists(",
   );
+  const pushSource = sourceRegion(
+    worker,
+    "async function pushWorkshop(",
+    "async function privateArtifact(",
+  );
   const fetchSource = worker.slice(worker.indexOf("  async fetch("));
   const exactBindingFailureSource = sourceRegion(
     worker,
@@ -3978,6 +4040,21 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "const results = await env.DB.batch(statements);",
   ]) {
     expect(promoteOwnershipGateIndex).toBeLessThan(promoteSource.indexOf(downstreamStep));
+  }
+  const pushSessionOwnershipGate =
+    'if (session === null) return json({ code: "LOCAL_SESSION_REQUIRED" }, 400);';
+  expect(pushSource).toContain(pushSessionOwnershipGate);
+  const pushSessionOwnershipGateIndex = pushSource.indexOf(pushSessionOwnershipGate);
+  expect(pushSessionOwnershipGateIndex).toBeGreaterThan(
+    pushSource.indexOf("const session = await env.DB.prepare("),
+  );
+  for (const downstreamStep of [
+    "const digest = await sha256Hex(bodyMd);",
+    "const bodyKey = stagedPrivateKey(digest);",
+    "await env.ARTIFACTS.put(bodyKey, bodyMd, {",
+    "const results = await env.DB.batch(statements);",
+  ]) {
+    expect(pushSessionOwnershipGateIndex).toBeLessThan(pushSource.indexOf(downstreamStep));
   }
   expect(faultGateSource).toContain(
     "request.headers.get(TEST_D1_BIND_FAULT_HEADER) === TEST_D1_BIND_FAULT",

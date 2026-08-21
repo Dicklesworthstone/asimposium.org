@@ -4,28 +4,30 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   backfillKraterIntegrity,
+  type ClaimProjection,
   canonicalJson,
   checkpointDigest,
-  ensureProblem,
-  serverAuthoredOutboxTimestamp,
   cursorMatchesEvents,
   deterministicWorkload,
+  ensureProblem,
   eventChainDigest,
   eventChainMatches,
   eventRowDigest,
   genesisChainDigest,
   type KraterEvent,
+  type KraterOutboxRecord,
   KraterReplayError,
   KraterValidationError,
   outboxMatchesEvents,
   projectionReplayMatches,
   replayClaimProjections,
+  serverAuthoredOutboxTimestamp,
   sha256Hex,
   transactionBoundaryMatches,
   UNDIGESTED_EVENT_INDEX,
   UNDIGESTED_EVENT_PROBE_SQL,
-  validateKraterIngressTimestamp,
   validateFtsReadInput,
+  validateKraterIngressTimestamp,
   writeClaim,
 } from "./krater";
 
@@ -65,6 +67,37 @@ function fakeD1Result<T>(results: readonly T[] = []): {
     meta: { rows_read: 0, rows_written: 0 },
   };
 }
+
+const PROJECTION_READ_SQL =
+  "SELECT claim_id, problem_id, source_seq, projection_version, build_digest, stale FROM claim_projections WHERE claim_id = ? AND problem_id = ? AND source_seq = ?";
+
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, " ").trim();
+}
+
+const EVENT_READ_SQL = normalizeSql(`SELECT id, problem_id, seq, type, object_kind, object_id,
+  object_version, payload_sha256, row_digest, chain_digest, created_at
+  FROM events WHERE id = ?`);
+const CLAIM_READ_SQL = normalizeSql(`SELECT id, problem_id, statement, payload_sha256, source_seq
+  FROM claims WHERE id = ? AND problem_id = ? AND source_seq = ?`);
+const OUTBOX_READ_SQL = normalizeSql(`SELECT event_id, problem_id, kind, dedupe_key,
+  payload_sha256, state FROM outbox
+  WHERE event_id = ? AND problem_id = ? AND kind = 'search.index'`);
+const CLAIM_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO claims
+  (id, problem_id, statement, payload_sha256, source_seq, created_at)
+  SELECT ?, p.id, ?, ?, p.public_seq, ? FROM problems p
+  JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+  WHERE p.id = ? AND i.event_id IS NULL`);
+const EVENT_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO events
+  (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+  row_digest, chain_digest, created_at)
+  SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ? FROM problems p
+  JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+  WHERE p.id = ? AND i.event_id IS NULL`);
+const OUTBOX_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO outbox
+  (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+  SELECT ?, ?, 'search.index', ?, ?, ? FROM idempotency i
+  WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`);
 
 function ensureProblemHarness(): {
   readonly db: Parameters<typeof ensureProblem>[0];
@@ -114,19 +147,46 @@ function ensureProblemHarness(): {
   return { db, inserts, batches };
 }
 
-function retryingWriteHarness(): {
+function retryingWriteHarness(
+  options: {
+    readonly forceProjectionPredicateMiss?: boolean;
+    readonly forceProjectionReadSequenceBindingMiss?: boolean;
+    readonly forceClaimPredicateMiss?: boolean;
+    readonly forceOutboxPredicateMiss?: boolean;
+    readonly failOnSynchronousFts?: boolean;
+  } = {},
+): {
   readonly db: Parameters<typeof writeClaim>[0];
   readonly armConflict: () => void;
   readonly persistedOutboxCreatedAt: () => string | null;
+  readonly synchronousFtsStatements: () => number;
+  readonly persistedWrite: () =>
+    | Readonly<{
+        event: KraterEvent;
+        projection: ClaimProjection;
+        outbox: KraterOutboxRecord;
+      }>
+    | undefined;
 } {
   let publicSeq = 0;
   let chainDigest = "a".repeat(64);
   let conflictArmed = false;
   let outboxCreatedAt: string | null = null;
-  let idempotency: { request_digest: string; event_id: string; event_seq: number } | null = null;
+  let synchronousFtsStatements = 0;
+  let idempotency: {
+    request_digest: string;
+    event_id: string | null;
+    event_seq: number | null;
+  } | null = null;
   let persistedEvent: Record<string, unknown> | null = null;
+  let persistedClaim: Record<string, unknown> | null = null;
   let persistedProjection: Record<string, unknown> | null = null;
   let persistedCheckpoint: Record<string, unknown> | null = null;
+  let persistedOutbox: Record<string, unknown> | null = null;
+  let claimObserved = false;
+  let observedEvent: KraterEvent | undefined;
+  let observedProjection: ClaimProjection | undefined;
+  let observedOutbox: KraterOutboxRecord | undefined;
 
   const prepared = (sql: string) => {
     let bindings: readonly unknown[] = [];
@@ -159,8 +219,71 @@ function retryingWriteHarness(): {
         ) {
           return idempotency;
         }
-        if (sql.includes("FROM events WHERE id = ?")) return persistedEvent;
-        if (sql.includes("FROM claim_projections")) return persistedProjection;
+        if (sql.includes("FROM events WHERE id = ?")) {
+          if (normalizeSql(sql) !== EVENT_READ_SQL || bindings.length !== 1) {
+            throw new Error("retry-harness event observation SQL drifted");
+          }
+          const persistedEventSnapshot = persistedEvent;
+          if (persistedEventSnapshot === null || persistedEventSnapshot.id !== bindings[0]) {
+            return null;
+          }
+          observedEvent = {
+            eventId: persistedEventSnapshot.id as string,
+            problemId: persistedEventSnapshot.problem_id as string,
+            seq: persistedEventSnapshot.seq as number,
+            type: persistedEventSnapshot.type as "claim.created",
+            objectId: persistedEventSnapshot.object_id as string,
+            payloadSha256: persistedEventSnapshot.payload_sha256 as string,
+            rowDigest: persistedEventSnapshot.row_digest as string,
+            chainDigest: persistedEventSnapshot.chain_digest as string,
+            createdAt: persistedEventSnapshot.created_at as string,
+          };
+          return persistedEventSnapshot;
+        }
+        if (sql.includes("FROM claims WHERE id = ?")) {
+          if (normalizeSql(sql) !== CLAIM_READ_SQL || bindings.length !== 3) {
+            throw new Error("retry-harness claim observation SQL drifted");
+          }
+          const matches =
+            persistedClaim !== null &&
+            persistedClaim.id === bindings[0] &&
+            persistedClaim.problem_id === bindings[1] &&
+            persistedClaim.source_seq === bindings[2];
+          claimObserved = matches;
+          return matches ? persistedClaim : null;
+        }
+        if (sql.includes("FROM outbox") && sql.includes("kind = 'search.index'")) {
+          if (normalizeSql(sql) !== OUTBOX_READ_SQL || bindings.length !== 2) {
+            throw new Error("retry-harness outbox observation SQL drifted");
+          }
+          const matches =
+            persistedOutbox !== null &&
+            persistedOutbox.event_id === bindings[0] &&
+            persistedOutbox.problem_id === bindings[1] &&
+            persistedOutbox.kind === "search.index";
+          if (!matches || persistedOutbox === null) return null;
+          observedOutbox = {
+            eventId: persistedOutbox.event_id as string,
+            kind: "search.index",
+            state: persistedOutbox.state as "pending" | "delivered",
+          };
+          return persistedOutbox;
+        }
+        if (sql.includes("FROM claim_projections")) {
+          if (normalizeSql(sql) !== PROJECTION_READ_SQL) {
+            throw new Error("retry-harness projection read lost its exact event identity query");
+          }
+          if (persistedProjection === null) return null;
+          const expectedSourceSeq = options.forceProjectionReadSequenceBindingMiss
+            ? Number(persistedProjection.source_seq) + 1
+            : persistedProjection.source_seq;
+          const readsExactPersistedProjection =
+            bindings.length === 3 &&
+            bindings[0] === persistedProjection.claim_id &&
+            bindings[1] === persistedProjection.problem_id &&
+            bindings[2] === expectedSourceSeq;
+          return readsExactPersistedProjection ? persistedProjection : null;
+        }
         if (sql.includes("FROM integrity_checkpoints")) return persistedCheckpoint;
         throw new Error(`unexpected retry-harness first query: ${sql}`);
       },
@@ -179,6 +302,12 @@ function retryingWriteHarness(): {
         conflictArmed = false;
         throw new Error("KRATER_CHAIN_HEAD_MISMATCH");
       }
+      synchronousFtsStatements += observed.filter((statement) =>
+        statement.sql.includes("public_claim_fts"),
+      ).length;
+      if (options.failOnSynchronousFts && synchronousFtsStatements > 0) {
+        throw new Error("PLANTED_SYNCHRONOUS_FTS_UNAVAILABLE");
+      }
       const one = (needle: string): ObservedD1Statement => {
         const found = observed.find((statement) => statement.sql.includes(needle));
         if (found === undefined) throw new Error(`retry-harness statement missing: ${needle}`);
@@ -186,54 +315,189 @@ function retryingWriteHarness(): {
       };
       const updateProblem = one("UPDATE problems SET public_seq = public_seq + 1");
       const idempotencyInsert = one("INSERT INTO idempotency");
+      const claimInsert = one("INSERT INTO claims");
       const eventInsert = one("INSERT INTO events");
       const projectionInsert = one("INSERT INTO claim_projections");
       const checkpointInsert = one("INSERT INTO integrity_checkpoints");
       const outboxInsert = one("INSERT INTO outbox");
-      const nextSeq = publicSeq + 1;
-      chainDigest = updateProblem.bindings[0] as string;
-      publicSeq = nextSeq;
+      if (normalizeSql(claimInsert.sql) !== CLAIM_INSERT_SELECT_SQL) {
+        throw new Error("retry-harness claim INSERT SELECT contract drifted");
+      }
+      if (normalizeSql(eventInsert.sql) !== EVENT_INSERT_SELECT_SQL) {
+        throw new Error("retry-harness event INSERT SELECT contract drifted");
+      }
+      if (normalizeSql(outboxInsert.sql) !== OUTBOX_INSERT_SELECT_SQL) {
+        throw new Error("retry-harness outbox INSERT SELECT contract drifted");
+      }
+      const idempotencyBindings = idempotencyInsert.bindings;
+      const problemId = idempotencyBindings[0];
+      const idempotencyKey = idempotencyBindings[1];
+      if (
+        typeof problemId !== "string" ||
+        typeof idempotencyKey !== "string" ||
+        idempotencyBindings[4] !== problemId ||
+        !idempotencyInsert.sql.includes("WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)")
+      ) {
+        throw new Error("retry-harness idempotency ownership predicate missing");
+      }
+      if (
+        updateProblem.bindings[2] !== problemId ||
+        updateProblem.bindings[5] !== problemId ||
+        updateProblem.bindings[6] !== idempotencyKey
+      ) {
+        throw new Error("retry-harness problem advance lost pending idempotency ownership");
+      }
+      const projectionOwnsPendingIdempotency =
+        /FROM problems p\s+JOIN idempotency i ON i\.problem_id = p\.id AND i\.idempotency_key = \?\s+WHERE p\.id = \? AND i\.event_id IS NULL/.test(
+          projectionInsert.sql,
+        ) &&
+        projectionInsert.bindings[3] === idempotencyKey &&
+        projectionInsert.bindings[4] === problemId;
+      if (!projectionOwnsPendingIdempotency) {
+        throw new Error(
+          "retry-harness projection INSERT lost selected pending-idempotency authority",
+        );
+      }
+      if (idempotency === null) {
+        idempotency = {
+          request_digest: idempotencyBindings[2] as string,
+          event_id: null,
+          event_seq: null,
+        };
+      }
+      if (idempotency.event_id !== null) {
+        return observed.map(() => fakeD1Result());
+      }
+      const claimBindings = claimInsert.bindings;
       const eventBindings = eventInsert.bindings;
       const projectionBindings = projectionInsert.bindings;
       const checkpointBindings = checkpointInsert.bindings;
-      const idempotencyBindings = idempotencyInsert.bindings;
       const outboxBindings = outboxInsert.bindings;
+      const ownsPendingIdempotency = idempotency.request_digest === idempotencyBindings[2];
+      const projectionSelects =
+        projectionOwnsPendingIdempotency &&
+        !options.forceProjectionPredicateMiss &&
+        ownsPendingIdempotency;
+      const nextSeq = publicSeq + 1;
+      chainDigest = updateProblem.bindings[0] as string;
+      publicSeq = nextSeq;
+      const claimExecutionBindings = [...claimBindings] as (string | number | null)[];
+      const eventExecutionBindings = [...eventBindings] as (string | number | null)[];
+      const outboxExecutionBindings = [...outboxBindings] as (string | number | null)[];
+      if (options.forceClaimPredicateMiss) {
+        claimExecutionBindings[4] = `${idempotencyKey}:missing`;
+      }
+      if (options.forceOutboxPredicateMiss) {
+        outboxExecutionBindings[6] = `${idempotencyKey}:missing`;
+      }
+      const scratch = new Database(":memory:");
+      try {
+        scratch.run(`
+          CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL);
+          CREATE TABLE idempotency (
+            problem_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            event_id TEXT,
+            PRIMARY KEY (problem_id, idempotency_key)
+          );
+          CREATE TABLE claims (
+            id TEXT PRIMARY KEY,
+            problem_id TEXT NOT NULL,
+            statement TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            source_seq INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE TABLE events (
+            id TEXT PRIMARY KEY,
+            problem_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            object_kind TEXT NOT NULL,
+            object_id TEXT NOT NULL,
+            object_version INTEGER NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            row_digest TEXT,
+            chain_digest TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE TABLE outbox (
+            id INTEGER PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            problem_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            payload_sha256 TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+          );
+        `);
+        scratch
+          .query("INSERT INTO problems (id, public_seq) VALUES (?, ?)")
+          .run(problemId, nextSeq);
+        scratch
+          .query(
+            "INSERT INTO idempotency (problem_id, idempotency_key, event_id) VALUES (?, ?, NULL)",
+          )
+          .run(problemId, idempotencyKey);
+        scratch.query(claimInsert.sql).run(...claimExecutionBindings);
+        scratch.query(eventInsert.sql).run(...eventExecutionBindings);
+        scratch.query(outboxInsert.sql).run(...outboxExecutionBindings);
+        persistedClaim = scratch
+          .query("SELECT id, problem_id, statement, payload_sha256, source_seq FROM claims LIMIT 1")
+          .get() as Record<string, unknown> | null;
+        persistedEvent = scratch
+          .query(
+            `SELECT id, problem_id, seq, type, object_kind, object_id, object_version,
+                    payload_sha256, row_digest, chain_digest, created_at FROM events LIMIT 1`,
+          )
+          .get() as Record<string, unknown> | null;
+        persistedOutbox = scratch
+          .query(
+            `SELECT event_id, problem_id, kind, dedupe_key, payload_sha256, state, created_at
+             FROM outbox LIMIT 1`,
+          )
+          .get() as Record<string, unknown> | null;
+      } finally {
+        scratch.close();
+      }
+      if (projectionSelects) {
+        persistedProjection = {
+          claim_id: projectionBindings[0],
+          problem_id: projectionBindings[4],
+          source_seq: nextSeq,
+          projection_version: 1,
+          build_digest: projectionBindings[1],
+          stale: 0,
+        };
+        observedProjection = {
+          claimId: projectionBindings[0] as string,
+          problemId: projectionBindings[4] as string,
+          sourceSeq: nextSeq,
+          projectionVersion: 1,
+          buildDigest: projectionBindings[1] as string,
+          stale: false,
+        };
+      }
+      if (ownsPendingIdempotency) {
+        persistedCheckpoint = {
+          problem_id: checkpointBindings[3],
+          checkpoint_seq: nextSeq,
+          root_chain_digest: chainDigest,
+          checkpoint_digest: checkpointBindings[0],
+          checkpoint_version: 1,
+          checkpoint_mode: "unsigned-v0",
+        };
+      }
+      if (typeof persistedOutbox?.created_at === "string") {
+        outboxCreatedAt = persistedOutbox.created_at;
+      }
       idempotency = {
         request_digest: idempotencyBindings[2] as string,
-        event_id: eventBindings[0] as string,
-        event_seq: nextSeq,
+        event_id: persistedEvent === null ? null : (persistedEvent.id as string),
+        event_seq: persistedEvent === null ? null : nextSeq,
       };
-      persistedEvent = {
-        id: eventBindings[0],
-        problem_id: eventBindings[7],
-        seq: nextSeq,
-        type: "claim.created",
-        object_kind: "claim",
-        object_id: eventBindings[1],
-        object_version: 1,
-        payload_sha256: eventBindings[2],
-        row_digest: eventBindings[3],
-        chain_digest: eventBindings[4],
-        created_at: eventBindings[5],
-      };
-      persistedProjection = {
-        claim_id: projectionBindings[0],
-        problem_id: projectionBindings[4],
-        source_seq: nextSeq,
-        projection_version: 1,
-        build_digest: projectionBindings[1],
-        stale: 0,
-      };
-      persistedCheckpoint = {
-        problem_id: checkpointBindings[3],
-        checkpoint_seq: nextSeq,
-        root_chain_digest: chainDigest,
-        checkpoint_digest: checkpointBindings[0],
-        checkpoint_version: 1,
-        checkpoint_mode: "unsigned-v0",
-      };
-      outboxCreatedAt = outboxBindings[4] as string;
-      return observed.map((statement, index) =>
+      return observed.map((_statement, index) =>
         index === 1 ? fakeD1Result([{ public_seq: nextSeq }]) : fakeD1Result(),
       );
     },
@@ -244,13 +508,30 @@ function retryingWriteHarness(): {
       conflictArmed = true;
     },
     persistedOutboxCreatedAt: () => outboxCreatedAt,
+    synchronousFtsStatements: () => synchronousFtsStatements,
+    persistedWrite: () => {
+      if (
+        observedEvent === undefined ||
+        observedProjection === undefined ||
+        observedOutbox === undefined ||
+        !claimObserved
+      ) {
+        return undefined;
+      }
+      return {
+        event: observedEvent,
+        projection: observedProjection,
+        outbox: observedOutbox,
+      };
+    },
   };
 }
 
 /**
  * Pure contracts plus narrow test-only statement observers for ingress and retry
- * binding. The real D1 transaction, FTS, trigger, pagination, disconnect, and
- * restart evidence is executed by scripts/e2e-s2-krater.sh.
+ * binding. The producer harness executes the literal claim/event/outbox INSERT
+ * SELECT statements in SQLite; full D1 transaction, FTS, trigger, pagination,
+ * disconnect, and restart evidence is executed by scripts/e2e-s2-krater.sh.
  */
 describe("Krater deterministic contracts", () => {
   test("canonicalizes object keys independently of construction order", async () => {
@@ -300,6 +581,68 @@ describe("Krater deterministic contracts", () => {
     );
     expect(projectionReplayMatches(events, wrongBuildDigest)).toBe(false);
     expect(transactionBoundaryMatches(2, events, wrongBuildDigest, outbox)).toBe(false);
+  });
+
+  test("PLANTED: an independently specified V2 builder row fails replay without changing its persisted boundary", () => {
+    const persistedBody = Object.freeze({
+      statement:
+        "The durable event body stays identical while a V2 projection builder changes its projection digest.",
+    });
+    const persistedEvents: readonly KraterEvent[] = [
+      {
+        eventId: "E-v2-builder",
+        problemId: "P-v2-builder",
+        seq: 1,
+        type: "claim.created",
+        objectId: "C-v2-builder",
+        payloadSha256: "a".repeat(64),
+        rowDigest: "b".repeat(64),
+        chainDigest: "c".repeat(64),
+        createdAt: "2026-08-20T00:00:00.000Z",
+      },
+    ];
+    // This V2 row is deliberately hand-specified, not derived through
+    // replayClaimProjections: it models a persisted changed-builder result.
+    const persistedProjections: readonly ClaimProjection[] = [
+      {
+        claimId: "C-v2-builder",
+        problemId: "P-v2-builder",
+        sourceSeq: 1,
+        projectionVersion: 2,
+        buildDigest: "v2:independently-specified-projection-digest",
+        stale: false,
+      },
+    ];
+    const persistedOutbox: readonly KraterOutboxRecord[] = [
+      { eventId: "E-v2-builder", kind: "search.index", state: "pending" },
+    ];
+    const persistedCursor = 1;
+    const before = JSON.stringify({
+      body: persistedBody,
+      events: persistedEvents,
+      projections: persistedProjections,
+      outbox: persistedOutbox,
+      cursor: persistedCursor,
+    });
+
+    expect(projectionReplayMatches(persistedEvents, persistedProjections)).toBe(false);
+    expect(
+      transactionBoundaryMatches(
+        persistedCursor,
+        persistedEvents,
+        persistedProjections,
+        persistedOutbox,
+      ),
+    ).toBe(false);
+    expect(
+      JSON.stringify({
+        body: persistedBody,
+        events: persistedEvents,
+        projections: persistedProjections,
+        outbox: persistedOutbox,
+        cursor: persistedCursor,
+      }),
+    ).toBe(before);
   });
 
   test("validates bounded FTS read inputs before the real-D1 FTS query", () => {
@@ -403,6 +746,124 @@ describe("Krater deterministic contracts", () => {
     } finally {
       Date.now = originalNow;
     }
+  });
+
+  test("PLANTED: writeClaim persists the v1 projection digest from its authoritative event row", async () => {
+    const harness = retryingWriteHarness();
+    const result = await writeClaim(harness.db, {
+      problemId: "P-projection-digest-v1",
+      claimId: "C-projection-digest-v1",
+      eventId: "E-projection-digest-v1",
+      idempotencyKey: "IK-projection-digest-v1",
+      statement: "A lossless one-event projection keeps the authoritative event row digest.",
+      createdAt: new Date().toISOString(),
+    });
+    const persisted = harness.persistedWrite();
+    if (persisted === undefined) throw new Error("writeClaim did not persist its fake-D1 records");
+
+    expect(result.buildDigest).toBe(result.rowDigest);
+    expect(persisted.projection.buildDigest).toBe(persisted.event.rowDigest);
+    expect(result.buildDigest).toBe(persisted.event.rowDigest);
+    expect(projectionReplayMatches([persisted.event], [persisted.projection])).toBe(true);
+    expect(
+      transactionBoundaryMatches(
+        result.postCursor,
+        [persisted.event],
+        [persisted.projection],
+        [persisted.outbox],
+      ),
+    ).toBe(true);
+  });
+
+  test("PLANTED: core claim writes enqueue search work without touching synchronous FTS", async () => {
+    const harness = retryingWriteHarness({ failOnSynchronousFts: true });
+
+    await expect(
+      writeClaim(harness.db, {
+        problemId: "P-outbox-only-search",
+        claimId: "C-outbox-only-search",
+        eventId: "E-outbox-only-search",
+        idempotencyKey: "IK-outbox-only-search",
+        statement: "Search backlog must not make the authoritative ledger write unavailable.",
+        createdAt: new Date().toISOString(),
+      }),
+    ).resolves.toMatchObject({ eventId: "E-outbox-only-search" });
+
+    expect(harness.synchronousFtsStatements()).toBe(0);
+    expect(harness.persistedWrite()?.outbox).toEqual({
+      eventId: "E-outbox-only-search",
+      kind: "search.index",
+      state: "pending",
+    });
+  });
+
+  test("PLANTED: a zero-row claim INSERT SELECT cannot produce a successful write receipt", async () => {
+    const harness = retryingWriteHarness({ forceClaimPredicateMiss: true });
+
+    await expect(
+      writeClaim(harness.db, {
+        problemId: "P-missing-claim-insert",
+        claimId: "C-missing-claim-insert",
+        eventId: "E-missing-claim-insert",
+        idempotencyKey: "IK-missing-claim-insert",
+        statement: "A durable event cannot substitute for its missing claim source.",
+        createdAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow("Krater write did not persist its claim row.");
+    expect(harness.persistedWrite()).toBeUndefined();
+  });
+
+  test("PLANTED: a zero-row outbox INSERT SELECT cannot produce a successful write receipt", async () => {
+    const harness = retryingWriteHarness({ forceOutboxPredicateMiss: true });
+
+    await expect(
+      writeClaim(harness.db, {
+        problemId: "P-missing-outbox-insert",
+        claimId: "C-missing-outbox-insert",
+        eventId: "E-missing-outbox-insert",
+        idempotencyKey: "IK-missing-outbox-insert",
+        statement: "A write receipt requires the durable search handoff row.",
+        createdAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow("Krater write did not persist its search outbox handoff.");
+    expect(harness.persistedWrite()).toBeUndefined();
+  });
+
+  test("PLANTED: writeClaim refuses a projection INSERT SELECT that produces no owned row", async () => {
+    const harness = retryingWriteHarness({ forceProjectionPredicateMiss: true });
+
+    await expect(
+      writeClaim(harness.db, {
+        problemId: "P-projection-predicate-miss",
+        claimId: "C-projection-predicate-miss",
+        eventId: "E-projection-predicate-miss",
+        idempotencyKey: "IK-projection-predicate-miss",
+        statement: "A missing selected projection row must fail the write receipt.",
+        createdAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow("Krater write did not persist a projection.");
+    expect(harness.persistedWrite()).toBeUndefined();
+  });
+
+  test("PLANTED: writeClaim refuses one wrong source-sequence projection read binding without a receipt", async () => {
+    const harness = retryingWriteHarness({ forceProjectionReadSequenceBindingMiss: true });
+    let receipt: Awaited<ReturnType<typeof writeClaim>> | undefined;
+
+    await expect(
+      writeClaim(harness.db, {
+        problemId: "P-projection-read-sequence-miss",
+        claimId: "C-projection-read-sequence-miss",
+        eventId: "E-projection-read-sequence-miss",
+        idempotencyKey: "IK-projection-read-sequence-miss",
+        statement: "An exact projection read must not accept a source-sequence mismatch.",
+        createdAt: new Date().toISOString(),
+      }).then((result) => {
+        receipt = result;
+      }),
+    ).rejects.toThrow("Krater write did not persist a projection.");
+
+    expect(receipt).toBeUndefined();
+    expect(harness.persistedWrite()).toBeDefined();
   });
 
   test("replays contiguous envelopes and rejects sequence gaps or mixed scopes", () => {

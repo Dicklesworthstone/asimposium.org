@@ -6,7 +6,7 @@ export const MAX_CONTEXTUAL_PROBLEM_STATEMENT_BYTES = 4_096;
 export const MAX_CONTEXTUAL_PROMOTION_BYTES = 4_096;
 /** Select this newest prefix, then present it chronologically before the current promotion. */
 export const MAX_CONTEXTUAL_PROMOTIONS = 6;
-/** The complete raw provider payload remains bounded even when every field is individually valid. */
+/** The complete canonical serialized provider payload remains bounded even when every field is valid. */
 export const MAX_CONTEXTUAL_TOTAL_BYTES = 12_288;
 
 const CONTEXTUAL_INPUT_KEYS = [
@@ -124,20 +124,9 @@ function candidateFrom(value: unknown): ContextualPromotionCandidate {
   };
 }
 
-function totalInputBytes(input: ContextualScreeningInput): number {
-  const candidateBytes = (candidate: ContextualPromotionCandidate): number =>
-    utf8Bytes(candidate.title) +
-    utf8Bytes(candidate.extract) +
-    utf8Bytes(candidate.statement) +
-    utf8Bytes(candidate.public_artifact_md);
-  return (
-    utf8Bytes(input.problem_statement) +
-    candidateBytes(input.current_promotion) +
-    input.recent_same_fellow_promotions.reduce(
-      (total, promotion) => total + candidateBytes(promotion),
-      0,
-    )
-  );
+/** The exact bytes bounded at ingress and hashed into the safe decision receipt. */
+function canonicalInputBytes(input: ContextualScreeningInput): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(input));
 }
 
 /**
@@ -169,7 +158,7 @@ export function normalizeContextualScreeningInput(input: unknown): ContextualScr
     current_promotion: candidate,
     recent_same_fellow_promotions: recentPromotions,
   };
-  if (totalInputBytes(normalized) > MAX_CONTEXTUAL_TOTAL_BYTES) {
+  if (canonicalInputBytes(normalized).byteLength > MAX_CONTEXTUAL_TOTAL_BYTES) {
     throw new ContextualScreeningInputError(
       "contextual screening input exceeds the aggregate byte budget.",
     );
@@ -243,7 +232,11 @@ export async function contextualScreeningInputDigest(
   input: ContextualScreeningInput,
 ): Promise<string> {
   const normalized = normalizeContextualScreeningInput(input);
-  const encoded = new TextEncoder().encode(JSON.stringify(normalized));
-  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
+  const encoded = canonicalInputBytes(normalized);
+  // Copy into an ArrayBuffer-backed view at the WebCrypto boundary. The
+  // generic Uint8Array type also permits SharedArrayBuffer-backed views, which
+  // are not valid BufferSource inputs for SubtleCrypto.
+  const digest = await crypto.subtle.digest("SHA-256", encoded.slice().buffer);
+  const bytes = new Uint8Array(digest);
   return `sha256:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }

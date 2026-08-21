@@ -1,6 +1,11 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ProblemDocumentSchema } from "@asimposium/contracts";
+import {
+  ProblemDocumentSchema,
+  ProblemIndexEntrySchema,
+  ProblemsIndexResponseSchema,
+} from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import {
   assertServedTextSafe,
@@ -16,6 +21,8 @@ import wireEntrypoint from "../../src/index";
 import {
   createExperimentalLedgerEventTailRoutes,
   createExperimentalProblemFaceRoutes,
+  createLedgerFaceRoutes,
+  PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS,
 } from "../../src/ledger-face";
 import {
   boundEnv,
@@ -469,11 +476,33 @@ describe("face wire format", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toContain("max-age=60");
     const body = JSON.parse(res.bodyText) as {
+      version: string;
+      origin: string;
       reads: string[];
       agent_writes: string[];
       fellow_reads: string[];
+      sponsor_surface: string;
+      error_dictionary: string;
       not_yet: string[];
     };
+    expect(Object.keys(body).sort()).toEqual([
+      "agent_writes",
+      "error_dictionary",
+      "fellow_reads",
+      "not_yet",
+      "origin",
+      "reads",
+      "sponsor_surface",
+      "version",
+    ]);
+    expect(body.version).toBe("0.1.0-draft");
+    expect(body.origin).toBe(TRUSTED_STOA_ORIGIN);
+    // The signed sponsor surface carries reads as well as writes, so the key is
+    // direction-neutral; `sponsor_writes` would name only half of what it
+    // summarizes. The exact key list above reds if the old name returns.
+    expect(body.sponsor_surface).toBe("signed service envelope only; minted in the Agora console");
+    expect(body.error_dictionary).toBe("https://a.asimposium.org/schemas/problem.v1.json");
+    const schemaReads = listPublicSchemas().map((document) => document.served_at);
     expect(body.reads).toEqual([
       "/",
       "/capabilities",
@@ -483,10 +512,26 @@ describe("face wire format", () => {
       "/skill.md",
       "/problems.md",
       "/problems.json",
+      "/cursor",
       "/join/<enrollment-id>",
-      "/schemas/<name>",
+      ...schemaReads,
       "/internal/health",
     ]);
+    // phg.1: discovery may advertise only concrete mounted paths. The exact
+    // roster below reds the moment a template rejoins the list, and every
+    // advertised URL is then requested through the mounted Worker with no D1
+    // binding, so an unmountable placeholder cannot survive as a copy-pasteable
+    // next step.
+    const advertisedSchemaReads = body.reads.filter((path) => path.startsWith("/schemas/"));
+    expect(advertisedSchemaReads).toEqual(schemaReads);
+    for (const advertised of advertisedSchemaReads) {
+      expect(advertised, advertised).not.toContain("<");
+      const document = listPublicSchemas().find((entry) => entry.served_at === advertised);
+      if (document === undefined) throw new Error(`advertised schema is unmounted: ${advertised}`);
+      const served = await callWorker(`${advertised}?format=json`, {});
+      expect(served.status, advertised).toBe(200);
+      expect(served.bodyText, advertised).toBe(document.body);
+    }
     expect(body.agent_writes).toEqual([
       "POST /v1/device-code",
       "POST /v1/device-token",
@@ -500,7 +545,6 @@ describe("face wire format", () => {
     expect(body.fellow_reads).toEqual([
       "GET /v1/hello (bearer)",
       "GET /v1/sessions/<id>/pack?profile=… (bearer)",
-      "GET /cursor",
     ]);
     expect(body.not_yet).toEqual([
       "rate-limit budgets",
@@ -624,6 +668,250 @@ describe("face wire format", () => {
     expect(queries[0]).toContain("SELECT id, public_seq, created_at FROM problems");
     expect(queries[1]).toContain("SELECT id, statement, source_seq, created_at FROM claims");
     expect(queries[2]).toContain("SELECT public_seq FROM problems WHERE id = ?");
+  });
+
+  test("the mounted problem index carries every contracted entry field across JSON and Markdown", async () => {
+    const row = ProblemIndexEntrySchema.parse({
+      id: "P-DIPTYCH-PARITY",
+      public_seq: 73491,
+      created_at: "2026-08-19T01:02:03.004Z",
+      updated_at: "2027-09-21T05:06:07.008Z",
+    });
+    const queries: string[] = [];
+    const routes = createLedgerFaceRoutes();
+    const env = {
+      DB: {
+        prepare(query: string) {
+          queries.push(query);
+          return { all: async () => ({ results: [row] }) };
+        },
+      } as unknown as Env["DB"],
+    } as Env;
+
+    const jsonResponse = await routes.fetch(
+      new Request("https://a.asimposium.org/problems.json"),
+      env,
+    );
+    const markdownResponse = await routes.fetch(
+      new Request("https://a.asimposium.org/problems.md"),
+      env,
+    );
+    expect(jsonResponse.status).toBe(200);
+    expect(markdownResponse.status).toBe(200);
+    const index = ProblemsIndexResponseSchema.parse(await jsonResponse.json());
+    const entry = ProblemIndexEntrySchema.parse(index.problems[0]);
+    const markdown = await markdownResponse.text();
+    expect(markdown).toBe(
+      "# Public problems\n\n" +
+        "- `P-DIPTYCH-PARITY` — seq 73491, opened 2026-08-19T01:02:03.004Z, " +
+        "updated 2027-09-21T05:06:07.008Z\n\n" +
+        "omitted: titles, statements, and statuses land with the problem lifecycle (W5.1)\n",
+    );
+
+    const descriptorKeys = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key);
+    const schemaKeys = [...ProblemIndexEntrySchema.keyof().options];
+    const entryKeys = Object.keys(entry);
+
+    // This three-way fence deliberately makes every future optional field force
+    // explicit fixture, SQL selection, and Markdown rendering review.
+    expect([...descriptorKeys].sort()).toEqual([...schemaKeys].sort());
+    expect([...entryKeys].sort()).toEqual([...schemaKeys].sort());
+    expect([...entryKeys].sort()).toEqual([...descriptorKeys].sort());
+
+    expect(queries).toHaveLength(2);
+    const sqlSuffix = " FROM problems ORDER BY id ASC LIMIT 201";
+    for (const query of queries) {
+      expect(query.startsWith("SELECT ")).toBe(true);
+      expect(query.endsWith(sqlSuffix)).toBe(true);
+      const selectedColumns = query
+        .slice("SELECT ".length, -sqlSuffix.length)
+        .split(", ");
+      expect(selectedColumns).toEqual(descriptorKeys);
+      expect([...selectedColumns].sort()).toEqual([...schemaKeys].sort());
+    }
+
+    const fixtureValues = descriptorKeys.map((key) => String(entry[key]));
+    for (let left = 0; left < fixtureValues.length; left += 1) {
+      for (let right = left + 1; right < fixtureValues.length; right += 1) {
+        expect(fixtureValues[left]?.includes(fixtureValues[right] ?? "")).toBe(false);
+        expect(fixtureValues[right]?.includes(fixtureValues[left] ?? "")).toBe(false);
+      }
+    }
+    for (const descriptor of PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS) {
+      const segment = descriptor.renderEntry(entry);
+      expect(segment.length).toBeGreaterThan(0);
+      expect(segment).toContain(String(entry[descriptor.key]));
+    }
+  });
+
+  test("PLANTED: mounted problem-index ETags bind an updated_at-only mutation", async () => {
+    const before = {
+      id: "P-DIPTYCH-ETAG",
+      public_seq: 74,
+      created_at: "2026-08-19T01:02:03.004Z",
+      updated_at: "2026-08-20T05:06:07.008Z",
+    };
+    const after = { ...before, updated_at: "2026-08-21T09:10:11.012Z" };
+    let current = before;
+    const env = {
+      ...trustedStoaEnv(),
+      DB: {
+        prepare(query: string) {
+          expect(query).toContain("SELECT id, public_seq, created_at, updated_at FROM problems");
+          return { all: async () => ({ results: [current] }) };
+        },
+      } as unknown as Env["DB"],
+    } as Env;
+    const context = executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2];
+    const fetchFace = (path: "/problems.json" | "/problems.md", etag?: string) =>
+      wireEntrypoint.fetch(
+        new Request(`https://a.asimposium.org${path}`, {
+          headers: etag === undefined ? undefined : { "if-none-match": etag },
+        }),
+        env,
+        context,
+      );
+    const readFaces = async (expected: typeof before) => {
+      const json = await fetchFace("/problems.json");
+      const markdown = await fetchFace("/problems.md");
+      expect(json.status).toBe(200);
+      expect(markdown.status).toBe(200);
+      expect(json.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      expect(markdown.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      expect(json.headers.get("cache-control")).toBe(
+        "public, max-age=60, stale-while-revalidate=300",
+      );
+      expect(markdown.headers.get("cache-control")).toBe(json.headers.get("cache-control"));
+      expect(ProblemsIndexResponseSchema.parse(await json.json()).problems).toEqual([expected]);
+      const expectedBody =
+        "# Public problems\n\n" +
+        `- \`${expected.id}\` — seq ${expected.public_seq}, opened ${expected.created_at}, ` +
+        `updated ${expected.updated_at}\n\n` +
+        "omitted: titles, statements, and statuses land with the problem lifecycle (W5.1)\n";
+      expect(await markdown.text()).toBe(expectedBody);
+      const jsonEtag = json.headers.get("etag");
+      const markdownEtag = markdown.headers.get("etag");
+      expect(jsonEtag).not.toBeNull();
+      expect(markdownEtag).not.toBeNull();
+      expect(jsonEtag).not.toBe(markdownEtag);
+      return { jsonEtag, markdownEtag };
+    };
+
+    const first = await readFaces(before);
+    current = after;
+    const second = await readFaces(after);
+    expect(second.jsonEtag).not.toBe(first.jsonEtag);
+    expect(second.markdownEtag).not.toBe(first.markdownEtag);
+
+    for (const [path, etag] of [
+      ["/problems.json", second.jsonEtag],
+      ["/problems.md", second.markdownEtag],
+    ] as const) {
+      if (etag === null) throw new Error(`missing ${path} ETag`);
+      const conditional = await fetchFace(path, etag);
+      expect(conditional.status).toBe(304);
+      expect(conditional.headers.get("etag")).toBe(etag);
+      expect(conditional.headers.get("cache-control")).toBe(
+        "public, max-age=60, stale-while-revalidate=300",
+      );
+      expect(await conditional.text()).toBe("");
+    }
+  });
+
+  test("PLANTED: the problems index is a deterministic id-ASC total order that truncates the 201st (92x.2)", async () => {
+    // 201 rows whose public_seq AND updated_at both ascend with the id, so every
+    // rival ordering — the old per-problem-volume `public_seq DESC`, and the
+    // superficially-tempting `updated_at DESC` (which cannot honestly rank
+    // recency: a later accepted event may carry an earlier canonical instant and
+    // move updated_at backward) — is the exact reverse of `id ASC` and excludes a
+    // different row. Real SQLite performs the sort, and the captured SQL text is
+    // pinned so a hand-sorted stub result alone cannot false-green.
+    const db = new Database(":memory:");
+    try {
+      db.run(
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+      );
+      const base = Date.parse("2026-08-20T00:00:00.000Z");
+      const insert = db.prepare(
+        "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      );
+      for (let i = 0; i <= 200; i += 1) {
+        const id = `P-${String(i).padStart(3, "0")}`;
+        insert.run(id, i, "2026-08-19T00:00:00.000Z", new Date(base + i * 1_000).toISOString());
+      }
+
+      let capturedSql: string | undefined;
+      const env = {
+        DB: {
+          prepare(query: string) {
+            capturedSql = query;
+            return { all: async () => ({ results: db.query(query).all() }) };
+          },
+        } as unknown as Env["DB"],
+      } as Env;
+
+      const routes = createLedgerFaceRoutes();
+      const fetchFace = (path: "/problems.json" | "/problems.md", etag?: string) =>
+        routes.fetch(
+          new Request(`https://a.asimposium.org${path}`, {
+            headers: etag === undefined ? undefined : { "if-none-match": etag },
+          }),
+          env,
+        );
+
+      const jsonResponse = await fetchFace("/problems.json");
+      const markdownResponse = await fetchFace("/problems.md");
+      expect(jsonResponse.status).toBe(200);
+      expect(markdownResponse.status).toBe(200);
+
+      // Bind the production SQL to the exact total order; without this a stub that
+      // returned pre-sorted rows would false-green.
+      expect(capturedSql).toBe(
+        "SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY id ASC LIMIT 201",
+      );
+
+      // Exact first-200 membership and order, by id ASC — never a rival sort's head.
+      const expectedIds = Array.from({ length: 200 }, (_, i) => `P-${String(i).padStart(3, "0")}`);
+      const index = ProblemsIndexResponseSchema.parse(await jsonResponse.json());
+      expect(index.problems).toHaveLength(200);
+      expect(index.problems.map((entry) => entry.id)).toEqual(expectedIds);
+      // The truncated row is the largest id, not the largest public_seq / latest
+      // updated_at (which the rival sorts would have kept as their first row).
+      expect(index.problems.some((entry) => entry.id === "P-200")).toBe(false);
+      expect(index.omitted).toContain("results beyond the first 200 in canonical problem-id order");
+
+      // JSON/Markdown parity: same order, same truncation, same honest omission.
+      const markdown = await markdownResponse.text();
+      expect(markdown).toContain("`P-000`");
+      expect(markdown).toContain("`P-199`");
+      expect(markdown).not.toContain("`P-200`");
+      expect(markdown.indexOf("`P-000`")).toBeLessThan(markdown.indexOf("`P-199`"));
+      expect(markdown).toContain("results beyond the first 200 in canonical problem-id order");
+
+      // Deterministic, stable face ETags across repeated reads, still useful for 304.
+      const jsonEtag = jsonResponse.headers.get("etag");
+      const markdownEtag = markdownResponse.headers.get("etag");
+      expect(jsonEtag).not.toBeNull();
+      expect(markdownEtag).not.toBeNull();
+      expect(jsonEtag).not.toBe(markdownEtag);
+      expect((await fetchFace("/problems.json")).headers.get("etag")).toBe(jsonEtag);
+      expect((await fetchFace("/problems.md")).headers.get("etag")).toBe(markdownEtag);
+      for (const [path, etag] of [
+        ["/problems.json", jsonEtag],
+        ["/problems.md", markdownEtag],
+      ] as const) {
+        if (etag === null) throw new Error(`missing ${path} ETag`);
+        const conditional = await fetchFace(path, etag);
+        expect(conditional.status).toBe(304);
+        expect(conditional.headers.get("etag")).toBe(etag);
+        expect(conditional.headers.get("cache-control")).toBe(
+          "public, max-age=60, stale-while-revalidate=300",
+        );
+        expect(await conditional.text()).toBe("");
+      }
+    } finally {
+      db.close();
+    }
   });
 
   test("the retained event-tail experiment accepts only canonical decimal cursors", async () => {
@@ -904,6 +1192,7 @@ describe("face wire format", () => {
 
     expect(res.status).toBe(400);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.bodyText).toBe(UNKNOWN_FORMAT);
   });
 

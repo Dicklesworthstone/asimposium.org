@@ -5,13 +5,16 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  ENROLLMENT_SECRET_TTL_MS,
+  FELLOW_ACTIVE_CREDENTIAL_LIMIT,
   PENDING_PROPOSAL_TTL_MS,
   SPONSOR_FELLOW_PAGE_SIZE,
   STAGING_STOA_ORIGIN,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
-import { D1EnrollmentStore } from "../../src/enrollment/d1-store";
+import { createApp } from "../../src/app";
+import { D1EnrollmentStore, FELLOW_CREDENTIAL_CAP_SQL_TOKEN } from "../../src/enrollment/d1-store";
 import {
   AesGcmEnrollmentReplayProtector,
   DEVICE_CODE_TTL_MS,
@@ -33,6 +36,8 @@ import {
   SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
   SPONSOR_STEP_UP_WINDOW_SECONDS,
 } from "../../src/enrollment/service";
+import type { Env } from "../../src/env";
+import { boundEnv } from "../support/bindings";
 
 /**
  * One explicit trusted origin for every service built here.
@@ -953,6 +958,231 @@ describe("device enrollment first-decider SQL", () => {
         )
         .get(),
     ).toEqual({ status: "expired" });
+  });
+
+  test("PLANTED: mounted device-token cap refusal rolls back, then expiry frees the same key", async () => {
+    const { clock, service, sqlite } = d1DeviceServiceFixture();
+    // `deviceDatabase()` applies shipped migrations 0002, 0006, 0009, 0010,
+    // 0011, then 0008. Migration 0011 owns the active-credential cap trigger;
+    // later enrollment migrations remain outside this fixture's proof boundary.
+    const fixtureNow = NOW;
+    clock.value = fixtureNow;
+    const sponsor = { type: "sponsor", sponsorId: "usr_mounted_device_cap" } as const;
+    const started = await service.deviceStart(
+      {
+        name: "mounted-device-cap",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.64" },
+    );
+    const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
+    await service.decide(sponsor, card.enrollmentId, {
+      enrollment_id: card.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(fixtureNow / 1_000),
+    });
+
+    const target = sqlite
+      .prepare<
+        {
+          proposal_id: string;
+          fellow_id: string;
+          sponsor_id: string;
+          granted_scopes_json: string;
+          granted_resources_json: string;
+        },
+        [string]
+      >(
+        `SELECT proposal.proposal_id, proposal.fellow_id, grant_row.sponsor_id,
+                grant_row.granted_scopes_json, grant_row.granted_resources_json
+           FROM enrollment_proposals AS proposal
+           JOIN enrollment_grants AS grant_row ON grant_row.proposal_id = proposal.proposal_id
+          WHERE proposal.enrollment_id = ?`,
+      )
+      .get(card.enrollmentId);
+    if (target === null) throw new Error("approved device flow is missing its durable grant");
+
+    // These use the approved Fellow's literal grant, so the real identity and
+    // lifecycle triggers accept them. Two remain live; the third expires only
+    // after the first mounted refusal, making the retry's capacity observable.
+    expect(FELLOW_ACTIVE_CREDENTIAL_LIMIT).toBe(3);
+    const capacityExpiryStepMs = 60_000;
+    expect(capacityExpiryStepMs * 2).toBeLessThan(DEVICE_CODE_TTL_MS);
+    const expiredSeedAt = fixtureNow + capacityExpiryStepMs;
+    const seededHashes: string[] = [];
+    const seedCredential = sqlite.prepare(
+      `INSERT INTO fellow_tokens (
+         credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+         granted_scopes_json, granted_resources_json, issued_at, expires_at,
+         revoked_at, last_used_at, credential_profile, credential_origin
+       ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'bearer', 'harness-migration')`,
+    );
+    for (let index = 0; index < FELLOW_ACTIVE_CREDENTIAL_LIMIT; index += 1) {
+      const tokenHash = fixtureDigest(`mounted-device-cap-seed-${index}`);
+      seededHashes.push(tokenHash);
+      seedCredential.run(
+        `cred-mounted-device-cap-${index}`,
+        target.fellow_id,
+        target.sponsor_id,
+        tokenHash,
+        target.granted_scopes_json,
+        target.granted_resources_json,
+        fixtureNow,
+        index === FELLOW_ACTIVE_CREDENTIAL_LIMIT - 1
+          ? expiredSeedAt
+          : expiredSeedAt + capacityExpiryStepMs,
+      );
+    }
+    const activeCredentialsAt = (at: number): number =>
+      sqlite
+        .prepare<{ n: number }, [string, number, number, number]>(
+          `SELECT COUNT(*) AS n
+             FROM fellow_tokens AS existing
+             LEFT JOIN enrollment_sponsor_security AS security
+               ON security.sponsor_id = existing.sponsor_id
+            WHERE existing.fellow_id = ?
+              AND existing.revoked_at IS NULL
+              AND existing.issued_at <= ?
+              AND existing.expires_at > ?
+              AND (
+                json_type(existing.granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
+                OR json_extract(existing.granted_resources_json, '$.fellowGrantExpiresAt') > ?
+              )
+              AND existing.issued_at > COALESCE(security.panic_at, -1)`,
+        )
+        .get(target.fellow_id, at, at, at)?.n ?? -1;
+    expect(activeCredentialsAt(fixtureNow)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+
+    const key = "mounted-device-cap-retry-1";
+    const body = JSON.stringify({ flow_handle: started.device_code });
+    const mountedD1 = localD1(sqlite);
+    const mountedStore = new D1EnrollmentStore(mountedD1);
+    let mountedNow = fixtureNow;
+    const app = createApp({
+      createEnrollmentStore: () => mountedStore,
+      enrollmentClock: { now: () => mountedNow },
+    });
+    const mountedEnv: Env = boundEnv({
+      DB: mountedD1,
+      ENROLLMENT_REPLAY_KEY: "A".repeat(43),
+      STOA_ORIGIN: TEST_STOA_ORIGIN,
+      AGORA_ORIGIN: "https://asimposium.org",
+    });
+    const poll = () =>
+      app.fetch(
+        new Request(`${TEST_STOA_ORIGIN}/v1/device-token`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          body,
+        }),
+        mountedEnv,
+      );
+    const durableSnapshot = () => ({
+      proposal:
+        sqlite
+          .prepare<
+            { status: string; token_hash: string | null; token_issued_at: number | null },
+            [string]
+          >(
+            `SELECT status, token_hash, token_issued_at
+               FROM enrollment_proposals
+              WHERE proposal_id = ?`,
+          )
+          .get(target.proposal_id) ?? null,
+      credentials: sqlite
+        .prepare<
+          {
+            credential_id: string;
+            proposal_id: string | null;
+            token_hash: string;
+            issued_at: number;
+            expires_at: number;
+            revoked_at: number | null;
+          },
+          [string]
+        >(
+          `SELECT credential_id, proposal_id, token_hash, issued_at, expires_at, revoked_at
+             FROM fellow_tokens
+            WHERE fellow_id = ?
+            ORDER BY credential_id`,
+        )
+        .all(target.fellow_id),
+      pollReplays: sqlite
+        .prepare<
+          {
+            scope: string;
+            principal_scope: string;
+            idempotency_key: string;
+            request_digest: string;
+            expires_at: number;
+          },
+          [string]
+        >(
+          `SELECT scope, principal_scope, idempotency_key, request_digest, expires_at
+             FROM enrollment_idempotency
+            WHERE scope = 'poll' AND idempotency_key = ?`,
+        )
+        .all(key),
+    });
+    const beforeRefusal = durableSnapshot();
+
+    const refused = await poll();
+    expect(refused.status).toBe(409);
+    expect(refused.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+    expect(refused.headers.get("cache-control")).toBe("no-store");
+    const refusedText = await refused.text();
+    expect(JSON.parse(refusedText)).toEqual({
+      type: "https://asimposium.org/errors/FELLOW_CREDENTIAL_CAP_REACHED",
+      title: "Fellow credential capacity is reached",
+      status: 409,
+      code: "FELLOW_CREDENTIAL_CAP_REACHED",
+      detail: "This Fellow already holds the most active credentials it may hold.",
+      fix_hint:
+        "Revoke an active credential from your console's Fellows list, then retry the exact request with a new Idempotency-Key.",
+    });
+    expect(refusedText).not.toContain(started.device_code);
+    expect(refusedText).not.toContain(target.fellow_id);
+    expect(refusedText).not.toContain(FELLOW_CREDENTIAL_CAP_SQL_TOKEN);
+    for (const tokenHash of seededHashes) expect(refusedText).not.toContain(tokenHash);
+    // The SQL abort must roll back both the proposed token and its encrypted
+    // replay write. Otherwise this exact retry would replay a refusal forever.
+    expect(durableSnapshot()).toEqual(beforeRefusal);
+
+    // The expiry is a durable SQLite fact. Advance only this mounted app's
+    // injected EnrollmentClock to that exact boundary, so one formerly live
+    // seed expires without a timing-dependent wait or a process-global clock.
+    expect(activeCredentialsAt(expiredSeedAt)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT - 1);
+    mountedNow = expiredSeedAt;
+    const issued = await poll();
+    expect(issued.status).toBe(200);
+    const issuedText = await issued.text();
+    expect(JSON.parse(issuedText)).toEqual({
+      status: "approved",
+      token: expect.any(String),
+      hello_url: `${TEST_STOA_ORIGIN}/v1/hello`,
+      suggested_next: "GET /v1/hello with the bearer token",
+    });
+    expect(activeCredentialsAt(expiredSeedAt)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+    const afterIssue = durableSnapshot();
+    expect(afterIssue.proposal).toEqual({
+      status: "approved",
+      token_hash: expect.any(String),
+      token_issued_at: expiredSeedAt,
+    });
+    expect(
+      afterIssue.credentials.filter((credential) => credential.proposal_id !== null),
+    ).toHaveLength(1);
+    expect(afterIssue.pollReplays).toHaveLength(1);
+
+    const replay = await poll();
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(issuedText);
+    expect(durableSnapshot()).toEqual(afterIssue);
   });
 
   test("D1 decision step-up refuses without mutation and replays a committed result after expiry", async () => {
@@ -2262,6 +2492,267 @@ function insertLifecycleCredential(
       input.proposalId === undefined ? "harness-migration" : "enrollment",
     );
 }
+
+/**
+ * W3.7 per-Fellow active credential cap (asimposiumorg-kj90).
+ *
+ * The authority is `enrollment_credentials_active_cap` in the SHIPPED 0006
+ * migration, re-asserted by 0011 — `database()` loads both, so these run the
+ * real trigger and not a fixture of it. Rows are seeded inline rather than
+ * through `insertLifecycleCredential`, which pins fellow_id to LIFECYCLE_FELLOW
+ * and so cannot express the isolation cases.
+ */
+const CAP_FELLOW = "fellow-cap-subject";
+const CAP_OTHER_FELLOW = "fellow-cap-neighbour";
+const CAP_OTHER_SPONSOR = "usr_cap_other_sponsor";
+const CAP_AT = 1_760_000_000_000;
+
+function seedCapAuthority(
+  sqlite: Database,
+  input: {
+    readonly label: string;
+    readonly fellowId: string;
+    readonly sponsorId: string;
+    readonly name: string;
+  },
+): void {
+  const enrollmentId = fixtureEnrollmentId(`cap-${input.label}`);
+  const proposalId = `proposal-cap-${input.label}`;
+  const recordCreatedAt = CAP_AT - 1;
+  const scopes = '["review"]';
+  const resources = "{}";
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_records (
+         enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+         requested_scopes_json, requested_resources_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      enrollmentId,
+      input.sponsorId,
+      fixtureDigest(`cap-secret-${input.label}`),
+      recordCreatedAt + ENROLLMENT_SECRET_TTL_MS,
+      scopes,
+      resources,
+      recordCreatedAt,
+    );
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_proposals (
+         proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
+         created_at, expires_at, status, granted_scopes_json, granted_resources_json,
+         token_hash, token_issued_at, poll_interval_seconds
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, 5)`,
+    )
+    .run(
+      proposalId,
+      enrollmentId,
+      input.fellowId,
+      fixtureDigest(`cap-flow-${input.label}`),
+      input.name,
+      "test-model",
+      "codex",
+      CAP_AT - 1,
+      CAP_AT + PENDING_PROPOSAL_TTL_MS,
+    );
+  sqlite
+    .prepare(
+      `UPDATE enrollment_proposals
+          SET status = 'approved', granted_scopes_json = ?, granted_resources_json = ?
+        WHERE proposal_id = ?`,
+    )
+    .run(scopes, resources, proposalId);
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(input.fellowId, input.sponsorId, input.name, "test-model", "codex", CAP_AT);
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_grants (
+         proposal_id, fellow_id, sponsor_id, granted_scopes_json,
+         granted_resources_json, granted_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(proposalId, input.fellowId, input.sponsorId, scopes, resources, CAP_AT);
+}
+
+function capDatabase(): Database {
+  const sqlite = database();
+  seedCapAuthority(sqlite, {
+    label: "subject",
+    fellowId: CAP_FELLOW,
+    sponsorId: LIFECYCLE_SPONSOR,
+    name: "cap-subject",
+  });
+  seedCapAuthority(sqlite, {
+    label: "neighbour",
+    fellowId: CAP_OTHER_FELLOW,
+    sponsorId: LIFECYCLE_SPONSOR,
+    name: "cap-neighbour",
+  });
+  seedCapAuthority(sqlite, {
+    label: "other-sponsor",
+    fellowId: CAP_OTHER_SPONSOR,
+    sponsorId: CAP_OTHER_SPONSOR,
+    name: "other-sponsor-fellow",
+  });
+  return sqlite;
+}
+
+function mintCredential(
+  sqlite: Database,
+  input: {
+    readonly label: string;
+    readonly fellowId?: string;
+    readonly sponsorId?: string;
+    readonly issuedAt?: number;
+    readonly expiresAt?: number;
+    readonly revokedAt?: number | null;
+  },
+): void {
+  const issuedAt = input.issuedAt ?? CAP_AT;
+  sqlite
+    .prepare(
+      `INSERT INTO fellow_tokens (
+         credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+         granted_scopes_json, granted_resources_json, issued_at, expires_at,
+         revoked_at, last_used_at, credential_profile, credential_origin
+       ) VALUES (?, NULL, ?, ?, ?, '["review"]', '{}', ?, ?, ?, NULL, 'bearer', 'harness-migration')`,
+    )
+    .run(
+      `cred-${input.label}`,
+      input.fellowId ?? CAP_FELLOW,
+      input.sponsorId ?? LIFECYCLE_SPONSOR,
+      fixtureDigest(`cap-${input.label}`),
+      issuedAt,
+      input.expiresAt ?? issuedAt + TOKEN_TTL_MS,
+      input.revokedAt ?? null,
+    );
+}
+
+function activeCount(sqlite: Database, fellowId: string, at: number): number {
+  return (
+    sqlite
+      .prepare<{ n: number }, [string, number, number]>(
+        `SELECT COUNT(*) AS n FROM fellow_tokens
+          WHERE fellow_id = ? AND revoked_at IS NULL AND issued_at <= ? AND expires_at > ?`,
+      )
+      .get(fellowId, at, at)?.n ?? -1
+  );
+}
+
+function fillToCap(sqlite: Database): void {
+  for (let index = 0; index < FELLOW_ACTIVE_CREDENTIAL_LIMIT; index += 1) {
+    mintCredential(sqlite, { label: `seed-${index}` });
+  }
+}
+
+describe("W3.7 per-Fellow active credential cap", () => {
+  test("the shipped migration raises the exact token this store matches", () => {
+    const shipped = readFileSync(LIFECYCLE_MIGRATION, "utf8");
+    expect(shipped).toContain(`RAISE(ABORT, '${FELLOW_CREDENTIAL_CAP_SQL_TOKEN}')`);
+    // The threshold in SQL and the contract's exported limit are one number in
+    // two files. Pin them together or the response bound and the storage
+    // authority can drift apart without any test noticing.
+    expect(shipped).toContain(`) >= ${FELLOW_ACTIVE_CREDENTIAL_LIMIT}`);
+    expect(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8")).toContain(
+      `RAISE(ABORT, '${FELLOW_CREDENTIAL_CAP_SQL_TOKEN}')`,
+    );
+  });
+
+  test("a fourth active credential is refused and leaves exactly three", () => {
+    const sqlite = capDatabase();
+    fillToCap(sqlite);
+    expect(activeCount(sqlite, CAP_FELLOW, CAP_AT)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+    expect(() => mintCredential(sqlite, { label: "fourth" })).toThrow(
+      FELLOW_CREDENTIAL_CAP_SQL_TOKEN,
+    );
+    // The abort rolled the row back rather than leaving a fourth behind.
+    expect(activeCount(sqlite, CAP_FELLOW, CAP_AT)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM fellow_tokens WHERE credential_id = ?",
+        )
+        .get("cred-fourth")?.n,
+    ).toBe(0);
+    sqlite.close();
+  });
+
+  test("revocation frees exactly one slot", () => {
+    const sqlite = capDatabase();
+    fillToCap(sqlite);
+    expect(() => mintCredential(sqlite, { label: "blocked" })).toThrow(
+      FELLOW_CREDENTIAL_CAP_SQL_TOKEN,
+    );
+    sqlite
+      .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
+      .run(CAP_AT + 1, "cred-seed-0");
+    mintCredential(sqlite, { label: "after-revoke", issuedAt: CAP_AT + 2 });
+    expect(activeCount(sqlite, CAP_FELLOW, CAP_AT + 2)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+    // And the freed slot is not a second slot: the cap still bites.
+    expect(() => mintCredential(sqlite, { label: "still-capped", issuedAt: CAP_AT + 3 })).toThrow(
+      FELLOW_CREDENTIAL_CAP_SQL_TOKEN,
+    );
+    sqlite.close();
+  });
+
+  test("expiry measured against the new row's issue instant frees a slot", () => {
+    const sqlite = capDatabase();
+    mintCredential(sqlite, { label: "short", expiresAt: CAP_AT + 10 });
+    mintCredential(sqlite, { label: "long-a" });
+    mintCredential(sqlite, { label: "long-b" });
+    // At CAP_AT the short credential is still live, so the cap refuses.
+    expect(() => mintCredential(sqlite, { label: "too-early", issuedAt: CAP_AT + 5 })).toThrow(
+      FELLOW_CREDENTIAL_CAP_SQL_TOKEN,
+    );
+    // At its expiry instant it is expired — the predicate is strict `>`.
+    mintCredential(sqlite, { label: "after-expiry", issuedAt: CAP_AT + 10 });
+    expect(activeCount(sqlite, CAP_FELLOW, CAP_AT + 10)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+    sqlite.close();
+  });
+
+  test("a sponsor panic frees every pre-panic slot", () => {
+    const sqlite = capDatabase();
+    fillToCap(sqlite);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(LIFECYCLE_SPONSOR, CAP_AT + 100, CAP_AT + 100);
+    // Pre-panic rows stop consuming capacity, so a post-panic mint is admitted.
+    mintCredential(sqlite, { label: "post-panic", issuedAt: CAP_AT + 101 });
+    // A credential minted on the panic boundary itself is still refused.
+    expect(() =>
+      mintCredential(sqlite, { label: "on-boundary", issuedAt: CAP_AT + 100 }),
+    ).toThrow();
+    sqlite.close();
+  });
+
+  test("the cap is scoped to one Fellow and does not cross sponsors", () => {
+    const sqlite = capDatabase();
+    fillToCap(sqlite);
+    expect(() => mintCredential(sqlite, { label: "capped" })).toThrow(
+      FELLOW_CREDENTIAL_CAP_SQL_TOKEN,
+    );
+    // A different Fellow under the SAME sponsor is unaffected.
+    mintCredential(sqlite, { label: "neighbour", fellowId: CAP_OTHER_FELLOW });
+    // As is a Fellow under a different sponsor.
+    mintCredential(sqlite, {
+      label: "other-sponsor",
+      fellowId: CAP_OTHER_SPONSOR,
+      sponsorId: CAP_OTHER_SPONSOR,
+    });
+    expect(activeCount(sqlite, CAP_OTHER_FELLOW, CAP_AT)).toBe(1);
+    expect(activeCount(sqlite, CAP_OTHER_SPONSOR, CAP_AT)).toBe(1);
+    expect(activeCount(sqlite, CAP_FELLOW, CAP_AT)).toBe(FELLOW_ACTIVE_CREDENTIAL_LIMIT);
+    sqlite.close();
+  });
+});
 
 function ensureDeviceSchema(sqlite: Database): void {
   const hasKind = sqlite

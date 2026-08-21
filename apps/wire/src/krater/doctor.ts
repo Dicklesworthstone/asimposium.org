@@ -13,6 +13,14 @@
 import type { ClaimProjection, KraterEvent } from "./krater.ts";
 import { replayClaimProjections } from "./krater.ts";
 
+/**
+ * The doctor is a whole-problem, dry-run comparison. Refuse a larger request
+ * rather than emit a partial report that could drive an incomplete rebuild.
+ * With at most this many input rows, drift is bounded by four diagnostics per
+ * replayed row plus one per stored row, and rebuildSet by this same row cap.
+ */
+export const MAX_PROJECTION_DOCTOR_INPUT_ROWS = 512;
+
 export class ProjectionDoctorInputError extends Error {
   readonly code = "PROJECTION_DOCTOR_INPUT_INVALID";
 
@@ -20,6 +28,10 @@ export class ProjectionDoctorInputError extends Error {
     super(`PROJECTION_DOCTOR_INPUT_INVALID: ${detail}`);
     this.name = "ProjectionDoctorInputError";
   }
+}
+
+function compareBinaryClaimIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export type ProjectionDrift =
@@ -36,8 +48,15 @@ export type ProjectionDrift =
   | {
       readonly kind: "stale_projection";
       readonly claimId: string;
-      readonly expected: false;
-      readonly actual: true;
+      readonly expected: boolean;
+      readonly actual: boolean;
+    }
+  | {
+      readonly kind: "invalid_stale_shape";
+      readonly claimId: string;
+      readonly expected: "boolean";
+      /** The runtime `typeof` classification; never reflect an untrusted value. */
+      readonly actualType: string;
     }
   | {
       readonly kind: "version_divergence";
@@ -79,6 +98,12 @@ export function doctorProjections(
   events: readonly KraterEvent[],
   stored: readonly ClaimProjection[],
 ): ProjectionDoctorReport {
+  if (events.length + stored.length > MAX_PROJECTION_DOCTOR_INPUT_ROWS) {
+    throw new ProjectionDoctorInputError(
+      `combined input exceeds the ${MAX_PROJECTION_DOCTOR_INPUT_ROWS}-row report cap`,
+    );
+  }
+
   if (
     events.some((event) => event.problemId !== problemId) ||
     stored.some((projection) => projection.problemId !== problemId)
@@ -111,12 +136,20 @@ export function doctorProjections(
       });
       continue;
     }
-    if (current.stale) {
+    const actualStale: unknown = current.stale;
+    if (typeof actualStale !== "boolean") {
+      drift.push({
+        kind: "invalid_stale_shape",
+        claimId: projection.claimId,
+        expected: "boolean",
+        actualType: typeof actualStale,
+      });
+    } else if (actualStale !== projection.stale) {
       drift.push({
         kind: "stale_projection",
         claimId: projection.claimId,
-        expected: false,
-        actual: true,
+        expected: projection.stale,
+        actual: actualStale,
       });
     }
     if (current.sourceSeq !== projection.sourceSeq) {
@@ -146,20 +179,23 @@ export function doctorProjections(
   }
 
   // A stored projection with no log claim is an orphan — fabricated state.
+  // Keep the replay-derived diagnostics above in their existing field order,
+  // then make this caller-order-independent suffix deterministic.
+  const orphanDrift: ProjectionDrift[] = [];
   for (const projection of stored) {
     if (!replayedById.has(projection.claimId)) {
-      drift.push({
+      orphanDrift.push({
         kind: "orphan_projection",
         claimId: projection.claimId,
         detail: "a projection row exists with no backing log event — fabricated state",
       });
     }
   }
+  orphanDrift.sort((left, right) => compareBinaryClaimIds(left.claimId, right.claimId));
+  drift.push(...orphanDrift);
 
   // The rebuild set: every claim whose stored state diverges from the replay.
-  const rebuildSet = [...new Set(drift.map((item) => item.claimId))].sort((left, right) =>
-    left < right ? -1 : left > right ? 1 : 0,
-  );
+  const rebuildSet = [...new Set(drift.map((item) => item.claimId))].sort(compareBinaryClaimIds);
 
   return {
     problemId,

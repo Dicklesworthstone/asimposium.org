@@ -1,13 +1,13 @@
 import {
   EnrollmentFlowHandleSchema,
   EnrollmentHelloResponseSchema,
+  FELLOW_ACTIVE_CREDENTIAL_LIMIT,
   PENDING_PROPOSAL_TTL_MS,
 } from "@asimposium/contracts";
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 
 import { createApp } from "../app.ts";
 import { D1EnrollmentStore } from "./d1-store.ts";
-import { createEnrollmentRouter } from "./router.ts";
 import {
   DEVICE_CODE_TTL_MS,
   EnrollmentError,
@@ -26,6 +26,12 @@ interface LocalEnrollmentEnv {
    * fail-closed operational response as a malformed one.
    */
   STOA_ORIGIN?: string;
+  /**
+   * Trusted deployment binding for every Agora URL emitted by production
+   * enrollment dispatch. It is optional here so absent or malformed local
+   * configuration reaches production's same fail-closed response.
+   */
+  AGORA_ORIGIN?: string;
 }
 
 function response(body: unknown, status = 200): Response {
@@ -51,28 +57,37 @@ let cached:
     }
   | undefined;
 let localClockOffsetMs = 0;
+let localPinnedNow: number | undefined;
+let localCredentialCapExpiryAt: number | undefined;
+
+function localNow(): number {
+  return localPinnedNow ?? Date.now() + localClockOffsetMs;
+}
 
 /**
- * The exact public texts hello's `next_actions` name. S-1's first safe read has
- * to land on a real successful canonical read, so these two paths are served by
- * the **production** handler in `createApp()` — the same `servePublicText` route
- * table a deployed Worker uses — rather than a fixture body invented here. A
- * fixture would prove only that this harness can return 200.
+ * One production app for this isolate, built with the harness's own store and
+ * clock. It serves public texts, the enrollment plane, and every other mounted
+ * production surface through the deployed middleware, dispatch, error, and 404
+ * path. The stable clock object closes over the live offset, so a local clock
+ * advance remains visible without rebuilding a cached enrollment stack.
  *
- * Everything else still goes to the local enrollment router and its adjustable
- * clock: `createApp()` builds its own enrollment stack from bindings this
- * harness does not supply, and routing enrollment through it would silently
- * discard the clock offsets the TTL proofs depend on.
+ * Local-only setup and observation routes stay above this production fall-through.
  */
-const PUBLIC_TEXT_PROOF_PATHS: readonly string[] = ["/protocol.md", "/skill.md"];
+let cachedProductionApp:
+  | { readonly db: D1Database; readonly app: ReturnType<typeof createApp> }
+  | undefined;
 
-/**
- * Built once per isolate. Construction is binding-free; only the two paths above
- * are ever dispatched to it, and `servePublicText` reads no binding at all —
- * which is why passing this harness's narrower env through is sound rather than
- * merely convenient.
- */
-let cachedPublicTextApp: ReturnType<typeof createApp> | undefined;
+function productionApp(env: LocalEnrollmentEnv): ReturnType<typeof createApp> {
+  if (cachedProductionApp !== undefined && cachedProductionApp.db === env.DB) {
+    return cachedProductionApp.app;
+  }
+  const app = createApp({
+    createEnrollmentStore: () => new D1EnrollmentStore(env.DB),
+    enrollmentClock: { now: localNow },
+  });
+  cachedProductionApp = { db: env.DB, app };
+  return app;
+}
 
 /**
  * This is deliberately duplicated from the production service's private
@@ -81,6 +96,13 @@ let cachedPublicTextApp: ReturnType<typeof createApp> | undefined;
  * contract or adding an application route for it.
  */
 const LOCAL_POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION = "flow-terminal-v1";
+
+/**
+ * A single deterministic interval for the expiring third credential and the
+ * final harness clock advance. Equality at this boundary frees exactly one
+ * slot because the shipped cap predicate requires expires_at > issued_at.
+ */
+const LOCAL_CREDENTIAL_CAP_EXPIRY_STEP_MS = 60_000;
 
 async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
@@ -112,7 +134,7 @@ function resolveService(env: LocalEnrollmentEnv): EnrollmentService | Response {
       agoraOrigin: "https://asimposium.org",
       store: new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
-      clock: { now: () => Date.now() + localClockOffsetMs },
+      clock: { now: localNow },
     });
     cached = {
       db: env.DB,
@@ -234,21 +256,13 @@ async function localHelloBinding(service: EnrollmentService, request: Request): 
  * drive a real workerd D1 binding through the mountable enrollment router.
  */
 export default {
-  async fetch(
-    request: Request,
-    env: LocalEnrollmentEnv,
-    _ctx: ExecutionContext,
-  ): Promise<Response> {
+  async fetch(request: Request, env: LocalEnrollmentEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Before the enrollment service is even resolved: these reads are free
-    // (Rule A5) and must not inherit an enrollment misconfiguration's 503.
-    if (
-      (request.method === "GET" || request.method === "HEAD") &&
-      PUBLIC_TEXT_PROOF_PATHS.includes(url.pathname)
-    ) {
-      cachedPublicTextApp ??= createApp();
-      return cachedPublicTextApp.fetch(request, env as never);
+    // The local routes are the only harness surface. Everything else, including
+    // public texts and enrollment, runs through production createApp dispatch.
+    if (!url.pathname.startsWith("/__s1/")) {
+      return productionApp(env).fetch(request, env as never, ctx);
     }
 
     const resolved = resolveService(env);
@@ -414,6 +428,177 @@ export default {
       }
     }
 
+    if (request.method === "POST" && url.pathname === "/__s1/local-only/credential-cap-seed") {
+      const body = await localBody(request);
+      const flowHandle = EnrollmentFlowHandleSchema.safeParse(body?.flow_handle);
+      if (body === undefined || !flowHandle.success || Object.keys(body).length !== 1) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      try {
+        const flowHandleHash = await sha256Hex(flowHandle.data);
+        const target = await env.DB.prepare(
+          `SELECT p.proposal_id, p.fellow_id, g.sponsor_id,
+                  g.granted_scopes_json, g.granted_resources_json
+             FROM enrollment_proposals p
+             JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
+            WHERE p.flow_handle_hash = ? AND p.status = 'approved' AND p.token_hash IS NULL`,
+        )
+          .bind(flowHandleHash)
+          .first<{
+            readonly proposal_id: string;
+            readonly fellow_id: string;
+            readonly sponsor_id: string;
+            readonly granted_scopes_json: string;
+            readonly granted_resources_json: string;
+          }>();
+        if (target === null) return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+
+        const now = localNow();
+        const expiringAt = now + LOCAL_CREDENTIAL_CAP_EXPIRY_STEP_MS;
+        const seeds = [];
+        for (let index = 0; index < FELLOW_ACTIVE_CREDENTIAL_LIMIT; index += 1) {
+          seeds.push(
+            env.DB.prepare(
+              `INSERT INTO fellow_tokens (
+                 credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+                 granted_scopes_json, granted_resources_json, issued_at, expires_at,
+                 revoked_at, last_used_at, credential_profile, credential_origin
+               ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'bearer', 'harness-migration')`,
+            ).bind(
+              `cred-local-cap-${flowHandleHash.slice(0, 16)}-${index}`,
+              target.fellow_id,
+              target.sponsor_id,
+              await sha256Hex(`local-credential-cap-seed:${flowHandleHash}:${index}`),
+              target.granted_scopes_json,
+              target.granted_resources_json,
+              now,
+              index === FELLOW_ACTIVE_CREDENTIAL_LIMIT - 1
+                ? expiringAt
+                : expiringAt + LOCAL_CREDENTIAL_CAP_EXPIRY_STEP_MS,
+            ),
+          );
+        }
+        await env.DB.batch(seeds);
+
+        const counted = await env.DB.prepare(
+          `SELECT COUNT(*) AS active
+             FROM fellow_tokens AS existing
+             LEFT JOIN enrollment_sponsor_security AS security
+               ON security.sponsor_id = existing.sponsor_id
+            WHERE existing.fellow_id = ?
+              AND existing.revoked_at IS NULL
+              AND existing.issued_at <= ?
+              AND existing.expires_at > ?
+              AND (
+                json_type(existing.granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
+                OR json_extract(existing.granted_resources_json, '$.fellowGrantExpiresAt') > ?
+              )
+              AND existing.issued_at > COALESCE(security.panic_at, -1)`,
+        )
+          .bind(target.fellow_id, now, now, now)
+          .first<{ readonly active: number }>();
+        if (counted === null || !Number.isSafeInteger(counted.active)) return unavailable();
+        localCredentialCapExpiryAt = expiringAt;
+        // Integers only; no credential, hash, expiry, Fellow, or sponsor bytes cross this route.
+        return response({ seeded: FELLOW_ACTIVE_CREDENTIAL_LIMIT, active: counted.active });
+      } catch {
+        return unavailable();
+      }
+    }
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/__s1/local-only/advance-to-credential-expiry"
+    ) {
+      const body = await localBody(request);
+      const exactExpiry = localCredentialCapExpiryAt;
+      if (
+        body === undefined ||
+        Object.keys(body).length !== 0 ||
+        localClockOffsetMs !== PENDING_PROPOSAL_TTL_MS ||
+        typeof exactExpiry !== "number" ||
+        !Number.isSafeInteger(exactExpiry)
+      ) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      // Offset arithmetic with a fresh Date.now() would land after the seeded
+      // expiry. Pin the existing production clock at the exact D1 value instead.
+      localPinnedNow = exactExpiry;
+      localCredentialCapExpiryAt = undefined;
+      return response({ advanced: true });
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s1/local-only/credential-cap-proof") {
+      const body = await localBody(request);
+      const flowHandle = EnrollmentFlowHandleSchema.safeParse(body?.flow_handle);
+      if (
+        body === undefined ||
+        !flowHandle.success ||
+        typeof body.idempotency_key !== "string" ||
+        body.idempotency_key.length < 1 ||
+        body.idempotency_key.length > 128 ||
+        Object.keys(body).length !== 2
+      ) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      try {
+        const flowHandleHash = await sha256Hex(flowHandle.data);
+        const now = localNow();
+        const proof = await env.DB.prepare(
+          `SELECT p.status AS proposal_status,
+                  CASE WHEN p.token_hash IS NULL THEN 0 ELSE 1 END AS proposal_has_token,
+                  (SELECT COUNT(*) FROM fellow_tokens c WHERE c.fellow_id = p.fellow_id)
+                    AS credentials_total,
+                  (SELECT COUNT(*) FROM fellow_tokens c
+                    WHERE c.fellow_id = p.fellow_id AND c.proposal_id = p.proposal_id)
+                    AS credentials_from_proposal,
+                  (SELECT COUNT(*) FROM fellow_tokens c
+                    WHERE c.fellow_id = p.fellow_id AND c.expires_at = ?)
+                    AS credentials_expiring_at_now,
+                  (SELECT COUNT(*)
+                     FROM enrollment_idempotency i
+                    WHERE i.scope = 'poll'
+                      AND i.principal_scope = ?
+                      AND i.idempotency_key = ?) AS poll_replay_rows
+             FROM enrollment_proposals p
+            WHERE p.flow_handle_hash = ?`,
+        )
+          .bind(
+            now,
+            `${LOCAL_POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION}:${flowHandleHash}`,
+            body.idempotency_key,
+            flowHandleHash,
+          )
+          .first<{
+            readonly proposal_status: string;
+            readonly proposal_has_token: number;
+            readonly credentials_total: number;
+            readonly credentials_from_proposal: number;
+            readonly credentials_expiring_at_now: number;
+            readonly poll_replay_rows: number;
+          }>();
+        if (
+          proof === null ||
+          !["pending", "approved", "reduced", "denied", "expired"].includes(
+            proof.proposal_status,
+          ) ||
+          ![
+            proof.proposal_has_token,
+            proof.credentials_total,
+            proof.credentials_from_proposal,
+            proof.credentials_expiring_at_now,
+            proof.poll_replay_rows,
+          ].every((value) => Number.isSafeInteger(value) && value >= 0)
+        ) {
+          return unavailable();
+        }
+        // One status enum and five non-negative integers; no private material crosses this route.
+        return response(proof);
+      } catch {
+        return unavailable();
+      }
+    }
+
     if (request.method === "POST" && url.pathname === "/__s1/approve") {
       const body = await localBody(request);
       if (
@@ -487,7 +672,7 @@ export default {
       }
     }
 
-    return createEnrollmentRouter({ service }).fetch(request);
+    return productionApp(env).fetch(request, env as never, ctx);
   },
 };
 

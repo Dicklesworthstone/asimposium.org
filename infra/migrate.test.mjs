@@ -995,6 +995,27 @@ const cases = [
         [actual0016.id],
       );
 
+      const actual0020 = productionMigrations.find((migration) => migration.sequence === 20);
+      assert.ok(actual0020, "current migration 0020 must exist");
+      assert.equal(actual0020.id, "0020_session_replay_atomic_claim.sql");
+      const schemaHead20 = productionManifest.schema_heads.filter((head) => head.sequence === 20);
+      assert.equal(
+        schemaHead20.length,
+        1,
+        "the production manifest must register exactly one measured head 20",
+      );
+      const migrationsThrough0020 = productionMigrations.filter(
+        (migration) => migration.sequence <= actual0020.sequence,
+      );
+      assert.equal(migrationsThrough0020.length, 20, "the replay-claim proof requires 0001-0020");
+      assert.deepEqual(
+        planMigrations(migrationsThrough0020, actualHistorical, forwardOptions).to_apply.map(
+          (migration) => migration.id,
+        ),
+        migrationsThrough0020.slice(15).map((migration) => migration.id),
+        "the production planner must admit the complete registered 0016-0020 suffix",
+      );
+
       assert.equal(bootstrapTargetDisposition({ kind: "provably-empty" }), "ready");
       assert.equal(
         bootstrapTargetDisposition({ kind: "bootstrap-baseline15", head: 15 }),

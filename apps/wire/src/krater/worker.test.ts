@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
+import {
+  eventChainDigest,
+  eventChainMatches,
+  genesisChainDigest,
+  type KraterEvent,
+} from "./krater";
 import worker from "./worker";
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
@@ -53,6 +59,118 @@ function databaseWithEvents(events: readonly Record<string, unknown>[]): D1Datab
       };
     },
   } as unknown as D1Database;
+}
+
+interface ChangedBuilderReplayFixture {
+  readonly body: Readonly<{ readonly problem_id: string }>;
+  readonly eventBody: Readonly<{ readonly event_id: string; readonly statement: string }>;
+  readonly event: KraterEvent;
+  readonly eventRows: readonly Record<string, unknown>[];
+  readonly projectionRows: readonly Record<string, unknown>[];
+  readonly outboxRows: readonly Record<string, unknown>[];
+  readonly cursor: number;
+}
+
+async function changedBuilderReplayFixture(): Promise<ChangedBuilderReplayFixture> {
+  const body = Object.freeze({ problem_id: "P-v2-builder" });
+  const payloadSha256 = "a".repeat(64);
+  const rowDigest = "b".repeat(64);
+  const chainDigest = await eventChainDigest(
+    body.problem_id,
+    1,
+    payloadSha256,
+    await genesisChainDigest(body.problem_id),
+  );
+  const event: KraterEvent = {
+    eventId: "E-v2-builder",
+    problemId: body.problem_id,
+    seq: 1,
+    type: "claim.created",
+    objectId: "C-v2-builder",
+    payloadSha256,
+    rowDigest,
+    chainDigest,
+    createdAt: "2026-08-20T00:00:00.000Z",
+  };
+  return {
+    body,
+    eventBody: Object.freeze({
+      event_id: event.eventId,
+      statement:
+        "The durable event body stays identical while a V2 projection builder changes its projection digest.",
+    }),
+    event,
+    eventRows: [
+      {
+        id: event.eventId,
+        problem_id: event.problemId,
+        seq: event.seq,
+        type: event.type,
+        object_id: event.objectId,
+        payload_sha256: event.payloadSha256,
+        row_digest: event.rowDigest,
+        chain_digest: event.chainDigest,
+        created_at: event.createdAt,
+      },
+    ],
+    // Independently specified V2 output: never call the production projection
+    // replay/builder to construct this persisted row or its digest.
+    projectionRows: [
+      {
+        claim_id: "C-v2-builder",
+        problem_id: body.problem_id,
+        source_seq: 1,
+        projection_version: 2,
+        build_digest: "v2:independently-specified-projection-digest",
+        stale: 0,
+      },
+    ],
+    outboxRows: [{ event_id: event.eventId, kind: "search.index", state: "pending" }],
+    cursor: 1,
+  };
+}
+
+function replayReadOnlyDatabase(fixture: ChangedBuilderReplayFixture): {
+  readonly db: D1Database;
+  readonly writeAttempts: () => number;
+} {
+  let writes = 0;
+  const db = {
+    prepare(sql: string) {
+      if (!sql.trimStart().startsWith("SELECT")) {
+        writes += 1;
+        throw new Error("S2_TEST_REPLAY_WRITE_FORBIDDEN");
+      }
+      return {
+        bind(...bindings: unknown[]) {
+          if (sql.includes("FROM events WHERE problem_id = ? AND seq > ?")) {
+            if (bindings[0] !== fixture.body.problem_id || bindings[1] !== 0) {
+              throw new Error("S2_TEST_REPLAY_EVENT_QUERY_MISMATCH");
+            }
+            return { all: async () => ({ results: fixture.eventRows }) };
+          }
+          if (sql.includes("FROM claim_projections WHERE problem_id = ?")) {
+            if (bindings[0] !== fixture.body.problem_id) {
+              throw new Error("S2_TEST_REPLAY_PROJECTION_QUERY_MISMATCH");
+            }
+            return { all: async () => ({ results: fixture.projectionRows }) };
+          }
+          if (sql.includes("SELECT public_seq FROM problems WHERE id = ?")) {
+            if (bindings[0] !== fixture.body.problem_id) {
+              throw new Error("S2_TEST_REPLAY_CURSOR_QUERY_MISMATCH");
+            }
+            return { first: async () => ({ public_seq: fixture.cursor }) };
+          }
+          throw new Error(`S2_TEST_REPLAY_UNEXPECTED_READ: ${sql}`);
+        },
+      };
+    },
+    batch() {
+      writes += 1;
+      throw new Error("S2_TEST_REPLAY_WRITE_FORBIDDEN");
+    },
+  } as unknown as D1Database;
+  return { db, writeAttempts: () => writes };
 }
 
 function databaseTouchCounter(): { readonly db: D1Database; readonly touches: () => number } {
@@ -340,6 +458,109 @@ describe("S2 local harness boundary", () => {
     );
     expect(unsafeEvent.status).toBe(400);
     expect(await unsafeEvent.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
+  });
+
+  test("PLANTED: mounted replay reports the independently literal V1 projection as true without mutating persisted rows", async () => {
+    const fixture = await changedBuilderReplayFixture();
+    const v1Fixture: ChangedBuilderReplayFixture = {
+      ...fixture,
+      // Independently literal V1 persistence contract: do not ask the production
+      // replay/builder to construct this row. V1's build digest is the event row digest.
+      projectionRows: [
+        {
+          claim_id: "C-v2-builder",
+          problem_id: "P-v2-builder",
+          source_seq: 1,
+          projection_version: 1,
+          build_digest: fixture.event.rowDigest,
+          stale: 0,
+        },
+      ],
+    };
+    const readonlyDb = replayReadOnlyDatabase(v1Fixture);
+    const before = JSON.stringify({
+      request: v1Fixture.body,
+      eventBody: v1Fixture.eventBody,
+      events: v1Fixture.eventRows,
+      projections: v1Fixture.projectionRows,
+      outbox: v1Fixture.outboxRows,
+      cursor: v1Fixture.cursor,
+    });
+    expect(await eventChainMatches([v1Fixture.event])).toBe(true);
+
+    const env = harnessEnv({
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    });
+    env.DB = readonlyDb.db;
+    const response = await worker.fetch(
+      harnessRequest("/__s2/replay", HARNESS_CAPABILITY, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(v1Fixture.body),
+      }),
+      env,
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ matches: true, cursor: 1, event_count: 1 });
+    expect(readonlyDb.writeAttempts()).toBe(0);
+    expect(
+      JSON.stringify({
+        request: v1Fixture.body,
+        eventBody: v1Fixture.eventBody,
+        events: v1Fixture.eventRows,
+        projections: v1Fixture.projectionRows,
+        outbox: v1Fixture.outboxRows,
+        cursor: v1Fixture.cursor,
+      }),
+    ).toBe(before);
+  });
+
+  test("PLANTED: mounted replay reports a changed V2 builder as false without mutating persisted rows", async () => {
+    const fixture = await changedBuilderReplayFixture();
+    const readonlyDb = replayReadOnlyDatabase(fixture);
+    const before = JSON.stringify({
+      request: fixture.body,
+      eventBody: fixture.eventBody,
+      events: fixture.eventRows,
+      projections: fixture.projectionRows,
+      outbox: fixture.outboxRows,
+      cursor: fixture.cursor,
+    });
+    expect(await eventChainMatches([fixture.event])).toBe(true);
+
+    const env = harnessEnv({
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    });
+    env.DB = readonlyDb.db;
+    const response = await worker.fetch(
+      harnessRequest("/__s2/replay", HARNESS_CAPABILITY, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(fixture.body),
+      }),
+      env,
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ matches: false, cursor: 1, event_count: 1 });
+    expect(readonlyDb.writeAttempts()).toBe(0);
+    expect(
+      JSON.stringify({
+        request: fixture.body,
+        eventBody: fixture.eventBody,
+        events: fixture.eventRows,
+        projections: fixture.projectionRows,
+        outbox: fixture.outboxRows,
+        cursor: fixture.cursor,
+      }),
+    ).toBe(before);
   });
 
   test("the harness capability is declared only by local S2 Wrangler configurations", () => {

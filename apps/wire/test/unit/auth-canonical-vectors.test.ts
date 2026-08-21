@@ -282,12 +282,18 @@ describe("verification key windows", () => {
 
   test("PLANTED: an envelope issued at or after retirement is refused", async () => {
     const key = await rotationKey(KEY_A);
+    const current = await rotationKey(KEY_B);
     const keyring = new VerificationKeyring([
       {
         kid: key.kid,
         publicKeyHex: key.publicKeyHex,
         notBefore: 0,
         notAfter: ROTATION_INSTANT,
+      },
+      {
+        kid: current.kid,
+        publicKeyHex: current.publicKeyHex,
+        notBefore: ROTATION_INSTANT,
       },
     ]);
 

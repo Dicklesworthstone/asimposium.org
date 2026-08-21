@@ -32,6 +32,8 @@ const FAULT_PLANTS = {
   TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE: "0",
   TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE: "0",
   TOKEN_LIFECYCLE_TEST_LOG_LEAK: "0",
+  TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW: "0",
+  TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP: "0",
   TOKEN_LIFECYCLE_TEST_PARTIAL_PS: "0",
   TOKEN_LIFECYCLE_TEST_PID_REUSE: "0",
   TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE: "0",
@@ -392,6 +394,9 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
     '"assertion":"self_test_transitive_source_config_migration_closure"',
   );
   expect(result.stdout).toContain('"wrangler_started":false');
+  expect(result.stdout).toContain(
+    '"record":"panic-credential-coverage","assertion":"panic_complete_known_minted_fellow_credential_coverage_and_pre_panic_active_token_rejection","known_fellows":5,"known_credentials":5,"pre_panic_active_tokens":2,"post_panic_rejected_tokens":2,"status":"pass"',
+  );
 
   const packageJson = JSON.parse(readFileSync(PACKAGE, "utf8")) as {
     scripts?: Record<string, string>;
@@ -477,7 +482,6 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("startup_gate_supervisor_reaped_before_target_launch");
   expect(script).toContain("TOKEN_LIFECYCLE_BARRIER_CAPABILITY");
   expect(script).toContain('"deterministic_barrier":true');
-  expect(script).toContain("panic-leaves-no-active-minted-credential");
   expect(script).toContain("real_workerd_d1_session_open_workshop_promote_close_same_key_races");
   expect(script).toContain("revoked_credential_refused_before_effectful_session_write");
   expect(script).toContain('"assertion":"revoke_vs_effectful_domain_write","status":"pass"');
@@ -660,6 +664,16 @@ const FAULT_CASES: readonly {
     code: "TOKEN_LIFECYCLE_SECRET_LOG_LEAK",
     requiresWorkerCleanup: true,
   },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW",
+    code: "TOKEN_LIFECYCLE_HTTP_PROOF_FAILED",
+    requiresWorkerCleanup: true,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP",
+    code: "TOKEN_LIFECYCLE_HTTP_PROOF_FAILED",
+    requiresWorkerCleanup: true,
+  },
 ];
 
 for (const current of FAULT_CASES) {
@@ -689,9 +703,9 @@ for (const current of FAULT_CASES) {
 
 test("PLANTED: combined lifecycle evidence omits the unevidenced active cap", () => {
   const script = readFileSync(SCRIPT, "utf8");
-  const assertions = [...script.matchAll(/"assertion":"(mint_use_scope_refusal_[^"]+)","status":"pass"/g)].map(
-    (match) => match[1],
-  );
+  const assertions = [
+    ...script.matchAll(/"assertion":"(mint_use_scope_refusal_[^"]+)","status":"pass"/g),
+  ].map((match) => match[1]);
 
   expect(assertions).toEqual([
     "mint_use_scope_refusal_expiry_individual_revoke_panic_zero_active_credentials_cross_principal_exact_replay",
@@ -699,6 +713,19 @@ test("PLANTED: combined lifecycle evidence omits the unevidenced active cap", ()
   // PLANTED: field reordering or an additional evidence record must not let an
   // unsupported active-cap claim evade the exact combined-record selector.
   expect(script).not.toContain("active_cap");
+});
+
+test("PLANTED: shared panic verifier rejects omitted rows and a no-op rejection callback", async () => {
+  for (const control of [
+    "TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW",
+    "TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP",
+  ] as const) {
+    const result = await runHarness(["--self-test"], { [control]: "1" });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('"code":"TOKEN_LIFECYCLE_PANIC_VERIFIER_SELF_TEST_FAILED"');
+    expect(result.stdout).not.toContain('"record":"panic-credential-coverage"');
+    expect(result.stdout).not.toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
+  }
 });
 
 test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit registered", async () => {
@@ -753,6 +780,20 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   expect(authorizationLatencyMs).toBeLessThanOrEqual(60_000);
   expect(authorizationRecord?.assertion_diff).toContain("operator=credential_revoked");
   expect(authorizationRecord?.assertion_diff).toContain("canary=<redacted>");
+  const panicCoverage = records.filter((record) => record.record === "panic-credential-coverage");
+  expect(panicCoverage).toEqual([
+    {
+      suite: "token-lifecycle-local",
+      record: "panic-credential-coverage",
+      assertion:
+        "panic_complete_known_minted_fellow_credential_coverage_and_pre_panic_active_token_rejection",
+      known_fellows: 5,
+      known_credentials: 5,
+      pre_panic_active_tokens: 2,
+      post_panic_rejected_tokens: 2,
+      status: "pass",
+    },
+  ]);
   for (const scope of ["session_open", "workshop_push", "promote", "session_close"]) {
     expect(result.stdout).toContain(
       `"assertion":"concurrent_http_same_key_${scope}_exact_replay","deterministic_barrier":true`,

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ContractProblemSchema, OpaqueProblemSchema } from "@asimposium/contracts";
 
-import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
+import {
+  createEnrollmentRouter,
+  MAX_ENROLLMENT_REQUEST_BODY_BYTES,
+} from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
   DEVICE_START_RATE_LIMIT_ATTEMPTS,
@@ -34,9 +37,57 @@ class FixedRandom {
   }
 }
 
-const sponsor = { type: "sponsor", sponsorId: "sponsor-router-1" } as const;
+const sponsor = { type: "sponsor", sponsorId: "usr_sponsor_router_1" } as const;
 const malformedSecret = ["v1", "short"].join(".");
 let requestSequence = 0;
+
+const PUBLIC_ENROLLMENT_WRITES = [
+  {
+    path: "/v1/device-code",
+    trustedAddress: true,
+    invalidCode: "DEVICE_CODE_BODY_INVALID",
+    invalidStatus: 422,
+    service: "deviceStart",
+    body: {
+      name: "bounded-ingress-device",
+      model: "test-model",
+      harness: "test-harness",
+      requested_scopes: ["review"],
+    },
+  },
+  {
+    path: "/v1/fellows",
+    trustedAddress: false,
+    invalidCode: "PAIRING_INVALID",
+    invalidStatus: 400,
+    service: "claim",
+    body: {
+      enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+      secret: `v1.${"A".repeat(43)}`,
+      name: "bounded-ingress-fellow",
+      model: "test-model",
+      harness: "test-harness",
+    },
+  },
+  {
+    path: "/v1/fellows/flow",
+    trustedAddress: false,
+    invalidCode: "PAIRING_INVALID",
+    invalidStatus: 400,
+    service: "poll",
+    body: { flow_handle: `flow_v1.${"A".repeat(43)}` },
+  },
+  {
+    path: "/v1/device-token",
+    trustedAddress: false,
+    invalidCode: "PAIRING_INVALID",
+    invalidStatus: 400,
+    service: "poll",
+    body: { flow_handle: `flow_v1.${"B".repeat(43)}` },
+  },
+] as const;
+
+type PublicEnrollmentWrite = (typeof PUBLIC_ENROLLMENT_WRITES)[number];
 
 function routerFixture() {
   const random = new FixedRandom();
@@ -66,6 +117,60 @@ async function request(
     headers.set("idempotency-key", `router-test-${requestSequence}`);
   }
   return router.fetch(new Request(`https://a.asimposium.org${path}`, { ...init, headers }));
+}
+
+function publicEnrollmentWriteRequest(
+  route: PublicEnrollmentWrite,
+  body: ReadableStream<Uint8Array>,
+  extraHeaders: Record<string, string> = {},
+  signal?: AbortSignal,
+): Request {
+  requestSequence += 1;
+  const headers = new Headers({
+    "content-type": "application/json",
+    "idempotency-key": `router-test-${requestSequence}`,
+    ...(route.trustedAddress ? { "cf-connecting-ip": "192.0.2.45" } : {}),
+  });
+  for (const [name, value] of new Headers(extraHeaders)) headers.set(name, value);
+  return new Request(`https://a.asimposium.org${route.path}`, {
+    method: "POST",
+    headers,
+    body,
+    signal,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+}
+
+function trackedEnrollmentBody(
+  chunks: readonly Uint8Array[],
+  error?: unknown,
+): {
+  readonly body: ReadableStream<Uint8Array>;
+  readonly cancellations: () => number;
+} {
+  let index = 0;
+  let cancellationCount = 0;
+  return {
+    body: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[index];
+        if (chunk !== undefined) {
+          index += 1;
+          controller.enqueue(chunk);
+          return;
+        }
+        if (error !== undefined) {
+          controller.error(error);
+          return;
+        }
+        controller.close();
+      },
+      cancel() {
+        cancellationCount += 1;
+      },
+    }),
+    cancellations: () => cancellationCount,
+  };
 }
 
 describe("S-1 mountable enrollment router", () => {
@@ -752,13 +857,7 @@ describe("S-1 mountable enrollment router", () => {
 
   test("public JSON writes reject missing and non-JSON media types before parsing or mutation", async () => {
     const { router, service } = routerFixture();
-    const cases = [
-      { path: "/v1/device-code", body: "{}", trustedAddress: true },
-      { path: "/v1/fellows", body: "{}", trustedAddress: false },
-      { path: "/v1/fellows/flow", body: "{}", trustedAddress: false },
-      { path: "/v1/device-token", body: "{}", trustedAddress: false },
-    ] as const;
-    for (const scenario of cases) {
+    for (const scenario of PUBLIC_ENROLLMENT_WRITES) {
       for (const contentType of [undefined, "text/plain", "application/json-seq"] as const) {
         const headers = new Headers();
         if (scenario.trustedAddress) headers.set("cf-connecting-ip", "192.0.2.44");
@@ -766,7 +865,7 @@ describe("S-1 mountable enrollment router", () => {
         const response = await request(router, scenario.path, {
           method: "POST",
           headers,
-          body: new TextEncoder().encode(scenario.body),
+          body: new TextEncoder().encode("{}"),
         });
         expect(response.status, `${scenario.path}:${contentType ?? "missing"}`).toBe(415);
         expect(await response.json(), `${scenario.path}:${contentType ?? "missing"}`).toMatchObject(
@@ -783,6 +882,694 @@ describe("S-1 mountable enrollment router", () => {
       }
     }
     expect(await service.pendingApprovals(sponsor)).toEqual([]);
+  });
+
+  test("public enrollment writes bound and fatally decode bytes before service effects", async () => {
+    const { service } = routerFixture();
+    const calls = { deviceStart: 0, claim: 0, poll: 0 };
+    service.deviceStart = async () => {
+      calls.deviceStart += 1;
+      throw new Error("deviceStart must not receive refused ingress");
+    };
+    service.claim = async () => {
+      calls.claim += 1;
+      throw new Error("claim must not receive refused ingress");
+    };
+    service.poll = async () => {
+      calls.poll += 1;
+      throw new Error("poll must not receive refused ingress");
+    };
+    const router = createEnrollmentRouter({ service });
+    const malformedUtf8 = Uint8Array.of(0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d);
+
+    for (const route of PUBLIC_ENROLLMENT_WRITES) {
+      const headers = new Headers({ "content-type": "application/json" });
+      if (route.trustedAddress) headers.set("cf-connecting-ip", "192.0.2.45");
+      const malformed = await request(router, route.path, {
+        method: "POST",
+        headers,
+        body: malformedUtf8,
+      });
+      expect([400, 422], route.path).toContain(malformed.status);
+      expect(await malformed.text(), route.path).not.toContain("�(");
+
+      const oversized = await request(router, route.path, {
+        method: "POST",
+        headers,
+        body: "x".repeat(MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1),
+      });
+      expect(oversized.status, route.path).toBe(413);
+      expect(await oversized.json(), route.path).toMatchObject({
+        code: "REQUEST_BODY_TOO_LARGE",
+      });
+    }
+    expect(calls).toEqual({ deviceStart: 0, claim: 0, poll: 0 });
+  });
+
+  test("a declared-over-cap enrollment body is cancelled before service effects", async () => {
+    const { service } = routerFixture();
+    let serviceCalls = 0;
+    service.claim = async () => {
+      serviceCalls += 1;
+      throw new Error("claim must not receive refused ingress");
+    };
+    const router = createEnrollmentRouter({ service });
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancellations += 1;
+      },
+    });
+    requestSequence += 1;
+    const incoming = new Request("https://a.asimposium.org/v1/fellows", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1),
+        "idempotency-key": `router-test-${requestSequence}`,
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await router.fetch(incoming);
+
+    expect(response.status).toBe(413);
+    expect(cancellations).toBe(1);
+    expect(serviceCalls).toBe(0);
+  });
+
+  test("PLANTED: a false-low chunked device-code body over cap is cancelled before service work", async () => {
+    const { service } = routerFixture();
+    let deviceStartCalls = 0;
+    service.deviceStart = async () => {
+      deviceStartCalls += 1;
+      throw new Error("deviceStart must not receive streamed over-cap ingress");
+    };
+    const router = createEnrollmentRouter({ service });
+    const secretCanary = `v1.${"A".repeat(43)}`;
+    const validDeviceStart = JSON.stringify({
+      name: "streamed-cap-agent",
+      model: "test-model",
+      harness: "test-harness",
+      tools_note: secretCanary,
+      requested_scopes: ["review"],
+    });
+    const encoder = new TextEncoder();
+    const payload = encoder.encode(
+      `${validDeviceStart}${" ".repeat(
+        MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1 - encoder.encode(validDeviceStart).byteLength,
+      )}`,
+    );
+    expect(payload.byteLength).toBe(MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1);
+
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(payload.slice(0, MAX_ENROLLMENT_REQUEST_BODY_BYTES));
+        controller.enqueue(payload.slice(MAX_ENROLLMENT_REQUEST_BODY_BYTES));
+      },
+      cancel() {
+        cancellations += 1;
+      },
+    });
+    requestSequence += 1;
+    const incoming = new Request("https://a.asimposium.org/v1/device-code", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        // Deliberately false-low: the stream, not the declaration, must enforce the cap.
+        "content-length": "1",
+        "cf-connecting-ip": "192.0.2.47",
+        "idempotency-key": `router-test-${requestSequence}`,
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const response = await router.fetch(incoming);
+    const raw = await response.text();
+
+    expect(response.status).toBe(413);
+    const refusal = JSON.parse(raw);
+    expect(refusal).toMatchObject({ code: "REQUEST_BODY_TOO_LARGE", status: 413 });
+    expect(OpaqueProblemSchema.safeParse(refusal).success).toBe(true);
+    expect(deviceStartCalls).toBe(0);
+    expect(cancellations).toBe(1);
+    expect(incoming.body?.locked).toBe(false);
+    expect(incoming.bodyUsed).toBe(true);
+    expect(raw).not.toContain(secretCanary);
+    expect(raw).not.toContain("streamed-cap-agent");
+    expect(raw).not.toContain(validDeviceStart);
+  });
+
+  test("PLANTED: every public enrollment write shares bounded fatal ingress semantics", async () => {
+    const { service } = routerFixture();
+    const calls = { deviceStart: 0, claim: 0, poll: 0 };
+    service.deviceStart = async () => {
+      calls.deviceStart += 1;
+      throw new Error("planted bounded device ingress reached service");
+    };
+    service.claim = async () => {
+      calls.claim += 1;
+      throw new Error("planted bounded claim ingress reached service");
+    };
+    service.poll = async () => {
+      calls.poll += 1;
+      throw new Error("planted bounded poll ingress reached service");
+    };
+    const router = createEnrollmentRouter({ service });
+    const encoder = new TextEncoder();
+    const secretCanary = `v1.${"Z".repeat(43)}`;
+    const snapshot = () => ({ ...calls });
+    const assertRefusal = async (
+      route: PublicEnrollmentWrite,
+      incoming: Request,
+      response: Response,
+      before: typeof calls,
+      status: number,
+      code: string,
+      markers: readonly string[],
+      cancellation?: { readonly count: () => number; readonly expected: number },
+    ) => {
+      const raw = await response.text();
+      expect(response.status, route.path).toBe(status);
+      const problem = JSON.parse(raw);
+      expect(problem, route.path).toMatchObject({ code, status });
+      if (status === 413) {
+        expect(OpaqueProblemSchema.safeParse(problem).success, route.path).toBe(true);
+      }
+      expect(calls, route.path).toEqual(before);
+      expect(await service.pendingApprovals(sponsor), route.path).toEqual([]);
+      expect(incoming.body?.locked, route.path).toBe(false);
+      expect(incoming.bodyUsed, route.path).toBe(true);
+      if (cancellation !== undefined) {
+        expect(cancellation.count(), route.path).toBe(cancellation.expected);
+      }
+      for (const marker of markers) expect(raw, route.path).not.toContain(marker);
+    };
+
+    for (const route of PUBLIC_ENROLLMENT_WRITES) {
+      const exactJson = JSON.stringify(route.body);
+      const exactPayload = `${exactJson}${" ".repeat(
+        MAX_ENROLLMENT_REQUEST_BODY_BYTES - encoder.encode(exactJson).byteLength,
+      )}`;
+      expect(encoder.encode(exactPayload).byteLength, route.path).toBe(
+        MAX_ENROLLMENT_REQUEST_BODY_BYTES,
+      );
+      const exactBody = trackedEnrollmentBody([encoder.encode(exactPayload)]);
+      const exactIncoming = publicEnrollmentWriteRequest(route, exactBody.body);
+      const exactBefore = snapshot();
+      const exactResponse = await router.fetch(exactIncoming);
+      const exactRaw = await exactResponse.text();
+      expect(exactResponse.status, route.path).toBe(503);
+      expect(calls[route.service], route.path).toBe(exactBefore[route.service] + 1);
+      expect(exactBody.cancellations(), route.path).toBe(0);
+      expect(exactIncoming.body?.locked, route.path).toBe(false);
+      expect(exactIncoming.bodyUsed, route.path).toBe(true);
+      expect(exactRaw, route.path).not.toContain(exactJson);
+      expect(await service.pendingApprovals(sponsor), route.path).toEqual([]);
+
+      const marker = `bounded-ingress-${route.path.replaceAll("/", "-")}`;
+      const requestJson = JSON.stringify({
+        ...route.body,
+        ingress_marker: marker,
+        ingress_secret: secretCanary,
+      });
+      const markers = [marker, secretCanary] as const;
+
+      const malformedBody = trackedEnrollmentBody([encoder.encode(requestJson.slice(0, -1))]);
+      const malformedIncoming = publicEnrollmentWriteRequest(route, malformedBody.body);
+      const malformedBefore = snapshot();
+      await assertRefusal(
+        route,
+        malformedIncoming,
+        await router.fetch(malformedIncoming),
+        malformedBefore,
+        route.invalidStatus,
+        route.invalidCode,
+        markers,
+        { count: malformedBody.cancellations, expected: 0 },
+      );
+
+      const declaredBody = trackedEnrollmentBody([encoder.encode(requestJson)]);
+      const declaredIncoming = publicEnrollmentWriteRequest(route, declaredBody.body, {
+        "content-length": String(MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1),
+      });
+      const declaredBefore = snapshot();
+      await assertRefusal(
+        route,
+        declaredIncoming,
+        await router.fetch(declaredIncoming),
+        declaredBefore,
+        413,
+        "REQUEST_BODY_TOO_LARGE",
+        markers,
+        { count: declaredBody.cancellations, expected: 1 },
+      );
+
+      const falseLowPayload = encoder.encode(
+        `${requestJson}${" ".repeat(
+          MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1 - encoder.encode(requestJson).byteLength,
+        )}`,
+      );
+      expect(falseLowPayload.byteLength, route.path).toBe(MAX_ENROLLMENT_REQUEST_BODY_BYTES + 1);
+      const falseLowBody = trackedEnrollmentBody([
+        falseLowPayload.slice(0, MAX_ENROLLMENT_REQUEST_BODY_BYTES),
+        falseLowPayload.slice(MAX_ENROLLMENT_REQUEST_BODY_BYTES),
+      ]);
+      const falseLowIncoming = publicEnrollmentWriteRequest(route, falseLowBody.body, {
+        "content-length": "1",
+      });
+      const falseLowBefore = snapshot();
+      await assertRefusal(
+        route,
+        falseLowIncoming,
+        await router.fetch(falseLowIncoming),
+        falseLowBefore,
+        413,
+        "REQUEST_BODY_TOO_LARGE",
+        markers,
+        { count: falseLowBody.cancellations, expected: 1 },
+      );
+
+      const readerRejectedBody = trackedEnrollmentBody(
+        [encoder.encode(requestJson)],
+        new Error("planted enrollment reader rejection"),
+      );
+      const readerRejectedIncoming = publicEnrollmentWriteRequest(route, readerRejectedBody.body);
+      const readerRejectedBefore = snapshot();
+      await assertRefusal(
+        route,
+        readerRejectedIncoming,
+        await router.fetch(readerRejectedIncoming),
+        readerRejectedBefore,
+        route.invalidStatus,
+        route.invalidCode,
+        markers,
+        { count: readerRejectedBody.cancellations, expected: 0 },
+      );
+
+      const abort = new AbortController();
+      let abortChunkSent = false;
+      let abortCancellations = 0;
+      const abortedBody = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!abortChunkSent) {
+            abortChunkSent = true;
+            controller.enqueue(encoder.encode(requestJson));
+            return new Promise<void>((resolve) => {
+              queueMicrotask(() => {
+                abort.abort(new DOMException("planted enrollment request abort", "AbortError"));
+                resolve();
+              });
+            });
+          }
+          controller.error(abort.signal.reason);
+        },
+        cancel() {
+          abortCancellations += 1;
+        },
+      });
+      const abortedIncoming = publicEnrollmentWriteRequest(route, abortedBody, {}, abort.signal);
+      const abortedBefore = snapshot();
+      await assertRefusal(
+        route,
+        abortedIncoming,
+        await router.fetch(abortedIncoming),
+        abortedBefore,
+        route.invalidStatus,
+        route.invalidCode,
+        markers,
+        { count: () => abortCancellations, expected: 0 },
+      );
+      expect(abortedIncoming.signal.aborted, route.path).toBe(true);
+      expect(abortedIncoming.signal.reason, route.path).toBeInstanceOf(DOMException);
+
+      const compressedBody = trackedEnrollmentBody([encoder.encode(requestJson)]);
+      const compressedIncoming = publicEnrollmentWriteRequest(route, compressedBody.body, {
+        "content-encoding": "gzip",
+      });
+      const compressedBefore = snapshot();
+      await assertRefusal(
+        route,
+        compressedIncoming,
+        await router.fetch(compressedIncoming),
+        compressedBefore,
+        route.invalidStatus,
+        route.invalidCode,
+        markers,
+        { count: compressedBody.cancellations, expected: 1 },
+      );
+    }
+  });
+
+  test("an early replay-key refusal cancels an unread enrollment body", async () => {
+    const { service } = routerFixture();
+    let serviceCalls = 0;
+    service.claim = async () => {
+      serviceCalls += 1;
+      throw new Error("claim must not receive an unkeyed request");
+    };
+    const router = createEnrollmentRouter({ service });
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancellations += 1;
+      },
+    });
+    const response = await router.fetch(
+      new Request("https://a.asimposium.org/v1/fellows", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "IDEMPOTENCY_KEY_INVALID" });
+    expect(cancellations).toBe(1);
+    expect(serviceCalls).toBe(0);
+  });
+
+  test("mounted sponsor and operator early refusals cancel every unread request body", async () => {
+    const { service } = routerFixture();
+    const unconfigured = createEnrollmentRouter({ service });
+    const configuredButUnavailable = createEnrollmentRouter({
+      service,
+      verifiedSponsor: async () => new Response(null, { status: 503 }),
+      verifiedOperator: async () => new Response(null, { status: 503 }),
+    });
+    const malformedVerifier = createEnrollmentRouter({
+      service,
+      verifiedSponsor: async () => undefined as never,
+      verifiedOperator: async () => undefined as never,
+    });
+    const wrongPrincipalVerifier = createEnrollmentRouter({
+      service,
+      verifiedSponsor: async () => ({
+        principal: { type: "fellow", fellowId: "F-wrong-principal" },
+        rawBody: new Uint8Array(),
+      }),
+      verifiedOperator: async () => ({
+        principal: { type: "sponsor", sponsorId: "usr_wrong_principal" },
+        rawBody: new Uint8Array(),
+      }),
+    });
+    const successfulVerifier = createEnrollmentRouter({
+      service,
+      verifiedSponsor: async () => ({
+        principal: { type: "sponsor", sponsorId: "usr_router_test" },
+        rawBody: new TextEncoder().encode("{}"),
+      }),
+      verifiedOperator: async () => ({
+        principal: {
+          type: "operator",
+          operatorId: "operator-router-test",
+          serviceEnvelopeKid: "operator-router-test-key",
+        },
+        rawBody: new TextEncoder().encode("{}"),
+      }),
+    });
+    const successfulOperatorVerifier = createEnrollmentRouter({
+      service,
+      verifiedOperator: async () => ({
+        principal: {
+          type: "operator",
+          operatorId: "operator-router-test",
+          serviceEnvelopeKid: "operator-router-test-key",
+        },
+        rawBody: new TextEncoder().encode(
+          JSON.stringify({
+            sponsor_id: "usr_operator_cap_target",
+            expected_active_fellow_limit: 5,
+            expected_sponsor_seq: 0,
+            active_fellow_limit: 6,
+            reason: "Reviewed capacity need for active Fellows.",
+            confirm: "override-fellow-cap",
+            step_up_authenticated_at: 1_786_800_000,
+          }),
+        ),
+      }),
+    });
+    const throwingVerifier = createEnrollmentRouter({
+      service,
+      verifiedSponsor: async () => {
+        throw new Error("planted sponsor verifier failure");
+      },
+      verifiedOperator: async () => {
+        throw new Error("planted operator verifier failure");
+      },
+    });
+    const cases = [
+      {
+        router: unconfigured,
+        path: "/v1/operators/fellow-cap?unexpected=1",
+        headers: { "content-type": "application/json", "idempotency-key": "operator-query" },
+        status: 400,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/operators/fellow-cap",
+        headers: { "idempotency-key": "operator-media" },
+        status: 415,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/enrollments?unexpected=1",
+        headers: { "content-type": "application/json", "idempotency-key": "mint-query" },
+        status: 400,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/enrollments",
+        headers: { "idempotency-key": "mint-media" },
+        status: 415,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision?unexpected=1",
+        headers: { "content-type": "application/json", "idempotency-key": "decision-query" },
+        status: 400,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/enrollments/not-an-enrollment/decision",
+        headers: { "content-type": "application/json", "idempotency-key": "decision-id" },
+        status: 422,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+        headers: { "idempotency-key": "decision-media" },
+        status: 415,
+      },
+      ...[
+        "/v1/fellows/credentials/revoke",
+        "/v1/fellows/lifecycle",
+        "/v1/sponsors/panic",
+        "/v1/sponsors/bootstrap",
+        "/v1/device-lookup",
+      ].flatMap((path, index) => [
+        {
+          router: unconfigured,
+          path: `${path}?unexpected=1`,
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `later-query-${index}`,
+          },
+          status: 400,
+        },
+        {
+          router: unconfigured,
+          path,
+          headers: { "idempotency-key": `later-media-${index}` },
+          status: 415,
+        },
+      ]),
+      {
+        router: unconfigured,
+        path: "/v1/enrollments",
+        headers: { "content-type": "application/json", "idempotency-key": "mint-no-verifier" },
+        status: 503,
+      },
+      {
+        router: unconfigured,
+        path: "/v1/operators/fellow-cap",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "operator-no-verifier",
+        },
+        status: 503,
+      },
+      {
+        router: configuredButUnavailable,
+        path: "/v1/enrollments",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "mint-verifier-refusal",
+        },
+        status: 503,
+      },
+      {
+        router: configuredButUnavailable,
+        path: "/v1/operators/fellow-cap",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "operator-verifier-refusal",
+        },
+        status: 503,
+      },
+      {
+        router: malformedVerifier,
+        path: "/v1/enrollments",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "mint-malformed-verifier",
+        },
+        status: 503,
+      },
+      {
+        router: wrongPrincipalVerifier,
+        path: "/v1/enrollments",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "mint-wrong-principal",
+        },
+        status: 503,
+      },
+      {
+        router: wrongPrincipalVerifier,
+        path: "/v1/operators/fellow-cap",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "operator-wrong-principal",
+        },
+        status: 503,
+      },
+      {
+        router: malformedVerifier,
+        path: "/v1/operators/fellow-cap",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "operator-malformed-verifier",
+        },
+        status: 503,
+      },
+      {
+        router: throwingVerifier,
+        path: "/v1/enrollments",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "mint-throwing-verifier",
+        },
+        status: 503,
+      },
+      {
+        router: successfulVerifier,
+        path: "/v1/enrollments",
+        headers: { "content-type": "application/json" },
+        status: 400,
+        code: "IDEMPOTENCY_KEY_INVALID",
+      },
+      {
+        router: successfulVerifier,
+        path: "/v1/enrollments",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "mint-successful-verifier-invalid-body",
+        },
+        status: 422,
+      },
+      {
+        router: successfulOperatorVerifier,
+        path: "/v1/operators/fellow-cap",
+        headers: { "content-type": "application/json" },
+        status: 400,
+        code: "IDEMPOTENCY_KEY_INVALID",
+      },
+      {
+        router: successfulVerifier,
+        path: "/v1/operators/fellow-cap",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "operator-successful-verifier-invalid-body",
+        },
+        status: 422,
+      },
+      {
+        router: throwingVerifier,
+        path: "/v1/operators/fellow-cap",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "operator-throwing-verifier",
+        },
+        status: 503,
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      let cancellations = 0;
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancellations += 1;
+        },
+      });
+      const response = await scenario.router.fetch(
+        new Request(`https://a.asimposium.org${scenario.path}`, {
+          method: "POST",
+          headers: scenario.headers,
+          body,
+          duplex: "half",
+        } as RequestInit & { duplex: "half" }),
+      );
+      expect(response.status, scenario.path).toBe(scenario.status);
+      if ("code" in scenario) {
+        expect(await response.json(), scenario.path).toMatchObject({ code: scenario.code });
+      }
+      expect(cancellations, scenario.path).toBe(1);
+    }
+  });
+
+  test("the enrollment ceiling is inclusive and compressed JSON is refused before service work", async () => {
+    const { service } = routerFixture();
+    let deviceStartCalls = 0;
+    service.deviceStart = async (value) => {
+      deviceStartCalls += 1;
+      expect(value).toEqual({});
+      throw new Error("planted exact-cap service boundary");
+    };
+    const router = createEnrollmentRouter({ service });
+    const exactCap = `{}${" ".repeat(MAX_ENROLLMENT_REQUEST_BODY_BYTES - 2)}`;
+    const admitted = await request(router, "/v1/device-code", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "192.0.2.46",
+      },
+      body: exactCap,
+    });
+    expect(admitted.status).toBe(503);
+    expect(deviceStartCalls).toBe(1);
+
+    const compressed = await request(router, "/v1/device-code", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        "cf-connecting-ip": "192.0.2.46",
+      },
+      body: "{}",
+    });
+    expect(compressed.status).toBe(422);
+    expect(await compressed.json()).toMatchObject({ code: "DEVICE_CODE_BODY_INVALID" });
+    expect(deviceStartCalls).toBe(1);
   });
 
   test("application/json matching is case-insensitive and permits media-type parameters", async () => {

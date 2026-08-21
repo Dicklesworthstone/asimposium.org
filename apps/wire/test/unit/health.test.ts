@@ -43,24 +43,47 @@ describe("GET /internal/health", () => {
     expect((res.body as { data: { format: string } }).data.format).toBe("json");
   });
 
-  // PLANTED NEGATIVE 1 — malformed input must fail closed with a stable code.
-  test("refuses an unknown ?format= with UNKNOWN_FORMAT and the allowed list", async () => {
-    const res = await callWorker("/internal/health?format=yaml");
+  // PLANTED NEGATIVE 1 — malformed or ambiguous input must fail closed with a
+  // single stable response before any binding authority is inspected.
+  test("refuses every unsupported or duplicate ?format= value", async () => {
+    const cases = [
+      "/internal/health?format=yaml",
+      "/internal/health?format=",
+      "/internal/health?format=json&format=yaml",
+      "/internal/health?format=yaml&format=json",
+      "/internal/health?format=json&format=json",
+    ] as const;
+    let expectedBody = "";
 
-    expect(res.status).toBe(400);
-    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
-    expect(res.body).toMatchObject({
-      type: "https://asimposium.org/errors/UNKNOWN_FORMAT",
-      status: 400,
-      code: "UNKNOWN_FORMAT",
-      rule: "A5",
-      schema: "https://a.asimposium.org/schemas/problem.v1.json",
-      example: { method: "GET", path: "/internal/health?format=json" },
-      allowed: ["json"],
-    });
-    expect((res.body as { fix_hint: string }).fix_hint.length).toBeGreaterThan(0);
-    // Never silent-fail: it must not quietly serve the default instead.
-    expect(res.bodyText).not.toContain('"ok":true');
+    for (const path of cases) {
+      let bindingReads = 0;
+      const env = new Proxy(boundEnv(), {
+        get(target, property, receiver) {
+          bindingReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const res = await callWorker(path, env);
+
+      expect(res.status).toBe(400);
+      expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.body).toMatchObject({
+        type: "https://asimposium.org/errors/UNKNOWN_FORMAT",
+        status: 400,
+        code: "UNKNOWN_FORMAT",
+        rule: "A5",
+        schema: "https://a.asimposium.org/schemas/problem.v1.json",
+        example: { method: "GET", path: "/internal/health?format=json" },
+        allowed: ["json"],
+      });
+      expect((res.body as { fix_hint: string }).fix_hint.length).toBeGreaterThan(0);
+      expect(res.bodyText).not.toContain('"ok":true');
+      expect(bindingReads).toBe(0);
+
+      if (expectedBody === "") expectedBody = res.bodyText;
+      expect(res.bodyText).toBe(expectedBody);
+    }
   });
 
   // PLANTED NEGATIVE 2 — an absent binding must fail closed, not report healthy.
@@ -145,6 +168,98 @@ describe("GET /internal/health", () => {
       missing: ["PUBLIC_ARTIFACTS"],
     });
     expect(res.bodyText).not.toContain(bucketValue);
+  });
+
+  test("fails closed when a binding accessor throws without reflecting the exception", async () => {
+    const canary = "private-r2-accessor-canary";
+    const artifacts: Record<string, unknown> = { put: () => undefined };
+    Object.defineProperty(artifacts, "get", {
+      enumerable: true,
+      get: () => {
+        throw new Error(canary);
+      },
+    });
+
+    const res = await callWorker("/internal/health", {
+      DB: d1Shaped(),
+      ARTIFACTS: artifacts,
+      PUBLIC_ARTIFACTS: r2Shaped(),
+      KRATER_OUTBOX: outboxShaped(),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.body).toMatchObject({
+      code: "BINDING_MISSING",
+      missing: ["ARTIFACTS"],
+      bindings: {
+        DB: "bound",
+        ARTIFACTS: "missing",
+        PUBLIC_ARTIFACTS: "bound",
+        KRATER_OUTBOX: "bound",
+      },
+    });
+    expect(res.bodyText).not.toContain(canary);
+  });
+
+  test("fails closed when the top-level environment Proxy refuses a binding read", async () => {
+    const canary = "private-top-level-db-canary";
+    const env = new Proxy(boundEnv(), {
+      get(target, property, receiver) {
+        if (property === "DB") {
+          throw new Error(canary);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const res = await callWorker("/internal/health", env);
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.body).toMatchObject({
+      code: "BINDING_MISSING",
+      missing: ["DB"],
+      bindings: {
+        DB: "missing",
+        ARTIFACTS: "bound",
+        PUBLIC_ARTIFACTS: "bound",
+        KRATER_OUTBOX: "bound",
+      },
+    });
+    expect(res.bodyText).not.toContain(canary);
+  });
+
+  test("bases the mounted response on one coherent binding snapshot", async () => {
+    let dbReads = 0;
+    const env = new Proxy(boundEnv(), {
+      get(target, property, receiver) {
+        if (property === "DB") {
+          dbReads += 1;
+          if (dbReads === 1) {
+            throw new Error("must-not-escape-flapping-db");
+          }
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const res = await callWorker("/internal/health", env);
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: "BINDING_MISSING",
+      missing: ["DB"],
+      bindings: {
+        DB: "missing",
+        ARTIFACTS: "bound",
+        PUBLIC_ARTIFACTS: "bound",
+        KRATER_OUTBOX: "bound",
+      },
+    });
+    expect(dbReads).toBe(1);
+    expect(res.bodyText).not.toContain("must-not-escape-flapping-db");
   });
 
   test("reports every missing binding at once, in declaration order", async () => {

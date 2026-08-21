@@ -123,18 +123,27 @@ interface AssertionEvidence {
   readonly problem_id?: string;
   readonly workshop_id?: string;
   readonly session_id?: string;
+  readonly counter_session_id?: string;
   /** Route *template*, never the filled path: a filled path can carry an id. */
   readonly route?: string;
   readonly public_seq_before?: number;
   readonly public_seq_after?: number;
   readonly workshop_seq_before?: number;
   readonly workshop_seq_after?: number;
+  readonly counter_own_workshop_count_before?: number;
+  readonly counter_own_workshop_count_after?: number;
+  readonly counter_workshop_seq_before?: number;
+  readonly counter_workshop_seq_after?: number;
   readonly request_id?: string;
   readonly event_id?: string;
   /** The decision or refusal code observed, never a message or body. */
   readonly code?: string;
   /** Outcome of a cache/search/export probe, as a fixed word. */
-  readonly cache_search_export?: "absent" | "present" | "not-probed";
+  readonly cache_search_export?:
+    | "absent"
+    | "present"
+    | "not-probed"
+    | "public-digest-404-before-after";
   readonly duration_ms?: number;
 }
 
@@ -2022,21 +2031,23 @@ async function main(): Promise<void> {
   );
   const crossFellowReset = await resetS4Fixtures();
   const crossFellowProblemId = "P-s4-cross-fellow-frontier";
+  const crossFellowSeedHeaders: Readonly<Record<string, string>> = {
+    [localS4FellowAuthorityHeader]: localAuthorityToken,
+    [localS4FellowIdHeader]: "fixture-fellow-a",
+  };
+  const crossFellowCurrentHeaders: Readonly<Record<string, string>> = {
+    [localS4FellowAuthorityHeader]: localAuthorityToken,
+    [localS4FellowIdHeader]: "fixture-fellow-b",
+  };
   const crossFellowSeedWorkshop = await pushWorkshop(
     crossFellowProblemId,
     `${privateCanary}-s4-cross-fellow-seed`,
-    {
-      [localS4FellowAuthorityHeader]: localAuthorityToken,
-      [localS4FellowIdHeader]: "fixture-fellow-a",
-    },
+    crossFellowSeedHeaders,
   );
   const crossFellowCurrentWorkshop = await pushWorkshop(
     crossFellowProblemId,
     `${privateCanary}-s4-cross-fellow-current`,
-    {
-      [localS4FellowAuthorityHeader]: localAuthorityToken,
-      [localS4FellowIdHeader]: "fixture-fellow-b",
-    },
+    crossFellowCurrentHeaders,
   );
   const crossFellowSeed = await snapshot(
     await localFetch(
@@ -2046,7 +2057,7 @@ async function main(): Promise<void> {
         "S4 cross-fellow frontier seed statement.",
         "S4 cross-fellow frontier seed artifact.",
         {},
-        s4FixtureHeaders("s4-cross-fellow-seed"),
+        s4FixtureHeaders("s4-cross-fellow-seed", crossFellowSeedHeaders),
         { title: LOCAL_S4_HISTORY_PIECE_MARKER },
       ),
     ),
@@ -2059,7 +2070,7 @@ async function main(): Promise<void> {
         "S4 cross-fellow frontier current statement.",
         "S4 cross-fellow frontier current artifact.",
         {},
-        s4FixtureHeaders("s4-cross-fellow-current"),
+        s4FixtureHeaders("s4-cross-fellow-current", crossFellowCurrentHeaders),
         { title: LOCAL_S4_CURRENT_PIECE_MARKER },
       ),
     ),
@@ -2380,6 +2391,23 @@ async function main(): Promise<void> {
       title: "Private local spill",
     }),
   });
+  // Give the counter Fellow a real session and read their own pack immediately
+  // before the borrowed request. The before/after pack comparison below proves
+  // the indistinguishable refusal did not advance that Fellow's private cursor
+  // or public cursor, rather than merely returning the same 400 body.
+  const counterOpenedSession = await openSession(sequenceProblemId, counterFellowHeaders);
+  const counterSessionId = recordField(counterOpenedSession.body, "session_id");
+  const counterPackBeforeBorrowedPush = await requestJson(
+    `/__s3/sessions/${counterSessionId ?? "missing"}/pack`,
+    { headers: counterFellowHeaders },
+  );
+  // This is the existing public artifact lookup, not a private diagnostic
+  // route. It lets the harness observe absence at the borrowed body's digest
+  // without ever reading a private staged object.
+  const borrowedPushDigest = await sha256Hex(sequenceSpillBody);
+  const borrowedPushPublicArtifactBefore = await snapshot(
+    await localFetch(`${origin}/sha256/${borrowedPushDigest}`),
+  );
   const borrowedPush = await requestJson("/__s3/workshops", {
     method: "POST",
     headers: { "content-type": "application/json", ...counterFellowHeaders },
@@ -2390,24 +2418,61 @@ async function main(): Promise<void> {
       title: "Private local spill",
     }),
   });
+  const counterPackAfterBorrowedPush = await requestJson(
+    `/__s3/sessions/${counterSessionId ?? "missing"}/pack`,
+    { headers: counterFellowHeaders },
+  );
+  const borrowedPushPublicArtifactAfter = await snapshot(
+    await localFetch(`${origin}/sha256/${borrowedPushDigest}`),
+  );
   check(
     "S3_sequence_3a_a_push_requires_a_session_this_fellow_opened_on_this_problem",
     unopenedPush.response.status === 400 &&
       recordField(unopenedPush.body, "code") === "LOCAL_SESSION_REQUIRED" &&
+      counterOpenedSession.response.status === 201 &&
+      counterSessionId !== undefined &&
+      counterSessionId.startsWith("S-") &&
+      counterPackBeforeBorrowedPush.response.status === 200 &&
+      numberField(counterPackBeforeBorrowedPush.body, "own_workshop_count") === 0 &&
+      numberField(counterPackBeforeBorrowedPush.body, "workshop_seq") === 0 &&
+      numberField(counterPackBeforeBorrowedPush.body, "public_seq") === 0 &&
       // Borrowing another Fellow's real session is refused identically, so the
       // refusal cannot be used to discover whether a session id exists.
       borrowedPush.response.status === 400 &&
       recordField(borrowedPush.body, "code") === "LOCAL_SESSION_REQUIRED" &&
-      JSON.stringify(unopenedPush.body) === JSON.stringify(borrowedPush.body),
+      JSON.stringify(unopenedPush.body) === JSON.stringify(borrowedPush.body) &&
+      counterPackAfterBorrowedPush.response.status === 200 &&
+      numberField(counterPackAfterBorrowedPush.body, "own_workshop_count") ===
+        numberField(counterPackBeforeBorrowedPush.body, "own_workshop_count") &&
+      numberField(counterPackAfterBorrowedPush.body, "workshop_seq") ===
+        numberField(counterPackBeforeBorrowedPush.body, "workshop_seq") &&
+      numberField(counterPackAfterBorrowedPush.body, "public_seq") ===
+        numberField(counterPackBeforeBorrowedPush.body, "public_seq") &&
+      borrowedPushPublicArtifactBefore.response.status === 404 &&
+      borrowedPushPublicArtifactAfter.response.status === 404 &&
+      hasNoPrivateMaterial(borrowedPushPublicArtifactAfter, [sequenceSpillBody]),
     `unopened ${unopenedPush.response.status} borrowed ${borrowedPush.response.status}`,
     {
       principal: localSequenceFellowId,
       counter_principal: localCounterFellowId,
       problem_id: sequenceProblemId,
       session_id: sequenceSessionId,
+      counter_session_id: counterSessionId,
       route: "POST /__s3/workshops",
       code: recordField(unopenedPush.body, "code") ?? "none",
-      cache_search_export: "not-probed",
+      counter_own_workshop_count_before: numberField(
+        counterPackBeforeBorrowedPush.body,
+        "own_workshop_count",
+      ),
+      counter_own_workshop_count_after: numberField(
+        counterPackAfterBorrowedPush.body,
+        "own_workshop_count",
+      ),
+      counter_workshop_seq_before: numberField(counterPackBeforeBorrowedPush.body, "workshop_seq"),
+      counter_workshop_seq_after: numberField(counterPackAfterBorrowedPush.body, "workshop_seq"),
+      public_seq_before: numberField(counterPackBeforeBorrowedPush.body, "public_seq"),
+      public_seq_after: numberField(counterPackAfterBorrowedPush.body, "public_seq"),
+      cache_search_export: "public-digest-404-before-after",
     },
   );
 

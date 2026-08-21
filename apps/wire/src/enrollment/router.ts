@@ -33,7 +33,12 @@ import {
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 
-import { parseAuthenticatedJsonBytes as verifiedJson } from "../auth/http.ts";
+import {
+  cancelUnconsumedRequestBody,
+  parseExactJsonBytes,
+  readBoundedRequestBody,
+  parseAuthenticatedJsonBytes as verifiedJson,
+} from "../auth/http.ts";
 import {
   enrollmentCapsuleHtml,
   enrollmentCapsuleMarkdown,
@@ -62,6 +67,14 @@ import {
  */
 const ENROLLMENT_SCHEMA_URL = "https://a.asimposium.org/schemas/enrollment.v1.json";
 const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
+export const MAX_ENROLLMENT_REQUEST_BODY_BYTES = 64 * 1024;
+
+class EnrollmentRequestBodyTooLargeError extends Error {
+  constructor() {
+    super("enrollment request body exceeds its byte ceiling");
+    this.name = "EnrollmentRequestBodyTooLargeError";
+  }
+}
 
 /** Contract failures teach request shape; credential and state refusals stay coarse. */
 function enrollmentContractFields(example: Record<string, unknown>): Record<string, unknown> {
@@ -543,6 +556,19 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "This sponsor cannot activate another Fellow at its current capacity.",
         "Pause or retire an existing Fellow, or ask the operator to raise this sponsor's limit, then retry the exact action.",
       );
+    // Distinct from the sponsor-attention cap above: this one bounds how many
+    // live credentials a single Fellow may hold. The wording names capacity
+    // only — never a credential id, hash, count or expiry — because the
+    // sponsor can already enumerate its own Fellow's credentials through the
+    // console, and a refusal must not become a second, cheaper inventory.
+    case "FELLOW_CREDENTIAL_CAP_REACHED":
+      return problem(
+        409,
+        error.code,
+        "Fellow credential capacity is reached",
+        "This Fellow already holds the most active credentials it may hold.",
+        "Revoke an active credential from your console's Fellows list, then retry the exact request with a new Idempotency-Key.",
+      );
     case "OPERATOR_FELLOW_CAP_NOT_CURRENT":
       return problem(
         409,
@@ -810,11 +836,27 @@ async function jsonBody(
   request: Request,
   invalidCode: EnrollmentErrorCode = "PAIRING_INVALID",
 ): Promise<unknown> {
+  const body = await readBoundedRequestBody(request, MAX_ENROLLMENT_REQUEST_BODY_BYTES);
+  if (!body.ok) {
+    if (body.reason === "too-large") throw new EnrollmentRequestBodyTooLargeError();
+    throw new EnrollmentError(invalidCode);
+  }
   try {
-    return await request.json();
+    return parseExactJsonBytes(body.bytes);
   } catch {
     throw new EnrollmentError(invalidCode);
   }
+}
+
+function enrollmentRequestIngressFailure(error: unknown): Response | undefined {
+  if (!(error instanceof EnrollmentRequestBodyTooLargeError)) return undefined;
+  return problem(
+    413,
+    "REQUEST_BODY_TOO_LARGE",
+    "Enrollment request body is too large",
+    "The enrollment request exceeds the byte ceiling for this route.",
+    "Send only the documented JSON fields within the request-body limit.",
+  );
 }
 
 function bearerToken(request: Request): string | undefined {
@@ -952,6 +994,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
   // the same D1 transaction as the proposal; the raw address is never stored.
   app.post("/v1/device-code", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return problem(
         400,
         "BODY_ONLY_REQUIRED",
@@ -975,6 +1018,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse(
         "/v1/device-code",
         {
@@ -987,9 +1031,15 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     const trustedClientAddress = trustedDeviceClientAddress(c.req.raw);
-    if (trustedClientAddress === undefined) return enrollmentUnavailableResponse();
+    if (trustedClientAddress === undefined) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return enrollmentUnavailableResponse();
+    }
     const idempotency = idempotencyOptions(c.req.raw);
-    if (idempotency instanceof Response) return idempotency;
+    if (idempotency instanceof Response) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return idempotency;
+    }
     try {
       const started = await options.service.deviceStart(
         await jsonBody(c.req.raw, "DEVICE_CODE_BODY_INVALID"),
@@ -999,6 +1049,8 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         "cache-control": "no-store",
       });
     } catch (error) {
+      const ingress = enrollmentRequestIngressFailure(error);
+      if (ingress !== undefined) return ingress;
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
       return error instanceof EnrollmentError
@@ -1009,6 +1061,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
 
   app.post("/v1/fellows", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return problem(
         400,
         "BODY_ONLY_REQUIRED",
@@ -1033,6 +1086,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse(
         "/v1/fellows",
         {
@@ -1047,13 +1101,18 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     }
     try {
       const idempotency = idempotencyOptions(c.req.raw);
-      if (idempotency instanceof Response) return idempotency;
+      if (idempotency instanceof Response) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return idempotency;
+      }
       const claim = await options.service.claim(await jsonBody(c.req.raw), idempotency);
       const result = EnrollmentClaimResponseSchema.parse({
         flow_handle: claim.flowHandle,
       });
       return c.json(result, 202, { "cache-control": "no-store" });
     } catch (error) {
+      const ingress = enrollmentRequestIngressFailure(error);
+      if (ingress !== undefined) return ingress;
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
       return error instanceof EnrollmentError
@@ -1067,6 +1126,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     route: "/v1/fellows/flow" | "/v1/device-token",
   ): Promise<Response> => {
     if (hasQuery(request)) {
+      cancelUnconsumedRequestBody(request);
       return problem(
         400,
         "BODY_ONLY_REQUIRED",
@@ -1085,6 +1145,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     if (!hasJsonContentType(request)) {
+      cancelUnconsumedRequestBody(request);
       return jsonContentTypeRequiredResponse(
         route,
         {
@@ -1095,7 +1156,10 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     }
     try {
       const idempotency = idempotencyOptions(request);
-      if (idempotency instanceof Response) return idempotency;
+      if (idempotency instanceof Response) {
+        cancelUnconsumedRequestBody(request);
+        return idempotency;
+      }
       const result = await options.service.poll(await jsonBody(request), idempotency);
       return new Response(JSON.stringify(result), {
         status: 200,
@@ -1105,6 +1169,8 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         },
       });
     } catch (error) {
+      const ingress = enrollmentRequestIngressFailure(error);
+      if (ingress !== undefined) return ingress;
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
       return error instanceof EnrollmentError
@@ -1223,16 +1289,31 @@ async function requireSponsor(
   action: string,
 ): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
   if (options.verifiedSponsor === undefined) {
+    cancelUnconsumedRequestBody(request);
     return sponsorAuthUnavailableResponse();
   }
   try {
     const result = await options.verifiedSponsor(request, route, action);
-    if (result instanceof Response) return privateNoStoreVerifierRefusal(result);
-    if (!isEnrollmentPrincipal(result?.principal) || !(result?.rawBody instanceof Uint8Array)) {
+    if (result instanceof Response) {
+      cancelUnconsumedRequestBody(request);
+      return privateNoStoreVerifierRefusal(result);
+    }
+    if (
+      !isEnrollmentPrincipal(result?.principal) ||
+      result.principal.type !== "sponsor" ||
+      !SponsorIdSchema.safeParse(result.principal.sponsorId).success ||
+      !(result?.rawBody instanceof Uint8Array)
+    ) {
+      cancelUnconsumedRequestBody(request);
       return sponsorAuthUnavailableResponse();
     }
+    // From here on handlers consume only the authenticated raw bytes. A custom
+    // verifier that supplied those bytes without draining Fetch still leaves
+    // the original stream under this router's ownership.
+    cancelUnconsumedRequestBody(request);
     return result;
   } catch {
+    cancelUnconsumedRequestBody(request);
     return sponsorAuthUnavailableResponse();
   }
 }
@@ -1245,21 +1326,28 @@ async function requireOperator(
   action: string,
 ): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
   if (options.verifiedOperator === undefined) {
+    cancelUnconsumedRequestBody(request);
     return operatorAuthUnavailableResponse();
   }
   try {
     const result = await options.verifiedOperator(request, route, action);
-    if (result instanceof Response) return privateNoStoreVerifierRefusal(result);
+    if (result instanceof Response) {
+      cancelUnconsumedRequestBody(request);
+      return privateNoStoreVerifierRefusal(result);
+    }
     if (
       !isEnrollmentPrincipal(result?.principal) ||
       result.principal.type !== "operator" ||
       !/^[A-Za-z0-9._-]{1,64}$/.test(result.principal.serviceEnvelopeKid) ||
       !(result?.rawBody instanceof Uint8Array)
     ) {
+      cancelUnconsumedRequestBody(request);
       return operatorAuthUnavailableResponse();
     }
+    cancelUnconsumedRequestBody(request);
     return result;
   } catch {
+    cancelUnconsumedRequestBody(request);
     return operatorAuthUnavailableResponse();
   }
 }
@@ -1553,6 +1641,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/operators/fellow-cap", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/fellow-cap");
     }
     const example = {
@@ -1565,6 +1654,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       step_up_authenticated_at: 1_786_800_000,
     };
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/operators/fellow-cap", example, true);
     }
     const authenticated = await requireOperator(
@@ -1612,9 +1702,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/enrollments", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments");
     }
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse(
         "/v1/enrollments",
         {
@@ -1691,13 +1783,16 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/enrollments/:enrollmentId/decision", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision");
     }
     const enrollmentId = c.req.param("enrollmentId");
     if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return enrollmentIdInvalidResponse();
     }
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse(
         "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
         {
@@ -1813,6 +1908,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/fellows/credentials/revoke", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows/credentials/revoke");
     }
     const example = {
@@ -1822,6 +1918,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       step_up_authenticated_at: 1_786_800_000,
     };
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/fellows/credentials/revoke", example, true);
     }
     const authenticated = await requireSponsor(
@@ -1869,6 +1966,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/fellows/lifecycle", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows/lifecycle");
     }
     const example = {
@@ -1878,6 +1976,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       step_up_authenticated_at: 1_786_800_000,
     };
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/fellows/lifecycle", example, true);
     }
     const authenticated = await requireSponsor(
@@ -1925,6 +2024,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/sponsors/panic", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/panic");
     }
     const example = {
@@ -1932,6 +2032,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       step_up_authenticated_at: 1_786_800_000,
     };
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/sponsors/panic", example, true);
     }
     const authenticated = await requireSponsor(
@@ -1981,9 +2082,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
   // writer. Idempotent by construction; no idempotency key needed.
   app.post("/v1/sponsors/bootstrap", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/bootstrap");
     }
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/sponsors/bootstrap", {});
     }
     const authenticated = await requireSponsor(
@@ -2036,9 +2139,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
   // lookup key; the answer is the same approval card the console renders.
   app.post("/v1/device-lookup", async (c) => {
     if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/device-lookup");
     }
     if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/device-lookup", {
         user_code: "ABCD-2345",
       });

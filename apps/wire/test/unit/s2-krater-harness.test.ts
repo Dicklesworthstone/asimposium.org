@@ -26,8 +26,14 @@ import {
   parseS2StateResult,
   parseS2WriteResult,
   S2_COST_RECEIPT_RELATIVE_PATH,
+  S2_OUTBOX_DEADLINE_MS,
+  S2_OUTBOX_TERMINAL_OBSERVATION_MS,
   type S2CostReceiptProvenance,
+  type S2OutboxStatus,
   type S2SettledWriteResult,
+  s2RemainingBudgetMs,
+  s2TerminalObservation,
+  s2WaitForOutbox,
   writeS2CostMeasurementReceipt,
 } from "../../src/krater/s2-client.ts";
 
@@ -1042,6 +1048,108 @@ describe("S2 to S7 normalized cost receipt", () => {
     }
   });
 
+  // 9yv2: each union guard returns its CONSTANT rather than the value it just
+  // validated, so deleting a guard does not fail to typecheck — it silently
+  // rewrites a wrong wire value into the expected one. Nothing below asserts a
+  // shape the parsers already reject for another reason: every input is the
+  // valid fixture with exactly one field changed, and each positive control is
+  // asserted first so a refusal is caused by that one axis.
+  test("PLANTED: S2 parsers refuse laundered unions, non-string digests, and omitted nullables", () => {
+    const validState = {
+      cursor: 1,
+      counts: {},
+      chain_digest: "4".repeat(64),
+      checkpoint_digest: null,
+      checkpoint_mode: "unsigned-v0",
+    };
+
+    // Positive controls: the measured values, and the lawful `null` observation
+    // that must stay distinguishable from an absent field.
+    expect(parseS2WriteResult({ ...FIRST_COST_WRITE })).toMatchObject({
+      chain_digest: "4".repeat(64),
+      successful_batch_metric_scope: "settled-db.batch-only",
+      failed_retry_batch_metrics: "excluded-d1-error-has-no-meta",
+      successful_batch_sql_ms: 1,
+      preflight_sql_ms: 1,
+    });
+    expect(
+      parseS2WriteResult({ ...FIRST_COST_WRITE, successful_batch_sql_ms: null }),
+    ).toMatchObject({ successful_batch_sql_ms: null });
+    // `preflight_sql_ms` carries the same `number | null` contract on its own
+    // branch. Varied alone, with successful_batch_sql_ms left measured, so
+    // neither field's proof can stand in for the other's.
+    expect(parseS2WriteResult({ ...FIRST_COST_WRITE, preflight_sql_ms: null })).toMatchObject({
+      successful_batch_sql_ms: 1,
+      preflight_sql_ms: null,
+    });
+    expect(parseS2StateResult({ ...validState })).toMatchObject({
+      chain_digest: "4".repeat(64),
+      checkpoint_digest: null,
+      checkpoint_mode: "unsigned-v0",
+    });
+
+    // A wrong union value must refuse, never be rewritten to the constant.
+    expect(() =>
+      parseS2WriteResult({
+        ...FIRST_COST_WRITE,
+        successful_batch_metric_scope: "settled-db.batch-and-preflight",
+      }),
+    ).toThrow("S2_RESPONSE_INVALID");
+    expect(() =>
+      parseS2WriteResult({
+        ...FIRST_COST_WRITE,
+        failed_retry_batch_metrics: "included-d1-error-meta",
+      }),
+    ).toThrow("S2_RESPONSE_INVALID");
+    expect(() => parseS2StateResult({ ...validState, checkpoint_mode: "signed-v1" })).toThrow(
+      "S2_CHECKPOINT_MODE_INVALID",
+    );
+
+    // `chain_digest` is a string in both parsers that carry it. A null, a
+    // number and an object each have to refuse, so a loosened check cannot
+    // pass one shape by accident.
+    for (const invalid of [null, 4, {}]) {
+      expect(() => parseS2WriteResult({ ...FIRST_COST_WRITE, chain_digest: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+      expect(() => parseS2StateResult({ ...validState, chain_digest: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+    }
+
+    // An explicit `null` is a measurement; an OMITTED key is a different fact
+    // and must refuse. This is exactly what `=== null` enforces and what a
+    // loosened `== null` would silently accept.
+    const { successful_batch_sql_ms: _measured, ...writeWithoutSqlMs } = FIRST_COST_WRITE;
+    expect(() => parseS2WriteResult(writeWithoutSqlMs)).toThrow("S2_RESPONSE_INVALID");
+    // Omitting only `preflight_sql_ms` leaves `successful_batch_sql_ms`
+    // measured, so this refusal is attributable to the preflight branch alone
+    // and cannot be satisfied by the sibling guard.
+    const { preflight_sql_ms: _preflight, ...writeWithoutPreflightSqlMs } = FIRST_COST_WRITE;
+    expect(() => parseS2WriteResult(writeWithoutPreflightSqlMs)).toThrow("S2_RESPONSE_INVALID");
+    const { checkpoint_digest: _checkpoint, ...stateWithoutCheckpoint } = validState;
+    expect(() => parseS2StateResult(stateWithoutCheckpoint)).toThrow("S2_RESPONSE_INVALID");
+  });
+
+  // 9yv2: `outbox_handoff` is the fourth union guard. Unlike its siblings it
+  // returns the value it validated rather than a constant, so a deleted guard
+  // passes a wire string through instead of laundering it into an expected
+  // one — a milder failure, and until now an unproven one. Both halves are
+  // load-bearing: each lawful state is asserted to survive AS ITSELF, so
+  // dropping any single clause from the guard (which would make that one state
+  // refuse) is red, and the invalid string covers deleting or widening the
+  // guard outright.
+  test("PLANTED: S2 write parsing admits exactly the three outbox handoff states", () => {
+    for (const handoff of ["armed", "deferred", "unavailable"] as const) {
+      expect(parseS2WriteResult({ ...FIRST_COST_WRITE, outbox_handoff: handoff })).toMatchObject({
+        outbox_handoff: handoff,
+      });
+    }
+    expect(() => parseS2WriteResult({ ...FIRST_COST_WRITE, outbox_handoff: "queued" })).toThrow(
+      "S2_RESPONSE_INVALID",
+    );
+  });
+
   test("PLANTED: S2 retains honest outbox-age evidence and rejects incoherent polarity", () => {
     const threshold = 300_000;
     const base = {
@@ -1194,17 +1302,46 @@ describe("S2 to S7 normalized cost receipt", () => {
       resolve(REPOSITORY_ROOT, "apps/wire/src/krater/s2-client.ts"),
       "utf8",
     );
-    const waitForOutboxStart = client.indexOf("async function waitForOutbox");
-    const waitForOutboxEnd = client.indexOf("async function expectTransportAbort", waitForOutboxStart);
+    const waitForOutboxStart = client.indexOf("export async function s2WaitForOutbox");
+    const waitForOutboxEnd = client.indexOf(
+      "async function expectTransportAbort",
+      waitForOutboxStart,
+    );
     const restartVerifyStart = client.indexOf("async function restartVerify");
     const restartVerifyEnd = client.indexOf("async function main", restartVerifyStart);
     expect(waitForOutboxStart).toBeGreaterThanOrEqual(0);
     expect(waitForOutboxEnd).toBeGreaterThan(waitForOutboxStart);
     expect(restartVerifyStart).toBeGreaterThanOrEqual(0);
     expect(restartVerifyEnd).toBeGreaterThan(restartVerifyStart);
-    expect(client.slice(waitForOutboxStart, waitForOutboxEnd)).toContain(
-      "...outboxAgeEvidence(observed),",
+    const waitForOutboxSource = client.slice(waitForOutboxStart, waitForOutboxEnd);
+    // The age evidence is a CONDITIONAL spread: an absent terminal observation
+    // reports nulls rather than borrowing a status-vocabulary member for a
+    // reading never taken. Pin both arms, so collapsing it back to an
+    // unconditional spread — or dropping the null branch — reds here.
+    expect(waitForOutboxSource).toContain("...(observed === undefined");
+    expect(waitForOutboxSource).toContain(": outboxAgeEvidence(observed)),");
+    // asimposiumorg-ciku: BOTH status reads are handed a positive remaining
+    // slice of the ONE absolute deadline, and each budget is derived, never a
+    // literal. Deleting either timeout argument stops matching here — and,
+    // because the production observer requires it, also stops compiling.
+    expect(waitForOutboxSource).toContain(
+      "const pollBudgetMs = s2RemainingBudgetMs(hooks.now(), pollUntil);",
     );
+    expect(waitForOutboxSource).toContain("hooks.observe(scenario, pollBudgetMs)");
+    expect(waitForOutboxSource).toContain(
+      "const terminalBudgetMs = s2RemainingBudgetMs(hooks.now(), deadline);",
+    );
+    // noTemplateCurlyInString fires on a dollar-brace sequence inside a plain
+    // string, and this pin has to spell one because it quotes SOURCE TEXT, not
+    // an interpolation. Assembling it from inert pieces keeps the asserted
+    // bytes byte-for-byte identical while no single literal spells the
+    // placeholder. Splitting anywhere else would still trip the rule.
+    const terminalCallPin = [
+      "hooks.observe(`",
+      "$",
+      "{scenario}-deadline-observation`, terminalBudgetMs)",
+    ].join("");
+    expect(waitForOutboxSource).toContain(terminalCallPin);
     expect(client.slice(restartVerifyStart, restartVerifyEnd)).toContain(
       "...outboxAgeEvidence(recoveredOutbox),",
     );
@@ -3808,6 +3945,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(reached).toContain("apps/wire/src/krater/outbox-do.ts");
     expect(reached).toContain("apps/wire/src/krater/s2-client.ts");
     expect(reached).toContain("packages/contracts/src/screening.ts");
+    expect(reached).toContain("packages/contracts/src/sessions.ts");
     expect(reached.length).toBeGreaterThan(10);
     expect(reached.filter((path) => !listed.has(path))).toEqual([]);
   });
@@ -3923,6 +4061,78 @@ describe("registered S2 shell and lifecycle regressions", () => {
       ).toBe(false);
       expect(
         existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+      ).toBe(false);
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  // The worker now imports createApp, so @asimposium/protocol and
+  // @asimposium/render are walked as local workspace source through the resolver
+  // extension. These two plants prove that resolution is causal: omit a reached
+  // protocol asset or a reached render source and the real walker must name it
+  // as unlisted rather than silently treating the workspace package as a listed
+  // bun.lock dependency.
+  test(
+    "PLANTED: omitting a reached protocol text asset fails the closure as unlisted",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const omitted = "packages/protocol/assets/protocol.md";
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "provenance",
+          S2_PLANT_SOURCE_CLOSURE_OMIT: omitted,
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      const records = ndjsonRecords(run);
+      expect(run.exitCode).toBe(1);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_INCOMPLETE",
+          unlisted: omitted,
+        }),
+      );
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+      expect(
+        records.some(
+          (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+        ),
+      ).toBe(false);
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: omitting a reached render source fails the closure as unlisted",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const omitted = "packages/render/src/pack-composer.ts";
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "provenance",
+          S2_PLANT_SOURCE_CLOSURE_OMIT: omitted,
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      const records = ndjsonRecords(run);
+      expect(run.exitCode).toBe(1);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_INCOMPLETE",
+          unlisted: omitted,
+        }),
+      );
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+      expect(
+        records.some(
+          (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+        ),
       ).toBe(false);
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
@@ -4080,14 +4290,14 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test("the expected migration journal tracks db/migrations exactly and in order", () => {
-    // Registration only: pane2 owns 0015's content and its own tests. What this
-    // asserts is that the S2 harness cannot silently fall behind a new migration
-    // and keep passing its upgrade lanes against a stale journal.
+    // This asserts that the S2 harness cannot silently fall behind a new
+    // migration and keep passing its upgrade lanes against a stale journal.
     const onDisk = readdirSync(resolve(REPOSITORY_ROOT, "db/migrations"))
       .filter((name) => name.endsWith(".sql"))
       .sort();
     expect(declaredMigrationJournal()).toEqual(onDisk);
     expect(onDisk).toContain("0016_operator_fellow_cap_override.sql");
+    expect(onDisk).toContain("0020_session_replay_atomic_claim.sql");
     const listed = new Set(declaredSourcePaths());
     for (const name of onDisk) expect(listed.has(`db/migrations/${name}`)).toBe(true);
   });
@@ -4311,5 +4521,241 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(`${run.stdout}\n${run.stderr}`).not.toContain(
       "runs only with explicit integration authority",
     );
+  });
+});
+
+/**
+ * asimposiumorg-ciku: the outbox wait must occupy ONE absolute wall.
+ *
+ * The clock is injected as plain numbers rather than advanced by sleeping, so
+ * these assert the budget arithmetic itself instead of racing a timer — a
+ * sleep-based test would be both slow and a poor oracle for "this request was
+ * handed exactly N milliseconds".
+ *
+ * `s2WaitForOutbox` exports only the hook-driven deadline composition seam;
+ * production still reaches it through the module-private `waitForOutbox`
+ * wrapper. This lets the causal plants inspect a real typed receipt without
+ * a clock or transport race.
+ */
+describe("S2 outbox deadline composition", () => {
+  const POLL_UNTIL_OFFSET_MS = S2_OUTBOX_DEADLINE_MS - S2_OUTBOX_TERMINAL_OBSERVATION_MS;
+
+  test("a poll entered near expiry receives only the remaining budget", () => {
+    const startedAt = 1_000;
+    const pollUntil = startedAt + POLL_UNTIL_OFFSET_MS;
+    // 3ms before the poll wall: the old code handed this poll a fresh 5_000.
+    const budget = s2RemainingBudgetMs(pollUntil - 3, pollUntil);
+
+    expect(budget).toBe(3);
+    expect(budget).toBeLessThan(5_000);
+  });
+
+  test("PLANTED: an exhausted budget instructs the caller not to start a request", () => {
+    const pollUntil = 1_000 + POLL_UNTIL_OFFSET_MS;
+    // Exactly at the wall, and past it: both must be the same refusal to start.
+    // `waitForOutbox` breaks on 0, so a nonzero here would issue a request with
+    // no budget, which is how a request inherits the 5s default and outlives
+    // the deadline it was just checked against.
+    for (const now of [pollUntil, pollUntil + 1, pollUntil + 10_000]) {
+      expect(s2RemainingBudgetMs(now, pollUntil), `now=${now}`).toBe(0);
+    }
+  });
+
+  test("PLANTED: the terminal observation cannot extend the same absolute deadline", () => {
+    const startedAt = 1_000;
+    const deadline = startedAt + S2_OUTBOX_DEADLINE_MS;
+    const pollUntil = deadline - S2_OUTBOX_TERMINAL_OBSERVATION_MS;
+
+    // The slice is carved OUT of the deadline, never added after it.
+    expect(pollUntil).toBeLessThan(deadline);
+    expect(S2_OUTBOX_TERMINAL_OBSERVATION_MS).toBeGreaterThan(0);
+
+    // Worst case: polling consumed every millisecond up to the poll wall. The
+    // observation still cannot exceed the reserved slice, and poll + terminal
+    // can never exceed the one wall.
+    const terminal = s2RemainingBudgetMs(pollUntil, deadline);
+    expect(terminal).toBe(S2_OUTBOX_TERMINAL_OBSERVATION_MS);
+    expect(POLL_UNTIL_OFFSET_MS + terminal).toBe(S2_OUTBOX_DEADLINE_MS);
+
+    // And an overrunning poll leaves the observation no budget at all rather
+    // than borrowing from beyond the deadline.
+    expect(s2RemainingBudgetMs(deadline + 250, deadline)).toBe(0);
+  });
+
+  test("a wait that finishes early still reports a positive remaining budget", () => {
+    const startedAt = 1_000;
+    const pollUntil = startedAt + POLL_UNTIL_OFFSET_MS;
+
+    expect(s2RemainingBudgetMs(startedAt, pollUntil)).toBe(POLL_UNTIL_OFFSET_MS);
+    expect(s2RemainingBudgetMs(startedAt + 25, pollUntil)).toBe(POLL_UNTIL_OFFSET_MS - 25);
+  });
+
+  test("the reserved slice is a real fraction of the wall, not a rounding artifact", () => {
+    // Guards the constants themselves: a terminal slice of 0 would silently
+    // restore the unbounded-observation behaviour, and a slice >= the deadline
+    // would leave no budget to poll with at all.
+    expect(S2_OUTBOX_TERMINAL_OBSERVATION_MS).toBeLessThan(S2_OUTBOX_DEADLINE_MS);
+    expect(POLL_UNTIL_OFFSET_MS).toBeGreaterThan(0);
+  });
+
+  /**
+   * asimposiumorg-ciku: the terminal observation must be CONTAINED.
+   *
+   * The observer is injected as a thunk, so these drive the real containment
+   * without giving `waitForOutbox` a transport seam it would not otherwise
+   * have — the same trade already made for the budget arithmetic above.
+   */
+  const observedStatus: S2OutboxStatus = {
+    active: 0,
+    pending: 1,
+    alarm_at: null,
+    owner_acquisitions: 1,
+    max_active: 1,
+    recovered_ownerships: 0,
+    delivery_attempts: 1,
+    delivered: 0,
+    quarantined: 0,
+    failures: 0,
+    last_backoff_ms: null,
+    last_quarantine_code: null,
+    last_phase: "idle",
+    oldest_pending_age_ms: 1_000,
+    oldest_pending_age_status: "measured",
+    oldest_pending_age_alert: "below-threshold",
+    oldest_pending_age_alert_threshold_ms: 300_000,
+  };
+
+  test("PLANTED: a rejected terminal observer is contained as an absent reading", async () => {
+    const planted = new Error("PLANTED_TERMINAL_OBSERVATION_TRANSPORT_FAILURE");
+    let calls = 0;
+
+    const observed = await s2TerminalObservation(async () => {
+      calls += 1;
+      throw planted;
+    }, S2_OUTBOX_TERMINAL_OBSERVATION_MS);
+
+    // Absent, not thrown. A transport error escaping here would replace the
+    // typed S2_OUTBOX_DEADLINE_EXCEEDED receipt with an unrelated failure.
+    expect(observed).toBeUndefined();
+    // And the observer really ran, so the absence is containment rather than a
+    // budget refusal that never attempted the request.
+    expect(calls).toBe(1);
+  });
+
+  test("PLANTED: a nonpositive terminal budget starts no observation at all", async () => {
+    let calls = 0;
+    const observe = async (): Promise<S2OutboxStatus> => {
+      calls += 1;
+      return observedStatus;
+    };
+
+    // Zero and negative both mean the poll loop already spent the wall. A
+    // request started here would inherit request()'s 5s default and outlive
+    // the absolute deadline it was just checked against.
+    for (const budgetMs of [0, -1, -S2_OUTBOX_DEADLINE_MS]) {
+      const observed = await s2TerminalObservation(observe, budgetMs);
+      expect(observed, `budgetMs=${budgetMs}`).toBeUndefined();
+    }
+    expect(calls).toBe(0);
+  });
+
+  test("PLANTED: a resolved terminal observation is returned verbatim", async () => {
+    // NON-VACUITY CONTROL for both refusals above: without this, each would
+    // pass against an implementation that always returned undefined.
+    const observed = await s2TerminalObservation(
+      async () => observedStatus,
+      S2_OUTBOX_TERMINAL_OBSERVATION_MS,
+    );
+
+    expect(observed).toBe(observedStatus);
+  });
+
+  test("PLANTED: a final poll abort still emits the typed deadline receipt", async () => {
+    const startedAt = 1_000;
+    const deadline = startedAt + S2_OUTBOX_DEADLINE_MS;
+    const pollUntil = deadline - S2_OUTBOX_TERMINAL_OBSERVATION_MS;
+    const times = [startedAt, pollUntil - 1, pollUntil, deadline];
+    const calls: { scenario: string; timeoutMs: number }[] = [];
+    const emitted: Record<string, unknown>[] = [];
+    const now = (): number => {
+      const value = times.shift();
+      if (value === undefined) throw new Error("PLANTED_CLOCK_EXHAUSTED");
+      return value;
+    };
+
+    await expect(
+      s2WaitForOutbox("planted-final-poll-abort", () => false, {
+        now,
+        observe: async (scenario, timeoutMs) => {
+          calls.push({ scenario, timeoutMs });
+          throw new Error("PLANTED_FINAL_POLL_TRANSPORT_ABORT");
+        },
+        sleep: async () => {
+          throw new Error("PLANTED_ABORTED_POLL_MUST_NOT_SLEEP");
+        },
+        emit: (receipt) => emitted.push(receipt),
+      }),
+    ).rejects.toThrow("S2_OUTBOX_DEADLINE_EXCEEDED");
+
+    expect(calls).toEqual([
+      { scenario: "planted-final-poll-abort", timeoutMs: 1 },
+      {
+        scenario: "planted-final-poll-abort-deadline-observation",
+        timeoutMs: S2_OUTBOX_TERMINAL_OBSERVATION_MS,
+      },
+    ]);
+    expect(emitted).toHaveLength(1);
+    const receipt = emitted[0];
+    if (receipt === undefined) throw new Error("PLANTED_DEADLINE_RECEIPT_MISSING");
+    expect(receipt).toMatchObject({
+      status: "fail",
+      assertion_diff:
+        "poll-read-failed;deadline-observation unavailable within the reserved terminal budget",
+      duration_ms: S2_OUTBOX_DEADLINE_MS,
+    });
+  });
+
+  test("PLANTED: a completed non-satisfying poll has distinct deadline evidence", async () => {
+    const startedAt = 1_000;
+    const deadline = startedAt + S2_OUTBOX_DEADLINE_MS;
+    const pollUntil = deadline - S2_OUTBOX_TERMINAL_OBSERVATION_MS;
+    const times = [startedAt, pollUntil - 1, pollUntil, pollUntil, deadline];
+    const calls: { scenario: string; timeoutMs: number }[] = [];
+    const emitted: Record<string, unknown>[] = [];
+    const now = (): number => {
+      const value = times.shift();
+      if (value === undefined) throw new Error("PLANTED_CLOCK_EXHAUSTED");
+      return value;
+    };
+
+    await expect(
+      s2WaitForOutbox("planted-nonsatisfying-poll", () => false, {
+        now,
+        observe: async (scenario, timeoutMs) => {
+          calls.push({ scenario, timeoutMs });
+          return observedStatus;
+        },
+        sleep: async () => {
+          throw new Error("PLANTED_FINAL_POLL_MUST_NOT_SLEEP");
+        },
+        emit: (receipt) => emitted.push(receipt),
+      }),
+    ).rejects.toThrow("S2_OUTBOX_DEADLINE_EXCEEDED");
+
+    expect(calls).toEqual([
+      { scenario: "planted-nonsatisfying-poll", timeoutMs: 1 },
+      {
+        scenario: "planted-nonsatisfying-poll-deadline-observation",
+        timeoutMs: S2_OUTBOX_TERMINAL_OBSERVATION_MS,
+      },
+    ]);
+    expect(emitted).toHaveLength(1);
+    const receipt = emitted[0];
+    if (receipt === undefined) throw new Error("PLANTED_DEADLINE_RECEIPT_MISSING");
+    expect(receipt).toMatchObject({
+      status: "fail",
+      assertion_diff: "poll-predicate-unsatisfied;pending=1;delivered=0;quarantined=0;phase=idle",
+      duration_ms: S2_OUTBOX_DEADLINE_MS,
+    });
   });
 });

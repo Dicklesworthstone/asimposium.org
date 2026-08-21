@@ -484,6 +484,7 @@ describe("sponsor enrollment routes", () => {
       status: 401,
       statusText: "Sponsor verifier denied",
       headers: {
+        "cache-control": "public, max-age=300",
         "content-type": "application/vnd.asimposium.sponsor-refusal+json",
         "x-verifier-sentinel": "sponsor",
       },
@@ -548,11 +549,7 @@ describe("sponsor enrollment routes", () => {
       "operator",
     );
     const operatorSuccess = await successHarness.app.fetch(
-      envelopeRequest(
-        `/v1/operators/sponsors/${SPONSOR}/fellow-cap`,
-        operatorHeaders,
-        "GET",
-      ),
+      envelopeRequest(`/v1/operators/sponsors/${SPONSOR}/fellow-cap`, operatorHeaders, "GET"),
     );
     expect(operatorSuccess.status).toBe(200);
     expect(operatorSuccess.headers.get("cache-control")).toBe("no-store");
@@ -560,6 +557,61 @@ describe("sponsor enrollment routes", () => {
       sponsor_id: SPONSOR,
       sponsor_seq: 0,
     });
+  });
+
+  test("router-owned unavailable sponsor and operator responses are no-store", async () => {
+    const malformedSponsor = (async () => ({
+      rawBody: new Uint8Array(),
+    })) as unknown as NonNullable<EnrollmentRouterOptions["verifiedSponsor"]>;
+    const malformedOperator = (async () => ({
+      rawBody: new Uint8Array(),
+    })) as unknown as NonNullable<EnrollmentRouterOptions["verifiedOperator"]>;
+    const sponsorCases = [
+      ["undefined", await harness({ withSponsorSeam: false })],
+      ["malformed", await harness({ verifiedSponsor: malformedSponsor })],
+      [
+        "thrown",
+        await harness({
+          verifiedSponsor: async () => {
+            throw new Error("sponsor verifier failure");
+          },
+        }),
+      ],
+    ] as const;
+    const operatorCases = [
+      ["undefined", await harness({ withOperatorSeam: false })],
+      ["malformed", await harness({ verifiedOperator: malformedOperator })],
+      [
+        "thrown",
+        await harness({
+          verifiedOperator: async () => {
+            throw new Error("operator verifier failure");
+          },
+        }),
+      ],
+    ] as const;
+
+    for (const [cause, h] of sponsorCases) {
+      const response = await h.app.fetch(
+        new Request(`${origin}/v1/enrollments/proposals`, { method: "GET" }),
+      );
+      expect(response.status, `sponsor ${cause}`).toBe(503);
+      expect(response.headers.get("cache-control"), `sponsor ${cause}`).toBe("no-store");
+      expect(await response.json(), `sponsor ${cause}`).toMatchObject({
+        code: "SPONSOR_AUTH_UNAVAILABLE",
+      });
+    }
+
+    for (const [cause, h] of operatorCases) {
+      const response = await h.app.fetch(
+        new Request(`${origin}/v1/operators/sponsors/${SPONSOR}/fellow-cap`, { method: "GET" }),
+      );
+      expect(response.status, `operator ${cause}`).toBe(503);
+      expect(response.headers.get("cache-control"), `operator ${cause}`).toBe("no-store");
+      expect(await response.json(), `operator ${cause}`).toMatchObject({
+        code: "OPERATOR_AUTH_UNAVAILABLE",
+      });
+    }
   });
 
   test("auth-seam throws become one coarse 503 on every sponsor route", async () => {
@@ -1595,6 +1647,55 @@ describe("sponsor enrollment routes", () => {
     expect(serialized).not.toContain(SPONSOR);
     expect(serialized).not.toContain("active_fellow_limit");
     expect(serialized).not.toContain("database");
+  });
+
+  test("the credential cap is a distinct 409 with no credential material", async () => {
+    // The cap itself aborts on the agent-facing poll batch, but the refusal
+    // shape is decided by the router's error mapping, which is route
+    // independent — so this exercises the new case through a real signed route.
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    h.service.decide = async () => {
+      throw new EnrollmentError("FELLOW_CREDENTIAL_CAP_REACHED");
+    };
+    const enrollmentId = "ASIMP-EN-01JXYZ4K6Q";
+    const body = JSON.stringify({
+      enrollment_id: enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const response = await h.app.fetch(
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
+    );
+
+    expect(response.status).toBe(409);
+    const payload = await response.json();
+    // Opaque, not contract: a cap has no corrected request body to teach.
+    expect(OpaqueProblemSchema.parse(payload)).toMatchObject({
+      code: "FELLOW_CREDENTIAL_CAP_REACHED",
+      status: 409,
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(SPONSOR);
+    // Never the material, the inventory, or the SQL that produced the refusal.
+    for (const forbidden of [
+      "credential_id",
+      "cred-",
+      "token_hash",
+      "expires_at",
+      "fellow_tokens",
+      "RAISE",
+      "active credential cap reached",
+      "database",
+    ]) {
+      expect(serialized.includes(forbidden), forbidden).toBe(false);
+    }
+    // And it is not confused with the sponsor-attention cap.
+    expect(serialized).not.toContain("FELLOW_CAP_REACHED");
   });
 
   test("the sponsor enrollment budget is an opaque retryable 429", async () => {

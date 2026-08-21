@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { MAX_BATCH_MEMBERS, planBatchCommit, type BatchMember } from "../../src/krater/batch.ts";
+import { type BatchMember, MAX_BATCH_MEMBERS, planBatchCommit } from "../../src/krater/batch.ts";
 
 function member(tempId: string, causedBy: readonly string[] = []): BatchMember {
   return { tempId, causedBy };
@@ -45,10 +45,7 @@ describe("batch commit planning (W2.2)", () => {
   });
 
   test("a causal cycle is refused with the DAG citation (P10)", () => {
-    const plan = planBatchCommit([
-      member("tmp:a", ["tmp:b"]),
-      member("tmp:b", ["tmp:a"]),
-    ]);
+    const plan = planBatchCommit([member("tmp:a", ["tmp:b"]), member("tmp:b", ["tmp:a"])]);
     expect(plan.ok).toBe(false);
     if (!plan.ok) {
       expect(plan.code).toBe("BATCH_CAUSAL_CYCLE");

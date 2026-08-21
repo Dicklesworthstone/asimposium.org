@@ -1,4 +1,8 @@
-import { type ProblemsIndexResponse, ProblemsIndexResponseSchema } from "@asimposium/contracts";
+import {
+  type ProblemIndexEntry,
+  type ProblemsIndexResponse,
+  ProblemsIndexResponseSchema,
+} from "@asimposium/contracts";
 import { PACK_PREAMBLE, type Projection, renderProjection } from "@asimposium/render";
 import { Hono } from "hono";
 
@@ -15,11 +19,38 @@ import { readCursor, readEvents } from "./krater/krater";
  */
 const OMITTED = ["titles, statements, and statuses land with the problem lifecycle (W5.1)"];
 
-interface ProblemRow {
-  id: string;
-  public_seq: number;
-  created_at: string;
-  updated_at: string;
+type ProblemIndexMarkdownFieldDescriptor<K extends keyof ProblemIndexEntry> = Readonly<{
+  key: K;
+  render: (value: ProblemIndexEntry[K]) => string;
+  renderEntry: (entry: ProblemIndexEntry) => string;
+}>;
+
+function defineProblemIndexMarkdownField<K extends keyof ProblemIndexEntry>(
+  key: K,
+  render: (value: ProblemIndexEntry[K]) => string,
+): ProblemIndexMarkdownFieldDescriptor<K> {
+  return {
+    key,
+    render,
+    renderEntry: (entry) => render(entry[key]),
+  };
+}
+
+export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
+  defineProblemIndexMarkdownField("id", (value) => `- \`${value}\``),
+  defineProblemIndexMarkdownField("public_seq", (value) => ` — seq ${value}`),
+  defineProblemIndexMarkdownField("created_at", (value) => `, opened ${value}`),
+  defineProblemIndexMarkdownField("updated_at", (value) => `, updated ${value}`),
+] as const;
+
+const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
+  ({ key }) => key,
+).join(", ")} FROM problems ORDER BY id ASC LIMIT 201`;
+
+function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
+  return PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ renderEntry }) =>
+    renderEntry(problem),
+  ).join("");
 }
 
 const PUBLIC_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
@@ -42,16 +73,23 @@ async function strongEtag(face: "json" | "markdown", body: string): Promise<stri
 }
 
 async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
-  // One row over the face limit decides whether the index is complete; when
-  // it is not, omitted[] says so rather than silently truncating.
-  const rows = await db
-    .prepare(
-      "SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY public_seq DESC LIMIT 201",
-    )
-    .all<ProblemRow>();
+  // Deterministic interim order: `id ASC`. It is neither of the two tempting
+  // recency proxies, because neither is honest here. `public_seq` is a
+  // per-problem event cursor (DEFAULT 0), so ranking by it is volume, not
+  // recency, and ties have no total order. `updated_at` is the accepted event's
+  // own canonical instant: `validateKraterIngressTimestamp` forbids a future or
+  // non-canonical value, but not one earlier than the row's current
+  // `updated_at`, so a later accepted write can move it backward — it cannot
+  // rank recency without lying. `id` is the unique primary key, so `id ASC` is a
+  // total order stable across storage and query-plan changes. W9.4 replaces this
+  // interim face with aggregated open-move weight.
+  //
+  // One row over the face limit decides whether the index is complete; when it
+  // is not, omitted[] says so rather than silently truncating.
+  const rows = await db.prepare(PROBLEM_INDEX_SELECT).all<ProblemIndexEntry>();
   const truncated = rows.results.length > 200;
   const omitted = truncated
-    ? [...OMITTED, "results beyond the 200 most recent by public_seq"]
+    ? [...OMITTED, "results beyond the first 200 in canonical problem-id order"]
     : OMITTED;
   return ProblemsIndexResponseSchema.parse({
     problems: rows.results.slice(0, 200),
@@ -155,7 +193,7 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
       data.problems.length === 0
         ? "No problems have been promoted to the public ledger yet."
         : data.problems
-            .map((p) => `- \`${p.id}\` — seq ${p.public_seq}, opened ${p.created_at}`)
+            .map((problem) => renderProblemIndexMarkdownRow(problem))
             .join("\n");
     const body = `# Public problems\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);

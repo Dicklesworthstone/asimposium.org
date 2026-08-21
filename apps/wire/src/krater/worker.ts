@@ -1,4 +1,17 @@
+import {
+  EnrollmentApprovedResponseSchema,
+  EnrollmentClaimResponseSchema,
+  FellowNameSchema,
+} from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, ExecutionContext } from "@cloudflare/workers-types";
+import { createApp } from "../app.ts";
+import { D1EnrollmentStore } from "../enrollment/d1-store.ts";
+import { createEnrollmentRouter } from "../enrollment/router.ts";
+import {
+  EnrollmentService,
+  enrollmentReplayProtectorFromBase64Url,
+} from "../enrollment/service.ts";
+import type { Env } from "../env.ts";
 import type { ClaimProjection, KraterWriteInput } from "./krater";
 import {
   attemptEnvelopeTamper,
@@ -54,7 +67,25 @@ interface KraterHarnessEnv extends KraterOutboxEnv {
   S2_HARNESS_TOKEN?: string;
   /** A non-secret, per-worker identifier returned only after token authentication. */
   S2_HARNESS_RUN_ID?: string;
+  /**
+   * The enrollment replay key the mounted production `createApp` session stack
+   * needs to build its replay protector (without it `enrollmentStack` yields no
+   * session router). It is secret-shaped local replay material, NOT a deployed
+   * binding: `scripts/e2e-s2-krater.sh` generates a fresh 43-char base64url key
+   * per run and injects it via Wrangler `--var`, exactly like the harness token,
+   * so `wrangler.s2.toml` stays byte-identical and no key is ever checked in.
+   */
+  ENROLLMENT_REPLAY_KEY?: string;
 }
+
+/**
+ * The real production Stoa app, built once. Under the S-2 harness (and only
+ * there) `handleHarnessRequest` delegates every non-`/__s2/` path to it, so the
+ * mounted promotion route runs against this run's real D1 and real
+ * KraterOutboxDrainer DO. It is never the deployed entrypoint — `apps/wire/src/
+ * index.ts` is — and the fall-through is gated on the local-only capability.
+ */
+const productionApp = createApp();
 
 const S2_LOCAL_HARNESS_CAPABILITY = "enabled";
 const HARNESS_PATH_PREFIX = "/__s2/";
@@ -577,7 +608,7 @@ function redactionReason(body: Record<string, unknown>): string {
 async function handleHarnessRequest(
   request: Request,
   env: KraterHarnessEnv,
-  _ctx: ExecutionContext,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
   // Before parsing, before touching D1: without both the local capability and this worker's
@@ -648,6 +679,122 @@ async function handleHarnessRequest(
           .run();
       }
       return response({ status: "seeded" }, 201);
+    }
+
+    // Token-gated, local-only. Produces the minimal real state a genuine
+    // production promotion needs -- an authenticatable Fellow bearer, an
+    // approved authority graph, and a seeded problem -- by driving the SAME
+    // production EnrollmentService issuance the unit fixture uses
+    // (mint -> claim -> approve -> poll), so D1 writes the exact
+    // enrollment_records/proposals/grants/fellow_tokens graph
+    // `authenticateCredential` requires. No enrollment SQL is hand-written here.
+    // The caller then opens a session, pushes a workshop, and promotes through
+    // the mounted production routes with the returned bearer, exercising the
+    // real committed-promotion -> waitUntil nudge -> DO path.
+    if (request.method === "POST" && url.pathname === "/__s2/seed-promotable") {
+      surface = "write";
+      const body = await readBody(request);
+      const problemId = requiredString(body, "problem_id");
+      const createdAt = requiredString(body, "created_at");
+      // enrollment_fellows.name is COLLATE NOCASE UNIQUE (migration 0002), so a
+      // hard-coded name would make the second mounted seed answer NAME_TAKEN. The
+      // caller supplies a per-scenario name; validate it through the shared
+      // FellowNameSchema (contracts-before-endpoints) so an out-of-policy name is
+      // refused here rather than deep in issuance. The value is a public handle,
+      // not a credential.
+      const parsedFellowName = FellowNameSchema.safeParse(requiredString(body, "name"));
+      if (!parsedFellowName.success) {
+        throw new KraterValidationError("seed-promotable requires a schema-valid Fellow name.");
+      }
+      const fellowName = parsedFellowName.data;
+      if (typeof env.ENROLLMENT_REPLAY_KEY !== "string") {
+        throw new KraterValidationError(
+          "seed-promotable requires the per-run ENROLLMENT_REPLAY_KEY --var.",
+        );
+      }
+      const service = new EnrollmentService({
+        stoaOrigin: "https://a.asimposium.org",
+        agoraOrigin: "https://asimposium.org",
+        store: new D1EnrollmentStore(env.DB),
+        replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
+      });
+      const enrollmentRouter = createEnrollmentRouter({ service });
+      const sponsor = { type: "sponsor", sponsorId: "usr_s2harnesssponsor1" } as const;
+      const minted = await service.mint(sponsor, {
+        requested_scopes: ["promote", "review"],
+        problem_binding: problemId,
+      });
+      const registration = await enrollmentRouter.fetch(
+        new Request("https://a.asimposium.org/v1/fellows", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `s2-seed-claim-${minted.enrollmentId}`,
+          },
+          body: JSON.stringify({
+            enrollment_id: minted.enrollmentId,
+            secret: minted.secret,
+            name: fellowName,
+            model: "test-model",
+            harness: "test-harness",
+          }),
+        }),
+      );
+      // Proof-hardening: a false-positive harness is worse than none. Do not
+      // accept field presence alone -- require the exact issuance status codes,
+      // then parse each response with the SHARED strict enrollment contracts
+      // (contracts-before-endpoints), which also validate hello_url and
+      // suggested_next. A wrong status or a shape the contract rejects is
+      // refused. Errors are generic: the secret-shaped values are never
+      // reflected (Fable §14.3 never-log).
+      if (registration.status !== 202) {
+        throw new KraterValidationError(
+          `seed-promotable claim returned ${registration.status}, expected 202.`,
+        );
+      }
+      const parsedClaim = EnrollmentClaimResponseSchema.safeParse(await registration.json());
+      if (!parsedClaim.success) {
+        throw new KraterValidationError(
+          "seed-promotable claim response did not match the enrollment claim contract.",
+        );
+      }
+      const flowHandle = parsedClaim.data.flow_handle;
+      await service.decide(sponsor, minted.enrollmentId, {
+        enrollment_id: minted.enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+      });
+      const issued = await enrollmentRouter.fetch(
+        new Request("https://a.asimposium.org/v1/device-token", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `s2-seed-token-${minted.enrollmentId}`,
+          },
+          body: JSON.stringify({ flow_handle: flowHandle }),
+        }),
+      );
+      if (issued.status !== 200) {
+        throw new KraterValidationError(
+          `seed-promotable issuance returned ${issued.status}, expected 200.`,
+        );
+      }
+      const parsedApproved = EnrollmentApprovedResponseSchema.safeParse(await issued.json());
+      if (!parsedApproved.success) {
+        throw new KraterValidationError(
+          "seed-promotable issuance response did not match the approved-token contract.",
+        );
+      }
+      const bearer = parsedApproved.data.token;
+      // Problem integrity prerequisites for a real promote (chain head + backfill
+      // complete) come from the same helper every harness write already uses.
+      await ensureProblem(env.DB, problemId, createdAt);
+      // Return only the bearer plus the seeded problem: the shell drives mounted
+      // production POST /v1/sessions -> workshop -> promote with the bearer, so no
+      // session/workshop invariant is duplicated here. The bearer is a transient
+      // credential the caller consumes into shell memory; it must never be written
+      // to retained evidence, and neither must the replay key.
+      return response({ status: "seeded-promotable", problem_id: problemId, bearer }, 201);
     }
 
     if (request.method === "POST" && url.pathname === "/__s2/write") {
@@ -1003,6 +1150,44 @@ async function handleHarnessRequest(
       });
     }
 
+    // Local-only production fall-through. Under the S-2 harness capability the
+    // real Stoa app runs against this run's D1 and KRATER_OUTBOX DO, and the
+    // outer ExecutionContext is forwarded so the mounted promotion route's
+    // committed-write waitUntil nudge detaches for real (the very seam this
+    // bead proves). Deployed configurations never set the capability, and
+    // worker.ts is not the deployed entrypoint, so this is unreachable in
+    // production. The env carries the exact bindings the session path reads --
+    // DB, KRATER_OUTBOX, ENROLLMENT_REPLAY_KEY -- and nothing fabricates R2.
+    if (!url.pathname.startsWith(HARNESS_PATH_PREFIX) && harnessEnabled(env)) {
+      // Local-only, token-authenticated nudge-failure injection. Pre-setting a DO
+      // fault mode cannot work: the production /nudge sends fault_mode:none and
+      // overwrites any stored mode. Instead, for this one delegated request only,
+      // run createApp with a KRATER_OUTBOX whose handle construction throws, so
+      // the committed promotion's post-commit nudge fails while the real D1 write
+      // still commits and returns 2xx. The stored DO state is never touched, so a
+      // subsequent ordinary /__s2/outbox manual reconcile drains the pending row
+      // through the real, untouched DO. This proves INJECTED-BINDING failure plus
+      // real-D1/real-DO recovery -- not a real-DO nudge failure -- and the normal
+      // leg below still delegates the untouched env so its nudge hits the real DO.
+      if (
+        harnessRequestAuthorized(request, env) &&
+        request.headers.get("x-s2-nudge-binding-fail") === "1"
+      ) {
+        const brokenOutboxEnv = {
+          ...env,
+          KRATER_OUTBOX: {
+            idFromName() {
+              throw new Error("S2_INJECTED_NUDGE_BINDING_FAILURE");
+            },
+            get() {
+              throw new Error("S2_INJECTED_NUDGE_BINDING_FAILURE");
+            },
+          },
+        } as unknown as Env;
+        return productionApp.fetch(request, brokenOutboxEnv, ctx);
+      }
+      return productionApp.fetch(request, env as unknown as Env, ctx);
+    }
     return response({ code: "KRATER_HARNESS_ROUTE_NOT_FOUND" }, 404);
   } catch (error) {
     return errorResponse(error, surface);

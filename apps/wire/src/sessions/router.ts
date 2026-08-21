@@ -1,4 +1,5 @@
 import {
+  CursorResponseSchema,
   type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
@@ -7,6 +8,7 @@ import {
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
+  SponsorIdSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushRequestSchema,
@@ -17,10 +19,11 @@ import {
   composePack,
   PACK_BUDGET_BUCKETS,
   type PackCandidate,
+  PackComposerError,
   renderProjection,
 } from "@asimposium/render";
-import { Hono } from "hono";
-import { readBoundedRequestBody } from "../auth/http";
+import { type Context, Hono } from "hono";
+import { cancelUnconsumedRequestBody, readBoundedRequestBody } from "../auth/http";
 import type {
   EncryptedEnrollmentReplay,
   EnrollmentService,
@@ -29,12 +32,14 @@ import type {
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
+import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   KraterIdempotencyConflictError,
   KraterProblemNotFoundError,
   readCursor,
   writeClaim,
 } from "../krater/krater";
+import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
 /**
@@ -99,6 +104,37 @@ export interface SessionRouterOptions {
   >;
 }
 
+function verifiedSponsorSnapshot(value: unknown):
+  | {
+      readonly sponsorId: string;
+      readonly rawBody: Uint8Array;
+    }
+  | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as {
+    readonly principal?: { readonly type?: unknown; readonly sponsorId?: unknown };
+    readonly rawBody?: unknown;
+  };
+  // Read each verifier-owned property exactly once, while the caller's catch
+  // still encloses hostile Proxy/getter behavior. Returning immutable scalar
+  // authority plus a byte copy prevents a later business-path reread from
+  // invoking the untrusted adapter again or observing a mutated buffer.
+  const principal = candidate.principal;
+  const rawBody = candidate.rawBody;
+  if (typeof principal !== "object" || principal === null) return undefined;
+  const type = principal.type;
+  const sponsorId = principal.sponsorId;
+  if (
+    type !== "sponsor" ||
+    typeof sponsorId !== "string" ||
+    !SponsorIdSchema.safeParse(sponsorId).success ||
+    !(rawBody instanceof Uint8Array)
+  ) {
+    return undefined;
+  }
+  return { sponsorId, rawBody: new Uint8Array(rawBody) };
+}
+
 function mintId(prefix: string): string {
   const bytes = new Uint8Array(26);
   crypto.getRandomValues(bytes);
@@ -115,6 +151,7 @@ function bearerToken(request: Request): string | undefined {
 function idempotencyKeyOrRefusal(request: Request, path: string): string | Response {
   const key = request.headers.get("idempotency-key");
   if (key === null || !/^[A-Za-z0-9._-]{1,160}$/.test(key)) {
+    cancelUnconsumedRequestBody(request);
     return problem({
       status: 400,
       code: "IDEMPOTENCY_KEY_INVALID",
@@ -169,6 +206,43 @@ async function writeRequestDigest(target: string, value: unknown): Promise<strin
 
 async function promoteKraterIdempotencyKey(claimToken: string): Promise<string> {
   return `session-promote-v2:${await sha256Text(`session-promote-v2\0${claimToken}`)}`;
+}
+
+/**
+ * Best-effort wake for the durable outbox drainer after a committed promotion.
+ *
+ * Delivery authority does not live here. The five-minute scheduled
+ * reconciliation still owns correctness and is deliberately unchanged; this only
+ * shortens the common-case latency between a durable claim and its search.index
+ * handoff. Because the promotion has already committed by the time this runs,
+ * the response is owed to the caller no matter what happens next, so every
+ * failure mode is swallowed:
+ *
+ *   - no ExecutionContext on the context (Hono's getter throws synchronously),
+ *   - `waitUntil` itself throwing synchronously,
+ *   - the bounded deadline aborting the handoff,
+ *   - the Durable Object rejecting, or the binding being absent.
+ *
+ * A duplicate or replayed wake is harmless by construction: /nudge only sets an
+ * alarm, and the drain it schedules is itself idempotent.
+ */
+function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
+  try {
+    c.executionCtx.waitUntil(
+      requestKraterOutbox(
+        c.env,
+        "/nudge",
+        { faultMode: "none" },
+        KRATER_OUTBOX_NUDGE_DEADLINE_MS,
+      ).then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+  } catch {
+    // Swallowed on purpose: see the contract above. The promotion is durable and
+    // the scheduled reconciliation still covers this row.
+  }
 }
 
 function idempotencyConflictProblem(): Response {
@@ -318,10 +392,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const replay = await readReplayRecord(db, scope, principal, key, requestDigest);
     return replay === undefined
       ? undefined
-      : new Response(replay.plaintext, {
-          status: 200,
-          headers: { "content-type": "application/json; charset=utf-8" },
-        });
+      : privateNoStore(
+          new Response(replay.plaintext, {
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          }),
+        );
   }
 
   /**
@@ -397,6 +473,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Check the console for the credential state or contact your sponsor.",
     });
 
+  const fellowTokenInvalidProblem = (): Response =>
+    problem({
+      status: 401,
+      code: "FELLOW_TOKEN_INVALID",
+      title: "Fellow bearer token is not accepted",
+      detail: "The bearer token was not accepted.",
+      fixHint:
+        "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
+    });
+
+  async function credentialIsLiveAtCommit(db: Env["DB"], credentialId: string): Promise<boolean> {
+    const row = await db
+      .prepare(
+        `SELECT 1 AS live FROM fellow_tokens
+         WHERE credential_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(credentialId)
+      .first<{ live: number }>();
+    return row !== null && row !== undefined;
+  }
+
   async function authenticate(
     request: Request,
   ): Promise<
@@ -404,20 +501,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | { readonly ok: false; readonly response: Response }
   > {
     const token = bearerToken(request);
-    const binding =
-      token === undefined ? undefined : await options.service.credentialBinding(token);
+    let binding: FellowCredentialBinding | undefined;
+    try {
+      binding = token === undefined ? undefined : await options.service.credentialBinding(token);
+    } catch {
+      // Credential-store availability must not distinguish a known token from
+      // an unknown one, and the unread request stream still belongs to us.
+      cancelUnconsumedRequestBody(request);
+      return { ok: false, response: fellowTokenInvalidProblem() };
+    }
     if (binding === undefined) {
-      return {
-        ok: false,
-        response: problem({
-          status: 401,
-          code: "FELLOW_TOKEN_INVALID",
-          title: "Fellow bearer token is not accepted",
-          detail: "The bearer token was not accepted.",
-          fixHint:
-            "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
-        }),
-      };
+      cancelUnconsumedRequestBody(request);
+      return { ok: false, response: fellowTokenInvalidProblem() };
     }
     return { ok: true, binding };
   }
@@ -524,12 +619,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = SessionOpenRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "SESSION_OPEN_BODY_INVALID",
         title: "The session-open body does not match the contract",
         detail: "The JSON body does not match the session-open contract.",
         fixHint: "Send {problem_id, intent?} with a problem id like P-4DSP.",
+        rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: { problem_id: "P-4DSP", intent: "prove" },
@@ -607,6 +703,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                        SELECT 1 FROM sessions
                        WHERE fellow_id = ? AND problem_id = ? AND closed_at IS NULL
                      )
+                     AND EXISTS (
+                       SELECT 1 FROM fellow_tokens
+                       WHERE credential_id = ? AND revoked_at IS NULL
+                     )
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
@@ -620,6 +720,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   parsed.data.problem_id,
                   auth.binding.fellowId,
                   parsed.data.problem_id,
+                  auth.binding.credentialId,
                 ),
               db
                 .prepare(
@@ -658,7 +759,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           };
         },
       );
-      return c.json(result.value, result.replayed ? 200 : 201);
+      return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof SessionProblemMissingError) {
         return problem({
@@ -713,6 +814,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             extensions: { existing_session_id: existing.session_id },
           });
         }
+        // Every contract-shaped cause is excluded above, so the election was
+        // lost to the commit-time credential liveness clause: a revoke landed
+        // between this request's authentication and its batch. It answers with
+        // the one coarse policy face, never a cause the caller could probe.
+        return writeRefusedProblem();
       }
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
@@ -730,14 +836,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const profileParam = url.searchParams.get("profile") ?? "working";
     if (!PROFILES.includes(profileParam as PackProfile)) {
       return privateNoStore(
-        problem({
+        validatedProblem({
           status: 400,
           code: "UNKNOWN_PROFILE",
           title: "Unknown pack profile",
-          detail: `No pack profile named '${profileParam}'.`,
+          detail: "The ?profile= value is not one this route serves.",
           fixHint: `Use one of: ${PROFILES.join(", ")}.`,
+          rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              method: "GET",
+              path: "/v1/sessions/<id>/pack?profile=working",
+            },
             allowed: PROFILES,
           },
         }),
@@ -772,25 +883,44 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       return new Response(body, { status: 200, headers });
     };
+    const composePackResponse = async (
+      input: Parameters<typeof composePack>[0],
+    ): Promise<Response> => {
+      try {
+        return await packResponse(composePack(input));
+      } catch (error) {
+        if (error instanceof PackComposerError) {
+          return privateNoStore(
+            validatedProblem({
+              status: 500,
+              code: "INTERNAL_ERROR",
+              title: "The session pack is unavailable",
+              detail: "The session pack could not be composed safely.",
+              fixHint:
+                "Retry the request. If it persists, report the route and the time of the attempt.",
+            }),
+          );
+        }
+        throw error;
+      }
+    };
     if (membership === undefined) {
-      return packResponse(
-        composePack({
-          schema: "asimposium.pack.v1",
-          session: session.session_id,
-          problem: session.problem_id,
-          profile,
-          cursor,
-          requested_max_tokens: requestedMaxTokens,
-          viewer: {
-            audience: "session",
-            membership: "none",
-            effective_permissions: [],
-          },
-          candidates: [],
-          action_candidates: [],
-          omitted: [{ reason: "no_membership" }],
-        }),
-      );
+      return composePackResponse({
+        schema: "asimposium.pack.v1",
+        session: session.session_id,
+        problem: session.problem_id,
+        profile,
+        cursor,
+        requested_max_tokens: requestedMaxTokens,
+        viewer: {
+          audience: "session",
+          membership: "none",
+          effective_permissions: [],
+        },
+        candidates: [],
+        action_candidates: [],
+        omitted: [{ reason: "no_membership" }],
+      });
     }
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
@@ -968,7 +1098,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     ) {
       actionPermissions.push("promote:write");
     }
-    const composed = composePack({
+    return composePackResponse({
       schema: "asimposium.pack.v1",
       session: session.session_id,
       problem: session.problem_id,
@@ -1008,7 +1138,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         })),
       ],
     });
-    return packResponse(composed);
   });
 
   // --- POST /v1/sessions/:id/workshop ------------------------------------
@@ -1023,12 +1152,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = WorkshopPushRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "WORKSHOP_PUSH_BODY_INVALID",
         title: "The workshop push does not match the contract",
         detail: "The JSON body does not match the workshop-push contract.",
         fixHint: "Send {type, title, body_md, relates_to?}.",
+        rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
@@ -1041,6 +1171,32 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/workshop`, parsed.data);
+    // The §7.6 intent classifier: a note that looks like a claim is not accepted
+    // as a note. Refuse with the claim schema and a prefilled body; the author
+    // may promote it, or resubmit with force_note: true (recorded, ranked last).
+    if (parsed.data.type === "note" && parsed.data.force_note !== true) {
+      const assessment = assessNoteIntent(
+        parsed.data.body_md,
+        parsed.data.relates_to.length > 0,
+      );
+      if (assessment.looksLikeClaim) {
+        return problem({
+          status: 422,
+          code: "LOOKS_LIKE_CLAIM",
+          title: "This note looks like a claim",
+          detail:
+            "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
+          fixHint:
+            "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
+          rule: "§7.6",
+          extensions: {
+            signals: assessment.signals,
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            suggested_claim: suggestedClaimFromNote(parsed.data.body_md),
+          },
+        });
+      }
+    }
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -1115,6 +1271,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      WHERE session_id = ? AND fellow_id = ? AND problem_id = ?
                        AND closed_at IS NULL
                    )
+                     AND EXISTS (
+                       SELECT 1 FROM fellow_tokens
+                       WHERE credential_id = ? AND revoked_at IS NULL
+                     )
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
@@ -1128,6 +1288,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   session.session_id,
                   auth.binding.fellowId,
                   session.problem_id,
+                  auth.binding.credentialId,
                 ),
               db
                 .prepare(
@@ -1161,12 +1322,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         isWorkshopSequenceConflict,
       );
-      return c.json(result.value, result.replayed ? 200 : 201);
+      return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       if (error instanceof ReplayClaimNotCommittedError) {
         const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
         if (current instanceof Response) return current;
+        // The session is still open, so the only remaining reason the election
+        // failed is the commit-time credential liveness clause. Coarse face.
+        return writeRefusedProblem();
       }
       throw error;
     }
@@ -1203,13 +1367,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const parsed = PromoteRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "PROMOTE_BODY_INVALID",
         title: "The promotion does not match the contract",
         detail: "The JSON body does not match the promote contract.",
         fixHint: "Send {workshop_id, kind, statement, falsifier?, relates_to?}.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            workshop_id: "W-4DSP-01JXYZ",
+            kind: "conjecture",
+            statement: "The orbit count is invariant under all eight toggles.",
+            falsifier: "A toggle sequence that changes the orbit count.",
+            relates_to: [],
+          },
+        },
       });
     }
 
@@ -1385,6 +1559,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    FROM idempotency
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?
+                     AND EXISTS (
+                       SELECT 1 FROM fellow_tokens
+                       WHERE credential_id = ? AND revoked_at IS NULL
+                     )
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
@@ -1401,6 +1579,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   kraterIdempotencyKey,
                   attempt.eventId,
                   attempt.sequence,
+                  auth.binding.credentialId,
                 ),
               // The anonymous cursor is a projection of the same winning
               // event and advances only when this attempt owns the replay.
@@ -1443,15 +1622,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       );
+      // The claim, its event and its outbox row are durable at exactly this
+      // point, so the wake is scheduled here rather than beside the return: the
+      // pending row is real even on the paths below that still answer with an
+      // error. Nothing before this line reaches it, so a refusal, a conflict and
+      // a failed commit all leave the drainer untouched.
+      scheduleCommittedPromotionNudge(c);
       const replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
       if (replay === undefined) {
         throw new Error("Krater promotion committed without its atomic replay");
       }
-      return c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200);
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
     } catch (error) {
       try {
         const winner = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
-        if (winner !== undefined) return c.json(JSON.parse(winner.plaintext), 200);
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
       } catch (replayError) {
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
@@ -1471,6 +1660,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
       if (current instanceof Response) return current;
+      if (
+        error instanceof ReplayClaimNotCommittedError ||
+        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+      ) {
+        // A promotion deliberately aborts its whole Krater batch when the
+        // companion replay row loses election, so credential revocation can
+        // surface as the database's constraint error rather than the replay
+        // helper's empty-settlement error. Re-read only the coarse liveness
+        // predicate: a still-live credential preserves unrelated failures,
+        // while an absent/revoked row receives the shared policy face.
+        return writeRefusedProblem();
+      }
       throw error;
     }
   });
@@ -1479,22 +1680,56 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   app.post("/v1/sessions/:id/close", async (c) => {
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
-    const db = c.env.DB;
     const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = SessionCloseRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "SESSION_CLOSE_BODY_INVALID",
         title: "The close body does not match the contract",
         detail: "The JSON body does not match the session-close contract.",
         fixHint: "Send {handback, promote?, keep?, discard?}; handback is ≤ 2000 chars.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            handback: "Next session should examine the boundary case.",
+            promote: [],
+            keep: [],
+            discard: [],
+          },
+        },
       });
     }
+    if (
+      parsed.data.promote.length > 0 ||
+      parsed.data.keep.length > 0 ||
+      parsed.data.discard.length > 0
+    ) {
+      return validatedProblem({
+        status: 422,
+        code: "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+        title: "Session close actions are unavailable",
+        detail:
+          "Session close records a handback only; send promotion requests to POST /v1/sessions/:id/promote before closing.",
+        fixHint:
+          "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            handback: "The next session should examine the boundary case.",
+            promote: [],
+            keep: [],
+            discard: [],
+          },
+        },
+      });
+    }
+    const db = c.env.DB;
     const digest = await writeRequestDigest(
       `POST /v1/sessions/${c.req.param("id")}/close`,
       parsed.data,
@@ -1566,6 +1801,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      SELECT 1 FROM sessions
                      WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
                    )
+                     AND EXISTS (
+                       SELECT 1 FROM fellow_tokens
+                       WHERE credential_id = ? AND revoked_at IS NULL
+                     )
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
@@ -1578,6 +1817,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   claimToken,
                   session.session_id,
                   auth.binding.fellowId,
+                  auth.binding.credentialId,
                 ),
               db
                 .prepare(
@@ -1606,13 +1846,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           };
         },
       );
-      return c.json(result.value, result.replayed ? 200 : 201);
+      return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       if (error instanceof SessionRouteRefusalError) return error.response;
       if (error instanceof ReplayClaimNotCommittedError) {
         const current = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
         if (current instanceof Response) return current;
+        // The session is still open, so the only remaining reason the election
+        // failed is the commit-time credential liveness clause. Coarse face.
+        return writeRefusedProblem();
       }
       throw error;
     }
@@ -1621,24 +1864,58 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // --- POST /v1/sponsors/workshop ----------------------------------------
   // The sponsor's live workshop view (Rule A2: only the sponsor of record
   // reads a Fellow's workshop). Verified by the signed service envelope.
+  const sponsorAuthUnavailable = (): Response =>
+    privateNoStore(
+      validatedProblem({
+        status: 503,
+        code: "SPONSOR_AUTH_UNAVAILABLE",
+        title: "Sponsor reads are not configured on this Worker",
+        detail: "This deployment has no service-envelope verification keyring.",
+        fixHint: "Configure the service-envelope verification keys and retry.",
+      }),
+    );
+  const sponsorWorkshopUnavailable = (): Response =>
+    privateNoStore(
+      validatedProblem({
+        status: 500,
+        code: "INTERNAL_ERROR",
+        title: "The sponsor workshop is unavailable",
+        detail: "The private workshop view could not be served safely.",
+        fixHint: "Retry shortly. If this persists, report the time of the request.",
+      }),
+    );
   app.post("/v1/sponsors/workshop", async (c) => {
     if (options.verifiedSponsor === undefined) {
-      return privateNoStore(
-        problem({
-          status: 503,
-          code: "SPONSOR_AUTH_UNAVAILABLE",
-          title: "Sponsor reads are not configured on this Worker",
-          detail: "This deployment has no service-envelope verification keyring.",
-          fixHint: "Configure the service-envelope verification keys and retry.",
-        }),
-      );
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorAuthUnavailable();
     }
-    const verified = await options.verifiedSponsor(
-      c.req.raw,
-      "/v1/sponsors/workshop",
-      "workshop.read",
-    );
-    if (verified instanceof Response) return privateNoStore(verified);
+    let verified: {
+      readonly sponsorId: string;
+      readonly rawBody: Uint8Array;
+    };
+    try {
+      const candidate = await options.verifiedSponsor(
+        c.req.raw,
+        "/v1/sponsors/workshop",
+        "workshop.read",
+      );
+      if (candidate instanceof Response) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return privateNoStore(candidate);
+      }
+      const snapshot = verifiedSponsorSnapshot(candidate);
+      if (snapshot === undefined) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return sponsorAuthUnavailable();
+      }
+      verified = snapshot;
+    } catch {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorAuthUnavailable();
+    }
+    // Product code consumes only the exact verifier-owned bytes below. Retire
+    // a custom adapter's still-unread Fetch stream before any business work.
+    cancelUnconsumedRequestBody(c.req.raw);
     let requestBody: unknown;
     try {
       requestBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(verified.rawBody));
@@ -1648,12 +1925,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const parsedRequest = SponsorWorkshopRequestSchema.safeParse(requestBody);
     if (!parsedRequest.success) {
       return privateNoStore(
-        problem({
+        validatedProblem({
           status: 422,
           code: "WORKSHOP_READ_BODY_INVALID",
           title: "Workshop read body is invalid",
           detail: "The signed JSON body must contain exactly problem_id and fellow_id.",
           fixHint: "Send the problem and one of your own Fellows in the signed JSON body.",
+          rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
             example: { problem_id: "P-4DSP", fellow_id: "fellow-01JXYZ" },
@@ -1662,60 +1940,61 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
     const { problem_id: problemId, fellow_id: fellowId } = parsedRequest.data;
-    // The sponsor may only read THEIR OWN fellows' workshops.
-    const fellow = await c.env.DB.prepare(
-      "SELECT fellow_id, sponsor_id FROM enrollment_fellows WHERE fellow_id = ?",
-    )
-      .bind(fellowId)
-      .first<{ fellow_id: string; sponsor_id: string }>();
-    if (
-      fellow === null ||
-      fellow === undefined ||
-      fellow.sponsor_id !== verified.principal.sponsorId
-    ) {
-      return privateNoStore(
-        problem({
-          status: 404,
-          code: "WORKSHOP_NOT_FOUND",
-          title: "No such workshop",
-          detail: "No workshop visible to this sponsor matches the query.",
-          fixHint: "Check the fellow id against your console's Fellows list.",
+    try {
+      // The sponsor may only read THEIR OWN fellows' workshops.
+      const fellow = await c.env.DB.prepare(
+        "SELECT fellow_id, sponsor_id FROM enrollment_fellows WHERE fellow_id = ?",
+      )
+        .bind(fellowId)
+        .first<{ fellow_id: string; sponsor_id: string }>();
+      if (fellow === null || fellow === undefined || fellow.sponsor_id !== verified.sponsorId) {
+        return privateNoStore(
+          validatedProblem({
+            status: 404,
+            code: "WORKSHOP_NOT_FOUND",
+            title: "No such workshop",
+            detail: "No workshop visible to this sponsor matches the query.",
+            fixHint: "Check the fellow id against your console's Fellows list.",
+          }),
+        );
+      }
+      const objects = await c.env.DB.prepare(
+        `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at
+           FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
+           ORDER BY workshop_seq DESC LIMIT 200`,
+      )
+        .bind(problemId, fellowId)
+        .all<{
+          workshop_id: string;
+          type: string;
+          title: string;
+          body_md: string;
+          relates_to_json: string;
+          workshop_seq: number;
+          created_at: string;
+        }>();
+      return c.json(
+        SponsorWorkshopViewSchema.parse({
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          problem_id: problemId,
+          fellow_id: fellowId,
+          objects: (objects.results ?? []).map((row) => ({
+            workshop_id: row.workshop_id,
+            type: row.type,
+            title: row.title,
+            body_md: row.body_md,
+            relates_to: JSON.parse(row.relates_to_json) as string[],
+            workshop_seq: row.workshop_seq,
+            created_at: row.created_at,
+          })),
         }),
+        200,
+        { "cache-control": "private, no-store" },
       );
+    } catch {
+      // D1 diagnostics and malformed private rows never cross this response.
+      return sponsorWorkshopUnavailable();
     }
-    const objects = await c.env.DB.prepare(
-      `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at
-         FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
-         ORDER BY workshop_seq DESC LIMIT 200`,
-    )
-      .bind(problemId, fellowId)
-      .all<{
-        workshop_id: string;
-        type: string;
-        title: string;
-        body_md: string;
-        relates_to_json: string;
-        workshop_seq: number;
-        created_at: string;
-      }>();
-    return c.json(
-      SponsorWorkshopViewSchema.parse({
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-        problem_id: problemId,
-        fellow_id: fellowId,
-        objects: (objects.results ?? []).map((row) => ({
-          workshop_id: row.workshop_id,
-          type: row.type,
-          title: row.title,
-          body_md: row.body_md,
-          relates_to: JSON.parse(row.relates_to_json) as string[],
-          workshop_seq: row.workshop_seq,
-          created_at: row.created_at,
-        })),
-      }),
-      200,
-      { "cache-control": "private, no-store" },
-    );
   });
 
   // --- GET /cursor ---------------------------------------------------------
@@ -1723,7 +2002,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const row = await c.env.DB.prepare(
       "SELECT cursor FROM public_cursor WHERE singleton = 1",
     ).first<{ cursor: number }>();
-    const body = String(row?.cursor ?? 0);
+    // The stored column is a 64-bit SQLite INTEGER whose only constraint is
+    // `cursor >= 0`; the contract is narrower. A value above the JS safe range
+    // has already lost precision by the time it reaches here, and type affinity
+    // admits a float, so serialize only what the published contract admits.
+    // An absent row is still the honest empty-ledger 0, not a refusal.
+    const stored = CursorResponseSchema.safeParse(row?.cursor ?? 0);
+    if (!stored.success) {
+      // Opaque on purpose: a corrupt cursor is an operator fault, and naming
+      // the row, column, table, statement or observed value would turn a public
+      // poll into a cheap diagnostic channel.
+      return privateNoStore(
+        validatedProblem({
+          status: 500,
+          code: "INTERNAL_ERROR",
+          title: "The public cursor is unavailable",
+          detail: "The public change cursor could not be served.",
+          fixHint: "Retry shortly. If this persists the operator must repair the cursor.",
+        }),
+      );
+    }
+    const body = String(stored.data);
     const etag = `"${await sha256Text(body)}"`;
     const headers = {
       "cache-control": "public, max-age=5",

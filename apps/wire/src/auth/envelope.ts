@@ -237,6 +237,7 @@ export async function verifyServiceEnvelope(
   const skew = options.clockSkewSeconds ?? SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS;
   if (!Number.isSafeInteger(skew) || skew < 0) return refuse("malformed");
   const maxLifetime = options.maxLifetimeSeconds ?? DEFAULT_MAX_LIFETIME_SECONDS;
+  if (!Number.isSafeInteger(maxLifetime) || maxLifetime <= 0) return refuse("malformed");
   if (claims.exp <= claims.iat) return refuse("malformed");
   if (claims.exp - claims.iat > maxLifetime) return refuse("lifetime_too_long");
   if (options.now > claims.exp + skew) return refuse("expired");

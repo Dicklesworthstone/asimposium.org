@@ -80,12 +80,27 @@ export type RequiredBinding = (typeof REQUIRED_BINDINGS)[number];
 
 export type BindingState = "bound" | "missing";
 
+export interface BindingHealthSnapshot {
+  missing: RequiredBinding[];
+  bindings: Record<RequiredBinding, BindingState>;
+}
+
 const isFunction = (value: unknown): boolean => typeof value === "function";
 
-const readProperty = (container: unknown, key: string): unknown =>
-  typeof container === "object" && container !== null
-    ? (container as Record<string, unknown>)[key]
-    : undefined;
+const readProperty = (container: unknown, key: string): unknown => {
+  if (typeof container !== "object" || container === null) {
+    return undefined;
+  }
+
+  try {
+    return (container as Record<string, unknown>)[key];
+  } catch {
+    // A Proxy or accessor may throw while a binding is inspected. Health is a
+    // fail-closed shape probe, so an unreadable property is indistinguishable
+    // from a missing one and must never turn the health route into a 500.
+    return undefined;
+  }
+};
 
 /**
  * Structural probes rather than `!= null` checks.
@@ -111,9 +126,32 @@ export function isBindingHealthy(name: RequiredBinding, value: unknown): boolean
   return BINDING_PROBES[name](value);
 }
 
+/**
+ * One coherent read of every required binding for a single health decision.
+ *
+ * Environment objects are normally inert Worker binding bags, but tests,
+ * preview adapters, and malformed configuration can expose stateful Proxies.
+ * Reading the environment twice could otherwise produce a contradictory
+ * `missing` list and state map, or even a 200 carrying a missing state.
+ */
+export function bindingHealthSnapshot(env: unknown): BindingHealthSnapshot {
+  const missing: RequiredBinding[] = [];
+  const bindings = {} as Record<RequiredBinding, BindingState>;
+
+  for (const name of REQUIRED_BINDINGS) {
+    const state = isBindingHealthy(name, readProperty(env, name)) ? "bound" : "missing";
+    bindings[name] = state;
+    if (state === "missing") {
+      missing.push(name);
+    }
+  }
+
+  return { missing, bindings };
+}
+
 /** The required bindings that are absent or the wrong shape, in declaration order. */
 export function missingBindings(env: unknown): RequiredBinding[] {
-  return REQUIRED_BINDINGS.filter((name) => !isBindingHealthy(name, readProperty(env, name)));
+  return bindingHealthSnapshot(env).missing;
 }
 
 /**
@@ -122,10 +160,5 @@ export function missingBindings(env: unknown): RequiredBinding[] {
  * never-log list applies to faces as well as logs).
  */
 export function bindingStates(env: unknown): Record<RequiredBinding, BindingState> {
-  const missing = new Set<RequiredBinding>(missingBindings(env));
-  const states = {} as Record<RequiredBinding, BindingState>;
-  for (const name of REQUIRED_BINDINGS) {
-    states[name] = missing.has(name) ? "missing" : "bound";
-  }
-  return states;
+  return bindingHealthSnapshot(env).bindings;
 }

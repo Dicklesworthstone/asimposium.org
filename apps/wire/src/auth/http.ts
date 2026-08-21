@@ -80,7 +80,7 @@ interface BoundedBodyReader {
   releaseLock(): void;
 }
 
-function cancelUnconsumedRequestBody(request: Request): void {
+export function cancelUnconsumedRequestBody(request: Request): void {
   try {
     const body = request.body;
     if (body !== null && !body.locked) void body.cancel().catch(() => undefined);
@@ -258,10 +258,15 @@ export async function authenticateServiceEnvelopeRequest(
  * responses, while this auth core owns byte binding and authorization only.
  */
 export function parseAuthenticatedJsonBody(request: AuthenticatedServiceEnvelopeRequest): unknown {
-  return parseAuthenticatedJsonBytes(request.rawBody);
+  return parseExactJsonBytes(request.rawBody);
 }
 
 /** Parse JSON from exact signature-verified bytes without replacing malformed UTF-8. */
 export function parseAuthenticatedJsonBytes(rawBody: Uint8Array): unknown {
+  return parseExactJsonBytes(rawBody);
+}
+
+/** Parse exact JSON bytes without replacement decoding; authorization is the caller's concern. */
+export function parseExactJsonBytes(rawBody: Uint8Array): unknown {
   return JSON.parse(jsonDecoder.decode(rawBody));
 }

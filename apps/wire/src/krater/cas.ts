@@ -47,21 +47,22 @@ const SHA256_HEX = /^[a-f0-9]{64}$/;
  * projects). Anything else is refused at admission; nothing HTML/SVG is ever
  * served under a site origin. Keys are the SNIFFED type, never the extension.
  */
-const ALLOWED_CONTENT_TYPES: Readonly<
-  Record<string, { readonly disposition: "inline" | "attachment" }>
-> = {
-  "text/plain": { disposition: "inline" },
-  "text/markdown": { disposition: "inline" },
-  "text/x-lean": { disposition: "inline" },
-  "text/x-python": { disposition: "inline" },
-  "text/x-csrc": { disposition: "inline" },
-  "text/x-typescript": { disposition: "inline" },
-  "text/x-log": { disposition: "inline" },
-  "application/json": { disposition: "inline" },
+const ALLOWED_CONTENT_TYPES: ReadonlyMap<
+  string,
+  { readonly disposition: "inline" | "attachment" }
+> = new Map<string, { readonly disposition: "inline" | "attachment" }>([
+  ["text/plain", { disposition: "inline" }],
+  ["text/markdown", { disposition: "inline" }],
+  ["text/x-lean", { disposition: "inline" }],
+  ["text/x-python", { disposition: "inline" }],
+  ["text/x-csrc", { disposition: "inline" }],
+  ["text/x-typescript", { disposition: "inline" }],
+  ["text/x-log", { disposition: "inline" }],
+  ["application/json", { disposition: "inline" }],
   // Lake archives are never rendered; they download with an attachment
   // disposition so no archived byte executes under a site origin.
-  "application/gzip": { disposition: "attachment" },
-};
+  ["application/gzip", { disposition: "attachment" }],
+]);
 
 /** Types that are categorically refused — executable under a site origin. */
 const FORBIDDEN_CONTENT_TYPES: ReadonlySet<string> = new Set([
@@ -92,7 +93,7 @@ export type CasRefusalCode =
 
 /** The R2 key for a verified digest. Throws on a non-sha256-hex input. */
 export function casKeyForHash(sha256Hex: string): string {
-  if (!SHA256_HEX.test(sha256Hex)) {
+  if (typeof sha256Hex !== "string" || !SHA256_HEX.test(sha256Hex)) {
     throw new Error("ARTIFACT_DIGEST_INVALID: CAS keys are lowercase sha256 hex");
   }
   return `${CAS_KEY_PREFIX}${sha256Hex}`;
@@ -100,7 +101,7 @@ export function casKeyForHash(sha256Hex: string): string {
 
 /** The immutable public URL for a verified digest. */
 export function casUrlForHash(sha256Hex: string): string {
-  if (!SHA256_HEX.test(sha256Hex)) {
+  if (typeof sha256Hex !== "string" || !SHA256_HEX.test(sha256Hex)) {
     throw new Error("ARTIFACT_DIGEST_INVALID: CAS URLs are lowercase sha256 hex");
   }
   return `${ARTIFACTS_ORIGIN}/sha256/${sha256Hex}`;
@@ -117,17 +118,23 @@ export function shouldSpillToCas(bodyBytes: number): boolean {
 /**
  * The 280-character extract the owning index row carries for a spilled body.
  * Sliced on Unicode code points (not UTF-16 code units or bytes) so the cut
- * never splits a valid surrogate pair.
+ * never splits a valid surrogate pair. Lone UTF-16 surrogate units are
+ * deterministically replaced with U+FFFD while copied, so an extract never
+ * preserves an invalid scalar input.
  */
 export function casExtractFor(body: string): string {
   let codePoints = 0;
-  let end = 0;
+  let extract = "";
   for (const character of body) {
     if (codePoints === CAS_EXTRACT_CHARS) break;
     codePoints += 1;
-    end += character.length;
+    // String iteration preserves a lone surrogate as a one-unit item. Valid
+    // astral code points arrive as two units, so this cannot split a pair.
+    const firstUnit = character.charCodeAt(0);
+    extract +=
+      character.length === 1 && firstUnit >= 0xd800 && firstUnit <= 0xdfff ? "\uFFFD" : character;
   }
-  return end === body.length ? body : body.slice(0, end);
+  return extract;
 }
 
 /**
@@ -141,7 +148,7 @@ export interface SecretFinding {
   readonly kind: "fellow-token" | "prefixed-grant" | "api-key" | "private-key" | "personal-address";
   /** 1-based line of the hit. */
   readonly line: number;
-  /** 1-based column where the sensitive run starts. */
+  /** 1-based CODE-POINT column where the sensitive run starts. */
   readonly column: number;
 }
 
@@ -159,19 +166,56 @@ const SECRET_PATTERNS: ReadonlyArray<{
   },
 ];
 
+/** Any UTF-16 code unit that can only appear as half of a surrogate pair. */
+const SURROGATE_UNIT = /[\uD800-\uDFFF]/;
+
+/**
+ * UTF-16 offset → 0-based code-point index, for one line.
+ *
+ * A line with no surrogate unit needs no map at all: there the two indices are
+ * already equal, which is the overwhelmingly common case and stays allocation
+ * free. When a map is needed it is built once for the whole line, so a line
+ * carrying many hits costs one linear pass rather than re-counting a prefix
+ * per finding.
+ *
+ * Both units of an astral character map to that character's own index, so an
+ * offset that lands mid-pair cannot report a column between two code points.
+ */
+function codePointColumnsFor(lineText: string): Int32Array | undefined {
+  if (!SURROGATE_UNIT.test(lineText)) return undefined;
+  const columns = new Int32Array(lineText.length + 1);
+  let unit = 0;
+  let codePoint = 0;
+  for (const character of lineText) {
+    columns[unit] = codePoint;
+    if (character.length === 2) columns[unit + 1] = codePoint;
+    unit += character.length;
+    codePoint += 1;
+  }
+  columns[unit] = codePoint;
+  return columns;
+}
+
 /**
  * Scan a body for credential- and PII-shaped content. Returns every finding
  * with its redacted location. Pure: same body, same findings.
+ *
+ * `column` counts CODE POINTS, matching `casExtractFor`'s slicing unit, so a
+ * location a reader is asked to inspect agrees with what they count. Only the
+ * hit's offset is used to derive it — the matched bytes never reach a finding,
+ * because echoing them would republish the leak this scan exists to stop.
  */
 export function scanBodyForSecrets(body: string): readonly SecretFinding[] {
   const findings: SecretFinding[] = [];
   const lines = body.split("\n");
   for (const [lineIndex, lineText] of lines.entries()) {
+    const columns = codePointColumnsFor(lineText);
     for (const { kind, pattern } of SECRET_PATTERNS) {
       const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
       const matcher = new RegExp(pattern.source, flags);
       for (const hit of lineText.matchAll(matcher)) {
-        findings.push({ kind, line: lineIndex + 1, column: hit.index + 1 });
+        const column = (columns === undefined ? hit.index : (columns[hit.index] ?? 0)) + 1;
+        findings.push({ kind, line: lineIndex + 1, column });
       }
     }
   }
@@ -220,7 +264,7 @@ export function decideArtifactAdmission(input: {
     };
   }
 
-  const allowed = ALLOWED_CONTENT_TYPES[sniffedType];
+  const allowed = ALLOWED_CONTENT_TYPES.get(sniffedType);
   if (allowed === undefined) {
     return {
       admitted: false,
@@ -242,7 +286,8 @@ export function decideArtifactAdmission(input: {
   // Secret scanning is deliberately last among the cheap admission checks.
   // It is linear in the supplied body but still materially more expensive
   // than scalar/type/cap validation, so a doomed upload must never reach it.
-  if (input.body !== undefined && bodyLooksSecretShaped(input.body)) {
+  const body = input.body;
+  if (body !== undefined && bodyLooksSecretShaped(body)) {
     return {
       admitted: false,
       code: "ARTIFACT_SECRET_SHAPED",
@@ -313,6 +358,7 @@ export function archiveMemberPathIsSafe(memberPath: string): boolean {
  *      │                    └──expire─────────────┘   └──mismatch──► quarantined
  *      └──expire──► expired                            (digest/size)
  *   verified ──bind──► bound   (terminal; the index row now references it)
+ *      └──expire──► expired    (binding failed and the manifest aged out)
  *
  * `expired` and `quarantined` are terminal; `bound` is the only success
  * terminal. An unverified or quarantined object can never reach `bound`, which
@@ -327,6 +373,18 @@ export type UploadState =
   | "expired"
   | "quarantined";
 
+const UPLOAD_STATE_ORDER: readonly UploadState[] = [
+  "declared",
+  "presigned",
+  "uploaded",
+  "verified",
+  "bound",
+  "expired",
+  "quarantined",
+];
+
+const UPLOAD_STATES: ReadonlySet<UploadState> = new Set(UPLOAD_STATE_ORDER);
+
 export type UploadTransition = "presign" | "upload" | "verify" | "bind" | "expire" | "mismatch";
 
 const TERMINAL_UPLOAD_STATES: ReadonlySet<UploadState> = new Set([
@@ -336,18 +394,27 @@ const TERMINAL_UPLOAD_STATES: ReadonlySet<UploadState> = new Set([
 ]);
 
 /** The lawful (from, transition) → to edges. Anything absent is refused. */
-const UPLOAD_EDGES: Readonly<
-  Record<UploadTransition, Readonly<Partial<Record<UploadState, UploadState>>>>
-> = {
-  presign: { declared: "presigned" },
-  upload: { presigned: "uploaded" },
-  verify: { uploaded: "verified" },
-  bind: { verified: "bound" },
+const UPLOAD_EDGES: ReadonlyMap<UploadTransition, ReadonlyMap<UploadState, UploadState>> = new Map<
+  UploadTransition,
+  ReadonlyMap<UploadState, UploadState>
+>([
+  ["presign", new Map<UploadState, UploadState>([["declared", "presigned"]])],
+  ["upload", new Map<UploadState, UploadState>([["presigned", "uploaded"]])],
+  ["verify", new Map<UploadState, UploadState>([["uploaded", "verified"]])],
+  ["bind", new Map<UploadState, UploadState>([["verified", "bound"]])],
   // Expiry lawfully preempts any non-terminal state; mismatch quarantines an
   // uploaded object whose observed digest/size disagrees with the manifest.
-  expire: { declared: "expired", presigned: "expired", uploaded: "expired" },
-  mismatch: { uploaded: "quarantined" },
-};
+  [
+    "expire",
+    new Map<UploadState, UploadState>([
+      ["declared", "expired"],
+      ["presigned", "expired"],
+      ["uploaded", "expired"],
+      ["verified", "expired"],
+    ]),
+  ],
+  ["mismatch", new Map<UploadState, UploadState>([["uploaded", "quarantined"]])],
+]);
 
 export type UploadStep =
   | { readonly ok: true; readonly state: UploadState }
@@ -360,7 +427,7 @@ export type UploadStep =
 
 /** Advance the machine one edge. Illegal moves are refused, never coerced. */
 export function stepUpload(state: UploadState, transition: UploadTransition): UploadStep {
-  const next = UPLOAD_EDGES[transition][state];
+  const next = UPLOAD_EDGES.get(transition)?.get(state);
   if (next === undefined) {
     return { ok: false, code: "UPLOAD_TRANSITION_ILLEGAL", from: state, transition };
   }
@@ -414,17 +481,29 @@ export type GcEligibility =
         | "licensed_reference_remains"
         | "backup_restoration_reference_remains"
         | "quarantine_hold"
-        | "legal_hold";
+        | "legal_hold"
+        | "private_reference_remains";
       readonly preservedFor: readonly RetentionClass[];
     };
 
-const NEVER_GC_CLASSES: ReadonlySet<RetentionClass> = new Set([
+const PRESERVING_REFERENCE_CLASSES: ReadonlySet<RetentionClass> = new Set([
   "public",
   "licensed",
   "backup-restoration",
   "quarantine",
   "legal-hold",
+  "private",
 ]);
+
+const RETENTION_CLASS_ORDER: readonly RetentionClass[] = [
+  "public",
+  "licensed",
+  "backup-restoration",
+  "quarantine",
+  "legal-hold",
+  "private",
+];
+const RETENTION_CLASSES: ReadonlySet<RetentionClass> = new Set(RETENTION_CLASS_ORDER);
 
 /**
  * Given the retention classes that still reference an object after some
@@ -433,7 +512,17 @@ const NEVER_GC_CLASSES: ReadonlySet<RetentionClass> = new Set([
  * whether the shared bytes survive.
  */
 export function gcEligibility(remainingClasses: readonly RetentionClass[]): GcEligibility {
-  const preserved = [...new Set(remainingClasses)].filter((c) => NEVER_GC_CLASSES.has(c));
+  const remaining = new Set<RetentionClass>();
+  for (const retentionClass of remainingClasses) {
+    if (typeof retentionClass !== "string" || !RETENTION_CLASSES.has(retentionClass)) {
+      throw new Error("ARTIFACT_RETENTION_INVALID: every remaining reference class must be known");
+    }
+    remaining.add(retentionClass);
+  }
+  const preserved = RETENTION_CLASS_ORDER.filter(
+    (retentionClass) =>
+      remaining.has(retentionClass) && PRESERVING_REFERENCE_CLASSES.has(retentionClass),
+  );
   if (preserved.length === 0) {
     return { eligible: true, reason: "no_lawful_reference_remains" };
   }
@@ -442,7 +531,8 @@ export function gcEligibility(remainingClasses: readonly RetentionClass[]): GcEl
     | "licensed_reference_remains"
     | "backup_restoration_reference_remains"
     | "quarantine_hold"
-    | "legal_hold" = preserved.includes("legal-hold")
+    | "legal_hold"
+    | "private_reference_remains" = preserved.includes("legal-hold")
     ? "legal_hold"
     : preserved.includes("quarantine")
       ? "quarantine_hold"
@@ -450,7 +540,9 @@ export function gcEligibility(remainingClasses: readonly RetentionClass[]): GcEl
         ? "public_bytes_stay_public"
         : preserved.includes("licensed")
           ? "licensed_reference_remains"
-          : "backup_restoration_reference_remains";
+          : preserved.includes("backup-restoration")
+            ? "backup_restoration_reference_remains"
+            : "private_reference_remains";
   return { eligible: false, reason, preservedFor: preserved };
 }
 
@@ -480,8 +572,8 @@ export function duplicateUploadKeepsPublicStatus(
  *  - missing_object: an index row references a digest no R2 object has. The
  *    binding is dangling — this is the corruption signal, surfaced loudly.
  *  - state_mismatch: an index row's recorded upload state disagrees with the
- *    object actually being present (a `bound` row with no object, or an
- *    object present for a `declared` row that never uploaded).
+ *    object actually being present (an uploaded/verified row with no object,
+ *    or an object present for a `declared` row that never uploaded).
  */
 export interface ArtifactIndexRow {
   readonly digest: string;
@@ -502,9 +594,38 @@ export function reconcileArtifactInventory(
   indexRows: readonly ArtifactIndexRow[],
   observedDigests: readonly string[],
 ): readonly InventoryDivergence[] {
-  const indexed = new Map<string, UploadState>();
-  for (const row of indexRows) indexed.set(row.digest, row.state);
-  const observed = new Set(observedDigests);
+  const indexed = new Map<string, Set<UploadState>>();
+  for (const row of indexRows) {
+    if (typeof row !== "object" || row === null) {
+      throw new Error(
+        "ARTIFACT_INVENTORY_INVALID: index rows require lowercase sha256 digests and known upload states",
+      );
+    }
+    const { digest, state } = row;
+    if (
+      typeof digest !== "string" ||
+      typeof state !== "string" ||
+      !SHA256_HEX.test(digest) ||
+      !UPLOAD_STATES.has(state)
+    ) {
+      throw new Error(
+        "ARTIFACT_INVENTORY_INVALID: index rows require lowercase sha256 digests and known upload states",
+      );
+    }
+    const states = indexed.get(digest) ?? new Set<UploadState>();
+    states.add(state);
+    indexed.set(digest, states);
+  }
+
+  const observed = new Set<string>();
+  for (const digest of observedDigests) {
+    if (typeof digest !== "string" || !SHA256_HEX.test(digest)) {
+      throw new Error(
+        "ARTIFACT_INVENTORY_INVALID: observed objects require lowercase sha256 digests",
+      );
+    }
+    observed.add(digest);
+  }
 
   const divergences: InventoryDivergence[] = [];
 
@@ -514,20 +635,40 @@ export function reconcileArtifactInventory(
     }
   }
 
-  for (const [digest, state] of indexed) {
+  for (const [digest, states] of indexed) {
     const present = observed.has(digest);
-    if (!present && state === "bound") {
+    if (!present && states.has("bound")) {
       divergences.push({ kind: "missing_object", digest });
-    } else if (!present && (state === "verified" || state === "uploaded")) {
-      // A verified/uploaded row with no object is a partial-write divergence.
-      divergences.push({ kind: "state_mismatch", digest, state });
-    } else if (present && state === "declared") {
+    }
+    if (!present) {
+      // Every distinct uploaded/verified row is independently inconsistent
+      // with an absent object. A bound row for the same digest does not erase
+      // these partial-write signals.
+      for (const state of UPLOAD_STATE_ORDER) {
+        if ((state === "uploaded" || state === "verified") && states.has(state)) {
+          divergences.push({ kind: "state_mismatch", digest, state });
+        }
+      }
+    } else if (states.has("declared")) {
       // An object exists for a row that never recorded an upload.
-      divergences.push({ kind: "state_mismatch", digest, state });
+      divergences.push({ kind: "state_mismatch", digest, state: "declared" });
     }
   }
 
-  return divergences.sort((a, b) =>
-    a.digest === b.digest ? a.kind.localeCompare(b.kind) : a.digest.localeCompare(b.digest),
-  );
+  const kindOrder: Readonly<Record<InventoryDivergence["kind"], number>> = {
+    missing_object: 0,
+    orphan_object: 1,
+    state_mismatch: 2,
+  };
+  return divergences.sort((left, right) => {
+    // Digests are validated lowercase ASCII hex, so compare code units
+    // directly. `localeCompare` unnecessarily delegates report order to the
+    // host locale/ICU build, weakening the byte-identical-report promise.
+    const digestOrder = left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0;
+    if (digestOrder !== 0) return digestOrder;
+    const divergenceOrder = kindOrder[left.kind] - kindOrder[right.kind];
+    if (divergenceOrder !== 0) return divergenceOrder;
+    if (left.kind !== "state_mismatch" || right.kind !== "state_mismatch") return 0;
+    return UPLOAD_STATE_ORDER.indexOf(left.state) - UPLOAD_STATE_ORDER.indexOf(right.state);
+  });
 }

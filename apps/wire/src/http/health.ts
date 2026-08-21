@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { type BindingState, bindingStates, missingBindings, type RequiredBinding } from "../env";
+import { type BindingState, bindingHealthSnapshot, type RequiredBinding } from "../env";
 import { problem, SCHEMA_BASE, success, validatedProblem } from "./envelope";
 
 /**
@@ -34,19 +34,20 @@ export interface HealthData {
 }
 
 export interface HealthRequest {
-  /** Raw `?format=` value, or `undefined` when the caller omitted it. */
-  format: string | undefined;
+  /** Every raw `?format=` value, in query-string order. */
+  formats: readonly string[];
   env: unknown;
 }
 
 export function handleHealth(request: HealthRequest): Response {
-  const parsed = HealthQuery.safeParse(
-    request.format === undefined ? {} : { format: request.format },
-  );
+  const parsed =
+    request.formats.length > 1
+      ? null
+      : HealthQuery.safeParse(request.formats.length === 0 ? {} : { format: request.formats[0] });
 
   // Fable §7.1 axiom 9: never silent-fail. An unknown format is a 400 that
   // names the allowed list rather than a quiet fallback to the default.
-  if (!parsed.success) {
+  if (parsed === null || !parsed.success) {
     return validatedProblem({
       status: 400,
       code: "UNKNOWN_FORMAT",
@@ -59,11 +60,11 @@ export function handleHealth(request: HealthRequest): Response {
         example: { method: "GET", path: "/internal/health?format=json" },
         allowed: [...HEALTH_FORMATS],
       },
+      headers: { "cache-control": "no-store" },
     });
   }
 
-  const missing = missingBindings(request.env);
-  const bindings = bindingStates(request.env);
+  const { missing, bindings } = bindingHealthSnapshot(request.env);
 
   // Fail closed: a Worker that cannot reach its system of record reports
   // unavailable rather than serving a cheerful 200 it cannot back up.

@@ -5,7 +5,21 @@
  * access date — a citation that outlives every session that built it.
  *
  * Pure string/data generation; the route that serves it supplies the object,
- * the access date, and the origin. Nothing here touches a clock or a socket.
+ * the access date, the origin, and the observed instant. Nothing here touches
+ * a clock or a socket.
+ *
+ * ## Why `observedAt` is required, not optional
+ *
+ * A citation asserts three times: when the claim was published, when it was
+ * retrieved, and — implicitly — that both already happened. The first two were
+ * already validated for canonical calendar form and for order. Neither had an
+ * upper bound, so `9999-12-31` satisfied every check and would have been
+ * rendered as `year = {9999}`.
+ *
+ * A module that reads its own clock cannot be replayed, so the bound arrives as
+ * an argument. `new Date(...)` still appears below, but only ever applied to a
+ * caller-supplied string for round-trip canonicalization — never `Date.now()`
+ * and never a no-argument `new Date()`. Same inputs, same citation, forever.
  */
 
 import {
@@ -30,6 +44,26 @@ export interface CitableClaim {
   readonly publishedAt: string;
 }
 
+/**
+ * One citation request. A single object rather than four positional arguments:
+ * `accessDate`, `origin` and `observedAt` are all strings, and a positional
+ * signature would let a transposition typecheck and then silently mis-date a
+ * permanent record.
+ */
+export interface CitationRequest {
+  readonly claim: CitableClaim;
+  /** `YYYY-MM-DD`, the day the citing party retrieved the claim. */
+  readonly accessDate: string;
+  /** Exact `https` origin the citation resolves against. */
+  readonly origin: string;
+  /**
+   * The caller's observed instant, `YYYY-MM-DDTHH:MM:SS.mmmZ`. The upper bound
+   * for both asserted times. Supplied by the caller so this module stays a pure
+   * function of its arguments.
+   */
+  readonly observedAt: string;
+}
+
 export class CitationInputError extends Error {
   readonly code = "CITATION_INPUT_INVALID";
 
@@ -44,6 +78,45 @@ function invalidCitationInput(detail: string): never {
 }
 
 const CITATION_UNSAFE_CHARACTER = /[\p{C}\p{Z}]/u;
+const CANONICAL_CITATION_ORIGIN = "https://asimposium.org";
+
+type RuntimeCitationRecord = Record<PropertyKey, unknown>;
+
+function citationRecord(value: unknown, field: string): RuntimeCitationRecord {
+  if (typeof value !== "object" || value === null) invalidCitationInput(field);
+  return value as RuntimeCitationRecord;
+}
+
+function readCitationMember(source: RuntimeCitationRecord, key: string, field: string): unknown {
+  try {
+    return Reflect.get(source, key);
+  } catch {
+    return invalidCitationInput(field);
+  }
+}
+
+/** Detach the runtime request graph before validation or rendering reads it. */
+function snapshotCitationRequest(value: CitationRequest): CitationRequest {
+  const request = citationRecord(value, "request");
+  const claim = citationRecord(readCitationMember(request, "claim", "claim"), "claim");
+  return {
+    claim: {
+      problemId: readCitationMember(claim, "problemId", "problem id") as string,
+      claimId: readCitationMember(claim, "claimId", "claim id") as string,
+      statement: readCitationMember(claim, "statement", "statement") as string,
+      statementVersion: readCitationMember(
+        claim,
+        "statementVersion",
+        "statement version",
+      ) as number,
+      authorFellowId: readCitationMember(claim, "authorFellowId", "Fellow id") as string,
+      publishedAt: readCitationMember(claim, "publishedAt", "publication instant") as string,
+    },
+    accessDate: readCitationMember(request, "accessDate", "access date") as string,
+    origin: readCitationMember(request, "origin", "origin") as string,
+    observedAt: readCitationMember(request, "observedAt", "observed instant") as string,
+  };
+}
 
 function citationTextIsSafe(text: string, allowAsciiSpace: boolean): boolean {
   if (text !== text.normalize("NFC")) return false;
@@ -70,51 +143,80 @@ function validateClaimIdentity(claim: CitableClaim): void {
   ) {
     invalidCitationInput("statement");
   }
-  if (!Number.isSafeInteger(claim.statementVersion) || claim.statementVersion <= 0) {
-    invalidCitationInput("statement version");
-  }
+  exactStatementVersion(claim.statementVersion);
 }
 
-function exactHttpsOrigin(origin: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    invalidCitationInput("origin");
+function exactStatementVersion(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    invalidCitationInput("statement version");
   }
-  const hostnameLabels = parsed.hostname.split(".");
-  const hostnameIsCanonical =
-    parsed.hostname.length <= 253 &&
-    hostnameLabels.every(
-      (label) =>
-        label.length > 0 &&
-        label.length <= 63 &&
-        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
-    );
-  if (parsed.protocol !== "https:" || parsed.origin !== origin || !hostnameIsCanonical) {
-    invalidCitationInput("origin");
-  }
+  return value as number;
+}
+
+function exactHttpsOrigin(origin: unknown): string {
+  if (origin !== CANONICAL_CITATION_ORIGIN) invalidCitationInput("origin");
   return origin;
 }
 
-function exactPublishedDate(publishedAt: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(publishedAt)) {
-    invalidCitationInput("publication instant");
+/**
+ * Canonical UTC instant, or refuse. The regex fixes the spelling (literal `Z`,
+ * exactly three fractional digits) and the round-trip fixes the calendar: an
+ * offset form never reaches here, and `2025-02-30` parses but re-serializes as
+ * `2025-03-02`, so it cannot pass.
+ */
+function exactUtcInstant(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    invalidCitationInput(field);
   }
-  const parsed = new Date(publishedAt);
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== publishedAt) {
-    invalidCitationInput("publication instant");
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+    invalidCitationInput(field);
   }
-  return publishedAt.slice(0, 10);
+  return value;
 }
 
-function exactAccessDate(accessDate: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(accessDate)) invalidCitationInput("access date");
+function exactAccessDate(accessDate: unknown): string {
+  if (typeof accessDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(accessDate)) {
+    invalidCitationInput("access date");
+  }
   const parsed = new Date(`${accessDate}T00:00:00.000Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== accessDate) {
     invalidCitationInput("access date");
   }
   return accessDate;
+}
+
+interface CitationTimes {
+  /** `YYYY-MM-DD` the citation was retrieved. */
+  readonly accessDate: string;
+  /** `YYYY-MM-DD` the claim became public. */
+  readonly publishedDate: string;
+}
+
+/**
+ * Validate every asserted time against the caller's observed instant, in one
+ * place so BibTeX and CSL cannot drift apart on which refusals apply.
+ *
+ * All three comparisons are lexical on fixed-width UTC forms, which is exactly
+ * chronological. Both bounds are INCLUSIVE: a claim published at the observed
+ * instant, or retrieved on the observed day, is a fact about now, not a
+ * prediction. Only strictly-greater is refused.
+ */
+function citationTimes(request: CitationRequest): CitationTimes {
+  const observedAt = exactUtcInstant(request.observedAt, "observed instant");
+  const publishedAt = exactUtcInstant(request.claim.publishedAt, "publication instant");
+  const accessDate = exactAccessDate(request.accessDate);
+  const observedDate = observedAt.slice(0, 10);
+  const publishedDate = publishedAt.slice(0, 10);
+
+  if (publishedAt > observedAt) {
+    invalidCitationInput("publication instant is after the observed instant");
+  }
+  if (accessDate > observedDate) {
+    invalidCitationInput("access date is after the observed instant");
+  }
+  if (accessDate < publishedDate) invalidCitationInput("access date precedes publication");
+  return { accessDate, publishedDate };
 }
 
 /** The canonical public URL for a claim — the stable, citable target. */
@@ -125,17 +227,17 @@ export function claimStableUrl(origin: string, problemId: string, claimId: strin
 }
 
 /**
- * The cite key: boring, stable, filesystem- and BibTeX-safe. Derived only from
- * the problem and claim ids so it never changes under a statement edit (the
- * version is carried separately, so the key stays stable across versions).
+ * The cite key: boring, stable, filesystem- and BibTeX-safe. It includes the
+ * statement version so two exact-version citations can coexist without one
+ * bibliography entry overwriting the other.
  */
-export function citeKeyFor(problemId: string, claimId: string): string {
+export function citeKeyFor(problemId: string, claimId: string, statementVersion: number): string {
   if (!ProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
   if (!ClaimIdSchema.safeParse(claimId).success) invalidCitationInput("claim id");
   // ProblemIdSchema and ClaimIdSchema exclude underscores, so replacing their
   // only separator character is injective over the canonical id alphabets.
   const encode = (identifier: string): string => identifier.toLowerCase().replaceAll("-", "_");
-  return `asimposium_${encode(problemId)}_${encode(claimId)}`;
+  return `asimposium_${encode(problemId)}_${encode(claimId)}_v${exactStatementVersion(statementVersion)}`;
 }
 
 /** Escape the BibTeX-sensitive characters in free text. */
@@ -144,11 +246,11 @@ function bibtexEscape(text: string): string {
     "\\": "\\textbackslash{}",
     "{": "\\{",
     "}": "\\}",
-    "$": "\\$",
+    $: "\\$",
     "&": "\\&",
     "#": "\\#",
     "%": "\\%",
-    "_": "\\_",
+    _: "\\_",
     "^": "\\textasciicircum{}",
     "~": "\\textasciitilde{}",
   };
@@ -159,12 +261,12 @@ function bibtexEscape(text: string): string {
  * A BibTeX @misc entry for a claim. The note pins the statement version and
  * the access date; the howpublished carries the stable URL.
  */
-export function bibtexForClaim(claim: CitableClaim, accessDate: string, origin: string): string {
+export function bibtexForClaim(request: CitationRequest): string {
+  const snapshot = snapshotCitationRequest(request);
+  const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
-  const exactDate = exactAccessDate(accessDate);
-  const publishedDate = exactPublishedDate(claim.publishedAt);
-  if (exactDate < publishedDate) invalidCitationInput("access date precedes publication");
-  const key = citeKeyFor(claim.problemId, claim.claimId);
+  const { accessDate, publishedDate } = citationTimes(snapshot);
+  const key = citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion);
   const url = claimStableUrl(origin, claim.problemId, claim.claimId);
   const title = bibtexEscape(claim.statement);
   return [
@@ -172,25 +274,21 @@ export function bibtexForClaim(claim: CitableClaim, accessDate: string, origin: 
     `  author = {{ASImposium Fellow ${bibtexEscape(claim.authorFellowId)}}},`,
     `  title = {${title}},`,
     `  howpublished = {\\url{${url}}},`,
-    `  note = {ASImposium claim ${claim.claimId} on ${claim.problemId}, statement version ${claim.statementVersion}. Accessed ${bibtexEscape(exactDate)}.},`,
+    `  note = {ASImposium claim ${claim.claimId} on ${claim.problemId}, statement version ${claim.statementVersion}. Accessed ${bibtexEscape(accessDate)}.},`,
     `  year = {${publishedDate.slice(0, 4)}}`,
     `}`,
   ].join("\n");
 }
 
 /** A CSL JSON item for the same claim — the machine-readable citation. */
-export function cslForClaim(
-  claim: CitableClaim,
-  accessDate: string,
-  origin: string,
-): Record<string, unknown> {
+export function cslForClaim(request: CitationRequest): Record<string, unknown> {
+  const snapshot = snapshotCitationRequest(request);
+  const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
-  const exactDate = exactAccessDate(accessDate);
-  const publishedDate = exactPublishedDate(claim.publishedAt);
-  if (exactDate < publishedDate) invalidCitationInput("access date precedes publication");
+  const { accessDate, publishedDate } = citationTimes(snapshot);
   const url = claimStableUrl(origin, claim.problemId, claim.claimId);
   return {
-    id: citeKeyFor(claim.problemId, claim.claimId),
+    id: citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion),
     type: "webpage",
     title: claim.statement,
     URL: url,
@@ -199,9 +297,9 @@ export function cslForClaim(
     accessed: {
       "date-parts": [
         [
-          Number(exactDate.slice(0, 4)),
-          Number(exactDate.slice(5, 7)),
-          Number(exactDate.slice(8, 10)),
+          Number(accessDate.slice(0, 4)),
+          Number(accessDate.slice(5, 7)),
+          Number(accessDate.slice(8, 10)),
         ],
       ],
     },

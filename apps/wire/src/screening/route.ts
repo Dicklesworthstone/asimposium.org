@@ -1,3 +1,8 @@
+import {
+  cancelUnconsumedRequestBody,
+  parseExactJsonBytes,
+  readBoundedRequestBody,
+} from "../auth/http";
 import type { Env } from "../env";
 import { problem } from "../http/envelope";
 import { isSafeScreeningDiagnosticLabel, isSha256Digest } from "./aggregate";
@@ -95,45 +100,6 @@ async function bearerMatches(header: string | null, expected: string): Promise<b
     difference |= presentedDigest.charCodeAt(index) ^ expectedDigest.charCodeAt(index);
   }
   return difference === 0 && presentedDigest.length === expectedDigest.length;
-}
-
-/** The whole request body, or `undefined` when it crosses the byte ceiling. */
-async function readBoundedBody(request: Request, maxBytes: number): Promise<string | undefined> {
-  const declaredLength = Number(request.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) return undefined;
-  if (request.body === null) return "";
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-          // Cancellation is cleanup, never the outcome.
-        }
-        return undefined;
-      }
-      chunks.push(value);
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // Preserve the bounded-read outcome.
-    }
-  }
-  const complete = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    complete.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(complete);
 }
 
 /**
@@ -258,13 +224,18 @@ export async function handleScreeningRequest(
   // Configuration gates first: a disabled surface does not read untrusted
   // bodies, and the two 503s are indistinguishable by construction.
   const bearer = env.S4_SCREENING_BEARER;
-  if (typeof bearer !== "string" || bearer.trim().length < 16) return screeningUnavailable();
+  if (typeof bearer !== "string" || bearer.trim().length < 16) {
+    cancelUnconsumedRequestBody(request);
+    return screeningUnavailable();
+  }
   const ai = env.AI;
   if (ai === undefined || ai === null || typeof ai.run !== "function") {
+    cancelUnconsumedRequestBody(request);
     return screeningUnavailable();
   }
 
   if (!(await bearerMatches(request.headers.get("authorization"), bearer))) {
+    cancelUnconsumedRequestBody(request);
     return problem({
       status: 401,
       code: "SCREENING_UNAUTHORIZED",
@@ -275,8 +246,8 @@ export async function handleScreeningRequest(
     });
   }
 
-  const text = await readBoundedBody(request, SCREENING_MAX_REQUEST_BYTES);
-  if (text === undefined) {
+  const body = await readBoundedRequestBody(request, SCREENING_MAX_REQUEST_BYTES);
+  if (!body.ok && body.reason === "too-large") {
     return screeningProblem(
       413,
       "SCREENING_REQUEST_TOO_LARGE",
@@ -284,9 +255,17 @@ export async function handleScreeningRequest(
       "Resubmit with the frozen S-4 corpus, which fits the documented ceiling.",
     );
   }
+  if (!body.ok) {
+    return screeningProblem(
+      422,
+      "SCREENING_REQUEST_MALFORMED",
+      "The body must be one JSON object: corpus_revision, corpus_digest, partial_run, examples.",
+      "Resubmit with the documented S-4 corpus request shape.",
+    );
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = parseExactJsonBytes(body.bytes);
   } catch {
     return screeningProblem(
       422,

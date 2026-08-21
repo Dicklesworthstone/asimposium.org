@@ -1953,6 +1953,9 @@ describe("a pinned port is validated before anything is started", () => {
     expect(phaseValue(run.stderr, "child-argv-secret-observed", "result")).toBe("absent");
     expect(phaseValue(run.stderr, "child-handoff-fd-observed", "result")).toBe("closed");
     expect(phaseValue(run.stderr, "client-streams-scanned", "scope")).toBe("closed-capture-inodes");
+    expect(readFileSync(`${stateDir}/runtime/wrangler-env`, "utf8")).toBe(
+      "AGORA_ORIGIN=https://asimposium.org\n",
+    );
     const retained = retainedArtifacts(stateDir);
     expect(retained.files.length).toBeGreaterThanOrEqual(3);
     expect(Number(phaseValue(run.stderr, "replay-key-artifact-scan", "files"))).toBe(
@@ -2081,6 +2084,58 @@ describe("a pinned port is validated before anything is started", () => {
       expect(run.stderr).not.toContain(sentinel);
     }
   }, 30_000);
+
+  test("PLANTED: the private Wrangler env-file contains only the canonical Agora binding", async () => {
+    const run = await runScript(["--self-test-private-wrangler-env"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("PRIVATE_WRANGLER_ENV_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "result")).toBe("exact");
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "binding")).toBe(
+      "AGORA_ORIGIN",
+    );
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "missing-lf")).toBe(
+      "refused",
+    );
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "extra-blank")).toBe(
+      "refused",
+    );
+    expect(phaseValue(run.stderr, "private-wrangler-env-observed", "scope")).toBe(
+      "private-env-file",
+    );
+  });
+
+  test("PLANTED: only the strict allowlisted local-client cause is surfaced", async () => {
+    const run = await runScript(["--self-test-client-failure-diagnostic"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("CLIENT_FAILURE_DIAGNOSTIC_ALLOWLIST_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "allowed")).toBe(
+      "capsule-json-status",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "validator-stdout")).toBe(
+      "empty",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "parent-code")).toBe(
+      "fixed",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "rejected")).toBe(
+      "withheld",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "malformed-utf8")).toBe(
+      "withheld",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "duplicate")).toBe(
+      "withheld",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "trailing")).toBe(
+      "withheld",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "no-lf")).toBe(
+      "withheld",
+    );
+    expect(phaseValue(run.stderr, "client-failure-diagnostic-allowlist", "scope")).toBe(
+      "closed-capture-file",
+    );
+  });
 
   test("PLANTED: a +1-byte overflow still leaves its earlier secret-shaped client diagnostic for exact inode scanning", async () => {
     const cap = 256 * 1024;
@@ -2258,11 +2313,39 @@ describe("a pinned port is validated before anything is started", () => {
   test("S1 regression surface: the rejected argv handoff strings are absent", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
     expect(source).toContain("CLOUDFLARE_INCLUDE_PROCESS_ENV=true");
+    expect(source).toContain(
+      'readonly LOCAL_WRANGLER_AGORA_ENV="AGORA_ORIGIN=https://asimposium.org"',
+    );
+    expect(source).toContain(
+      'printf \'%s\\n\' "$LOCAL_WRANGLER_AGORA_ENV" >"$LOCAL_RUNTIME_WRANGLER_ENV_FILE"',
+    );
+    expect(source).toContain("private_wrangler_env_is_exact || return 1");
+    expect(source).toContain('printf \'%s\' "$LOCAL_WRANGLER_AGORA_ENV"');
+    expect(source).toContain('printf \'%s\\n\\n\' "$LOCAL_WRANGLER_AGORA_ENV"');
+    expect(source).toContain('const allowedCodes = new Set(["capsule-json-status"]);');
+    expect(source).toContain("const args = process.argv.slice(1);");
+    expect(source).toContain("args.length !== 1");
+    expect(source).toContain('new TextDecoder("utf-8", { fatal: true })');
+    expect(source).toContain("bytes.at(-1) !== 0x0a");
+    expect(source).toContain("bytes.indexOf(0x0a) !== bytes.length - 1");
+    expect(source).toContain("const after = await file.stat();");
+    expect(source).toContain("after.dev !== opened.dev || after.ino !== opened.ino");
+    expect(source).toContain("after.size !== opened.size || bytes.length !== opened.size");
+    expect(source).toContain('record !== `${JSON.stringify(parsed)}\\n`');
+    expect(source).toContain("!allowedCodes.has(parsed.code)");
+    expect(source).toContain('local_client_failure_validator "$stderr_path" >/dev/null 2>/dev/null');
+    expect(source).toContain("printf '%s' \"capsule-json-status\"");
+    expect(source).not.toContain("process.argv.length !== 3");
+    expect(source).not.toContain("process.argv.length !== 2");
+    expect(source).not.toContain("new TextDecoder().decode(await file.readFile())");
+    expect(source).not.toContain("process.stdout.write(parsed.code)");
     for (const rejectedHandoff of [
       'export ENROLLMENT_REPLAY_KEY="$replay_key"',
       'export S1_LOCAL_STOA_ORIGIN="$origin"',
       'stoa_origin="$S1_LOCAL_STOA_ORIGIN"',
       'export STOA_ORIGIN="$stoa_origin"',
+      'export "$agora_name=https://asimposium.org"',
+      "export AGORA_ORIGIN=",
       "unset replay_key stoa_origin",
       "unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN",
     ]) {

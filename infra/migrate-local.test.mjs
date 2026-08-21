@@ -820,6 +820,68 @@ function assertCurrent0016InputsUnchanged(inputs) {
   );
 }
 
+function stableCurrent0020Inputs() {
+  const migrationPath = resolve(root, "db/migrations/0020_session_replay_atomic_claim.sql");
+  const manifestPath = resolve(root, "db/bootstrap/manifest.json");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = {
+      migration: digestOf(readFileSync(migrationPath, "utf8")),
+      manifest: digestOf(readFileSync(manifestPath, "utf8")),
+    };
+    const currentMigrations = readMigrationDirectory(resolve(root, "db/migrations"));
+    const currentManifest = readBootstrapManifest(root);
+    const after = {
+      migration: digestOf(readFileSync(migrationPath, "utf8")),
+      manifest: digestOf(readFileSync(manifestPath, "utf8")),
+    };
+    if (before.migration !== after.migration || before.manifest !== after.manifest) continue;
+
+    const migration0020 = currentMigrations.find((migration) => migration.sequence === 20);
+    assert.ok(migration0020, "current replay-claim migration 0020 must exist");
+    assert.equal(migration0020.id, "0020_session_replay_atomic_claim.sql");
+    assert.equal(
+      migration0020.digest,
+      before.migration,
+      "the production migration command must use the exact current 0020 bytes",
+    );
+    const schemaHead20 = currentManifest.schema_heads.filter((head) => head.sequence === 20);
+    assert.equal(
+      schemaHead20.length,
+      1,
+      "the production manifest must register exactly one measured head 20",
+    );
+    const migrationsThrough0020 = currentMigrations.filter((migration) => migration.sequence <= 20);
+    assert.equal(
+      migrationsThrough0020.length,
+      20,
+      "the replay-claim proof requires contiguous 0001-0020",
+    );
+    return {
+      migration0020,
+      migrationsThrough0020,
+      manifest: currentManifest,
+      schemaHead20: schemaHead20[0],
+      sourceDigests: before,
+    };
+  }
+  assert.fail("replay-claim migration 0020 or bootstrap manifest moved during local-proof input capture");
+}
+
+function assertCurrent0020InputsUnchanged(inputs) {
+  assert.equal(
+    digestOf(
+      readFileSync(resolve(root, "db/migrations/0020_session_replay_atomic_claim.sql"), "utf8"),
+    ),
+    inputs.sourceDigests.migration,
+    "replay-claim migration 0020 moved during the local proof; reject the mixed snapshot",
+  );
+  assert.equal(
+    digestOf(readFileSync(resolve(root, "db/bootstrap/manifest.json"), "utf8")),
+    inputs.sourceDigests.manifest,
+    "bootstrap manifest moved during the head-20 local proof; reject the mixed snapshot",
+  );
+}
+
 function productCatalog(catalog) {
   return catalog.filter(
     (entry) =>
@@ -2507,6 +2569,66 @@ END;`,
         }
         assertSafeCause(immutable);
       }
+    },
+  },
+  {
+    name: "actual head-20 replay-claim fingerprint is measured through canonical local D1 commands",
+    async execute() {
+      const current0020 = stableCurrent0020Inputs();
+      const databaseName = uniqueDatabaseName("head-20");
+
+      await localJson(databaseName, LEDGER_DDL, "head-20-journal-create");
+      await applyMigrations(databaseName, 1, 20);
+
+      const { catalog, journal } = await readSnapshot(databaseName, "head-20-snapshot");
+      assertCurrent0020InputsUnchanged(current0020);
+      assert.equal(
+        catalogFingerprint(catalog),
+        current0020.schemaHead20.schema_digest,
+        "the production head-20 pin must equal the raw local D1 catalog fingerprint",
+      );
+      assert.deepEqual(
+        journal,
+        current0020.migrationsThrough0020.map((migration) => ({
+          id: migration.id,
+          sequence: migration.sequence,
+          digest: migration.digest,
+        })),
+        "each canonical migration command must leave its exact coupled journal record",
+      );
+      assert.deepEqual(
+        classifySchemaLineage({
+          catalog,
+          journal,
+          lineage: [],
+          migrations: current0020.migrationsThrough0020,
+          manifest: current0020.manifest,
+        }),
+        { kind: "historical-forward", head: 20 },
+        "the measured replay-claim schema must reclassify to the admitted historical forward head",
+      );
+      assert.equal(
+        planMigrations(current0020.migrationsThrough0020, journal, localPlanOptions).idempotent,
+        true,
+        "the measured replay-claim schema must produce an empty second plan",
+      );
+      const replayColumns = (
+        await localJson(databaseName, "PRAGMA table_info(session_write_replays);", "head-20-columns")
+      ).flatMap((statement) => statement.results ?? []);
+      assert.deepEqual(
+        replayColumns
+          .filter((column) => column.name === "claim_token")
+          .map((column) => ({ name: String(column.name), type: String(column.type), notnull: Number(column.notnull) })),
+        [{ name: "claim_token", type: "TEXT", notnull: 0 }],
+        "head 20 must retain the nullable replay ownership claim for legacy rows",
+      );
+      assert.equal(
+        catalog.filter(
+          (entry) => entry.type === "index" && entry.name === "session_write_replays_claim_token_idx",
+        ).length,
+        1,
+        "head 20 must retain exactly one non-null replay ownership index",
+      );
     },
   },
 ];

@@ -1,8 +1,8 @@
 /**
  * Per-problem event export (W2.8): the public dataset, the agent warm-up
  * format, and the exit hatch, all one file. `/p/<slug>/export.jsonl.gz` is the
- * NDJSON event stream with the integrity checkpoints embedded — tamper-evident
- * and verifiable offline for the cost of one hash per write (Fable §10.2).
+ * NDJSON event stream with integrity checkpoints embedded for strict offline
+ * self-consistency verification (Fable §10.2).
  *
  * Format (Fable §7): one complete event per line, terminated by a control
  * record so a consumer never guesses whether the export completed. The
@@ -13,13 +13,162 @@
  * license line. Nothing here touches a socket.
  */
 
-import type { KraterCheckpoint, KraterEvent } from "./krater.ts";
+import {
+  checkpointDigest,
+  eventChainDigest,
+  eventRowDigest,
+  genesisChainDigest,
+  type KraterCheckpoint,
+  type KraterEvent,
+} from "./krater.ts";
 
 /** The license line every public export carries (CC BY 4.0, Fable §10). */
 export const EXPORT_LICENSE = "CC BY 4.0";
 
 /** The export format version, so a consumer can reject a future shape. */
 export const EXPORT_FORMAT = "asimposium.problem-export.v1";
+
+/** The `control` value of the first record. Named so the scan cannot drift. */
+export const EXPORT_HEADER_CONTROL = "export_header";
+
+/** The `control` value of the terminal record — the completion witness. */
+export const EXPORT_TRAILER_CONTROL = "export_end";
+
+const EXPORT_HEADER_KEYS = [
+  "checkpoints",
+  "control",
+  "format",
+  "generated_at",
+  "license",
+  "problem",
+  "title",
+] as const;
+
+const EXPORT_CHECKPOINT_KEYS = [
+  "checkpoint_digest",
+  "checkpoint_mode",
+  "checkpoint_seq",
+  "checkpoint_version",
+  "problem",
+  "root_chain_digest",
+] as const;
+
+const EXPORT_EVENT_KEYS = [
+  "chain_digest",
+  "created_at",
+  "event_id",
+  "object_id",
+  "payload_sha256",
+  "row_digest",
+  "seq",
+  "type",
+] as const;
+
+const EXPORT_TRAILER_KEYS = ["control", "event_count", "final_cursor", "problem"] as const;
+const PROBLEM_ID = /^P-[A-Z0-9][A-Z0-9-]{1,30}$/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/;
+const MAX_IDENTIFIER_LENGTH = 160;
+const MAX_TITLE_LENGTH = 160;
+
+interface ParsedCheckpoint {
+  readonly checkpointSeq: number;
+  readonly rootChainDigest: string;
+  readonly checkpointDigest: string;
+}
+
+interface ParsedHeader {
+  readonly problem: string;
+  readonly checkpoints: readonly ParsedCheckpoint[];
+}
+
+interface ParsedEvent {
+  readonly eventId: string;
+  readonly seq: number;
+  readonly objectId: string;
+  readonly payloadSha256: string;
+  readonly rowDigest: string;
+  readonly chainDigest: string;
+  readonly createdAt: string;
+}
+
+interface ParsedTrailer {
+  readonly problem: string;
+  readonly eventCount: number;
+  readonly finalCursor: number;
+}
+
+type ParseResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly reason: string };
+
+type ExportParseResult =
+  | {
+      readonly ok: true;
+      readonly header: ParsedHeader;
+      readonly events: readonly ParsedEvent[];
+      readonly trailer: ParsedTrailer;
+    }
+  | { readonly ok: false; readonly brokenAtSeq: number | null; readonly detail: string };
+
+function nonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function positiveInteger(value: unknown): value is number {
+  return nonNegativeInteger(value) && value > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(record: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(record).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function boundedNonBlankString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length <= maximum && value.trim().length > 0;
+}
+
+function isProblemId(value: unknown): value is string {
+  return typeof value === "string" && PROBLEM_ID.test(value);
+}
+
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && SHA256_HEX.test(value);
+}
+
+function isUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = UTC_TIMESTAMP.exec(value);
+  if (match === null) return false;
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return false;
+  return (
+    timestamp.getUTCFullYear() === Number(match[1]) &&
+    timestamp.getUTCMonth() + 1 === Number(match[2]) &&
+    timestamp.getUTCDate() === Number(match[3]) &&
+    timestamp.getUTCHours() === Number(match[4]) &&
+    timestamp.getUTCMinutes() === Number(match[5]) &&
+    timestamp.getUTCSeconds() === Number(match[6])
+  );
+}
+
+function parseJsonRecord(line: string, label: string): ParseResult<Record<string, unknown>> {
+  if (line.includes("\n") || line.includes("\r")) {
+    return { ok: false, reason: `${label} must be exactly one LF-free record` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return { ok: false, reason: `${label} is not JSON` };
+  }
+  if (!isRecord(parsed)) return { ok: false, reason: `${label} is not an object` };
+  return { ok: true, value: parsed };
+}
 
 export interface ProblemExportInput {
   readonly problemId: string;
@@ -38,7 +187,7 @@ export interface ProblemExportInput {
  */
 export function serializeProblemExport(input: ProblemExportInput): string {
   const header = {
-    control: "export_header",
+    control: EXPORT_HEADER_CONTROL,
     format: EXPORT_FORMAT,
     license: EXPORT_LICENSE,
     problem: input.problemId,
@@ -50,6 +199,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
       checkpoint_digest: c.checkpointDigest,
       checkpoint_version: c.checkpointVersion,
       checkpoint_mode: c.checkpointMode,
+      problem: c.problemId,
     })),
   };
   const eventLines = input.events.map((event) =>
@@ -65,7 +215,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
     }),
   );
   const trailer = {
-    control: "export_end",
+    control: EXPORT_TRAILER_CONTROL,
     problem: input.problemId,
     event_count: input.events.length,
     final_cursor: input.events[input.events.length - 1]?.seq ?? 0,
@@ -73,11 +223,80 @@ export function serializeProblemExport(input: ProblemExportInput): string {
   return `${[JSON.stringify(header), ...eventLines, JSON.stringify(trailer)].join("\n")}\n`;
 }
 
-/**
- * Parse and validate an export's header line — the consumer-side contract. A
- * mirror reads this first to confirm the format and extract the checkpoints
- * before trusting any event line.
- */
+function parseCheckpoint(
+  value: unknown,
+  problem: string,
+  index: number,
+): ParseResult<ParsedCheckpoint> {
+  if (!isRecord(value) || !hasExactKeys(value, EXPORT_CHECKPOINT_KEYS)) {
+    return { ok: false, reason: `header checkpoint ${index} does not have the exact v1 shape` };
+  }
+  if (value.problem !== problem) {
+    return { ok: false, reason: `header checkpoint ${index} is not bound to the header problem` };
+  }
+  if (
+    !positiveInteger(value.checkpoint_seq) ||
+    !isSha256Hex(value.root_chain_digest) ||
+    !isSha256Hex(value.checkpoint_digest) ||
+    value.checkpoint_version !== 1 ||
+    value.checkpoint_mode !== "unsigned-v0"
+  ) {
+    return { ok: false, reason: `header checkpoint ${index} carries invalid v1 fields` };
+  }
+  return {
+    ok: true,
+    value: {
+      checkpointSeq: value.checkpoint_seq,
+      rootChainDigest: value.root_chain_digest,
+      checkpointDigest: value.checkpoint_digest,
+    },
+  };
+}
+
+function parseHeaderRecord(line: string): ParseResult<ParsedHeader> {
+  const parsed = parseJsonRecord(line, "header");
+  if (!parsed.ok) return parsed;
+  const record = parsed.value;
+  if (!hasExactKeys(record, EXPORT_HEADER_KEYS)) {
+    return { ok: false, reason: "header does not have the exact v1 shape" };
+  }
+  if (record.control !== EXPORT_HEADER_CONTROL) {
+    return { ok: false, reason: "first line is not the export header" };
+  }
+  if (record.format !== EXPORT_FORMAT) {
+    return { ok: false, reason: "header carries an unrecognized export format" };
+  }
+  if (record.license !== EXPORT_LICENSE) {
+    return { ok: false, reason: "header carries an unrecognized export license" };
+  }
+  if (!isProblemId(record.problem)) {
+    return { ok: false, reason: "header carries no valid problem id" };
+  }
+  if (!boundedNonBlankString(record.title, MAX_TITLE_LENGTH)) {
+    return { ok: false, reason: "header carries no valid problem title" };
+  }
+  if (!isUtcTimestamp(record.generated_at)) {
+    return { ok: false, reason: "header carries no valid generation timestamp" };
+  }
+  if (!Array.isArray(record.checkpoints)) {
+    return { ok: false, reason: "header checkpoints are not an array" };
+  }
+
+  const checkpoints: ParsedCheckpoint[] = [];
+  let previousCheckpointSeq = 0;
+  for (const [offset, checkpoint] of record.checkpoints.entries()) {
+    const parsedCheckpoint = parseCheckpoint(checkpoint, record.problem, offset + 1);
+    if (!parsedCheckpoint.ok) return parsedCheckpoint;
+    if (parsedCheckpoint.value.checkpointSeq <= previousCheckpointSeq) {
+      return { ok: false, reason: "header checkpoints are not in strict sequence order" };
+    }
+    checkpoints.push(parsedCheckpoint.value);
+    previousCheckpointSeq = parsedCheckpoint.value.checkpointSeq;
+  }
+  return { ok: true, value: { problem: record.problem, checkpoints } };
+}
+
+/** Parse an exact v1 header record for consumers that read it independently. */
 export function parseExportHeader(line: string):
   | {
       readonly ok: true;
@@ -86,40 +305,170 @@ export function parseExportHeader(line: string):
       readonly checkpointCount: number;
     }
   | { readonly ok: false; readonly reason: string } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return { ok: false, reason: "header is not JSON" };
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    return { ok: false, reason: "header is not an object" };
-  }
-  const record = parsed as Record<string, unknown>;
-  if (record.control !== "export_header") {
-    return { ok: false, reason: "first line is not the export header" };
-  }
-  if (record.format !== EXPORT_FORMAT) {
-    return { ok: false, reason: `unrecognized export format: ${String(record.format)}` };
-  }
-  const checkpoints = Array.isArray(record.checkpoints) ? record.checkpoints.length : 0;
+  const header = parseHeaderRecord(line);
+  if (!header.ok) return header;
   return {
     ok: true,
     format: EXPORT_FORMAT,
-    license: String(record.license),
-    checkpointCount: checkpoints,
+    license: EXPORT_LICENSE,
+    checkpointCount: header.value.checkpoints.length,
   };
 }
 
+function parseTrailerRecord(line: string): ParseResult<ParsedTrailer> {
+  const parsed = parseJsonRecord(line, "terminal record");
+  if (!parsed.ok) return parsed;
+  const record = parsed.value;
+  if (!hasExactKeys(record, EXPORT_TRAILER_KEYS)) {
+    return { ok: false, reason: "terminal record does not have the exact v1 shape" };
+  }
+  if (record.control !== EXPORT_TRAILER_CONTROL) {
+    return { ok: false, reason: "last line is not the export trailer" };
+  }
+  if (!isProblemId(record.problem)) {
+    return { ok: false, reason: "terminal record carries no valid problem id" };
+  }
+  if (!nonNegativeInteger(record.event_count)) {
+    return { ok: false, reason: "terminal record carries no exact event count" };
+  }
+  if (!nonNegativeInteger(record.final_cursor)) {
+    return { ok: false, reason: "terminal record carries no exact final cursor" };
+  }
+  return {
+    ok: true,
+    value: {
+      problem: record.problem,
+      eventCount: record.event_count,
+      finalCursor: record.final_cursor,
+    },
+  };
+}
+
+/** Parse an exact v1 terminal record for consumers that read it independently. */
+export function parseExportTrailer(line: string):
+  | {
+      readonly ok: true;
+      readonly problem: string;
+      readonly eventCount: number;
+      readonly finalCursor: number;
+    }
+  | { readonly ok: false; readonly reason: string } {
+  const trailer = parseTrailerRecord(line);
+  if (!trailer.ok) return trailer;
+  return {
+    ok: true,
+    problem: trailer.value.problem,
+    eventCount: trailer.value.eventCount,
+    finalCursor: trailer.value.finalCursor,
+  };
+}
+
+function parseEventRecord(line: string): ParseResult<ParsedEvent> {
+  const parsed = parseJsonRecord(line, "event line");
+  if (!parsed.ok) return parsed;
+  const event = parsed.value;
+  if (!hasExactKeys(event, EXPORT_EVENT_KEYS)) {
+    return { ok: false, reason: "event line does not have the exact export shape" };
+  }
+  if (
+    !boundedNonBlankString(event.event_id, MAX_IDENTIFIER_LENGTH) ||
+    !positiveInteger(event.seq) ||
+    event.type !== "claim.created" ||
+    !boundedNonBlankString(event.object_id, MAX_IDENTIFIER_LENGTH) ||
+    !isSha256Hex(event.payload_sha256) ||
+    !isSha256Hex(event.row_digest) ||
+    !isSha256Hex(event.chain_digest) ||
+    !isUtcTimestamp(event.created_at)
+  ) {
+    return {
+      ok: false,
+      reason: "event line carries invalid field types or an unsupported event type",
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      eventId: event.event_id,
+      seq: event.seq,
+      objectId: event.object_id,
+      payloadSha256: event.payload_sha256,
+      rowDigest: event.row_digest,
+      chainDigest: event.chain_digest,
+      createdAt: event.created_at,
+    },
+  };
+}
+
+function splitExactLfRecords(ndjson: string): ParseResult<readonly string[]> {
+  if (ndjson.length === 0) return { ok: false, reason: "empty export" };
+  if (ndjson.includes("\r")) return { ok: false, reason: "export must use LF line endings" };
+  if (!ndjson.endsWith("\n")) return { ok: false, reason: "export must end with one LF" };
+  const lines = ndjson.slice(0, -1).split("\n");
+  if (lines.some((line) => line.length === 0)) {
+    return { ok: false, reason: "export carries a blank record" };
+  }
+  return { ok: true, value: lines };
+}
+
 /**
- * Verify an export's integrity chain (Fable §10.2 tamper-evidence, and the
- * restore drill's core check). Recomputes the chain over the event lines and
- * confirms each link, then confirms the final chain digest matches the last
- * embedded checkpoint's root. A mirror can run this offline against only the
- * export bytes — no D1, no Worker.
+ * The sole v1 grammar: exact LF framing, then exact header, event, and trailer
+ * records. It parses every record before integrity work so malformed,
+ * reordered, appended, or blank records cannot become a tolerated prefix.
+ */
+function parseProblemExportV1(ndjson: string): ExportParseResult {
+  const framed = splitExactLfRecords(ndjson);
+  if (!framed.ok) return { ok: false, brokenAtSeq: null, detail: framed.reason };
+  if (framed.value.length < 2) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "export is missing its terminal control record",
+    };
+  }
+
+  const header = parseHeaderRecord(framed.value[0] ?? "");
+  if (!header.ok) return { ok: false, brokenAtSeq: null, detail: header.reason };
+  const trailer = parseTrailerRecord(framed.value[framed.value.length - 1] ?? "");
+  if (!trailer.ok) return { ok: false, brokenAtSeq: null, detail: trailer.reason };
+  if (trailer.value.problem !== header.value.problem) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "the terminal record's problem id does not match the header",
+    };
+  }
+
+  const events: ParsedEvent[] = [];
+  for (const [offset, line] of framed.value.slice(1, -1).entries()) {
+    const parsedEvent = parseEventRecord(line);
+    if (!parsedEvent.ok) {
+      return { ok: false, brokenAtSeq: offset + 1, detail: parsedEvent.reason };
+    }
+    events.push(parsedEvent.value);
+  }
+  if (header.value.checkpoints.length > events.length) {
+    return { ok: false, brokenAtSeq: null, detail: "export carries more checkpoints than events" };
+  }
+  if (header.value.checkpoints.some((checkpoint) => checkpoint.checkpointSeq > events.length)) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "header checkpoint references an event beyond the export",
+    };
+  }
+  return { ok: true, header: header.value, events, trailer: trailer.value };
+}
+
+/**
+ * Verify an export's integrity chain (Fable §10.2 tamper-evidence). The strict
+ * parser first proves complete v1 framing and record shapes; this then
+ * recomputes every row digest, chain link, and checkpoint digest/root.
  *
- * Returns the first broken link, or null when the chain is intact end to end.
- * This is async because the digest is a WebCrypto SHA-256.
+ * This is self-consistency evidence, not cryptographic authenticity: v1
+ * checkpoints are `unsigned-v0`, and 5il1 remains open because the chain
+ * preimage does not yet bind `row_digest`. ds62's row-digest verification is
+ * intentionally retained here; no parser result may be described as signed or
+ * authentic until that separate repair exists.
  */
 export async function verifyProblemExportChain(
   ndjson: string,
@@ -128,84 +477,106 @@ export async function verifyProblemExportChain(
   | { readonly intact: false; readonly brokenAtSeq: number; readonly detail: string }
   | { readonly intact: false; readonly brokenAtSeq: null; readonly detail: string }
 > {
-  const lines = ndjson.split("\n").filter((line) => line.length > 0);
-  const headerLine = lines[0];
-  if (headerLine === undefined) {
-    return { intact: false, brokenAtSeq: null, detail: "empty export" };
-  }
-  const header = parseExportHeader(headerLine);
-  if (!header.ok) {
-    return { intact: false, brokenAtSeq: null, detail: header.reason };
+  const parsed = parseProblemExportV1(ndjson);
+  if (!parsed.ok) {
+    return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
   }
 
-  const headerRecord = JSON.parse(headerLine) as {
-    readonly problem?: string;
-    readonly checkpoints?: readonly { readonly root_chain_digest?: string }[];
-  };
-  const problemId = headerRecord.problem;
-  if (typeof problemId !== "string" || problemId.length === 0) {
-    return { intact: false, brokenAtSeq: null, detail: "header carries no problem id" };
-  }
-
-  // Event lines are everything between the header and the terminal control
-  // record. The trailer is the last line; anything after the header that is
-  // not the trailer is an event.
-  const eventLines = lines.slice(1, -1);
-  const { genesisChainDigest, eventChainDigest } = await import("./krater.ts");
-  let previous = await genesisChainDigest(problemId);
+  let previous = await genesisChainDigest(parsed.header.problem);
   let expectedSeq = 1;
+  let nextCheckpoint = 0;
 
-  for (const line of eventLines) {
-    let event: Record<string, unknown>;
-    try {
-      event = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      return { intact: false, brokenAtSeq: expectedSeq, detail: "event line is not JSON" };
-    }
-    const seq = event.seq;
-    const payloadSha256 = event.payload_sha256;
-    const chainDigest = event.chain_digest;
-    if (
-      typeof seq !== "number" ||
-      typeof payloadSha256 !== "string" ||
-      typeof chainDigest !== "string"
-    ) {
+  for (const event of parsed.events) {
+    if (event.seq !== expectedSeq) {
       return {
         intact: false,
         brokenAtSeq: expectedSeq,
-        detail: "event line is missing seq or digests",
+        detail: `sequence gap: expected seq ${expectedSeq}, found ${event.seq}`,
       };
     }
-    if (seq !== expectedSeq) {
+    const recomputedRow = await eventRowDigest(
+      {
+        eventId: event.eventId,
+        problemId: parsed.header.problem,
+        claimId: event.objectId,
+        // These request-only fields do not participate in eventRowDigest.
+        idempotencyKey: "export-verifier",
+        statement: "",
+        createdAt: event.createdAt,
+      },
+      event.seq,
+      event.payloadSha256,
+    );
+    if (recomputedRow !== event.rowDigest) {
       return {
         intact: false,
-        brokenAtSeq: expectedSeq,
-        detail: `sequence gap: expected seq ${expectedSeq}, found ${seq}`,
+        brokenAtSeq: event.seq,
+        detail: `row digest mismatch at seq ${event.seq} — the event envelope is tampered`,
       };
     }
-    const recomputed = await eventChainDigest(problemId, seq, payloadSha256, previous);
-    if (recomputed !== chainDigest) {
+    const recomputedChain = await eventChainDigest(
+      parsed.header.problem,
+      event.seq,
+      event.payloadSha256,
+      previous,
+    );
+    if (recomputedChain !== event.chainDigest) {
       return {
         intact: false,
-        brokenAtSeq: seq,
-        detail: `chain digest mismatch at seq ${seq} — the export is tampered or truncated`,
+        brokenAtSeq: event.seq,
+        detail: `chain digest mismatch at seq ${event.seq} — the export is tampered or truncated`,
       };
     }
-    previous = chainDigest;
+    previous = event.chainDigest;
+
+    const checkpoint = parsed.header.checkpoints[nextCheckpoint];
+    if (checkpoint?.checkpointSeq === event.seq) {
+      if (checkpoint.rootChainDigest !== previous) {
+        return {
+          intact: false,
+          brokenAtSeq: event.seq,
+          detail: `checkpoint root mismatch at seq ${event.seq}`,
+        };
+      }
+      const recomputedCheckpoint = await checkpointDigest(
+        parsed.header.problem,
+        checkpoint.checkpointSeq,
+        checkpoint.rootChainDigest,
+      );
+      if (recomputedCheckpoint !== checkpoint.checkpointDigest) {
+        return {
+          intact: false,
+          brokenAtSeq: event.seq,
+          detail: `checkpoint digest mismatch at seq ${event.seq}`,
+        };
+      }
+      nextCheckpoint += 1;
+    }
     expectedSeq += 1;
   }
 
-  // If the header embedded checkpoints, the final chain must match the last
-  // one's root. Absent checkpoints, the recomputed chain is the evidence.
-  const checkpoints = headerRecord.checkpoints ?? [];
-  const lastRoot = checkpoints[checkpoints.length - 1]?.root_chain_digest;
-  if (lastRoot !== undefined && lastRoot !== previous) {
+  if (parsed.trailer.eventCount !== parsed.events.length) {
     return {
       intact: false,
       brokenAtSeq: null,
-      detail: "the final chain digest does not match the embedded checkpoint root",
+      detail: `terminal record claims ${parsed.trailer.eventCount} events; the export carries ${parsed.events.length}`,
+    };
+  }
+  const finalSeq = expectedSeq - 1;
+  if (parsed.trailer.finalCursor !== finalSeq) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: `terminal record claims final cursor ${parsed.trailer.finalCursor}; the export ends at ${finalSeq}`,
+    };
+  }
+  if (nextCheckpoint !== parsed.header.checkpoints.length) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "header checkpoint references an event absent from the verified chain",
     };
   }
 
-  return { intact: true, eventCount: eventLines.length, finalChainDigest: previous };
+  return { intact: true, eventCount: parsed.events.length, finalChainDigest: previous };
 }

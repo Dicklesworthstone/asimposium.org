@@ -2,8 +2,10 @@ import { writeFileSync } from "node:fs";
 
 import {
   DeviceCodeStartResponseSchema,
+  DeviceLookupResponseSchema,
   EnrollmentHelloResponseSchema,
   isTrustedStoaOrigin,
+  PENDING_PROPOSAL_TTL_MS,
   SponsorEnrollmentDecisionResponseSchema,
 } from "@asimposium/contracts";
 
@@ -57,6 +59,7 @@ export const LOCAL_D1_EVIDENCE_CASES = [
   "decision-replay-after-step-up-expiry",
   "stable-poll-key-24h-proposal-expiry-transition",
   "stable-poll-key-24h-proposal-expiry-durable-state",
+  "mounted-device-cap-rollback-expiry-replay",
 ] as const;
 
 export const LOCAL_D1_COMPLETION_SKIP_PLANT = "mounted-device-ingress-exact-replay-conflict";
@@ -735,15 +738,24 @@ if (!import.meta.main) {
     };
 
     // Bounded D1 postcondition, read through the sponsor's own approval card:
-    // the durable proposal state for this enrollment, before and after the
-    // refusal. Comparing the exact response bytes keeps this sensitive to any
-    // row the refused write might have created.
+    // each snapshot must independently be the expected pending card before
+    // exact-byte comparison can say anything about a refused write.
     const proposalState = async (): Promise<string> => {
       const card = await post("/__s1/card", {
         sponsor_id: sponsorId,
         enrollment_id: freshMinted.enrollmentId,
       });
-      return `${card.status}:${await card.text()}`;
+      const raw = await card.text();
+      const parsed = DeviceLookupResponseSchema.safeParse(parseLocalJson(raw));
+      if (
+        card.status !== 200 ||
+        !parsed.success ||
+        parsed.data.card.enrollment_id !== freshMinted.enrollmentId ||
+        parsed.data.card.status !== "pending"
+      ) {
+        throw new Error("claim-missing-idempotency-key-card-snapshot");
+      }
+      return raw;
     };
 
     const beforeRefusal = await proposalState();
@@ -1722,6 +1734,169 @@ if (!import.meta.main) {
       throw new Error("stable-poll-key-proposal-expiry-replay-row-count");
     }
     completeCase("stable-poll-key-24h-proposal-expiry-durable-state");
+
+    // Real Workerd/D1 cap boundary: exactly three live seeded credentials make
+    // the mounted production poll fail atomically; expiry then frees one slot.
+    const capStart = await startDevice(
+      "198.51.100.43",
+      deviceStartBody("local-cap-fellow"),
+      "local-device-cap-start-1",
+    );
+    const capStartBody = DeviceCodeStartResponseSchema.safeParse(await capStart.json());
+    if (capStart.status !== 201 || !capStartBody.success) throw new Error("cap-device-start");
+    const capLookup = await post("/__s1/device-lookup", {
+      sponsor_id: sponsorId,
+      user_code: capStartBody.data.user_code,
+    });
+    const capLookupBody = (await capLookup.json()) as { card?: { enrollmentId?: unknown } };
+    if (capLookup.status !== 200 || typeof capLookupBody.card?.enrollmentId !== "string") {
+      throw new Error("cap-device-lookup");
+    }
+    const capEnrollmentId = capLookupBody.card.enrollmentId;
+    const capDecision = await post(
+      "/__s1/approve",
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: capEnrollmentId,
+        decision: {
+          enrollment_id: capEnrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: Math.floor((Date.now() + PENDING_PROPOSAL_TTL_MS) / 1_000),
+        },
+      },
+      { "idempotency-key": "local-device-cap-decision-1" },
+    );
+    await assertDecisionAcknowledged(capDecision, "cap-approve");
+
+    const capSeed = await post("/__s1/local-only/credential-cap-seed", {
+      flow_handle: capStartBody.data.device_code,
+    });
+    const capSeedBody = parseLocalJson(await capSeed.text()) as {
+      seeded?: unknown;
+      active?: unknown;
+    };
+    if (capSeed.status !== 200 || capSeedBody.seeded !== 3 || capSeedBody.active !== 3) {
+      throw new Error("cap-seed-boundary");
+    }
+
+    const capRefusalKey = "local-device-cap-poll-refusal-1";
+    const capProof = async (idempotencyKey: string) => {
+      const proof = await post("/__s1/local-only/credential-cap-proof", {
+        flow_handle: capStartBody.data.device_code,
+        idempotency_key: idempotencyKey,
+      });
+      const body = parseLocalJson(await proof.text()) as {
+        proposal_status?: unknown;
+        proposal_has_token?: unknown;
+        credentials_total?: unknown;
+        credentials_from_proposal?: unknown;
+        credentials_expiring_at_now?: unknown;
+        poll_replay_rows?: unknown;
+      };
+      if (proof.status !== 200) throw new Error("cap-proof-status");
+      return body;
+    };
+    const capBefore = await capProof(capRefusalKey);
+    if (
+      capBefore.proposal_status !== "approved" ||
+      capBefore.proposal_has_token !== 0 ||
+      capBefore.credentials_total !== 3 ||
+      capBefore.credentials_from_proposal !== 0 ||
+      capBefore.credentials_expiring_at_now !== 0 ||
+      capBefore.poll_replay_rows !== 0
+    ) {
+      throw new Error("cap-precondition");
+    }
+
+    const capRefused = await post(
+      "/v1/device-token",
+      { flow_handle: capStartBody.data.device_code },
+      { "idempotency-key": capRefusalKey },
+    );
+    const capRefusedRaw = await capRefused.text();
+    const capRefusedBody = parseLocalJson(capRefusedRaw) as { code?: unknown; status?: unknown };
+    if (
+      capRefused.status !== 409 ||
+      capRefusedBody.code !== "FELLOW_CREDENTIAL_CAP_REACHED" ||
+      capRefusedBody.status !== 409 ||
+      capRefused.headers.get("cache-control") !== "no-store"
+    ) {
+      throw new Error("cap-refusal-face");
+    }
+    if (
+      capRefusedRaw.includes("active credential cap reached") ||
+      capRefusedRaw.includes(capStartBody.data.device_code)
+    ) {
+      throw new Error("cap-refusal-opacity");
+    }
+    const capAfterRefusal = await capProof(capRefusalKey);
+    if (
+      JSON.stringify(capAfterRefusal) !== JSON.stringify(capBefore) ||
+      capAfterRefusal.poll_replay_rows !== 0 ||
+      capAfterRefusal.credentials_from_proposal !== 0
+    ) {
+      throw new Error("cap-refusal-rollback");
+    }
+
+    const capAdvanced = await post("/__s1/local-only/advance-to-credential-expiry", {});
+    if (capAdvanced.status !== 200) throw new Error("cap-expiry-advance");
+
+    // The local proof reads the real D1 expiry value using the same frozen clock
+    // the mounted router will use. An offset that merely overshoots the boundary
+    // yields zero here, so this rejects a successful-but-not-exact retry.
+    const capIssueKey = "local-device-cap-poll-issued-1";
+    const capAtExpiry = await capProof(capIssueKey);
+    if (
+      capAtExpiry.proposal_status !== "approved" ||
+      capAtExpiry.proposal_has_token !== 0 ||
+      capAtExpiry.credentials_total !== 3 ||
+      capAtExpiry.credentials_from_proposal !== 0 ||
+      capAtExpiry.credentials_expiring_at_now !== 1 ||
+      capAtExpiry.poll_replay_rows !== 0
+    ) {
+      throw new Error("cap-expiry-equality");
+    }
+
+    // The refusal left no replay row. A new key now drives the same flow once,
+    // and its exact replay proves the stored result was served rather than recomputed.
+    const capIssued = await post(
+      "/v1/device-token",
+      { flow_handle: capStartBody.data.device_code },
+      { "idempotency-key": capIssueKey },
+    );
+    const capIssuedRaw = await capIssued.text();
+    const capIssuedBody = parseLocalJson(capIssuedRaw) as { status?: unknown; token?: unknown };
+    if (
+      capIssued.status !== 200 ||
+      capIssuedBody.status !== "approved" ||
+      typeof capIssuedBody.token !== "string"
+    ) {
+      throw new Error("cap-expiry-retry");
+    }
+    const capAfterIssue = await capProof(capIssueKey);
+    if (
+      capAfterIssue.proposal_has_token !== 1 ||
+      capAfterIssue.credentials_total !== 4 ||
+      capAfterIssue.credentials_from_proposal !== 1 ||
+      capAfterIssue.poll_replay_rows !== 1
+    ) {
+      throw new Error("cap-expiry-issue-state");
+    }
+
+    const capReplay = await post(
+      "/v1/device-token",
+      { flow_handle: capStartBody.data.device_code },
+      { "idempotency-key": capIssueKey },
+    );
+    const capReplayRaw = await capReplay.text();
+    if (capReplay.status !== 200 || capReplayRaw !== capIssuedRaw) {
+      throw new Error("cap-replay-not-identical");
+    }
+    const capAfterReplay = await capProof(capIssueKey);
+    if (JSON.stringify(capAfterReplay) !== JSON.stringify(capAfterIssue)) {
+      throw new Error("cap-replay-side-effect");
+    }
+    completeCase("mounted-device-cap-rollback-expiry-replay");
 
     const evidence = {
       record: "s1-local-d1-evidence",

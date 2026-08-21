@@ -60,6 +60,14 @@ const CENSUS_TRIGGERS = [
   "events_immutable_before_delete",
   "events_chain_head_before_insert",
   "event_content_lawful_redaction_only",
+  // The W3.7 per-Fellow credential cap and the three guards that make its
+  // capacity release one-way. 0011 already rebuilt fellow_tokens once; if a
+  // future rebuild drops any of these, the cap silently stops existing and a
+  // fourth credential mints without a word.
+  "enrollment_credentials_active_cap",
+  "enrollment_credentials_revocation_monotonic",
+  "enrollment_credentials_authority_immutable",
+  "enrollment_credentials_no_delete",
 ] as const;
 
 describe("W2.1 schema census", () => {

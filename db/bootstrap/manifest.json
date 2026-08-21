@@ -93,6 +93,10 @@
     {
       "sequence": 19,
       "schema_digest": "4a5b798c9dfec2878d3b4f73757e6e96475bd880be7bce5cefcbd7f81e37240a"
+    },
+    {
+      "sequence": 20,
+      "schema_digest": "4899be970b17892b9043b8f57ca4af3baf2cabcb3fdda12739c2f4074fd96783"
     }
   ]
 }

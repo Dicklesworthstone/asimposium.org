@@ -7,7 +7,7 @@ import {
   type ProtocolDocument,
   sha256Hex,
 } from "@asimposium/protocol";
-import { Hono } from "hono";
+import { type ExecutionContext, Hono } from "hono";
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import {
@@ -20,6 +20,7 @@ import { envelopeRefusalProblem } from "./auth/refusal";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
+  type EnrollmentClock,
   EnrollmentReplayConfigurationError,
   EnrollmentService,
   type EnrollmentStore,
@@ -56,13 +57,16 @@ interface EnrollmentStack {
 }
 
 /**
- * Construction seam for local binding proofs. Production calls `createApp()`
- * without a factory, so the deployed entrypoint always uses D1EnrollmentStore.
+ * Construction seams for local binding proofs. Production calls `createApp()`
+ * without overrides, so the deployed entrypoint always uses D1EnrollmentStore
+ * and the system clock.
  */
 export type EnrollmentStoreFactory = (env: Env) => EnrollmentStore;
 
 export interface CreateAppOptions {
   readonly createEnrollmentStore?: EnrollmentStoreFactory;
+  /** App-local clock seam for mounted lifecycle proofs; production uses the system clock. */
+  readonly enrollmentClock?: EnrollmentClock;
 }
 
 interface CachedEnrollmentStack {
@@ -70,6 +74,7 @@ interface CachedEnrollmentStack {
   readonly db: Env["DB"];
   readonly credentialKey: string;
   readonly storeFactory: EnrollmentStoreFactory | undefined;
+  readonly enrollmentClock: EnrollmentClock | undefined;
   readonly stack: EnrollmentStack;
 }
 
@@ -139,9 +144,24 @@ const PUBLIC_SCHEMA_ROUTES: readonly {
 }));
 
 /**
- * The v0 capabilities body: exactly the routes this Worker serves today.
- * Hand-maintained until W6.6 derives it; a route added without updating this
- * list is a face the handbook cannot see.
+ * The v0 capabilities body: the intentionally disclosed AGENT surface, not an
+ * inventory of every mounted route.
+ *
+ *  - Schema reads are exact-derived from the same public-schema registry that
+ *    mounts them, so discovery can never name a schema this Worker does not
+ *    serve.
+ *  - The signed sponsor surface is SUMMARIZED, never enumerated: those routes
+ *    are reachable only with a service envelope minted in the Agora console,
+ *    and an agent following this document can never call one. `sponsor_surface`
+ *    covers signed sponsor reads and writes alike, which is why it is not named
+ *    for either direction.
+ *  - Operator-internal routes beyond `/internal/health` are intentionally
+ *    undisclosed. That is a policy choice under Rule A5's second transparency
+ *    class, not an omission to be repaired by listing them here.
+ *
+ * The remaining agent-facing lists are hand-maintained until W6.6 derives them,
+ * so an AGENT-facing route added without updating this list is a face the
+ * handbook cannot see.
  */
 const capabilitiesBody = (origin: string): string =>
   `${JSON.stringify(
@@ -162,8 +182,11 @@ const capabilitiesBody = (origin: string): string =>
         "/skill.md",
         "/problems.md",
         "/problems.json",
+        "/cursor",
         "/join/<enrollment-id>",
-        "/schemas/<name>",
+        // Concrete mounted paths from the same registry that mounts them, so
+        // discovery can never name a schema route this Worker does not serve.
+        ...PUBLIC_SCHEMA_ROUTES.map((route) => route.path),
         "/internal/health",
       ],
       agent_writes: [
@@ -176,12 +199,10 @@ const capabilitiesBody = (origin: string): string =>
         "POST /v1/sessions/<id>/promote",
         "POST /v1/sessions/<id>/close",
       ],
-      fellow_reads: [
-        "GET /v1/hello (bearer)",
-        "GET /v1/sessions/<id>/pack?profile=… (bearer)",
-        "GET /cursor",
-      ],
-      sponsor_writes: "signed service envelope only; minted in the Agora console",
+      fellow_reads: ["GET /v1/hello (bearer)", "GET /v1/sessions/<id>/pack?profile=… (bearer)"],
+      // Reads and writes both: this summary is deliberately direction-neutral,
+      // because the signed sponsor surface carries GETs as well as POSTs.
+      sponsor_surface: "signed service envelope only; minted in the Agora console",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
       not_yet: [
         "rate-limit budgets",
@@ -485,7 +506,10 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   // A tuple encoding is unambiguous even when one credential contains spaces.
   const credentialKey = JSON.stringify([
     env.ENROLLMENT_REPLAY_KEY ?? "",
-    env.SERVICE_ENVELOPE_KEYS ?? "",
+    // Missing is an intentionally quiet, unavailable sponsor plane. An empty
+    // present binding is malformed and must be parsed/logged as such; collapsing
+    // both to "" would let a cached missing-config stack bypass that boundary.
+    env.SERVICE_ENVELOPE_KEYS ?? null,
     env.OPERATOR_PRINCIPAL_IDS ?? "",
     stoaOrigin,
     agoraOrigin,
@@ -494,9 +518,31 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     cached !== undefined &&
     cached.db === env.DB &&
     cached.credentialKey === credentialKey &&
-    cached.storeFactory === options.createEnrollmentStore
+    cached.storeFactory === options.createEnrollmentStore &&
+    cached.enrollmentClock === options.enrollmentClock
   ) {
     return cached.stack;
+  }
+
+  let keyring: VerificationKeyring | undefined;
+  try {
+    const records = parseKeyringRecords(env.SERVICE_ENVELOPE_KEYS);
+    if (records !== undefined) {
+      keyring = new VerificationKeyring(records);
+    }
+  } catch (error) {
+    if (!(error instanceof KeyringConfigError)) throw error;
+    // A present keyring is deployment configuration, not an optional request
+    // input. Refuse construction before creating any enrollment dependencies;
+    // absence alone intentionally reaches the sponsor-plane unavailable face.
+    // Never include the raw config or error in the diagnostic.
+    if (lastInvalidKeyringCredentialKey !== credentialKey) {
+      console.error("[wire] invalid service-envelope keyring", {
+        error: "KEYRING_CONFIG_INVALID",
+      });
+      lastInvalidKeyringCredentialKey = credentialKey;
+    }
+    throw error;
   }
 
   let service: EnrollmentService;
@@ -507,6 +553,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
       stoaOrigin,
       agoraOrigin,
       store: options.createEnrollmentStore?.(env) ?? new D1EnrollmentStore(env.DB),
+      clock: options.enrollmentClock,
       replayProtector,
     });
   } catch (error) {
@@ -522,26 +569,6 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     throw error;
   }
 
-  let keyring: VerificationKeyring | undefined;
-  try {
-    const records = parseKeyringRecords(env.SERVICE_ENVELOPE_KEYS);
-    if (records !== undefined) {
-      keyring = new VerificationKeyring(records);
-    }
-  } catch (error) {
-    if (!(error instanceof KeyringConfigError)) throw error;
-    // The public refusal remains deliberately opaque, but a malformed present
-    // binding must not be indistinguishable from an intentionally unconfigured
-    // sponsor plane in deployment logs. Log once per observed binding tuple so
-    // an unauthenticated caller cannot amplify a known configuration failure.
-    // Never include the raw config or error.
-    if (lastInvalidKeyringCredentialKey !== credentialKey) {
-      console.error("[wire] invalid service-envelope keyring", {
-        error: "KEYRING_CONFIG_INVALID",
-      });
-      lastInvalidKeyringCredentialKey = credentialKey;
-    }
-  }
   const nonces = new D1NonceStore(env.DB);
   const operatorPrincipalIds = parseOperatorPrincipalIds(env.OPERATOR_PRINCIPAL_IDS);
 
@@ -623,7 +650,13 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     router,
     sessionRouter: createSessionRouter({ service, replayProtector, verifiedSponsor }),
   };
-  cached = { db: env.DB, credentialKey, storeFactory: options.createEnrollmentStore, stack };
+  cached = {
+    db: env.DB,
+    credentialKey,
+    storeFactory: options.createEnrollmentStore,
+    enrollmentClock: options.enrollmentClock,
+    stack,
+  };
   return stack;
 }
 
@@ -664,7 +697,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     });
   });
 
-  app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
+  app.get("/internal/health", (c) =>
+    handleHealth({ formats: c.req.queries("format") ?? [], env: c.env }),
+  );
 
   // The S-4 staging screening surface: bearer-gated, fail-closed, and absent
   // from the public capabilities document by design — it is an operator
@@ -704,7 +739,21 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       await next();
       return;
     }
-    const response = await stack.sessionRouter.fetch(c.req.raw, c.env);
+    // Propagate the outer request's ExecutionContext into the session sub-router
+    // so the committed-promotion waitUntil nudge (router.ts scheduleCommitted-
+    // PromotionNudge) actually detaches under Workerd. Without this third
+    // argument the sub-router had no ExecutionContext, its `c.executionCtx`
+    // getter threw, and the nudge was swallowed on every mounted production
+    // promote. A direct `app.fetch(req, env)` call (the unit fixtures) still has
+    // no ExecutionContext: the getter throws here, we pass `undefined`, and the
+    // nudge remains a correct no-op — never a route failure.
+    let executionCtx: ExecutionContext | undefined;
+    try {
+      executionCtx = c.executionCtx;
+    } catch {
+      executionCtx = undefined;
+    }
+    const response = await stack.sessionRouter.fetch(c.req.raw, c.env, executionCtx);
     return response.headers.get(ROUTER_MISS_HEADER) === "1"
       ? routeNotFound(c.req.url, c.req.method)
       : response;
@@ -728,7 +777,11 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
 
   app.notFound((c) => routeNotFound(c.req.url));
 
-  app.onError((_err, c) => {
+  app.onError((error, c) => {
+    // A malformed present service-envelope keyring is a configuration
+    // construction failure. Let the typed failure reach the Worker boundary;
+    // the fixed operator diagnostic was emitted before any dependency work.
+    if (error instanceof KeyringConfigError) throw error;
     // Server-side breadcrumb without the message: the never-log list (Fable
     // §14.3) treats raw bodies and unredacted error text as unsafe until the
     // observability pipeline that scrubs them exists.

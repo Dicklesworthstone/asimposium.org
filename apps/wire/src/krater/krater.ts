@@ -218,6 +218,23 @@ interface CheckpointRow {
   checkpoint_mode: "unsigned-v0";
 }
 
+interface ClaimRow {
+  id: string;
+  problem_id: string;
+  statement: string;
+  payload_sha256: string;
+  source_seq: number;
+}
+
+interface OutboxRow {
+  event_id: string;
+  problem_id: string;
+  kind: string;
+  dedupe_key: string;
+  payload_sha256: string;
+  state: string;
+}
+
 interface IntegrityBackfillRow {
   state: "required" | "complete";
   legacy_event_count: number;
@@ -346,8 +363,20 @@ export async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+export function canonicalClaimPayload(input: {
+  readonly claimId: string;
+  readonly kind: "claim";
+  readonly statement: string;
+}): string {
+  return canonicalJson({ claim_id: input.claimId, kind: input.kind, statement: input.statement });
+}
+
 function payloadFor(input: KraterWriteInput): string {
-  return canonicalJson({ claim_id: input.claimId, kind: "claim", statement: input.statement });
+  return canonicalClaimPayload({
+    claimId: input.claimId,
+    kind: "claim",
+    statement: input.statement,
+  });
 }
 
 function requestFor(input: KraterWriteInput): string {
@@ -425,13 +454,13 @@ async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): Promise
   );
 }
 
-export async function projectionBuildDigest(
-  payloadSha256: string,
-  rowDigest: string,
-): Promise<string> {
-  return sha256Hex(
-    canonicalJson({ payload_sha256: payloadSha256, projection_version: 1, row_digest: rowDigest }),
-  );
+/**
+ * V1 claim projections are lossless one-event projections: their build digest
+ * is the authoritative source event's row digest, not a second digest over a
+ * subset of that event. Keep persistence and replay on this same contract.
+ */
+export function claimProjectionBuildDigestV1(eventRowDigest: string): string {
+  return eventRowDigest;
 }
 
 export async function checkpointDigest(
@@ -618,6 +647,34 @@ async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<C
     ...row,
     checkpoint_seq: requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false),
   };
+}
+
+async function readClaimByEvent(db: D1Database, event: EventRow): Promise<ClaimRow> {
+  const row = await statement(
+    db,
+    `SELECT id, problem_id, statement, payload_sha256, source_seq
+     FROM claims WHERE id = ? AND problem_id = ? AND source_seq = ?`,
+    event.object_id,
+    event.problem_id,
+    event.seq,
+  ).first<ClaimRow>();
+  if (row === null) throw new Error("Krater write did not persist its claim row.");
+  return {
+    ...row,
+    source_seq: requireStoredSequence(row.source_seq, "claim source sequence", false),
+  };
+}
+
+async function readOutboxByEvent(db: D1Database, event: EventRow): Promise<OutboxRow> {
+  const row = await statement(
+    db,
+    `SELECT event_id, problem_id, kind, dedupe_key, payload_sha256, state
+     FROM outbox WHERE event_id = ? AND problem_id = ? AND kind = 'search.index'`,
+    event.id,
+    event.problem_id,
+  ).first<OutboxRow>();
+  if (row === null) throw new Error("Krater write did not persist its search outbox handoff.");
+  return row;
 }
 
 function backfillRequired(message: string): never {
@@ -981,7 +1038,12 @@ export async function writeClaim(
   const serverNowMs = Date.now();
   validateWriteInput(input, serverNowMs);
   const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
-  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt, serverNowMs);
+  const preflight = await backfillKraterIntegrity(
+    db,
+    input.problemId,
+    input.createdAt,
+    serverNowMs,
+  );
   const companionRequestDigest = companion?.requestDigest;
   const claimIdForSequence = companion?.claimIdForSequence;
   if (companionRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(companionRequestDigest)) {
@@ -1021,10 +1083,12 @@ export async function writeClaim(
       eventChainDigest(input.problemId, candidateSeq, payloadSha256, before.chain_digest),
       eventRowDigest(attemptInput, candidateSeq, payloadSha256),
     ]);
-    const [nextBuildDigest, nextCheckpointDigest] = await Promise.all([
-      projectionBuildDigest(payloadSha256, nextRowDigest),
-      checkpointDigest(input.problemId, candidateSeq, nextChainDigest),
-    ]);
+    const nextBuildDigest = claimProjectionBuildDigestV1(nextRowDigest);
+    const nextCheckpointDigest = await checkpointDigest(
+      input.problemId,
+      candidateSeq,
+      nextChainDigest,
+    );
 
     const companionStatements =
       (await companion?.statementsForAttempt({
@@ -1122,16 +1186,6 @@ export async function writeClaim(
         ),
         statement(
           db,
-          `INSERT INTO public_claim_fts (claim_id, problem_id, statement)
-           SELECT c.id, c.problem_id, c.statement
-           FROM claims c
-           JOIN idempotency i ON i.problem_id = c.problem_id AND i.idempotency_key = ?
-           WHERE c.id = ? AND i.event_id IS NULL`,
-          input.idempotencyKey,
-          attemptInput.claimId,
-        ),
-        statement(
-          db,
           `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
            SELECT ?, ?, 'search.index', ?, ?, ?
            FROM idempotency i
@@ -1216,12 +1270,40 @@ export async function writeClaim(
       throw new Error("Krater sequence allocation disagreed with the settled event.");
     }
 
-    const [event, projection, checkpoint, after] = await Promise.all([
-      readEventById(db, settled.event_id),
-      readEventById(db, settled.event_id).then((persisted) => readProjectionByEvent(db, persisted)),
-      readEventById(db, settled.event_id).then((persisted) => readCheckpointByEvent(db, persisted)),
+    const event = await readEventById(db, settled.event_id);
+    const [projection, checkpoint, claim, outbox, after] = await Promise.all([
+      readProjectionByEvent(db, event),
+      readCheckpointByEvent(db, event),
+      readClaimByEvent(db, event),
+      readOutboxByEvent(db, event),
       readProblemHead(db, input.problemId),
     ]);
+    const observedPayloadSha256 = await sha256Hex(
+      canonicalClaimPayload({
+        claimId: claim.id,
+        kind: "claim",
+        statement: claim.statement,
+      }),
+    );
+    if (
+      event.problem_id !== input.problemId ||
+      event.type !== "claim.created" ||
+      event.object_kind !== "claim" ||
+      event.object_version !== 1 ||
+      claim.id !== event.object_id ||
+      claim.problem_id !== event.problem_id ||
+      claim.source_seq !== event.seq ||
+      claim.payload_sha256 !== event.payload_sha256 ||
+      observedPayloadSha256 !== event.payload_sha256 ||
+      outbox.event_id !== event.id ||
+      outbox.problem_id !== event.problem_id ||
+      outbox.kind !== "search.index" ||
+      outbox.dedupe_key !== `search.index:${event.id}` ||
+      outbox.payload_sha256 !== event.payload_sha256 ||
+      (outbox.state !== "pending" && outbox.state !== "delivered")
+    ) {
+      throw new Error("Krater persisted claim, event, and outbox bindings disagree.");
+    }
     if (event.seq !== settledEventSeq || checkpoint.root_chain_digest !== event.chain_digest) {
       throw new Error("Krater persisted integrity records disagree.");
     }
@@ -1424,7 +1506,7 @@ export function replayClaimProjections(events: readonly KraterEvent[]): ClaimPro
       problemId: event.problemId,
       sourceSeq: event.seq,
       projectionVersion: 1,
-      buildDigest: event.rowDigest,
+      buildDigest: claimProjectionBuildDigestV1(event.rowDigest),
       stale: false,
     });
     priorSeq = event.seq;

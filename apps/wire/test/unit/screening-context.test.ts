@@ -7,7 +7,11 @@ import {
   type ContextualScreeningInput,
   ContextualScreeningInputError,
   type ContextualScreeningProvider,
+  contextualScreeningInputDigest,
+  MAX_CONTEXTUAL_PROBLEM_STATEMENT_BYTES,
+  MAX_CONTEXTUAL_PROMOTION_BYTES,
   MAX_CONTEXTUAL_PROMOTIONS,
+  MAX_CONTEXTUAL_TOTAL_BYTES,
   type ScreeningProvider,
   type ScreeningProviderRequest,
   screenContextuallyWithProvider,
@@ -19,6 +23,74 @@ const CANARY_CURRENT = "current-promotion-canary-do-not-store";
 const CANARY_RECENT = "recent-promotion-canary-do-not-store";
 
 const OUTWARD_FIELDS = ["title", "extract", "statement", "public_artifact_md"] as const;
+
+function serializedBytes(value: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(value));
+}
+
+function boundaryInput(targetBytes: number, token = "x"): ContextualScreeningInput {
+  const empty: ContextualScreeningInput = {
+    problem_statement: "",
+    current_promotion: {
+      title: "",
+      extract: "",
+      statement: "",
+      public_artifact_md: "",
+    },
+    recent_same_fellow_promotions: [],
+  };
+  let remaining = targetBytes - serializedBytes(empty).byteLength;
+  if (remaining < 1) throw new Error("target cannot carry a nonempty problem statement");
+  const tokenBytes = new TextEncoder().encode(token).byteLength;
+  if (tokenBytes < 1 || JSON.stringify(token) !== `"${token}"`) {
+    throw new Error("boundary token must serialize without JSON escaping");
+  }
+  const capacities = [
+    MAX_CONTEXTUAL_PROBLEM_STATEMENT_BYTES,
+    MAX_CONTEXTUAL_PROMOTION_BYTES,
+    MAX_CONTEXTUAL_PROMOTION_BYTES,
+    MAX_CONTEXTUAL_PROMOTION_BYTES,
+    MAX_CONTEXTUAL_PROMOTION_BYTES,
+  ];
+  const fields = capacities.map((capacity) => {
+    const repetitions = Math.min(
+      Math.floor(remaining / tokenBytes),
+      Math.floor(capacity / tokenBytes),
+    );
+    let value = token.repeat(repetitions);
+    remaining -= repetitions * tokenBytes;
+    const spare = capacity - new TextEncoder().encode(value).byteLength;
+    if (remaining > 0 && spare > 0) {
+      const padding = Math.min(remaining, spare);
+      value += "x".repeat(padding);
+      remaining -= padding;
+    }
+    return value;
+  });
+  if (remaining !== 0 || fields[0] === "") {
+    throw new Error("target exceeds the contextual field capacities");
+  }
+  const [problemStatement, title, extract, statement, publicArtifact] = fields;
+  if (
+    problemStatement === undefined ||
+    title === undefined ||
+    extract === undefined ||
+    statement === undefined ||
+    publicArtifact === undefined
+  ) {
+    throw new Error("contextual boundary fields are incomplete");
+  }
+  return {
+    problem_statement: problemStatement,
+    current_promotion: {
+      title,
+      extract,
+      statement,
+      public_artifact_md: publicArtifact,
+    },
+    recent_same_fellow_promotions: [],
+  };
+}
 
 function promotion(statement: string): ContextualPromotionCandidate {
   return {
@@ -167,6 +239,67 @@ test("contextual input is bounded, server-shaped, and presents the newest retain
       }),
     ),
   ).toThrow(ContextualScreeningInputError);
+});
+
+test("the aggregate ceiling measures the exact canonical provider bytes", async () => {
+  const exactAscii = boundaryInput(MAX_CONTEXTUAL_TOTAL_BYTES);
+  const exactUnicode = boundaryInput(MAX_CONTEXTUAL_TOTAL_BYTES, "é");
+  const oneByteOver = boundaryInput(MAX_CONTEXTUAL_TOTAL_BYTES + 1);
+
+  expect(serializedBytes(exactAscii)).toHaveLength(MAX_CONTEXTUAL_TOTAL_BYTES);
+  expect(serializedBytes(exactUnicode)).toHaveLength(MAX_CONTEXTUAL_TOTAL_BYTES);
+  expect(() => assertContextualScreeningInput(exactAscii)).not.toThrow();
+  expect(() => assertContextualScreeningInput(exactUnicode)).not.toThrow();
+  expect(() => assertContextualScreeningInput(oneByteOver)).toThrow(
+    "contextual screening input exceeds the aggregate byte budget.",
+  );
+  let overCapProviderCalls = 0;
+  const overCapProvider: ContextualScreeningProvider = {
+    async screenContextually() {
+      overCapProviderCalls += 1;
+      return { decision: "pass", coarse_category: "benign-context" };
+    },
+  };
+  await expect(
+    screenContextuallyWithProvider(overCapProvider, oneByteOver, CONTEXT_OPTIONS),
+  ).rejects.toThrow("contextual screening input exceeds the aggregate byte budget.");
+  expect(overCapProviderCalls).toBe(0);
+
+  for (const escaped of ["\u0000".repeat(3_000), "\\".repeat(4_096), '"'.repeat(4_096)]) {
+    const input: ContextualScreeningInput = {
+      problem_statement: "p".repeat(4_096),
+      current_promotion: {
+        title: escaped,
+        extract: "",
+        statement: "",
+        public_artifact_md: "",
+      },
+      recent_same_fellow_promotions: [],
+    };
+    expect(() => assertContextualScreeningInput(input)).toThrow(
+      "contextual screening input exceeds the aggregate byte budget.",
+    );
+  }
+
+  const canonical = JSON.stringify(exactUnicode);
+  const digestBytes = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical)),
+  );
+  const expectedDigest = `sha256:${Array.from(digestBytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("")}`;
+  expect(await contextualScreeningInputDigest(exactUnicode)).toBe(expectedDigest);
+
+  let observedCanonical = "";
+  const provider: ContextualScreeningProvider = {
+    async screenContextually(received) {
+      observedCanonical = JSON.stringify(received);
+      return { decision: "pass", coarse_category: "benign-context" };
+    },
+  };
+  const result = await screenContextuallyWithProvider(provider, exactUnicode, CONTEXT_OPTIONS);
+  expect(observedCanonical).toBe(canonical);
+  expect(result.input_digest).toBe(expectedDigest);
 });
 
 test("every outward field of a prior promotion can participate in contextual aggregation", async () => {

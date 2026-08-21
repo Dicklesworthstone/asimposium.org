@@ -423,6 +423,26 @@ function isActiveFellowCapFailure(error: unknown): boolean {
   return error instanceof Error && /active Fellow cap reached/i.test(error.message);
 }
 
+/**
+ * The exact nonsecret abort token raised by `enrollment_credentials_active_cap`
+ * in db/migrations/0006_fellow_credential_lifecycle.sql (re-asserted by 0011).
+ *
+ * SQLite's RAISE(ABORT, …) takes a string literal and cannot interpolate a
+ * column, so this token can never carry a credential id, hash or expiry. It is
+ * exported so a test can assert the shipped migration still raises exactly this
+ * spelling: the matcher below and the SQL are otherwise free to drift apart
+ * silently, and a drifted matcher degrades a typed 409 into a generic 500.
+ *
+ * Deliberately distinct from the sponsor-attention cap's 'active Fellow cap
+ * reached' (0013). Do not widen either pattern to cover both: they are
+ * different caps with different remedies and different problem codes.
+ */
+export const FELLOW_CREDENTIAL_CAP_SQL_TOKEN = "active credential cap reached";
+
+function isFellowCredentialCapFailure(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(FELLOW_CREDENTIAL_CAP_SQL_TOKEN);
+}
+
 function isOperatorFellowCapStateFailure(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -2440,7 +2460,19 @@ export class D1EnrollmentStore implements EnrollmentStore {
         await this.raceIfPresent(idempotency);
       } catch (error) {
         if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+        // A concurrent winner under this key stays authoritative even when this
+        // batch lost on the credential cap first: a different body under the
+        // winner's key is an idempotency conflict, not a capacity refusal. So
+        // the race check keeps its precedence, exactly as at the Fellow-cap
+        // site above.
         await this.raceIfPresent(idempotency);
+        // The cap is enforced by a BEFORE INSERT trigger inside this same D1
+        // batch, so the abort already rolled the credential back. Name it here
+        // or it degrades into an untyped persistence failure and the sponsor
+        // sees a 500 for a decision the platform made deliberately.
+        if (isFellowCredentialCapFailure(error)) {
+          throw new EnrollmentError("FELLOW_CREDENTIAL_CAP_REACHED");
+        }
         throw new EnrollmentPersistenceError();
       }
     }

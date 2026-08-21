@@ -142,15 +142,7 @@ function parseClassification(raw: unknown): {
   if (text === undefined) {
     throw new TypeError("Workers AI completion is not a text response.");
   }
-  let trimmed = text.trim();
-  if (!trimmed.startsWith("{")) {
-    const open = trimmed.indexOf("{");
-    const close = trimmed.lastIndexOf("}");
-    if (open === -1 || close <= open) {
-      throw new TypeError("Workers AI completion carries no JSON object.");
-    }
-    trimmed = trimmed.slice(open, close + 1);
-  }
+  const trimmed = text.trim();
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);

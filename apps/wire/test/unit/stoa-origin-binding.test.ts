@@ -15,6 +15,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { createApp } from "../../src/app.ts";
 import { toHex } from "../../src/auth/canonical.ts";
+import { KeyringConfigError } from "../../src/auth/keyring.ts";
 import {
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
@@ -648,34 +649,43 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       errors.push(values);
     };
     try {
-      const response = await createApp().fetch(
-        new Request("https://a.asimposium.org/v1/operators/fellow-cap", { method: "POST" }),
-        {
-          DB: db,
-          ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
-          STOA_ORIGIN: LOOPBACK,
-          AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
-          SERVICE_ENVELOPE_KEYS: keyring,
-          OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
-        } as never,
-        ctx,
-      );
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual(await fixture(OPERATOR_AUTH_UNAVAILABLE_FIXTURE));
+      await expect(
+        createApp().fetch(
+          new Request("https://a.asimposium.org/v1/operators/fellow-cap", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }),
+          {
+            DB: db,
+            ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+            STOA_ORIGIN: LOOPBACK,
+            AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+            SERVICE_ENVELOPE_KEYS: keyring,
+            OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+          } as never,
+          ctx,
+        ),
+      ).rejects.toBeInstanceOf(KeyringConfigError);
 
-      const repeated = await createApp().fetch(
-        new Request("https://a.asimposium.org/v1/operators/fellow-cap", { method: "POST" }),
-        {
-          DB: db,
-          ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
-          STOA_ORIGIN: LOOPBACK,
-          AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
-          SERVICE_ENVELOPE_KEYS: keyring,
-          OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
-        } as never,
-        ctx,
-      );
-      expect(repeated.status).toBe(503);
+      await expect(
+        createApp().fetch(
+          new Request("https://a.asimposium.org/v1/operators/fellow-cap", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }),
+          {
+            DB: db,
+            ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+            STOA_ORIGIN: LOOPBACK,
+            AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+            SERVICE_ENVELOPE_KEYS: keyring,
+            OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+          } as never,
+          ctx,
+        ),
+      ).rejects.toBeInstanceOf(KeyringConfigError);
     } finally {
       console.error = originalError;
     }
@@ -683,6 +693,52 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       ["[wire] invalid service-envelope keyring", { error: "KEYRING_CONFIG_INVALID" }],
     ]);
     expect(JSON.stringify(errors)).not.toContain(keyring);
+  });
+
+  test("a cached absent keyring cannot hide a later present empty binding", async () => {
+    const { db } = latestD1();
+    const baseEnv = {
+      DB: db,
+      ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+      STOA_ORIGIN: LOOPBACK,
+      AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+      OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+    } as const;
+    const errors: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...values: unknown[]) => {
+      errors.push(values);
+    };
+    try {
+      const app = createApp();
+      const absent = await app.fetch(
+        new Request("https://a.asimposium.org/v1/operators/fellow-cap", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+        baseEnv as never,
+        ctx,
+      );
+      expect(absent.status).toBe(503);
+
+      await expect(
+        app.fetch(
+          new Request("https://a.asimposium.org/v1/operators/fellow-cap", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }),
+          { ...baseEnv, SERVICE_ENVELOPE_KEYS: "" } as never,
+          ctx,
+        ),
+      ).rejects.toBeInstanceOf(KeyringConfigError);
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors).toEqual([
+      ["[wire] invalid service-envelope keyring", { error: "KEYRING_CONFIG_INVALID" }],
+    ]);
   });
 
   test("an absent optional keyring stays a quiet typed-unavailable sponsor plane", async () => {
@@ -694,7 +750,11 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
     };
     try {
       const response = await createApp().fetch(
-        new Request("https://a.asimposium.org/v1/operators/fellow-cap", { method: "POST" }),
+        new Request("https://a.asimposium.org/v1/operators/fellow-cap", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
         {
           DB: db,
           ENROLLMENT_REPLAY_KEY: REPLAY_KEY,

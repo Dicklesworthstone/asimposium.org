@@ -12,7 +12,11 @@ import {
 import { resolve } from "node:path";
 
 import {
+  FellowNameSchema,
+  FellowTokenSchema,
   MAX_S2_COST_RECEIPT_BYTES,
+  type PromoteResponse,
+  PromoteResponseSchema,
   parseS2CostMeasurementReceiptBytes,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_METRIC_SCOPE,
@@ -23,6 +27,9 @@ import {
   S2_SUCCESSFUL_BATCH_SCOPE,
   S2_WRITE_CLAIM_SCOPE,
   type S2CostMeasurementReceipt,
+  SessionOpenResponseSchema,
+  WorkshopObjectIdSchema,
+  WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 
 const origin = process.env.S2_ORIGIN;
@@ -52,6 +59,20 @@ const SEQUENCE_BOUNDARY_PROBLEM = "P-s2-sequence-boundary";
 const UNSAFE_PERSISTED_SEQUENCE_PROBLEM = "P-s2-unsafe-persisted-sequence";
 const LARGE_PROBLEM = "P-s2-large";
 const OUTBOX_PROBLEM = "P-s2-outbox";
+/**
+ * The mounted-production promotion subjects (6js.5). Each drives the real
+ * `createApp` session path -- POST /v1/sessions -> workshop -> promote with a
+ * seeded Fellow bearer -- against this run's actual D1 and KRATER_OUTBOX DO, so
+ * the post-commit nudge that app.ts now propagates is observed end to end rather
+ * than from source order. They are their own problems so their per-problem D1
+ * census stays exact and independent of the `/__s2/outbox/*`-driven counters.
+ */
+const MOUNTED_PROBLEM = "P-s2-mounted";
+const MOUNTED_NO_NUDGE_PROBLEM = "P-s2-mounted-no-nudge";
+const MOUNTED_BINDING_FAIL_PROBLEM = "P-s2-mounted-binding-fail";
+const MOUNTED_CAS_PROBLEM = "P-s2-mounted-cas";
+/** Spans the crash: committed-but-undelivered before the restart, drained after. */
+const MOUNTED_CRASH_PROBLEM = "P-s2-mounted-crash";
 const UPGRADE_EXISTING_PROBLEM = "P-upgrade-existing";
 const UPGRADE_EMPTY_PROBLEM = "P-upgrade-empty";
 
@@ -550,7 +571,7 @@ function nullableSafeNonnegativeIntegerAt(
 
 /** New status/evidence fields must be present data, never inherited or omitted defaults. */
 function ownDataAt(record: Record<string, unknown>, key: string): unknown {
-  if (!Object.prototype.hasOwnProperty.call(record, key)) fail("S2_RESPONSE_INVALID");
+  if (!Object.hasOwn(record, key)) fail("S2_RESPONSE_INVALID");
   return record[key];
 }
 
@@ -687,6 +708,7 @@ async function request(
   scenario: string,
   body?: Record<string, unknown>,
   timeoutMs = 5_000,
+  extraHeaders: Record<string, string> = {},
 ): Promise<RequestResult> {
   if (origin === undefined) fail("S2_ORIGIN_MISSING");
   const currentRequestId = requestId();
@@ -694,9 +716,16 @@ async function request(
   const started = performance.now();
   try {
     const token = requireHarnessToken();
+    // `extraHeaders` carries the mounted-production credentials (a Fellow bearer
+    // in `authorization`, the `idempotency-key`, and the injected
+    // `x-s2-nudge-binding-fail` seam). It is spread first so the harness token
+    // and content-type below stay authoritative, and it is deliberately kept out
+    // of `requestDiagnostics`, which only ever reads typed body fields -- never a
+    // header -- so the bearer never reaches a retained receipt.
     const fetchResponse = await fetch(`${origin}${pathname}`, {
       method,
       headers: {
+        ...extraHeaders,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         "x-s2-harness-token": token,
       },
@@ -1358,10 +1387,76 @@ export function parseS2OutboxStatus(body: Record<string, unknown>): S2OutboxStat
   return result;
 }
 
-async function outboxStatus(scenario: string): Promise<S2OutboxStatus> {
-  const result = await request("GET", "/__s2/outbox/status", scenario);
+/**
+ * The bound for a one-shot status read taken outside any deadline. It is the
+ * value `request` would otherwise have defaulted to, named so the four
+ * deadline-free callers below state their budget instead of inheriting one.
+ */
+const S2_OUTBOX_STATUS_TIMEOUT_MS = 5_000;
+
+/**
+ * `timeoutMs` is REQUIRED, not optional. Inside `waitForOutbox` the argument is
+ * the remaining slice of the one absolute deadline; making it optional let a
+ * dropped argument silently fall back to `request`'s 5s default and outlive the
+ * wall it was just checked against. Required means that regression cannot
+ * compile rather than merely failing a test.
+ */
+async function outboxStatus(scenario: string, timeoutMs: number): Promise<S2OutboxStatus> {
+  const result = await request("GET", "/__s2/outbox/status", scenario, undefined, timeoutMs);
   assertEqual(result.status, 200, "S2_OUTBOX_STATUS_FAILED");
   return parseS2OutboxStatus(result.body);
+}
+
+/** The outer wall an outbox wait may occupy, start to receipt. */
+export const S2_OUTBOX_DEADLINE_MS = 8_000;
+
+/**
+ * The slice of the deadline reserved for the terminal observation.
+ *
+ * It is carved out of `S2_OUTBOX_DEADLINE_MS` rather than added after it. An
+ * observation granted its own budget would extend the same absolute deadline,
+ * which is exactly the defect: the poll loop and the final observation must
+ * share one wall, not two.
+ */
+export const S2_OUTBOX_TERMINAL_OBSERVATION_MS = 500;
+
+/**
+ * Time left before an absolute monotonic deadline, clamped at zero.
+ *
+ * Zero is the caller's instruction not to start: a request handed a
+ * nonpositive timeout would either throw or, worse, inherit `request`'s 5s
+ * default and silently outlive the deadline it was meant to respect. Exported
+ * so the budget arithmetic is testable on an injected clock without giving
+ * `waitForOutbox` a clock or transport seam it would not otherwise have.
+ */
+export function s2RemainingBudgetMs(nowMs: number, deadlineMs: number): number {
+  const remaining = deadlineMs - nowMs;
+  return remaining > 0 ? remaining : 0;
+}
+
+/**
+ * The terminal observation: best-effort, budget-gated, and never authoritative.
+ *
+ * A transport failure here must surface as an ABSENT reading, never as a thrown
+ * transport error, or it would replace the typed `S2_OUTBOX_DEADLINE_EXCEEDED`
+ * receipt the caller is about to emit with an unrelated failure. A nonpositive
+ * budget means the poll loop already spent the wall, so no request is started
+ * at all rather than one inheriting `request`'s 5s default.
+ *
+ * Exported for the same reason as `s2RemainingBudgetMs`: it makes the
+ * containment testable on an injected observer without giving `waitForOutbox`
+ * a clock or transport seam it would not otherwise have.
+ */
+export async function s2TerminalObservation(
+  observe: () => Promise<S2OutboxStatus>,
+  budgetMs: number,
+): Promise<S2OutboxStatus | undefined> {
+  if (budgetMs <= 0) return undefined;
+  try {
+    return await observe();
+  } catch {
+    return undefined;
+  }
 }
 
 export function outboxAgeEvidence(status: S2OutboxStatus): S2OutboxAgeEvidence {
@@ -1373,18 +1468,75 @@ export function outboxAgeEvidence(status: S2OutboxStatus): S2OutboxAgeEvidence {
   };
 }
 
-async function waitForOutbox(
+export interface S2OutboxWaitHooks {
+  readonly now: () => number;
+  readonly observe: (scenario: string, timeoutMs: number) => Promise<S2OutboxStatus>;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly emit: (record: Record<string, unknown>) => void;
+}
+
+const productionOutboxWaitHooks: S2OutboxWaitHooks = {
+  now: () => performance.now(),
+  observe: outboxStatus,
+  sleep: (milliseconds) => Bun.sleep(milliseconds),
+  emit,
+};
+
+export async function s2WaitForOutbox(
   scenario: string,
   predicate: (status: S2OutboxStatus) => boolean,
+  hooks: S2OutboxWaitHooks = productionOutboxWaitHooks,
 ): Promise<S2OutboxStatus> {
-  const deadline = performance.now() + 8_000;
-  while (performance.now() < deadline) {
-    const current = await outboxStatus(scenario);
+  // One absolute monotonic deadline governs every request below. Each poll is
+  // handed only what remains, so a poll entered just before expiry can no
+  // longer inherit a fresh 5s window and outlive the wall it was checked
+  // against.
+  const startedAt = hooks.now();
+  const deadline = startedAt + S2_OUTBOX_DEADLINE_MS;
+  const pollUntil = deadline - S2_OUTBOX_TERMINAL_OBSERVATION_MS;
+  let pollReadFailed = false;
+  let sawNonSatisfyingPoll = false;
+  for (;;) {
+    const pollBudgetMs = s2RemainingBudgetMs(hooks.now(), pollUntil);
+    if (pollBudgetMs === 0) break;
+    let current: S2OutboxStatus;
+    try {
+      current = await hooks.observe(scenario, pollBudgetMs);
+    } catch {
+      // A final in-flight status read may hit its bounded AbortSignal. It is
+      // evidence for the deadline receipt, not a reason to bypass it.
+      pollReadFailed = true;
+      break;
+    }
     if (predicate(current)) return current;
-    await Bun.sleep(50);
+    sawNonSatisfyingPoll = true;
+    // The backoff is bounded by the same wall: sleeping past it would spend
+    // budget the terminal observation is holding.
+    const idleBudgetMs = s2RemainingBudgetMs(hooks.now(), pollUntil);
+    if (idleBudgetMs === 0) break;
+    await hooks.sleep(Math.min(50, idleBudgetMs));
   }
-  const observed = await outboxStatus(`${scenario}-deadline-observation`);
-  emit({
+  // Best-effort, bounded by the reserved slice, and never authoritative: a
+  // transport failure here must be observed as an absent reading rather than
+  // replacing the typed deadline refusal with a transport error. The budget is
+  // still measured against the one absolute deadline; only the containment moved
+  // into s2TerminalObservation, where an injected observer can prove it.
+  const terminalBudgetMs = s2RemainingBudgetMs(hooks.now(), deadline);
+  const observed = await s2TerminalObservation(
+    () => hooks.observe(`${scenario}-deadline-observation`, terminalBudgetMs),
+    terminalBudgetMs,
+  );
+  const terminalObservationDiff =
+    observed === undefined
+      ? "deadline-observation unavailable within the reserved terminal budget"
+      : `pending=${observed.pending};delivered=${observed.delivered};` +
+        `quarantined=${observed.quarantined};phase=${observed.last_phase}`;
+  const pollObservationDiff = pollReadFailed
+    ? "poll-read-failed"
+    : sawNonSatisfyingPoll
+      ? "poll-predicate-unsatisfied"
+      : "poll-window-exhausted-without-status";
+  hooks.emit({
     tool: "bun",
     tool_version: Bun.version,
     package: "apps/wire",
@@ -1405,15 +1557,34 @@ async function waitForOutbox(
     build_digest: null,
     checkpoint_digest: null,
     checkpoint_mode: "unsigned-v0",
-    ...outboxAgeEvidence(observed),
+    // An absent observation reports nulls rather than a fabricated status: the
+    // age vocabulary has no "unobserved" member, so borrowing one would put a
+    // reading in the receipt that was never taken.
+    ...(observed === undefined
+      ? {
+          oldest_pending_age_ms: null,
+          oldest_pending_age_status: null,
+          oldest_pending_age_alert: null,
+          oldest_pending_age_alert_threshold_ms: null,
+        }
+      : outboxAgeEvidence(observed)),
     ...receiptMetrics(),
     lock_wait_ms: null,
-    retry_count: observed.delivery_attempts,
-    assertion_diff: `pending=${observed.pending};delivered=${observed.delivered};quarantined=${observed.quarantined};phase=${observed.last_phase}`,
+    retry_count: observed?.delivery_attempts ?? null,
+    assertion_diff: `${pollObservationDiff};${terminalObservationDiff}`,
     status: "fail",
-    duration_ms: 8_000,
+    // Measured, not asserted. The old constant claimed 8000 even when the
+    // fresh-window polls had already carried the wait past it.
+    duration_ms: Math.round(hooks.now() - startedAt),
   });
   return fail("S2_OUTBOX_DEADLINE_EXCEEDED");
+}
+
+async function waitForOutbox(
+  scenario: string,
+  predicate: (status: S2OutboxStatus) => boolean,
+): Promise<S2OutboxStatus> {
+  return s2WaitForOutbox(scenario, predicate);
 }
 
 async function expectTransportAbort(
@@ -1448,7 +1619,7 @@ async function assertReplay(
 
 async function exerciseOutboxDrainer(): Promise<void> {
   await seed(OUTBOX_PROBLEM, "outbox-seed");
-  const before = await outboxStatus("outbox-before-auto-handoff");
+  const before = await outboxStatus("outbox-before-auto-handoff", S2_OUTBOX_STATUS_TIMEOUT_MS);
   const auto = await write(
     writeBody(1, OUTBOX_PROBLEM, "Outbox automatic handoff claim."),
     "outbox-automatic-handoff",
@@ -1477,7 +1648,7 @@ async function exerciseOutboxDrainer(): Promise<void> {
     false,
   );
   assertEqual(scheduled.outbox_handoff, "unavailable", "S2_OUTBOX_HANDOFF_FAILURE_NOT_PLANTED");
-  const stranded = await outboxStatus("outbox-failed-handoff-visible");
+  const stranded = await outboxStatus("outbox-failed-handoff-visible", S2_OUTBOX_STATUS_TIMEOUT_MS);
   assertEqual(stranded.pending, 1, "S2_OUTBOX_FAILED_HANDOFF_NOT_PENDING");
   assertEqual(stranded.alarm_at, null, "S2_OUTBOX_FAILED_HANDOFF_BORROWED_ALARM");
   await triggerScheduledOutboxReconcile("outbox-scheduled-reconcile-trigger");
@@ -1545,7 +1716,7 @@ async function exerciseOutboxDrainer(): Promise<void> {
   });
   assertEqual(staleFirst.status, 200, "S2_OUTBOX_STALE_WRAP_FIRST_DRAIN_FAILED");
   assertEqual(numberAt(staleFirst.body, "delivered"), 0, "S2_OUTBOX_STALE_WRAP_SKIPPED_RANGE");
-  const staleArmed = await outboxStatus("outbox-stale-wrap-rearmed");
+  const staleArmed = await outboxStatus("outbox-stale-wrap-rearmed", S2_OUTBOX_STATUS_TIMEOUT_MS);
   assertEqual(staleArmed.pending, 1, "S2_OUTBOX_STALE_WRAP_PENDING_LOST");
   assertEqual(staleArmed.alarm_at === null, false, "S2_OUTBOX_STALE_WRAP_ALARM_LOST");
   const staleSecond = await request(
@@ -1586,7 +1757,7 @@ async function exerciseOutboxDrainer(): Promise<void> {
   });
   assertEqual(hold.status, 200, "S2_OUTBOX_HOLD_ROUTE_FAILED");
   assertEqual(booleanAt(hold.body, "held_before_ack"), true, "S2_OUTBOX_HOLD_NOT_REACHED");
-  const heldStatus = await outboxStatus("outbox-kill-boundary-status");
+  const heldStatus = await outboxStatus("outbox-kill-boundary-status", S2_OUTBOX_STATUS_TIMEOUT_MS);
   assertEqual(heldStatus.last_phase, "held-before-ack", "S2_OUTBOX_KILL_BOUNDARY_NOT_DURABLE");
   assertEqual(heldStatus.alarm_at === null, false, "S2_OUTBOX_KILL_REARM_MISSING");
   assertEqual(held.seq, 6, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
@@ -2623,6 +2794,780 @@ async function restartVerify(): Promise<void> {
   });
 }
 
+// ── mounted-production promotion scenarios (6js.5) ──────────────────────────
+//
+// These drive the real `createApp` session path against this run's actual local
+// D1 and KRATER_OUTBOX Durable Object, on the same origin the harness routes
+// answer on: the worker delegates every non-`/__s2/` path to the mounted
+// production app, so one process serves both the `/__s2/*` observers (harness
+// token) and `/v1/*` promotions (a seeded Fellow bearer). The bearer is minted
+// by `/__s2/seed-promotable`, consumed straight into the header of the mounted
+// request, and never written to argv, exported env, a log line, or a retained
+// receipt -- `request`'s diagnostics only ever read typed body fields.
+// The full per-problem successful-write census: `/__s2/state` counts exactly
+// these eight tables (readState in krater.ts), and a committed promotion writes
+// one row into every one of them. Asserting the whole set -- not the
+// claims/projections/events/outbox subset the outbox scenarios elsewhere use --
+// is what makes the mounted no-lost/no-phantom claim exact rather than partial.
+const MOUNTED_TABLES = [
+  "claims",
+  "claim_projections",
+  "events",
+  "event_content",
+  "public_claim_fts",
+  "idempotency",
+  "outbox",
+  "integrity_checkpoints",
+] as const;
+
+// A schema-valid WorkshopObjectId (W- + 26 base62 chars) that this fixture does
+// not explicitly create, so a promote referencing it reaches the router's
+// owned-object lookup and is refused there -- not rejected earlier by contract
+// validation. All-zero is schema-valid but not mathematically impossible from a
+// random mint, so the no-nudge scenario also asserts it differs from every
+// workshop id the session actually minted before using it. Its validity is
+// pinned against the shared schema at module load.
+const MOUNTED_ABSENT_WORKSHOP_ID = `W-${"0".repeat(26)}`;
+if (!WorkshopObjectIdSchema.safeParse(MOUNTED_ABSENT_WORKSHOP_ID).success) {
+  fail("S2_MOUNTED_ABSENT_WORKSHOP_ID_INVALID");
+}
+
+/**
+ * The Fellow name for a mounted problem. `enrollment_fellows.name` is COLLATE
+ * NOCASE UNIQUE, so each of the five mounted problems needs its own name or the
+ * second seed answers NAME_TAKEN. Derive it from the already-distinct problem id,
+ * lowercased into FellowNameSchema's `^[a-z][a-z0-9-]{2,31}$` shape.
+ */
+function mountedFellowName(problemId: string): string {
+  const name = `s2-${problemId.replace(/^P-/, "").toLowerCase()}`;
+  if (!FellowNameSchema.safeParse(name).success) fail("S2_MOUNTED_FELLOW_NAME_INVALID");
+  return name;
+}
+
+// Causal uniqueness proof for the five mounted Fellow names. If a future rename
+// made two collide under NOCASE, the second seed would hit the DB's UNIQUE(name)
+// mid-run; checking distinctness here at load fails fast and locally instead.
+{
+  const mountedNames = [
+    MOUNTED_PROBLEM,
+    MOUNTED_NO_NUDGE_PROBLEM,
+    MOUNTED_BINDING_FAIL_PROBLEM,
+    MOUNTED_CAS_PROBLEM,
+    MOUNTED_CRASH_PROBLEM,
+  ].map((problemId) => mountedFellowName(problemId).toLowerCase());
+  if (new Set(mountedNames).size !== mountedNames.length) {
+    fail("S2_MOUNTED_FELLOW_NAMES_NOT_UNIQUE");
+  }
+}
+
+/**
+ * Mint a Fellow bearer for `problemId` through the local-only seed seam, which
+ * runs the production EnrollmentService issuance (mint -> claim -> approve ->
+ * poll) so the credential authenticates against the real enrollment graph. The
+ * seed envelope is validated to exactly its three own keys, with the bearer
+ * itself parsed by the shared FellowTokenSchema. The bearer is returned in
+ * memory only; callers must not emit it.
+ */
+async function seedPromotable(problemId: string, scenario: string): Promise<string> {
+  const seeded = await request("POST", "/__s2/seed-promotable", scenario, {
+    problem_id: problemId,
+    created_at: CREATED_AT,
+    name: mountedFellowName(problemId),
+  });
+  assertEqual(seeded.status, 201, "S2_MOUNTED_SEED_FAILED");
+  assertEqual(
+    seeded.contentType,
+    "application/json; charset=utf-8",
+    "S2_MOUNTED_SEED_CONTENT_TYPE",
+  );
+  // Exact own keys: status, problem_id, bearer -- nothing else. A widened
+  // envelope (an extra reflected field) is a refusal, not a warning.
+  assertEqual(
+    Object.keys(seeded.body).sort().join(","),
+    "bearer,problem_id,status",
+    "S2_MOUNTED_SEED_ENVELOPE_SHAPE_INVALID",
+  );
+  assertEqual(
+    stringAt(seeded.body, "status"),
+    "seeded-promotable",
+    "S2_MOUNTED_SEED_STATUS_INVALID",
+  );
+  assertEqual(stringAt(seeded.body, "problem_id"), problemId, "S2_MOUNTED_SEED_PROBLEM_INVALID");
+  const parsedBearer = FellowTokenSchema.safeParse(stringAt(seeded.body, "bearer"));
+  if (!parsedBearer.success) fail("S2_MOUNTED_SEED_BEARER_INVALID");
+  return parsedBearer.data ?? fail("S2_MOUNTED_SEED_BEARER_INVALID");
+}
+
+/** Header set for a mounted production request: the bearer never leaves memory. */
+function mountedHeaders(
+  bearer: string,
+  idempotencyKey: string,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return { authorization: `Bearer ${bearer}`, "idempotency-key": idempotencyKey, ...extra };
+}
+
+async function mountedOpen(bearer: string, problemId: string, prefix: string): Promise<string> {
+  const opened = await request(
+    "POST",
+    "/v1/sessions",
+    `${prefix}-open`,
+    { problem_id: problemId, intent: "prove" },
+    5_000,
+    mountedHeaders(bearer, `${prefix}-open`),
+  );
+  assertEqual(opened.status, 201, "S2_MOUNTED_SESSION_OPEN_FAILED");
+  // Hono's c.json() (the session router's success path) emits exactly
+  // `application/json` with no charset -- distinct from the harness seed helper's
+  // charset variant; pin the exact value rather than a guessed common one.
+  assertEqual(opened.contentType, "application/json", "S2_MOUNTED_SESSION_OPEN_CONTENT_TYPE");
+  // Parse the WHOLE body with the shared strict session-open contract, not a
+  // sampled field: an extra or malformed field is a contract failure here.
+  const parsed = SessionOpenResponseSchema.safeParse(opened.body);
+  if (!parsed.success) fail("S2_MOUNTED_SESSION_OPEN_SHAPE_INVALID");
+  const openedSession = parsed.data ?? fail("S2_MOUNTED_SESSION_OPEN_SHAPE_INVALID");
+  assertEqual(openedSession.problem_id, problemId, "S2_MOUNTED_SESSION_OPEN_PROBLEM_INVALID");
+  return openedSession.session_id;
+}
+
+async function mountedWorkshop(
+  bearer: string,
+  sessionId: string,
+  prefix: string,
+  title: string,
+): Promise<string> {
+  const pushed = await request(
+    "POST",
+    `/v1/sessions/${sessionId}/workshop`,
+    `${prefix}-workshop`,
+    { type: "draft", title, body_md: `${title} prepares one durable promotion.`, relates_to: [] },
+    5_000,
+    mountedHeaders(bearer, `${prefix}-workshop`),
+  );
+  assertEqual(pushed.status, 201, "S2_MOUNTED_WORKSHOP_PUSH_FAILED");
+  assertEqual(pushed.contentType, "application/json", "S2_MOUNTED_WORKSHOP_PUSH_CONTENT_TYPE");
+  // The whole body must satisfy the shared strict schema; workshop_seq is a
+  // positive int by that schema (a session's second push is seq 2, so the exact
+  // value is not pinned here).
+  const parsed = WorkshopPushResponseSchema.safeParse(pushed.body);
+  if (!parsed.success) fail("S2_MOUNTED_WORKSHOP_PUSH_SHAPE_INVALID");
+  return (parsed.data ?? fail("S2_MOUNTED_WORKSHOP_PUSH_SHAPE_INVALID")).workshop_id;
+}
+
+async function mountedOpenAndWorkshop(
+  bearer: string,
+  problemId: string,
+  prefix: string,
+): Promise<{ sessionId: string; workshopId: string }> {
+  const sessionId = await mountedOpen(bearer, problemId, prefix);
+  const workshopId = await mountedWorkshop(bearer, sessionId, prefix, `${prefix} draft`);
+  return { sessionId, workshopId };
+}
+
+/** One mounted promote. Returns the raw result so refusals stay inspectable. */
+async function mountedPromote(
+  bearer: string,
+  sessionId: string,
+  idempotencyKey: string,
+  workshopId: string,
+  statement: string,
+  scenario: string,
+  extra: Record<string, string> = {},
+): Promise<RequestResult> {
+  return request(
+    "POST",
+    `/v1/sessions/${sessionId}/promote`,
+    scenario,
+    {
+      workshop_id: workshopId,
+      kind: "conjecture",
+      statement,
+      falsifier: "The durable row and the delivered outbox effect disagree.",
+      relates_to: [],
+    },
+    5_000,
+    mountedHeaders(bearer, idempotencyKey, extra),
+  );
+}
+
+/** Parse a committed promote's WHOLE body with the shared strict contract. */
+function parseMountedPromote(result: RequestResult, code: string): PromoteResponse {
+  assertEqual(result.status, 201, code);
+  // Hono c.json() success media type: exactly `application/json`, no charset.
+  assertEqual(result.contentType, "application/json", `${code}_CONTENT_TYPE`);
+  const parsed = PromoteResponseSchema.safeParse(result.body);
+  if (!parsed.success) fail(`${code}_SHAPE`);
+  return parsed.data ?? fail(`${code}_SHAPE`);
+}
+
+/**
+ * Assert a refused mounted promote: the exact HTTP status, the exact problem
+ * `code`, an application/problem+json body, and no reflection of the caller's
+ * bearer. The refusal problem body is NOT parsed by a shared closed schema on
+ * purpose: the session router still emits these session codes
+ * (WORKSHOP_OBJECT_NOT_FOUND, DUPLICATE_CLAIM) through the generic problem()
+ * helper, and cataloguing them into the closed schema is owned by bead
+ * asimposiumorg-but.1. Until but.1 lands, the exact status+code+media-type is the
+ * strongest contract-shaped assertion available here.
+ */
+function assertMountedRefusal(
+  result: RequestResult,
+  status: number,
+  code: string,
+  bearer: string,
+  diagnostic: string,
+): void {
+  assertEqual(result.status, status, `${diagnostic}_STATUS`);
+  assertEqual(
+    result.contentType,
+    "application/problem+json; charset=utf-8",
+    `${diagnostic}_CONTENT_TYPE`,
+  );
+  assertEqual(stringAt(result.body, "code"), code, `${diagnostic}_CODE`);
+  // Non-reflection: a refusal must never echo the Fellow bearer back.
+  assertEqual(JSON.stringify(result.body).includes(bearer), false, `${diagnostic}_REFLECTS_BEARER`);
+}
+
+function assertMountedCensus(census: S2StateResult, code: string): void {
+  for (const table of MOUNTED_TABLES) assertEqual(census.counts[table], 1, code);
+}
+
+/**
+ * The exact, whole-of-S2OutboxStatus DO tuple in a fixed canonical field order.
+ * A refused promote that wrongly touched the drainer could move ownership, the
+ * alarm, a backoff/quarantine field, or an age field without changing
+ * delivered/pending, so the no-nudge scenario compares every field, not a
+ * subset. After a settled baseline (pending 0, alarm cleared) all of these stay
+ * exact across a pair of refusals.
+ */
+function outboxTuple(status: S2OutboxStatus): string {
+  return JSON.stringify({
+    active: status.active,
+    pending: status.pending,
+    alarm_at: status.alarm_at,
+    owner_acquisitions: status.owner_acquisitions,
+    max_active: status.max_active,
+    recovered_ownerships: status.recovered_ownerships,
+    delivery_attempts: status.delivery_attempts,
+    delivered: status.delivered,
+    quarantined: status.quarantined,
+    failures: status.failures,
+    last_backoff_ms: status.last_backoff_ms,
+    last_quarantine_code: status.last_quarantine_code,
+    last_phase: status.last_phase,
+    oldest_pending_age_ms: status.oldest_pending_age_ms,
+    oldest_pending_age_status: status.oldest_pending_age_status,
+    oldest_pending_age_alert: status.oldest_pending_age_alert,
+    oldest_pending_age_alert_threshold_ms: status.oldest_pending_age_alert_threshold_ms,
+  });
+}
+
+/** Canonical promote receipt for cross-response equality (fixed key order). */
+function canonicalPromote(receipt: {
+  claim_id: string;
+  problem_id: string;
+  seq: number;
+  queue_position: number;
+}): string {
+  return JSON.stringify({
+    claim_id: receipt.claim_id,
+    problem_id: receipt.problem_id,
+    seq: receipt.seq,
+    queue_position: receipt.queue_position,
+  });
+}
+
+/**
+ * (a) Commit -> nudge -> effect -> ack. A mounted promotion commits its durable
+ * D1 row, the propagated post-commit context wakes the real DO, and the DO
+ * drains the row to `delivered`. Measured as a delta from a baseline captured
+ * immediately before, so the global DO counters from earlier phases do not
+ * matter.
+ */
+async function mountedHappyPathPromotion(): Promise<void> {
+  const bearer = await seedPromotable(MOUNTED_PROBLEM, "mounted-happy-seed");
+  const base = await outboxStatus("mounted-happy-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  const prepared = await mountedOpenAndWorkshop(bearer, MOUNTED_PROBLEM, "mounted-happy");
+  const promoted = await mountedPromote(
+    bearer,
+    prepared.sessionId,
+    "mounted-happy-promote",
+    prepared.workshopId,
+    "A mounted promotion commits then wakes the drainer exactly once.",
+    "mounted-happy-commit",
+  );
+  const claim = parseMountedPromote(promoted, "S2_MOUNTED_PROMOTE_NOT_COMMITTED");
+  assertEqual(claim.claim_id, "C-1", "S2_MOUNTED_PROMOTE_CLAIM_ID_INVALID");
+  assertEqual(claim.seq, 1, "S2_MOUNTED_PROMOTE_SEQ_INVALID");
+  assertEqual(claim.problem_id, MOUNTED_PROBLEM, "S2_MOUNTED_PROMOTE_PROBLEM_INVALID");
+  const delivered = await waitForOutbox(
+    "mounted-happy-delivered",
+    (status) =>
+      status.delivered === base.delivered + 1 &&
+      status.pending === base.pending &&
+      status.last_phase === "delivered",
+  );
+  // Exactly one attempt delivered exactly one row: a retry-tolerant `>=` would
+  // not prove single-effect. owner_acquisitions is intentionally not pinned --
+  // a duplicate wake may legitimately add an empty ownership scan.
+  assertEqual(
+    delivered.delivery_attempts,
+    base.delivery_attempts + 1,
+    "S2_MOUNTED_HAPPY_NOT_EXACTLY_ONE_ATTEMPT",
+  );
+  assertEqual(delivered.max_active, 1, "S2_MOUNTED_HAPPY_OWNERSHIP_INVALID");
+  assertEqual(delivered.active, 0, "S2_MOUNTED_HAPPY_ACTIVE_OWNER_LEAKED");
+  assertMountedCensus(
+    await state(MOUNTED_PROBLEM, "mounted-happy-census"),
+    "S2_MOUNTED_HAPPY_CENSUS_INVALID",
+  );
+}
+
+/**
+ * (b) Non-vacuous no-nudge. Scenario (a) proves the detector fires for a real
+ * promote; here a real commit on this problem establishes a live baseline, then
+ * two refusals -- a 404 for a workshop id this session did not create, and a 409
+ * P11 near-duplicate -- each reach no commit and so schedule no nudge and enqueue
+ * no row. The whole DO tuple, not just delivered/pending, is unchanged
+ * afterwards, so a refusal that touched ownership or the alarm without moving
+ * those two counters is still caught.
+ */
+async function mountedRefusedPromotionsWakeNothing(): Promise<void> {
+  const bearer = await seedPromotable(MOUNTED_NO_NUDGE_PROBLEM, "mounted-no-nudge-seed");
+  const prepared = await mountedOpenAndWorkshop(
+    bearer,
+    MOUNTED_NO_NUDGE_PROBLEM,
+    "mounted-no-nudge",
+  );
+  const statement = "A refused mounted promote wakes the drainer zero times.";
+  const committed = await mountedPromote(
+    bearer,
+    prepared.sessionId,
+    "mounted-no-nudge-commit-key",
+    prepared.workshopId,
+    statement,
+    "mounted-no-nudge-commit",
+  );
+  parseMountedPromote(committed, "S2_MOUNTED_NO_NUDGE_SETUP_NOT_COMMITTED");
+  await waitForOutbox(
+    "mounted-no-nudge-settle",
+    (status) => status.pending === 0 && status.last_phase === "delivered",
+  );
+  // A settled snapshot (post-delivery, alarm cleared) is the exact tuple the two
+  // refusals must not perturb.
+  const baseTuple = outboxTuple(
+    await outboxStatus("mounted-no-nudge-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS),
+  );
+  const secondWorkshop = await mountedWorkshop(
+    bearer,
+    prepared.sessionId,
+    "mounted-no-nudge-second",
+    "second draft",
+  );
+  // All-zero is schema-valid but not impossible from a random mint: prove the
+  // absent id is not one this session actually created before relying on the 404.
+  assertEqual(
+    MOUNTED_ABSENT_WORKSHOP_ID !== prepared.workshopId &&
+      MOUNTED_ABSENT_WORKSHOP_ID !== secondWorkshop,
+    true,
+    "S2_MOUNTED_ABSENT_WORKSHOP_ID_COLLIDED",
+  );
+  const missing = await mountedPromote(
+    bearer,
+    prepared.sessionId,
+    "mounted-no-nudge-missing-key",
+    MOUNTED_ABSENT_WORKSHOP_ID,
+    "This mounted promote references no owned workshop object.",
+    "mounted-no-nudge-missing",
+  );
+  // WORKSHOP_OBJECT_NOT_FOUND and DUPLICATE_CLAIM are still emitted through the
+  // router's generic problem() helper; cataloguing them into the closed schema is
+  // bead asimposiumorg-but.1. Exact status + code + problem+json is the strongest
+  // contract-shaped assertion here until but.1 lands.
+  assertMountedRefusal(
+    missing,
+    404,
+    "WORKSHOP_OBJECT_NOT_FOUND",
+    bearer,
+    "S2_MOUNTED_NO_NUDGE_MISSING",
+  );
+  const duplicate = await mountedPromote(
+    bearer,
+    prepared.sessionId,
+    "mounted-no-nudge-dup-key",
+    secondWorkshop,
+    statement,
+    "mounted-no-nudge-duplicate",
+  );
+  assertMountedRefusal(duplicate, 409, "DUPLICATE_CLAIM", bearer, "S2_MOUNTED_NO_NUDGE_DUPLICATE");
+  assertEqual(
+    outboxTuple(await outboxStatus("mounted-no-nudge-after", S2_OUTBOX_STATUS_TIMEOUT_MS)),
+    baseTuple,
+    "S2_MOUNTED_NO_NUDGE_DO_TUPLE_CHANGED",
+  );
+  assertMountedCensus(
+    await state(MOUNTED_NO_NUDGE_PROBLEM, "mounted-no-nudge-census"),
+    "S2_MOUNTED_NO_NUDGE_CENSUS_INVALID",
+  );
+}
+
+/**
+ * (d) Duplicate/race CAS exactly-once, at BOTH the producer and the nudge. Two
+ * overlapping identical promotes race: exactly one wins the atomic replay
+ * election and commits (201, exactly `application/json`), the loser's Krater
+ * batch aborts before the post-commit nudge and it returns 200 with the winner's
+ * bytes. That 200 is served by one of two real source paths depending on which
+ * side of the winner's replay-row commit the loser's read falls -- the
+ * top-of-handler exact-response replay (`application/json; charset=utf-8`) or the
+ * post-commit c.json path (`application/json`) -- so its media type is asserted
+ * against exactly those two values. Both bodies parse under the shared contract
+ * and must be canonically identical.
+ *
+ * The producers commit through the injected binding-failure seam, so the row is
+ * durable-but-pending with no delivery yet. Then several real DO nudges and the
+ * scheduled reconcile are fired CONCURRENTLY: this is the duplicate-nudge race,
+ * and the DO's single-owner CAS collapses them to exactly one delivery attempt
+ * and one effect. Every census table stays at one.
+ */
+async function mountedDuplicateRaceIsExactlyOnce(): Promise<void> {
+  const bearer = await seedPromotable(MOUNTED_CAS_PROBLEM, "mounted-cas-seed");
+  const base = await outboxStatus("mounted-cas-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  const prepared = await mountedOpenAndWorkshop(bearer, MOUNTED_CAS_PROBLEM, "mounted-cas");
+  const key = "mounted-cas-promote-key";
+  const statement = "Concurrent identical mounted promotes elect exactly one envelope.";
+  const bindingFail = { "x-s2-nudge-binding-fail": "1" };
+  const [first, second] = await Promise.all([
+    mountedPromote(
+      bearer,
+      prepared.sessionId,
+      key,
+      prepared.workshopId,
+      statement,
+      "mounted-cas-a",
+      bindingFail,
+    ),
+    mountedPromote(
+      bearer,
+      prepared.sessionId,
+      key,
+      prepared.workshopId,
+      statement,
+      "mounted-cas-b",
+      bindingFail,
+    ),
+  ]);
+  // Exactly one commit and one durable replay, in either arrival order. Two
+  // commits would show as 201,201 here.
+  assertEqual(
+    [first.status, second.status].sort((left, right) => left - right).join(","),
+    "200,201",
+    "S2_MOUNTED_CAS_RACE_STATUS_INVALID",
+  );
+  const committed = first.status === 201 ? first : second;
+  const replayed = first.status === 201 ? second : first;
+  const committedClaim = parseMountedPromote(committed, "S2_MOUNTED_CAS_COMMIT_NOT_201");
+  assertEqual(committedClaim.claim_id, "C-1", "S2_MOUNTED_CAS_CLAIM_ID_INVALID");
+  assertEqual(committedClaim.seq, 1, "S2_MOUNTED_CAS_SEQ_INVALID");
+  assertEqual(
+    ["application/json", "application/json; charset=utf-8"].includes(replayed.contentType),
+    true,
+    "S2_MOUNTED_CAS_REPLAY_CONTENT_TYPE",
+  );
+  const parsedReplay = PromoteResponseSchema.safeParse(replayed.body);
+  if (!parsedReplay.success) fail("S2_MOUNTED_CAS_REPLAY_SHAPE");
+  const replayClaim = parsedReplay.data ?? fail("S2_MOUNTED_CAS_REPLAY_SHAPE");
+  assertEqual(
+    canonicalPromote(committedClaim),
+    canonicalPromote(replayClaim),
+    "S2_MOUNTED_CAS_RECEIPTS_DIVERGE",
+  );
+  // The injected binding failure left the single winning row committed but
+  // undelivered: one producer, one pending row, no delivery.
+  const stranded = await outboxStatus("mounted-cas-stranded", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  assertEqual(stranded.pending, base.pending + 1, "S2_MOUNTED_CAS_NOT_PENDING");
+  assertEqual(stranded.delivered, base.delivered, "S2_MOUNTED_CAS_PHANTOM_DELIVERY");
+  // The duplicate-nudge race: several real DO wakes and the scheduled reconcile,
+  // all concurrent. The reconcile leg throws on a non-200; the nudge legs are
+  // each asserted 202. The single-owner CAS must collapse them to one delivery.
+  const [wakeA, wakeB, wakeC] = await Promise.all([
+    request("POST", "/__s2/outbox/nudge", "mounted-cas-wake-a", { fault_mode: "none" }),
+    request("POST", "/__s2/outbox/nudge", "mounted-cas-wake-b", { fault_mode: "none" }),
+    request("POST", "/__s2/outbox/nudge", "mounted-cas-wake-c", { fault_mode: "none" }),
+    triggerScheduledOutboxReconcile("mounted-cas-reconcile"),
+  ]);
+  for (const wake of [wakeA, wakeB, wakeC]) {
+    assertEqual(wake.status, 202, "S2_MOUNTED_CAS_WAKE_FAILED");
+  }
+  const delivered = await waitForOutbox(
+    "mounted-cas-delivered",
+    (status) =>
+      status.delivered === base.delivered + 1 &&
+      status.pending === base.pending &&
+      status.last_phase === "delivered",
+  );
+  // Exactly one delivery attempt despite four concurrent wakes: the collapse is
+  // the CAS proof. owner_acquisitions is not pinned -- each wake may add an empty
+  // ownership scan.
+  assertEqual(
+    delivered.delivery_attempts,
+    base.delivery_attempts + 1,
+    "S2_MOUNTED_CAS_NOT_EXACTLY_ONE_ATTEMPT",
+  );
+  assertEqual(delivered.max_active, 1, "S2_MOUNTED_CAS_OWNERSHIP_INVALID");
+  assertEqual(delivered.active, 0, "S2_MOUNTED_CAS_ACTIVE_OWNER_LEAKED");
+  assertMountedCensus(
+    await state(MOUNTED_CAS_PROBLEM, "mounted-cas-census"),
+    "S2_MOUNTED_CAS_DUPLICATED_ROW",
+  );
+}
+
+/**
+ * (c) Injected binding failure, then real-DO recovery. The `x-s2-nudge-binding-fail`
+ * seam runs the mounted app for this one request with a KRATER_OUTBOX handle that
+ * throws on construction. This is an INJECTED BINDING FAILURE, not a real-DO nudge
+ * failure: the commit still writes its durable D1 row, but the detached
+ * post-commit nudge cannot reach the DO and is swallowed, leaving the row
+ * committed-and-pending with no delivery. The ordinary manual reconcile then
+ * drives the real DO on the real binding, which drains the row exactly once.
+ */
+async function mountedInjectedBindingFailureRecovers(): Promise<void> {
+  const bearer = await seedPromotable(MOUNTED_BINDING_FAIL_PROBLEM, "mounted-binding-fail-seed");
+  const base = await outboxStatus("mounted-binding-fail-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  const prepared = await mountedOpenAndWorkshop(
+    bearer,
+    MOUNTED_BINDING_FAIL_PROBLEM,
+    "mounted-binding-fail",
+  );
+  const committed = await mountedPromote(
+    bearer,
+    prepared.sessionId,
+    "mounted-binding-fail-key",
+    prepared.workshopId,
+    "An injected binding failure leaves the promotion committed but unnudged.",
+    "mounted-binding-fail-commit",
+    { "x-s2-nudge-binding-fail": "1" },
+  );
+  const claim = parseMountedPromote(committed, "S2_MOUNTED_BINDING_FAIL_NOT_COMMITTED");
+  assertEqual(claim.claim_id, "C-1", "S2_MOUNTED_BINDING_FAIL_CLAIM_INVALID");
+  const stranded = await outboxStatus("mounted-binding-fail-stranded", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  assertEqual(stranded.pending, base.pending + 1, "S2_MOUNTED_BINDING_FAIL_NOT_PENDING");
+  assertEqual(stranded.delivered, base.delivered, "S2_MOUNTED_BINDING_FAIL_PHANTOM_DELIVERY");
+  await triggerScheduledOutboxReconcile("mounted-binding-fail-reconcile");
+  const recovered = await waitForOutbox(
+    "mounted-binding-fail-recovered",
+    (status) =>
+      status.delivered === base.delivered + 1 &&
+      status.pending === base.pending &&
+      status.last_phase === "delivered",
+  );
+  // Exactly one real delivery attempt: the injected-failure nudge never reached
+  // the DO, so the reconcile's single drain is the only attempt on this row.
+  assertEqual(
+    recovered.delivery_attempts,
+    base.delivery_attempts + 1,
+    "S2_MOUNTED_BINDING_FAIL_NOT_EXACTLY_ONE_ATTEMPT",
+  );
+  assertEqual(recovered.max_active, 1, "S2_MOUNTED_BINDING_FAIL_OWNERSHIP_INVALID");
+  assertEqual(recovered.active, 0, "S2_MOUNTED_BINDING_FAIL_ACTIVE_OWNER_LEAKED");
+  assertMountedCensus(
+    await state(MOUNTED_BINDING_FAIL_PROBLEM, "mounted-binding-fail-census"),
+    "S2_MOUNTED_BINDING_FAIL_CENSUS_INVALID",
+  );
+}
+
+/**
+ * (e) setup, pre-restart. Commit through the injected binding-failure seam so the
+ * promotion is durable in D1 but never delivered, leaving exactly one pending row
+ * for the post-restart reconcile. The bearer is consumed entirely within this
+ * pre-crash process and never persisted; it cannot and need not survive the
+ * restart, because the durable D1 row and the real DO carry the proof across it.
+ */
+async function mountedCrashSetupLeavesOneDurablePending(): Promise<void> {
+  const bearer = await seedPromotable(MOUNTED_CRASH_PROBLEM, "mounted-crash-seed");
+  const base = await outboxStatus("mounted-crash-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  const prepared = await mountedOpenAndWorkshop(bearer, MOUNTED_CRASH_PROBLEM, "mounted-crash");
+  const committed = await mountedPromote(
+    bearer,
+    prepared.sessionId,
+    "mounted-crash-key",
+    prepared.workshopId,
+    "A committed promotion must survive a worker restart and deliver exactly once.",
+    "mounted-crash-commit",
+    { "x-s2-nudge-binding-fail": "1" },
+  );
+  parseMountedPromote(committed, "S2_MOUNTED_CRASH_SETUP_NOT_COMMITTED");
+  const stranded = await outboxStatus("mounted-crash-stranded", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  assertEqual(stranded.pending, base.pending + 1, "S2_MOUNTED_CRASH_SETUP_NOT_PENDING");
+  assertEqual(stranded.delivered, base.delivered, "S2_MOUNTED_CRASH_SETUP_PHANTOM_DELIVERY");
+  const census = await state(MOUNTED_CRASH_PROBLEM, "mounted-crash-setup-census");
+  assertEqual(census.counts.outbox, 1, "S2_MOUNTED_CRASH_SETUP_OUTBOX_INVALID");
+  assertEqual(census.counts.events, 1, "S2_MOUNTED_CRASH_SETUP_EVENT_INVALID");
+}
+
+/**
+ * (e) verify, post-restart. The durable D1 row and its claim survived the
+ * same-persist restart even though the bearer did not. A manual reconcile drives
+ * the real DO -- idempotent if the restarted DO already recovered the row on its
+ * own -- and the row is delivered exactly once: pending returns to zero and the
+ * per-problem census never doubles (no lost, no phantom).
+ */
+async function mountedCrashRecoveryDeliversExactlyOnce(): Promise<void> {
+  const survived = await state(MOUNTED_CRASH_PROBLEM, "mounted-crash-survived");
+  assertEqual(survived.counts.outbox, 1, "S2_MOUNTED_CRASH_ROW_LOST");
+  assertEqual(survived.counts.events, 1, "S2_MOUNTED_CRASH_EVENT_LOST");
+  assertEqual(survived.counts.claims, 1, "S2_MOUNTED_CRASH_CLAIM_LOST");
+  // The crash row was committed via the binding-failure seam, so the DO never
+  // armed an alarm for it; on restart it does not self-deliver, and /status is
+  // read-only. So a baseline captured here still shows the row pending, and the
+  // reconcile below is the single delivery -- an exact +1, not a >=.
+  const base = await outboxStatus("mounted-crash-recovery-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  assertEqual(base.pending >= 1, true, "S2_MOUNTED_CRASH_PENDING_NOT_DURABLE");
+  await triggerScheduledOutboxReconcile("mounted-crash-reconcile");
+  const recovered = await waitForOutbox(
+    "mounted-crash-recovered",
+    (status) =>
+      status.delivered === base.delivered + 1 &&
+      status.pending === base.pending - 1 &&
+      status.last_phase === "delivered",
+  );
+  assertEqual(
+    recovered.delivery_attempts,
+    base.delivery_attempts + 1,
+    "S2_MOUNTED_CRASH_NOT_EXACTLY_ONE_ATTEMPT",
+  );
+  assertEqual(recovered.max_active, 1, "S2_MOUNTED_CRASH_RESTART_OWNERSHIP_VIOLATION");
+  assertEqual(recovered.active, 0, "S2_MOUNTED_CRASH_RESTART_ACTIVE_OWNER_LEAKED");
+  assertMountedCensus(
+    await state(MOUNTED_CRASH_PROBLEM, "mounted-crash-recovery-census"),
+    "S2_MOUNTED_CRASH_DUPLICATED_ROW",
+  );
+}
+
+/**
+ * (f) Final census. The no-lost/no-phantom proof is the sum of five EXACT
+ * per-problem D1 censuses -- each mounted problem committed exactly one claim,
+ * with exactly one row in every one of the eight written tables and a projection
+ * that replays to a single event -- combined with the EXACT per-scenario DO
+ * deltas each scenario already asserted (delivered +1, delivery_attempts +1).
+ * The DO counters are global and accumulate across earlier phases (restart-verify
+ * even leaves one quarantined row), so this is deliberately NOT asserted as an
+ * absolute global DO total; only the drained-and-owned invariants (nothing
+ * pending, a single owner, no active leak) are asserted globally.
+ */
+async function mountedFinalCensus(): Promise<void> {
+  for (const problemId of [
+    MOUNTED_PROBLEM,
+    MOUNTED_NO_NUDGE_PROBLEM,
+    MOUNTED_BINDING_FAIL_PROBLEM,
+    MOUNTED_CAS_PROBLEM,
+    MOUNTED_CRASH_PROBLEM,
+  ]) {
+    assertMountedCensus(
+      await state(problemId, "mounted-final-census"),
+      "S2_MOUNTED_FINAL_CENSUS_INVALID",
+    );
+    await assertReplay(problemId, 1, "mounted-final-replay");
+  }
+  const outbox = await outboxStatus("mounted-final-outbox", S2_OUTBOX_STATUS_TIMEOUT_MS);
+  assertEqual(outbox.pending, 0, "S2_MOUNTED_FINAL_PENDING_NONZERO");
+  assertEqual(outbox.max_active, 1, "S2_MOUNTED_FINAL_OWNERSHIP_INVALID");
+  assertEqual(outbox.active, 0, "S2_MOUNTED_FINAL_ACTIVE_OWNER_LEAKED");
+}
+
+/**
+ * The retained terminal record for a mounted phase. Because the cost manifest
+ * intentionally carries no mounted keys, this record must itself hold the exact
+ * measured DO summary it stands for -- the explicit `mounted_*` fields below --
+ * plus the scenario count that ran. All values are nonsecret DO counters; no
+ * ids, bearers, or replay keys are ever emitted.
+ */
+function emitMountedPass(
+  scenario: string,
+  observed: S2OutboxStatus,
+  mountedScenarioCount: number,
+): void {
+  emit({
+    tool: "bun",
+    tool_version: Bun.version,
+    package: "apps/wire",
+    suite: "s2-krater-local-do-mounted",
+    revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
+    bindings: BINDINGS,
+    scenario,
+    seed: SEED,
+    scope: SCOPE,
+    request_id: null,
+    event_id: null,
+    pre_cursor: null,
+    post_cursor: null,
+    payload_sha256: null,
+    row_digest: null,
+    build_digest: null,
+    checkpoint_digest: null,
+    checkpoint_mode: null,
+    ...outboxAgeEvidence(observed),
+    ...receiptMetrics(),
+    mounted_scenario_count: mountedScenarioCount,
+    mounted_pending: observed.pending,
+    mounted_delivered: observed.delivered,
+    mounted_delivery_attempts: observed.delivery_attempts,
+    mounted_owner_acquisitions: observed.owner_acquisitions,
+    mounted_recovered_ownerships: observed.recovered_ownerships,
+    mounted_failures: observed.failures,
+    mounted_quarantined: observed.quarantined,
+    mounted_max_active: observed.max_active,
+    mounted_active: observed.active,
+    mounted_alarm_at: observed.alarm_at,
+    mounted_alarm_armed: observed.alarm_at !== null,
+    mounted_last_phase: observed.last_phase,
+    lock_wait_ms: null,
+    retry_count: observed.delivery_attempts,
+    assertion_diff: null,
+    total_harness_request_count: requestCount,
+    status: "pass",
+    reproduce: "scripts/e2e-s2-krater.sh",
+  });
+}
+
+/**
+ * The pre-restart mounted phase: the commit->nudge->effect->ack path, the
+ * non-vacuous no-nudge refusals, the CAS exactly-once race, the injected
+ * binding-failure recovery, and the durable pending row the crash will strand.
+ * The shell then restarts the worker against the same persistence directory.
+ */
+async function mountedOutbox(): Promise<void> {
+  await mountedHappyPathPromotion();
+  await mountedRefusedPromotionsWakeNothing();
+  await mountedDuplicateRaceIsExactlyOnce();
+  await mountedInjectedBindingFailureRecovers();
+  await mountedCrashSetupLeavesOneDurablePending();
+  // Four scenarios prove their claims here (a, b, d, c); the fifth (crash setup)
+  // only strands a durable row for the post-restart phase to recover.
+  emitMountedPass(
+    "mounted-promotion-commit-nudge-effect-ack-no-nudge-cas-binding-fail",
+    await outboxStatus("mounted-outbox-phase-status", S2_OUTBOX_STATUS_TIMEOUT_MS),
+    5,
+  );
+}
+
+/**
+ * The post-restart mounted phase: the crash the pre-restart phase set up is
+ * recovered exactly once against the real DO, and the final exact D1/outbox/DO
+ * census proves no lost and no phantom.
+ */
+async function mountedOutboxRestartVerify(): Promise<void> {
+  await mountedCrashRecoveryDeliversExactlyOnce();
+  await mountedFinalCensus();
+  // Two scenarios here: the crash recovery (e) and the final census (f).
+  emitMountedPass(
+    "mounted-promotion-crash-restart-reconcile-exactly-once-census",
+    await outboxStatus("mounted-restart-phase-status", S2_OUTBOX_STATUS_TIMEOUT_MS),
+    2,
+  );
+}
+
 async function main(): Promise<void> {
   if (origin === undefined) fail("S2_ORIGIN_MISSING");
   if (REVISION === undefined || !/^[0-9a-f]{40}$/.test(REVISION)) fail("S2_GIT_HEAD_INVALID");
@@ -2633,6 +3578,8 @@ async function main(): Promise<void> {
   requireHarnessToken();
   if (phase === "exercise") return exercise();
   if (phase === "restart-verify") return restartVerify();
+  if (phase === "mounted-outbox") return mountedOutbox();
+  if (phase === "mounted-outbox-restart-verify") return mountedOutboxRestartVerify();
   if (phase === "upgrade-existing") return upgradeExisting();
   if (phase === "upgrade-indexed") return upgradeIndexed();
   if (phase === "upgrade-empty") return upgradeEmpty();

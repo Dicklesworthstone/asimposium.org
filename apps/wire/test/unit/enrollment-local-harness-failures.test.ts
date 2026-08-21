@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { OpaqueProblemSchema } from "@asimposium/contracts";
 import { getDocument } from "@asimposium/protocol";
 
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
@@ -91,6 +92,7 @@ const KEY_A = "A".repeat(43);
 const KEY_B = "B".repeat(43);
 const KEY_C = "C".repeat(43);
 const LOCAL_STOA_ORIGIN = "http://127.0.0.1:8787";
+const LOCAL_AGORA_ORIGIN = "https://asimposium.org";
 const STAGING_STOA_ORIGIN = "https://a-staging.asimposium.org";
 const MISSING_STOA_ORIGIN = Symbol("missing-stoa-origin");
 const syntheticJoinSecret = (): string => `v1.${"x".repeat(43)}`;
@@ -104,8 +106,17 @@ async function call(
   body: unknown,
   headers: Record<string, string> = {},
   stoaOrigin: unknown | typeof MISSING_STOA_ORIGIN = LOCAL_STOA_ORIGIN,
-): Promise<{ status: number; body: Record<string, unknown>; raw: string }> {
-  const env: Record<string, unknown> = { DB: db, ENROLLMENT_REPLAY_KEY: replayKey };
+): Promise<{
+  status: number;
+  contentType: string | null;
+  body: Record<string, unknown>;
+  raw: string;
+}> {
+  const env: Record<string, unknown> = {
+    DB: db,
+    ENROLLMENT_REPLAY_KEY: replayKey,
+    AGORA_ORIGIN: LOCAL_AGORA_ORIGIN,
+  };
   if (stoaOrigin !== MISSING_STOA_ORIGIN) env.STOA_ORIGIN = stoaOrigin;
   const response = await worker.fetch(
     new Request(`https://local.invalid${path}`, {
@@ -123,7 +134,12 @@ async function call(
   } catch {
     parsed = {};
   }
-  return { status: response.status, body: parsed, raw };
+  return {
+    status: response.status,
+    contentType: response.headers.get("content-type"),
+    body: parsed,
+    raw,
+  };
 }
 
 const mintBody = { sponsor_id: "usr_harness_sponsor", request: { requested_scopes: ["review"] } };
@@ -238,15 +254,24 @@ describe("a replay key the operator did not supply is a typed 503", () => {
   }
 
   test("the refusal reaches the mounted router surface too, not only the setup routes", async () => {
+    const secret = syntheticJoinSecret();
     const result = await call(freshDatabase(), "", "/v1/fellows", {
       enrollment_id: "ASIMP-EN-0000000000",
-      secret: syntheticJoinSecret(),
+      secret,
       name: "orchid-vector",
       model: "m",
       harness: "h",
     });
     expect(result.status).toBe(503);
-    expect(result.body).toEqual({ code: "ENROLLMENT_UNAVAILABLE" });
+    expect(result.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(OpaqueProblemSchema.safeParse(result.body).success).toBe(true);
+    expect(result.body).toMatchObject({
+      type: "https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",
+      status: 503,
+      code: "ENROLLMENT_UNAVAILABLE",
+    });
+    expect(result.raw).not.toContain(secret);
+    expect(result.raw).not.toContain(secret.slice("v1.".length));
   });
 });
 

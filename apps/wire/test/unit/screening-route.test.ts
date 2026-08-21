@@ -382,6 +382,62 @@ describe("POST /internal/screen", () => {
     expect(observation.provider_status).toBe("error");
   });
 
+  test("model output must be exactly one bare JSON object", async () => {
+    const validObject = JSON.stringify({
+      decision: "pass",
+      coarse_category: "benign-context",
+      bands: {
+        "benign-context": "high",
+        "spam-commercial": "low",
+        injection: "low",
+        "dual-use-boundary": "low",
+        "operational-harm": "low",
+        harassment: "low",
+        "sexual-content": "low",
+        "provider-unavailable": null,
+      },
+    });
+    const cases = [
+      { name: "leading prose", response: `classification: ${validObject}`, accepted: false },
+      { name: "trailing prose", response: `${validObject} done`, accepted: false },
+      { name: "Markdown fence", response: `\`\`\`json\n${validObject}\n\`\`\``, accepted: false },
+      { name: "two objects", response: `${validObject}\n${validObject}`, accepted: false },
+      { name: "whitespace framing", response: ` \n\t${validObject}\r\n `, accepted: true },
+    ] as const;
+
+    for (const framingCase of cases) {
+      let calls = 0;
+      const ai = {
+        async run() {
+          calls += 1;
+          return framingCase.response;
+        },
+      };
+      const corpus = await corpusRequest([{ id: "legit-001", body: "A benign post." }]);
+      const response = await postScreening(corpus, { env: screeningEnv(ai) });
+      const observation = observationsOf(response.json)[0];
+      if (observation === undefined) throw new Error(`missing ${framingCase.name} observation`);
+
+      expect(response.status, framingCase.name).toBe(200);
+      expect(calls, framingCase.name).toBe(1);
+      expect(observation.decision, framingCase.name).toBe(
+        framingCase.accepted ? "pass" : "quarantine",
+      );
+      expect(observation.provider_status, framingCase.name).toBe(
+        framingCase.accepted ? "ok" : "error",
+      );
+      expect(observation.decision_path, framingCase.name).toBe(
+        framingCase.accepted ? "provider" : "provider-error-fail-closed",
+      );
+      expect(observation.status_code, framingCase.name).toBe(
+        framingCase.accepted ? "SCREENED" : "SCREENING_PROVIDER_ERROR",
+      );
+      expect(response.text, framingCase.name).not.toContain("classification:");
+      expect(response.text, framingCase.name).not.toContain(" done");
+      expect(response.text, framingCase.name).not.toContain("```json");
+    }
+  });
+
   test("an out-of-vocabulary model decision is a provider error, not a pass", async () => {
     const inventiveAi = {
       async run() {
@@ -447,6 +503,206 @@ describe("POST /internal/screen", () => {
 
     expect(response.status).toBe(413);
     expect(refusalCode(await response.json())).toBe("SCREENING_REQUEST_TOO_LARGE");
+  });
+
+  test("declared and streamed screening overruns cancel ingress before provider work", async () => {
+    for (const scenario of ["declared", "false-low-stream"] as const) {
+      const ai = passingAi();
+      let cancellations = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (scenario === "declared") {
+            controller.enqueue(new TextEncoder().encode("{}"));
+          } else {
+            controller.enqueue(new Uint8Array(SCREENING_MAX_REQUEST_BYTES));
+            controller.enqueue(Uint8Array.of(0x20));
+          }
+        },
+        cancel() {
+          cancellations += 1;
+        },
+      });
+      const request = new Request("https://a-staging.asimposium.org/internal/screen", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${BEARER}`,
+          "content-type": "application/json",
+          "content-length": scenario === "declared" ? String(SCREENING_MAX_REQUEST_BYTES + 1) : "2",
+        },
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      const response = await handleScreeningRequest(request, screeningEnv(ai) as never);
+
+      expect(response.status, scenario).toBe(413);
+      expect(refusalCode(await response.json()), scenario).toBe("SCREENING_REQUEST_TOO_LARGE");
+      expect(cancellations, scenario).toBe(1);
+      expect(ai.calls, scenario).toEqual([]);
+    }
+  });
+
+  test("malformed UTF-8 and reader failure refuse before provider work", async () => {
+    const invalidUtf8 = Uint8Array.of(0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d);
+    const malformedAi = passingAi();
+    const malformedResponse = await handleScreeningRequest(
+      new Request("https://a-staging.asimposium.org/internal/screen", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${BEARER}`,
+          "content-type": "application/json",
+        },
+        body: invalidUtf8,
+      }),
+      screeningEnv(malformedAi) as never,
+    );
+    expect(malformedResponse.status).toBe(422);
+    expect(refusalCode(await malformedResponse.json())).toBe("SCREENING_REQUEST_MALFORMED");
+    expect(malformedAi.calls).toEqual([]);
+
+    const failingAi = passingAi();
+    let cancellations = 0;
+    const failingRequest = {
+      headers: new Headers({
+        authorization: `Bearer ${BEARER}`,
+        "content-type": "application/json",
+      }),
+      body: {
+        getReader(options?: { mode?: string }) {
+          if (options?.mode === "byob") throw new TypeError("BYOB unavailable in planted reader");
+          return {
+            async read() {
+              throw new Error("planted screening reader failure");
+            },
+            async cancel() {
+              cancellations += 1;
+            },
+            releaseLock() {},
+          };
+        },
+      },
+    } as unknown as Request;
+    const failedResponse = await handleScreeningRequest(
+      failingRequest,
+      screeningEnv(failingAi) as never,
+    );
+    expect(failedResponse.status).toBe(422);
+    expect(refusalCode(await failedResponse.json())).toBe("SCREENING_REQUEST_MALFORMED");
+    expect(cancellations).toBe(1);
+    expect(failingAi.calls).toEqual([]);
+  });
+
+  test("a mounted mid-stream abort refuses and releases canonical ingress before provider work", async () => {
+    const abortingAi = passingAi();
+    let locked = false;
+    let released = 0;
+    const abortingRequest = {
+      url: "https://a-staging.asimposium.org/internal/screen",
+      method: "POST",
+      headers: new Headers({
+        authorization: `Bearer ${BEARER}`,
+        "content-type": "application/json",
+      }),
+      body: {
+        get locked() {
+          return locked;
+        },
+        getReader(options?: { mode?: string }) {
+          if (options?.mode === "byob") throw new TypeError("BYOB unavailable in planted reader");
+          locked = true;
+          return {
+            async read() {
+              throw new DOMException("aborted screening ingress", "AbortError");
+            },
+            async cancel() {},
+            releaseLock() {
+              released += 1;
+              locked = false;
+            },
+          };
+        },
+      },
+    } as unknown as Request;
+
+    const response = await worker.fetch(
+      abortingRequest,
+      screeningEnv(abortingAi) as never,
+      executionContext() as unknown as Parameters<typeof worker.fetch>[2],
+    );
+    const text = await response.text();
+    const json = JSON.parse(text);
+
+    // This is the same coarse malformed-body contract as malformed UTF-8 and
+    // generic reader failure; the client must not learn that the reader aborted.
+    expect(response.status).toBe(422);
+    expect(refusalCode(json)).toBe("SCREENING_REQUEST_MALFORMED");
+    expect(refusalFixHint(json)).toBe("Resubmit with the documented S-4 corpus request shape.");
+    expect(text).not.toContain("AbortError");
+    expect(text).not.toContain("aborted screening ingress");
+    expect(abortingAi.calls).toEqual([]);
+    // A terminal errored stream need not invoke its underlying cancel hook;
+    // releaseLock in the canonical reader's finally is the deterministic proof.
+    expect(released).toBe(1);
+    expect(abortingRequest.body?.locked).toBe(false);
+  });
+
+  test("the screening ceiling is inclusive and compressed JSON never reaches the provider", async () => {
+    const corpus = await corpusRequest([{ id: "legit-001", body: "A benign post." }]);
+    const encoded = JSON.stringify(corpus);
+    const exactCapBody = encoded + " ".repeat(SCREENING_MAX_REQUEST_BYTES - encoded.length);
+    expect(new TextEncoder().encode(exactCapBody).byteLength).toBe(SCREENING_MAX_REQUEST_BYTES);
+    const admittedAi = passingAi();
+    const admitted = await handleScreeningRequest(
+      screeningRequest(exactCapBody, BEARER),
+      screeningEnv(admittedAi) as never,
+    );
+    expect(admitted.status).toBe(200);
+    expect(admittedAi.calls).toHaveLength(1);
+
+    const compressedAi = passingAi();
+    const compressed = await handleScreeningRequest(
+      new Request("https://a-staging.asimposium.org/internal/screen", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${BEARER}`,
+          "content-type": "application/json",
+          "content-encoding": "gzip",
+        },
+        body: encoded,
+      }),
+      screeningEnv(compressedAi) as never,
+    );
+    expect(compressed.status).toBe(422);
+    expect(refusalCode(await compressed.json())).toBe("SCREENING_REQUEST_MALFORMED");
+    expect(compressedAi.calls).toEqual([]);
+  });
+
+  test("an unauthorized screening refusal cancels its unread body", async () => {
+    const ai = passingAi();
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancellations += 1;
+      },
+    });
+    const response = await handleScreeningRequest(
+      new Request("https://a-staging.asimposium.org/internal/screen", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer wrong-screening-bearer",
+          "content-type": "application/json",
+        },
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+      screeningEnv(ai) as never,
+    );
+
+    expect(response.status).toBe(401);
+    expect(cancellations).toBe(1);
+    expect(ai.calls).toEqual([]);
   });
 
   test("the route teaches nothing about classified content in its refusals", async () => {
