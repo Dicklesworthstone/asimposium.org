@@ -16,16 +16,17 @@ import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   configuredStoaOrigin,
+  sponsorWorkshopRefusalNotice,
+  type SponsorWorkshopObject,
   stoaBootstrapSponsor,
   stoaConfigured,
   stoaEnrollmentRecoveryOwner,
   stoaEnrollmentWritesConfigured,
   stoaFellows,
   stoaPendingProposals,
-  type SponsorWorkshopObject,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
-import { newestWorkshopPreview } from "@/lib/stoa-sponsor";
+import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
@@ -132,9 +133,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
 
   const planeStatusRows = consolePlaneStatusRows(await resolveCachedPlaneStatus());
 
-  // The sponsor's live workshop views (Rule A2): one fetch per Fellow with a
-  // bound problem. A failed read degrades to an empty view, never blocks the
-  // console.
+  // The sponsor's live workshop views (Rule A2): inspect only a stable bounded
+  // prefix of problem-bound Fellows under one absolute render deadline. A
+  // failed read degrades to an empty view; uninspected candidates are counted
+  // explicitly rather than pretending this page examined every workshop.
   interface WorkshopViewEntry {
     readonly fellow_id: string;
     readonly fellowName: string;
@@ -142,19 +144,43 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     readonly objects: readonly SponsorWorkshopObject[];
   }
   const workshopViews: WorkshopViewEntry[] = [];
+  const workshopRefusalNotices: Array<
+    NonNullable<ReturnType<typeof sponsorWorkshopRefusalNotice>>
+  > = [];
+  let omittedWorkshopPreviewCount = 0;
+  let unavailableWorkshopPreviewCount = 0;
   if (configured && sponsorId !== undefined) {
-    for (const fellow of fellows) {
-      const problemBinding = fellow.granted_resources.problem_binding;
-      if (problemBinding === undefined) continue;
-      const view = await stoaSponsorWorkshop(sponsorId, problemBinding, fellow.fellow_id);
-      if (view.ok) {
-        workshopViews.push({
-          fellow_id: fellow.fellow_id,
-          fellowName: fellow.name,
-          problem_id: problemBinding,
-          objects: newestWorkshopPreview(view.data.objects),
-        });
+    const candidates = fellows.flatMap((fellow) => {
+      const problem_id = fellow.granted_resources.problem_binding;
+      return problem_id === undefined ? [] : [{ fellow, problem_id }];
+    });
+    const loaded = await loadBoundedWorkshopPreviewPrefix(candidates, (candidate, deadlineAtMs) =>
+      stoaSponsorWorkshop(
+        sponsorId,
+        candidate.problem_id,
+        candidate.fellow.fellow_id,
+        deadlineAtMs,
+      ),
+    );
+    omittedWorkshopPreviewCount = loaded.omittedCount;
+    for (const { candidate, value: view } of loaded.loaded) {
+      if (!view.ok) {
+        const refusalNotice = sponsorWorkshopRefusalNotice(view);
+        if (refusalNotice !== undefined) workshopRefusalNotices.push(refusalNotice);
+        unavailableWorkshopPreviewCount += 1;
+        continue;
       }
+      const objects = newestWorkshopPreviewIfValid(view.data.objects);
+      if (objects === undefined) {
+        unavailableWorkshopPreviewCount += 1;
+        continue;
+      }
+      workshopViews.push({
+        fellow_id: candidate.fellow.fellow_id,
+        fellowName: candidate.fellow.name,
+        problem_id: candidate.problem_id,
+        objects,
+      });
     }
   }
 
@@ -281,8 +307,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           </h2>
           {workshopViews.length === 0 ? (
             <p className="quiet">
-              Nothing in any Fellow workshop yet. When an agent pushes notes, drafts, or dead ends,
-              they appear here — visible only to you, never on the public ledger.
+              {unavailableWorkshopPreviewCount === 0
+                ? "Nothing in any loaded Fellow workshop yet."
+                : "No available workshop preview contains a push."}{" "}
+              When an agent pushes notes, drafts, or dead ends, they appear here — visible only to
+              you, never on the public ledger.
             </p>
           ) : (
             workshopViews.map((view) => (
@@ -306,6 +335,30 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 )}
               </div>
             ))
+          )}
+          {unavailableWorkshopPreviewCount === 0 ? null : (
+            <p className="quiet">
+              {unavailableWorkshopPreviewCount} selected private workshop{" "}
+              {unavailableWorkshopPreviewCount === 1 ? "preview was" : "previews were"} unavailable
+              or invalid. No private bytes from those responses were rendered.
+            </p>
+          )}
+          {workshopRefusalNotices.length === 0 ? null : (
+            <ul className="quiet">
+              {workshopRefusalNotices.map((notice, index) => (
+                <li key={`${notice.problemCode}:${notice.title}:${index}`}>
+                  <code>{notice.problemCode}</code>: {notice.title}
+                </li>
+              ))}
+            </ul>
+          )}
+          {omittedWorkshopPreviewCount === 0 ? null : (
+            <p className="quiet">
+              {omittedWorkshopPreviewCount} additional workshop{" "}
+              {omittedWorkshopPreviewCount === 1 ? "preview was" : "previews were"} omitted to keep
+              this private console render bounded.{" "}
+              <Link href="#fellows-title">Review the Fellow inventory above.</Link>
+            </p>
           )}
         </section>
 

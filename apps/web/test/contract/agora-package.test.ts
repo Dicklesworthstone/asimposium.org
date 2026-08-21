@@ -9,6 +9,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import ts from "typescript";
 import nextConfig, { configuredRedirectStoaOrigin } from "../../next.config";
 
 // The route deliberately pulls in server-only diagnostics. Register this file's
@@ -34,6 +35,16 @@ const PACKAGE_DIR = dirname(dirname(import.meta.dir));
 
 function readPackageFile(relativePath: string): string {
   return readFileSync(join(PACKAGE_DIR, relativePath), "utf8");
+}
+
+function descendants<T extends ts.Node>(root: ts.Node, guard: (node: ts.Node) => node is T): T[] {
+  const found: T[] = [];
+  const visit = (node: ts.Node): void => {
+    if (guard(node)) found.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
 }
 
 describe("app router + one-writer contract, against the real tree", () => {
@@ -76,6 +87,7 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
     expect(surface.imports).toEqual([
       "next-auth",
       "next-auth/providers/google",
+      "./lib/auth-time",
       "./lib/sponsor-id",
     ]);
   });
@@ -256,7 +268,7 @@ describe("sponsor console trust boundary", () => {
       expect(cards).toContain(`<dt>${label}</dt>`);
     }
     expect(cards).toContain('? "Unbounded"');
-    expect(cards).toContain('? "No grant expiry"');
+    expect(cards).toContain('? "No grant expiry (you can revoke it anytime from the console)"');
     expect(cards).toContain('card.tools_note ?? "None declared"');
     expect(cards).toContain(
       "This grants every requested scope and resource limit shown above to this Fellow.",
@@ -466,11 +478,12 @@ describe("sponsor console trust boundary", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
     for (const page of [consolePage, approvePage]) {
+      const normalizedProse = page.replaceAll("&rsquo;", "'").replaceAll(/\s+/gu, " ");
       expect(page).toContain('prompt: "select_account"');
       expect(page).not.toContain('prompt: "login"');
       expect(page).not.toContain("max_age");
       expect(page).toContain("Recheck Google authentication");
-      expect(page).toContain("signed authentication time");
+      expect(normalizedProse).toContain("signed authentication time");
     }
   });
 
@@ -611,24 +624,164 @@ describe("sponsor console trust boundary", () => {
 
   test("the retained-decision recovery control has a synchronous double-submit barrier", () => {
     const cards = readPackageFile("app/console/cards.tsx");
-    const claimAt = cards.indexOf("if (!claimEnrollmentRecoveryLock(inFlight)) return;");
-    const dispatchAt = cards.indexOf("await recoverProposalDecision(");
-    const releaseAt = cards.indexOf("releaseEnrollmentRecoveryLock(inFlight);");
+    const source = ts.createSourceFile(
+      "cards.tsx",
+      cards,
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const components = source.statements.filter(
+      (statement): statement is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(statement) && statement.name?.text === "RetainedDecisionRecovery",
+    );
+    expect(components).toHaveLength(1);
+    const component = components[0];
+    if (component === undefined) throw new Error("RetainedDecisionRecovery is missing");
+    const onClickAttributes = descendants(
+      component,
+      (node): node is ts.JsxAttribute =>
+        ts.isJsxAttribute(node) && ts.isIdentifier(node.name) && node.name.text === "onClick",
+    );
+    expect(onClickAttributes).toHaveLength(1);
+    const onClick = onClickAttributes[0];
+    if (
+      onClick === undefined ||
+      onClick.initializer === undefined ||
+      !ts.isJsxExpression(onClick.initializer) ||
+      onClick.initializer.expression === undefined ||
+      !ts.isArrowFunction(onClick.initializer.expression) ||
+      !ts.isBlock(onClick.initializer.expression.body)
+    ) {
+      throw new Error("retained-decision onClick must be a block-bodied arrow function");
+    }
+    const openingElement = onClick.parent.parent;
+    if (!ts.isJsxOpeningElement(openingElement) || !ts.isIdentifier(openingElement.tagName)) {
+      throw new Error("retained-decision onClick must belong to a JSX opening element");
+    }
+    expect(openingElement.tagName.text).toBe("button");
+    const button = openingElement.parent;
+    if (!ts.isJsxElement(button)) throw new Error("retained-decision button is malformed");
+    const buttonStrings = descendants(button, ts.isStringLiteral).map((value) => value.text);
+    expect(buttonStrings).toContain("Recovering…");
+    expect(buttonStrings).toContain("Recover the exact decision");
+
+    const recoveryHandler = onClick.initializer.expression.body;
+    const namedCalls = (name: string): ts.CallExpression[] =>
+      descendants(
+        recoveryHandler,
+        (node): node is ts.CallExpression =>
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === name,
+      );
+    const claimCalls = namedCalls("claimEnrollmentRecoveryLock");
+    const transitionCalls = namedCalls("startTransition");
+    const dispatchCalls = namedCalls("recoverProposalDecision");
+    const releaseCalls = namedCalls("releaseEnrollmentRecoveryLock");
+    expect(claimCalls).toHaveLength(1);
+    expect(transitionCalls).toHaveLength(1);
+    expect(dispatchCalls).toHaveLength(1);
+    expect(releaseCalls).toHaveLength(1);
+    const claim = claimCalls[0];
+    const transition = transitionCalls[0];
+    const dispatch = dispatchCalls[0];
+    const release = releaseCalls[0];
+    if (
+      claim === undefined ||
+      transition === undefined ||
+      dispatch === undefined ||
+      release === undefined
+    ) {
+      throw new Error("retained-decision lock sequence is incomplete");
+    }
 
     // The barrier is a ref, so it flips in the same tick. `pending` is state and
     // is still false for a second invocation that runs before the next render,
     // which is why `disabled` alone cannot hold this.
-    expect(cards).toContain("const inFlight = useRef(false);");
-    expect(claimAt).toBeGreaterThan(-1);
-    // Claim before dispatch, or two invocations both reach the action.
-    expect(claimAt).toBeLessThan(dispatchAt);
-    // Released after the action, on every path, so a retained refusal stays
-    // retryable rather than making the control single-use.
-    expect(releaseAt).toBeGreaterThan(dispatchAt);
-    // Exactly one claim and one release: a second pair elsewhere would mean
-    // another path could hold or drop the same barrier.
-    expect(cards.match(/claimEnrollmentRecoveryLock\(/gu)).toHaveLength(1);
-    expect(cards.match(/releaseEnrollmentRecoveryLock\(/gu)).toHaveLength(1);
+    expect(
+      descendants(
+        component,
+        (node): node is ts.VariableDeclaration =>
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          node.name.text === "inFlight" &&
+          node.initializer !== undefined &&
+          ts.isCallExpression(node.initializer) &&
+          ts.isIdentifier(node.initializer.expression) &&
+          node.initializer.expression.text === "useRef" &&
+          node.initializer.arguments.length === 1 &&
+          node.initializer.arguments[0]?.kind === ts.SyntaxKind.FalseKeyword,
+      ),
+    ).toHaveLength(1);
+
+    const negatedClaim = claim.parent;
+    if (!ts.isPrefixUnaryExpression(negatedClaim)) {
+      throw new Error("retained-decision lock claim must be negated");
+    }
+    expect(negatedClaim.operator).toBe(ts.SyntaxKind.ExclamationToken);
+    const claimGuard = negatedClaim.parent;
+    if (!ts.isIfStatement(claimGuard)) {
+      throw new Error("retained-decision lock claim must guard an if statement");
+    }
+    expect(ts.isReturnStatement(claimGuard.thenStatement)).toBe(true);
+    expect(claimGuard.parent).toBe(recoveryHandler);
+    expect(claim.arguments.map((argument) => argument.getText(source))).toEqual(["inFlight"]);
+    expect(claim.getStart(source)).toBeLessThan(transition.getStart(source));
+    const transitionStatement = transition.parent;
+    if (!ts.isExpressionStatement(transitionStatement)) {
+      throw new Error("retained-decision transition must be a direct handler statement");
+    }
+    expect(transitionStatement.parent).toBe(recoveryHandler);
+    const transitionWork = transition.arguments[0];
+    if (
+      transitionWork === undefined ||
+      !ts.isArrowFunction(transitionWork) ||
+      !ts.isBlock(transitionWork.body)
+    ) {
+      throw new Error("retained-decision transition must own one block-bodied callback");
+    }
+    expect(
+      transitionWork.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ??
+        false,
+    ).toBe(true);
+    if (!ts.isAwaitExpression(dispatch.parent)) {
+      throw new Error("retained-decision recovery dispatch must be awaited");
+    }
+    let dispatchAncestor: ts.Node | undefined = dispatch.parent;
+    while (dispatchAncestor !== undefined && dispatchAncestor !== transitionWork) {
+      if (
+        ts.isArrowFunction(dispatchAncestor) ||
+        ts.isFunctionExpression(dispatchAncestor) ||
+        ts.isFunctionDeclaration(dispatchAncestor) ||
+        ts.isMethodDeclaration(dispatchAncestor)
+      ) {
+        throw new Error("retained-decision recovery dispatch must run in the transition callback");
+      }
+      dispatchAncestor = dispatchAncestor.parent;
+    }
+    expect(dispatchAncestor).toBe(transitionWork);
+
+    const contains = (root: ts.Node, node: ts.Node): boolean =>
+      node.getStart(source) >= root.getStart(source) && node.getEnd() <= root.getEnd();
+    const owningTry = transitionWork.body.statements.filter(
+      (statement): statement is ts.TryStatement =>
+        ts.isTryStatement(statement) &&
+        contains(statement.tryBlock, dispatch) &&
+        statement.finallyBlock !== undefined &&
+        contains(statement.finallyBlock, release),
+    );
+    expect(owningTry).toHaveLength(1);
+    const finallyBlock = owningTry[0]?.finallyBlock;
+    if (finallyBlock === undefined) throw new Error("retained-decision finally is missing");
+    expect(finallyBlock.statements).toHaveLength(1);
+    const releaseStatement = finallyBlock.statements[0];
+    expect(
+      releaseStatement !== undefined &&
+        ts.isExpressionStatement(releaseStatement) &&
+        releaseStatement.expression === release,
+    ).toBe(true);
+    expect(release.arguments.map((argument) => argument.getText(source))).toEqual(["inFlight"]);
     // The lock body itself is not inline here. That is what makes the unit test
     // in `test/unit/console-idempotency.test.ts` a test of the shipped path
     // rather than of a second spelling that could drift from it.
@@ -855,9 +1008,9 @@ describe("OPS.1 gate entry points", () => {
   });
 
   test("the stack table is respected: App Router, Tailwind, Auth.js v5", () => {
-    expect(manifest.dependencies["next"]).toMatch(/^16\./);
+    expect(manifest.dependencies.next).toMatch(/^16\./);
     expect(manifest.dependencies["next-auth"]).toMatch(/^5\./);
-    expect(manifest.devDependencies["tailwindcss"]).toMatch(/^4\./);
+    expect(manifest.devDependencies.tailwindcss).toMatch(/^4\./);
     expect(readPackageFile("postcss.config.mjs")).toContain("@tailwindcss/postcss");
     expect(readPackageFile("app/globals.css")).toContain('@import "tailwindcss"');
   });

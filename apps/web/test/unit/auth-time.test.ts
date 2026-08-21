@@ -28,6 +28,39 @@ describe("authTimeFromIdToken", () => {
     expect(authTimeFromIdToken("")).toBeUndefined();
     expect(authTimeFromIdToken("no-segments")).toBeUndefined();
     expect(authTimeFromIdToken("a.!!!not-base64-json!!!.c")).toBeUndefined();
+    const valid = idTokenWith({ auth_time: 1_700_000_000 });
+    const [header, payload, signature] = valid.split(".");
+    expect(header).toBeDefined();
+    expect(payload).toBeDefined();
+    expect(signature).toBeDefined();
+    expect(authTimeFromIdToken(`${header}.${payload}`)).toBeUndefined();
+    expect(authTimeFromIdToken(`${header}.${payload}.${signature}.extra`)).toBeUndefined();
+    expect(authTimeFromIdToken(`.${payload}.${signature}`)).toBeUndefined();
+    expect(authTimeFromIdToken(`${header}.${payload}.`)).toBeUndefined();
+    expect(authTimeFromIdToken(`${header}.${payload}!.${signature}`)).toBeUndefined();
+
+    const invalidUtf8Payload = Buffer.concat([
+      Buffer.from('{"auth_time":1700000000,"invalid":"', "utf8"),
+      Buffer.from([0xff]),
+      Buffer.from('"}', "utf8"),
+    ]).toString("base64url");
+    expect(authTimeFromIdToken(`${header}.${invalidUtf8Payload}.${signature}`)).toBeUndefined();
+
+    let payloadBytes = Buffer.from('{"auth_time":1700000000}', "utf8");
+    while (payloadBytes.length % 3 === 0) {
+      payloadBytes = Buffer.concat([payloadBytes, Buffer.from(" ")]);
+    }
+    const canonicalPayload = payloadBytes.toString("base64url");
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const noncanonicalPayload = [...alphabet]
+      .map((last) => `${canonicalPayload.slice(0, -1)}${last}`)
+      .find(
+        (candidate) =>
+          candidate !== canonicalPayload &&
+          Buffer.from(candidate, "base64url").equals(payloadBytes),
+      );
+    if (noncanonicalPayload === undefined) throw new Error("fixture needs unused base64url bits");
+    expect(authTimeFromIdToken(`${header}.${noncanonicalPayload}.${signature}`)).toBeUndefined();
   });
 
   test("returns undefined when auth_time is missing or the wrong shape", () => {

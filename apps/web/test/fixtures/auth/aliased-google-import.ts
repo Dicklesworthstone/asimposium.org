@@ -3,22 +3,25 @@
 // configuration, so it resolves the binding to its module instead.
 import NextAuth from "next-auth";
 import Idp from "next-auth/providers/google";
+import { authTimeFromIdToken as signedAuthTime } from "./lib/auth-time";
+import {
+  isCanonicalSponsorId as isSponsorId,
+  sponsorIdFromGoogleSubject as sponsorIdFor,
+} from "./lib/sponsor-id";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Idp({ allowDangerousEmailAccountLinking: false })],
   callbacks: {
-    jwt({ token, account, profile }) {
+    async jwt({ token, account, profile }) {
       if (account) {
-        token.authTime =
-          typeof profile?.auth_time === "number" &&
-          Number.isSafeInteger(profile.auth_time) &&
-          profile.auth_time >= 0
-            ? profile.auth_time
-            : undefined;
+        token.sub = await sponsorIdFor(profile?.sub);
+        token.authTime = signedAuthTime(account.id_token);
       }
       return token;
     },
     session({ session, token }) {
+      if (isSponsorId(token.sub)) session.user.id = token.sub;
+      else Reflect.deleteProperty(session.user, "id");
       if (typeof token.authTime === "number") session.authIssuedAt = token.authTime;
       return session;
     },

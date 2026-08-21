@@ -21,7 +21,7 @@
  * The contract, all from Fable §5.1 and §14.1:
  *
  *  1. **Imports are allowlisted.** Only `next-auth`, the Google provider, and
- *     the pure canonical sponsor-id helper.
+ *     the pure canonical sponsor-id and signed-authentication-time helpers.
  *     Otherwise `import { env } from "./secrets"` walks straight through every
  *     other rule in this file.
  *  2. **Exactly one Auth.js factory call**, resolved to the *imported* default
@@ -38,7 +38,11 @@
  *     `globalThis` anywhere in the file — aliased, bracketed, computed, inside
  *     a callback, inside an IIFE, inside a static initialiser — is refused.
  *     Auth.js resolves `AUTH_*` itself; this file never needs a secret.
- *  6. **Recent authentication uses Google evidence.** The JWT callback copies
+ *  6. **Sponsor principals come only from Google's stable subject.** The JWT
+ *     callback hashes `profile?.sub` with the reviewed helper while an OAuth
+ *     account is present. The session callback exposes that value only after
+ *     the canonical sponsor-id guard and deletes any stale id otherwise.
+ *  7. **Recent authentication uses Google evidence.** The JWT callback copies
  *     only the validated ID-token `auth_time` claim while an OAuth account is
  *     present, and the session callback projects only that stable custom
  *     claim. Auth.js refreshes standard `iat` on session reads, so consulting
@@ -75,6 +79,9 @@ export type AuthViolationCode =
   | "AUTH_COOKIE_DOMAIN_SET"
   | "AUTH_COOKIE_UNRESOLVABLE"
   | "AUTH_ENV_ACCESS_FORBIDDEN"
+  | "AUTH_CALL_NOT_ALLOWED"
+  | "AUTH_PROVIDER_EVIDENCE_ESCAPE"
+  | "AUTH_SPONSOR_PRINCIPAL_UNSAFE"
   | "AUTH_RECENT_AUTH_CONFIG_MISSING"
   | "AUTH_RECENT_AUTH_REFRESHABLE";
 
@@ -92,7 +99,7 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
   AUTH_IMPORT_NOT_ALLOWED: {
     rule: "ASI-PROPYLON-2",
     fix_hint:
-      "auth.ts may import only next-auth and the Google provider. Put anything else in a module the app imports directly, so it is reviewed on its own terms.",
+      "auth.ts may import only next-auth, the Google provider, and the two reviewed pure identity helpers. Put anything else in a module the app imports directly, so it is reviewed on its own terms.",
   },
   AUTH_NEXTAUTH_CALL_UNRESOLVED: {
     rule: "ASI-PROPYLON-1",
@@ -163,6 +170,21 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
     fix_hint:
       "`process.env.NODE_ENV` is the only environment expression allowed in auth.ts. Auth.js resolves AUTH_* itself; read anything else in a module of its own.",
   },
+  AUTH_CALL_NOT_ALLOWED: {
+    rule: "ASI-CALL-SURFACE",
+    fix_hint:
+      "auth.ts may execute only the imported next-auth factory, the Google provider, the reviewed sponsor-id and auth-time helpers, and the exact Reflect.deleteProperty cleanup. Ambient calls (fetch, console, timers, storage, beacons), new-expressions, tagged templates, decorators and local helpers all run code this file's review never sees; put such logic in a module the app imports and reviews on its own terms.",
+  },
+  AUTH_PROVIDER_EVIDENCE_ESCAPE: {
+    rule: "ASI-PROVIDER-EVIDENCE",
+    fix_hint:
+      "Raw provider evidence has exactly three reviewed reads: the truthy `if (account)` guard, `profile?.sub` as the sole argument of sponsorIdFromGoogleSubject, and `account.id_token` as the sole argument of authTimeFromIdToken. Every other read, alias, wrapper, computed access, closure capture or packaging of the profile/account bindings is refused.",
+  },
+  AUTH_SPONSOR_PRINCIPAL_UNSAFE: {
+    rule: "ASI-SPONSOR-PRINCIPAL",
+    fix_hint:
+      "Inside the account guard, stamp token.sub only with await sponsorIdFromGoogleSubject(profile?.sub). In the session callback, project token.sub only through isCanonicalSponsorId(token.sub), and delete session.user.id on the invalid branch.",
+  },
   AUTH_RECENT_AUTH_CONFIG_MISSING: {
     rule: "ASI-RECENT-AUTH",
     fix_hint:
@@ -171,13 +193,14 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
   AUTH_RECENT_AUTH_REFRESHABLE: {
     rule: "ASI-RECENT-AUTH",
     fix_hint:
-      "Never derive recent authentication from callback arrival or token.iat. Copy a validated, nonnegative safe-integer Google profile.auth_time only on an account callback, then project that stable token.authTime claim.",
+      "Never derive recent authentication from userinfo profile data, callback arrival, or token.iat. Inside the account callback guard, call the reviewed authTimeFromIdToken helper with exactly account.id_token, then project that stable token.authTime claim.",
   },
 };
 
 const NEXT_AUTH_MODULE = "next-auth";
 const PROVIDER_PREFIX = "next-auth/providers/";
 const GOOGLE_PROVIDER = `${PROVIDER_PREFIX}google`;
+const AUTH_TIME_HELPER = "./lib/auth-time";
 const SPONSOR_ID_HELPER = "./lib/sponsor-id";
 
 /**
@@ -187,6 +210,7 @@ const SPONSOR_ID_HELPER = "./lib/sponsor-id";
 export const ALLOWED_IMPORTS: ReadonlySet<string> = new Set([
   NEXT_AUTH_MODULE,
   GOOGLE_PROVIDER,
+  AUTH_TIME_HELPER,
   SPONSOR_ID_HELPER,
 ]);
 
@@ -265,7 +289,22 @@ export interface AuthSurface {
   wiring: ExportWiring;
   /** Source text of each dynamic-code escape hatch found in the file. */
   dynamicCode: string[];
+  /** Source text of each executable call/new/tagged/decorator off the allowlist. */
+  ambientCalls: string[];
+  /** Source text of each raw provider-evidence read outside the reviewed shapes. */
+  evidenceEscapes: string[];
+  sponsorPrincipal: SponsorPrincipalSurface;
   recentAuth: RecentAuthSurface;
+}
+
+export interface SponsorPrincipalSurface {
+  unresolvable: boolean;
+  jwtStampCount: number;
+  safeJwtStampCount: number;
+  sessionProjectionCount: number;
+  safeSessionProjectionCount: number;
+  sessionCleanupCount: number;
+  safeSessionCleanupCount: number;
 }
 
 export interface RecentAuthSurface {
@@ -465,7 +504,13 @@ export function sessionCookieOptions(sourceFile: ts.SourceFile): SessionCookieOp
   return { present: true, keys, unresolvable };
 }
 
-type CallbackFunction = ts.MethodDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+type CallbackFunction = (
+  | ts.MethodDeclaration
+  | ts.ArrowFunction
+  | ts.FunctionExpression
+) & {
+  readonly body: ts.ConciseBody;
+};
 
 function callbackFunction(
   callbacks: ts.ObjectLiteralExpression,
@@ -479,7 +524,9 @@ function callbackFunction(
       continue;
     }
     if (literalPropertyName(element) !== key) continue;
-    if (ts.isMethodDeclaration(element)) fn = element;
+    if (ts.isMethodDeclaration(element) && element.body !== undefined) {
+      fn = element as CallbackFunction;
+    }
     else if (
       ts.isPropertyAssignment(element) &&
       (ts.isArrowFunction(element.initializer) || ts.isFunctionExpression(element.initializer))
@@ -539,102 +586,1108 @@ function isWithin(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
-function isProviderAuthTimeAccess(
-  node: ts.Node | undefined,
-  profileBinding: string | undefined,
-): node is ts.PropertyAccessExpression {
-  return propertyAccess(node, profileBinding, "auth_time");
-}
-
 function isSafeProviderAuthTimeExpression(
   node: ts.Expression,
-  profileBinding: string | undefined,
+  accountBinding: string | undefined,
+  authTimeHelperBinding: string | undefined,
 ): boolean {
-  if (!ts.isConditionalExpression(node)) return false;
-  if (!isProviderAuthTimeAccess(node.whenTrue, profileBinding)) return false;
-  if (!ts.isIdentifier(node.whenFalse) || node.whenFalse.text !== "undefined") return false;
-
-  let numberType = false;
-  let safeInteger = false;
-  let nonnegative = false;
-  const visit = (part: ts.Node): void => {
-    if (ts.isBinaryExpression(part)) {
-      if (
-        [ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken].includes(
-          part.operatorToken.kind,
-        ) &&
-        ts.isTypeOfExpression(part.left) &&
-        isProviderAuthTimeAccess(part.left.expression, profileBinding) &&
-        ts.isStringLiteral(part.right) &&
-        part.right.text === "number"
-      ) {
-        numberType = true;
-      }
-      if (
-        part.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken &&
-        isProviderAuthTimeAccess(part.left, profileBinding) &&
-        ts.isNumericLiteral(part.right) &&
-        part.right.text === "0"
-      ) {
-        nonnegative = true;
-      }
-    }
-    if (
-      ts.isCallExpression(part) &&
-      part.arguments.length === 1 &&
-      propertyAccess(part.expression, "Number", "isSafeInteger") &&
-      isProviderAuthTimeAccess(part.arguments[0], profileBinding)
-    ) {
-      safeInteger = true;
-    }
-    ts.forEachChild(part, visit);
-  };
-  visit(node.condition);
-  return numberType && safeInteger && nonnegative;
+  return (
+    authTimeHelperBinding !== undefined &&
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === authTimeHelperBinding &&
+    node.arguments.length === 1 &&
+    propertyAccess(node.arguments[0], accountBinding, "id_token")
+  );
 }
 
-function isInsideTruthyIf(node: ts.Node, binding: string | undefined, stop: ts.Node): boolean {
-  let child = node;
-  for (let parent = node.parent; parent !== undefined && parent !== stop; parent = parent.parent) {
+function exactNamedImportBinding(
+  sourceFile: ts.SourceFile,
+  moduleName: string,
+  importedName: string,
+): string | undefined {
+  const matches: string[] = [];
+  for (const statement of sourceFile.statements) {
+    const namedBindings = ts.isImportDeclaration(statement)
+      ? statement.importClause?.namedBindings
+      : undefined;
     if (
-      ts.isIfStatement(parent) &&
-      child === parent.thenStatement &&
-      binding !== undefined &&
-      ts.isIdentifier(parent.expression) &&
-      parent.expression.text === binding
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== moduleName ||
+      statement.importClause?.isTypeOnly === true ||
+      namedBindings === undefined ||
+      !ts.isNamedImports(namedBindings)
     ) {
-      return true;
+      continue;
     }
-    child = parent;
+    for (const element of namedBindings.elements) {
+      if (
+        !element.isTypeOnly &&
+        (element.propertyName?.text ?? element.name.text) === importedName
+      ) {
+        matches.push(element.name.text);
+      }
+    }
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function hasValueDeclaration(root: ts.Node, name: string): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    const declared =
+      (ts.isVariableDeclaration(node) ||
+        ts.isParameter(node) ||
+        ts.isBindingElement(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isClassDeclaration(node) ||
+        ts.isClassExpression(node)) &&
+      node.name !== undefined &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name;
+    if (declared) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+function unwrapTransparentExpression(node: ts.Expression): ts.Expression {
+  let current = node;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function directIdentifierName(node: ts.Expression): string | undefined {
+  const current = unwrapTransparentExpression(node);
+  return ts.isIdentifier(current) ? current.text : undefined;
+}
+
+function assignmentRoot(node: ts.Expression): string | undefined {
+  let current = unwrapTransparentExpression(node);
+  while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    current = unwrapTransparentExpression(current.expression);
+  }
+  return ts.isIdentifier(current) ? current.text : undefined;
+}
+
+function assignmentTargetContains(
+  node: ts.Expression,
+  matches: (target: ts.Expression) => boolean,
+): boolean {
+  const current = unwrapTransparentExpression(node);
+  if (matches(current)) return true;
+  if (ts.isSpreadElement(current)) {
+    return assignmentTargetContains(current.expression, matches);
+  }
+  if (ts.isArrayLiteralExpression(current)) {
+    return current.elements.some(
+      (element) =>
+        !ts.isOmittedExpression(element) && assignmentTargetContains(element, matches),
+    );
+  }
+  if (ts.isObjectLiteralExpression(current)) {
+    return current.properties.some((property) => {
+      if (ts.isShorthandPropertyAssignment(property)) {
+        return assignmentTargetContains(property.name, matches);
+      }
+      if (ts.isPropertyAssignment(property)) {
+        return assignmentTargetContains(property.initializer, matches);
+      }
+      if (ts.isSpreadAssignment(property)) {
+        return assignmentTargetContains(property.expression, matches);
+      }
+      return false;
+    });
   }
   return false;
 }
 
-function isInsideNumberGuard(
+function hasBindingWrite(root: ts.Node, name: string): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      assignmentTargetContains(node.left, (target) => assignmentRoot(target) === name)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+function hasDirectBindingWrite(root: ts.Node, name: string): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      assignmentTargetContains(node.left, (target) => directIdentifierName(target) === name)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+function hasWholeBindingEscape(root: ts.Node, name: string): boolean {
+  const aliases = new Set([name]);
+  let aliasAdded = true;
+  while (aliasAdded) {
+    aliasAdded = false;
+    const collectAliases = (node: ts.Node): void => {
+      let target: ts.Identifier | undefined;
+      let source: ts.Expression | undefined;
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        target = node.name;
+        source = node.initializer;
+      } else if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left)
+      ) {
+        target = node.left;
+        source = node.right;
+      }
+      const sourceName = source === undefined ? undefined : directIdentifierName(source);
+      if (
+        target !== undefined &&
+        sourceName !== undefined &&
+        aliases.has(sourceName) &&
+        !aliases.has(target.text)
+      ) {
+        aliases.add(target.text);
+        aliasAdded = true;
+      }
+      ts.forEachChild(node, collectAliases);
+    };
+    collectAliases(root);
+  }
+
+  const containsWholeBinding = (node: ts.Expression): boolean => {
+    const current = unwrapTransparentExpression(node);
+    if (ts.isIdentifier(current)) return aliases.has(current.text);
+    if (ts.isConditionalExpression(current)) {
+      return containsWholeBinding(current.whenTrue) || containsWholeBinding(current.whenFalse);
+    }
+    if (
+      ts.isBinaryExpression(current) &&
+      [
+        ts.SyntaxKind.CommaToken,
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
+    ) {
+      return containsWholeBinding(current.left) || containsWholeBinding(current.right);
+    }
+    if (ts.isAwaitExpression(current)) return containsWholeBinding(current.expression);
+    if (ts.isSpreadElement(current)) return containsWholeBinding(current.expression);
+    if (ts.isArrayLiteralExpression(current)) {
+      return current.elements.some(
+        (element) => !ts.isOmittedExpression(element) && containsWholeBinding(element),
+      );
+    }
+    if (ts.isObjectLiteralExpression(current)) {
+      return current.properties.some((property) => {
+        if (ts.isShorthandPropertyAssignment(property)) {
+          return aliases.has(property.name.text);
+        }
+        if (ts.isPropertyAssignment(property)) return containsWholeBinding(property.initializer);
+        if (ts.isSpreadAssignment(property)) return containsWholeBinding(property.expression);
+        return false;
+      });
+    }
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      if (!ts.isBlock(current.body)) return containsWholeBinding(current.body);
+      let returnsBinding = false;
+      const visitReturn = (child: ts.Node): void => {
+        if (returnsBinding || (child !== current && ts.isFunctionLike(child))) return;
+        if (
+          ts.isReturnStatement(child) &&
+          child.expression !== undefined &&
+          containsWholeBinding(child.expression)
+        ) {
+          returnsBinding = true;
+          return;
+        }
+        ts.forEachChild(child, visitReturn);
+      };
+      visitReturn(current.body);
+      return returnsBinding;
+    }
+    return false;
+  };
+
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    // A protected callback object stored for later use has already escaped
+    // this local proof, even if the eventual mutating call is written through
+    // a wrapper path the simple alias relation cannot reconstruct. Refuse the
+    // storage edge itself: direct aliases, array/object wrappers, default
+    // values, and expression-bodied closures all arrive as an initializer or
+    // assignment RHS containing the whole binding.
+    const storedExpression =
+      ts.isVariableDeclaration(node) ||
+      ts.isParameter(node) ||
+      ts.isPropertyDeclaration(node) ||
+      ts.isBindingElement(node)
+        ? node.initializer
+        : ts.isBinaryExpression(node) &&
+            node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+          ? node.right
+          : undefined;
+    if (storedExpression !== undefined && containsWholeBinding(storedExpression)) {
+      found = true;
+      return;
+    }
+    if (
+      (ts.isArrayLiteralExpression(node) || ts.isObjectLiteralExpression(node)) &&
+      containsWholeBinding(node)
+    ) {
+      found = true;
+      return;
+    }
+    // A declaration-style nested function has no initializer. Its return or
+    // yield is nevertheless an escape once somebody later calls the function.
+    // The callback's own required trailing `return token/session` is outside
+    // `root`, so its enclosing function deliberately does not satisfy this.
+    if (
+      ((ts.isReturnStatement(node) && node.expression !== undefined) ||
+        (ts.isYieldExpression(node) && node.expression !== undefined)) &&
+      containsWholeBinding(node.expression)
+    ) {
+      let enclosing: ts.Node | undefined = node.parent;
+      while (enclosing !== undefined && !ts.isFunctionLike(enclosing)) enclosing = enclosing.parent;
+      if (enclosing !== undefined && isWithin(enclosing, root)) {
+        found = true;
+        return;
+      }
+    }
+    // Throwing the protected object is also an escape: framework error
+    // handlers, adapters, or loggers may observe the thrown value even though
+    // the callback retains its reviewed trailing return on the ordinary path.
+    if (
+      ts.isThrowStatement(node) &&
+      node.expression !== undefined &&
+      containsWholeBinding(node.expression)
+    ) {
+      found = true;
+      return;
+    }
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      const receiver =
+        ts.isPropertyAccessExpression(node.expression) ||
+        ts.isElementAccessExpression(node.expression)
+          ? node.expression.expression
+          : undefined;
+      if (
+        containsWholeBinding(node.expression) ||
+        (receiver !== undefined && containsWholeBinding(receiver)) ||
+        node.arguments?.some(containsWholeBinding)
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+function hasFieldMutationOtherThan(
+  root: ts.Node,
+  objectName: string,
+  propertyName: string,
+  allowed: ts.Node,
+): boolean {
+  const aliases = new Set([objectName]);
+  let aliasAdded = true;
+  while (aliasAdded) {
+    aliasAdded = false;
+    const collectAliases = (node: ts.Node): void => {
+      let target: ts.Identifier | undefined;
+      let source: ts.Expression | undefined;
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        target = node.name;
+        source = node.initializer;
+      } else if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left)
+      ) {
+        target = node.left;
+        source = node.right;
+      }
+      const sourceBinding =
+        source === undefined ? undefined : directIdentifierName(source);
+      if (
+        target !== undefined &&
+        sourceBinding !== undefined &&
+        aliases.has(sourceBinding) &&
+        !aliases.has(target.text)
+      ) {
+        aliases.add(target.text);
+        aliasAdded = true;
+      }
+      ts.forEachChild(node, collectAliases);
+    };
+    collectAliases(root);
+  }
+
+  let found = false;
+  const targetsField = (target: ts.Expression): boolean => {
+    const current = unwrapTransparentExpression(target);
+    const rootName = assignmentRoot(current);
+    if (rootName === undefined || !aliases.has(rootName)) return false;
+    const name = staticPropertyName(current);
+    // A computed property that cannot be resolved statically may be the
+    // protected evidence field. Refuse it rather than blessing a dynamic
+    // post-evidence overwrite the checker cannot distinguish from a harmless
+    // property write.
+    return name === undefined || name === propertyName;
+  };
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      node !== allowed &&
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      assignmentTargetContains(node.left, targetsField)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ((ts.isPrefixUnaryExpression(node) &&
+        [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) ||
+        ts.isPostfixUnaryExpression(node)) &&
+      targetsField(node.operand)
+    ) {
+      found = true;
+      return;
+    }
+    if (ts.isDeleteExpression(node) && targetsField(node.expression)) {
+      found = true;
+      return;
+    }
+    if (ts.isCallExpression(node)) {
+      const target = node.arguments[0];
+      const namedProperty = node.arguments[1];
+      const directTarget =
+        target !== undefined && aliases.has(directIdentifierName(target) ?? "");
+      if (directTarget && propertyAccess(node.expression, "Object", "assign")) {
+        found = true;
+        return;
+      }
+      if (directTarget && propertyAccess(node.expression, "Object", "defineProperties")) {
+        found = true;
+        return;
+      }
+      const namedPropertyIsProtectedOrUnknown =
+        namedProperty === undefined ||
+        !ts.isStringLiteralLike(namedProperty) ||
+        namedProperty.text === propertyName;
+      if (
+        directTarget &&
+        namedPropertyIsProtectedOrUnknown &&
+        (propertyAccess(node.expression, "Object", "defineProperty") ||
+          propertyAccess(node.expression, "Reflect", "defineProperty") ||
+          propertyAccess(node.expression, "Reflect", "deleteProperty") ||
+          propertyAccess(node.expression, "Reflect", "set"))
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+interface StaticAccessPath {
+  readonly root: string;
+  /** Undefined means at least one computed segment could not be resolved. */
+  readonly path: readonly string[] | undefined;
+}
+
+function staticAccessPath(node: ts.Expression): StaticAccessPath | undefined {
+  let current = unwrapTransparentExpression(node);
+  const reversed: string[] = [];
+  let unresolvable = false;
+  while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    if (ts.isPropertyAccessExpression(current)) {
+      reversed.push(current.name.text);
+    } else {
+      const argument = current.argumentExpression;
+      if (argument !== undefined && ts.isStringLiteralLike(argument)) reversed.push(argument.text);
+      else unresolvable = true;
+    }
+    current = unwrapTransparentExpression(current.expression);
+  }
+  if (!ts.isIdentifier(current)) return undefined;
+  return {
+    root: current.text,
+    path: unresolvable ? undefined : reversed.reverse(),
+  };
+}
+
+function propertyPathAccess(
+  node: ts.Expression | undefined,
+  root: string | undefined,
+  path: readonly string[],
+): boolean {
+  if (node === undefined || root === undefined) return false;
+  const access = staticAccessPath(node);
+  return (
+    access !== undefined &&
+    access.root === root &&
+    access.path !== undefined &&
+    access.path.length === path.length &&
+    access.path.every((part, index) => part === path[index])
+  );
+}
+
+/**
+ * Refuse any mutation that can replace `session.user.id`, including through a
+ * direct alias of `session` or `session.user`. Unknown computed paths rooted at
+ * either binding fail closed rather than being assumed unrelated.
+ */
+function hasSponsorSessionMutationOtherThan(
+  root: ts.Node,
+  sessionBinding: string,
+  allowed: ReadonlySet<ts.Node>,
+): boolean {
+  const sessionAliases = new Set([sessionBinding]);
+  const userAliases = new Set<string>();
+  let aliasAdded = true;
+  while (aliasAdded) {
+    aliasAdded = false;
+    const collectAliases = (node: ts.Node): void => {
+      let target: ts.Identifier | undefined;
+      let source: ts.Expression | undefined;
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        target = node.name;
+        source = node.initializer;
+      } else if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left)
+      ) {
+        target = node.left;
+        source = node.right;
+      }
+      const access = source === undefined ? undefined : staticAccessPath(source);
+      if (target !== undefined && access !== undefined) {
+        if (
+          ((sessionAliases.has(access.root) && access.path?.length === 0) ||
+            (userAliases.has(access.root) && access.path?.length === 0)) &&
+          !sessionAliases.has(target.text) &&
+          !userAliases.has(target.text)
+        ) {
+          if (sessionAliases.has(access.root)) sessionAliases.add(target.text);
+          else userAliases.add(target.text);
+          aliasAdded = true;
+        } else if (
+          sessionAliases.has(access.root) &&
+          access.path?.length === 1 &&
+          access.path[0] === "user" &&
+          !userAliases.has(target.text)
+        ) {
+          userAliases.add(target.text);
+          aliasAdded = true;
+        }
+      }
+      ts.forEachChild(node, collectAliases);
+    };
+    collectAliases(root);
+  }
+
+  const mutationTargetsPrincipal = (target: ts.Expression): boolean => {
+    const access = staticAccessPath(target);
+    if (access === undefined) return false;
+    if (sessionAliases.has(access.root)) {
+      if (access.path === undefined) return true;
+      return access.path[0] === "user" &&
+        (access.path.length === 1 || access.path[1] === "id");
+    }
+    if (userAliases.has(access.root)) {
+      if (access.path === undefined) return true;
+      return access.path.length > 0 && access.path[0] === "id";
+    }
+    return false;
+  };
+
+  const objectCanContainPrincipal = (target: ts.Expression): boolean => {
+    const access = staticAccessPath(target);
+    if (access === undefined) return false;
+    if (sessionAliases.has(access.root)) {
+      if (access.path === undefined || access.path.length === 0) return true;
+      return access.path[0] === "user" &&
+        (access.path.length === 1 || access.path[1] === "id");
+    }
+    if (userAliases.has(access.root)) {
+      return access.path === undefined || access.path.length === 0 || access.path[0] === "id";
+    }
+    return false;
+  };
+
+  const expressionContainsPrincipalObject = (node: ts.Expression): boolean => {
+    const current = unwrapTransparentExpression(node);
+    const bodyExposesPrincipal = (body: ts.ConciseBody): boolean => {
+      if (!ts.isBlock(body)) return expressionContainsPrincipalObject(body);
+      let exposesPrincipal = false;
+      const visitExposure = (child: ts.Node): void => {
+        if (exposesPrincipal || (child !== body && ts.isFunctionLike(child))) return;
+        const exposedExpression =
+          ts.isReturnStatement(child) || ts.isYieldExpression(child)
+            ? child.expression
+            : undefined;
+        if (
+          exposedExpression !== undefined &&
+          expressionContainsPrincipalObject(exposedExpression)
+        ) {
+          exposesPrincipal = true;
+          return;
+        }
+        ts.forEachChild(child, visitExposure);
+      };
+      visitExposure(body);
+      return exposesPrincipal;
+    };
+    if (objectCanContainPrincipal(current)) return true;
+    if (ts.isConditionalExpression(current)) {
+      return (
+        expressionContainsPrincipalObject(current.whenTrue) ||
+        expressionContainsPrincipalObject(current.whenFalse)
+      );
+    }
+    if (
+      ts.isBinaryExpression(current) &&
+      [
+        ts.SyntaxKind.CommaToken,
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
+    ) {
+      return (
+        expressionContainsPrincipalObject(current.left) ||
+        expressionContainsPrincipalObject(current.right)
+      );
+    }
+    if (ts.isAwaitExpression(current)) {
+      return expressionContainsPrincipalObject(current.expression);
+    }
+    if (ts.isSpreadElement(current)) return expressionContainsPrincipalObject(current.expression);
+    if (ts.isArrayLiteralExpression(current)) {
+      return current.elements.some(
+        (element) =>
+          !ts.isOmittedExpression(element) && expressionContainsPrincipalObject(element),
+      );
+    }
+    if (ts.isObjectLiteralExpression(current)) {
+      return current.properties.some((property) => {
+        if (ts.isShorthandPropertyAssignment(property)) {
+          return objectCanContainPrincipal(property.name);
+        }
+        if (ts.isPropertyAssignment(property)) {
+          return expressionContainsPrincipalObject(property.initializer);
+        }
+        if (ts.isSpreadAssignment(property)) {
+          return expressionContainsPrincipalObject(property.expression);
+        }
+        if (
+          (ts.isMethodDeclaration(property) ||
+            ts.isGetAccessorDeclaration(property) ||
+            ts.isSetAccessorDeclaration(property)) &&
+          property.body !== undefined
+        ) {
+          return bodyExposesPrincipal(property.body);
+        }
+        return false;
+      });
+    }
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      return bodyExposesPrincipal(current.body);
+    }
+    if (ts.isClassExpression(current)) {
+      return current.members.some(
+        (member) =>
+          (ts.isMethodDeclaration(member) ||
+            ts.isGetAccessorDeclaration(member) ||
+            ts.isSetAccessorDeclaration(member)) &&
+          member.body !== undefined &&
+          bodyExposesPrincipal(member.body),
+      );
+    }
+    return false;
+  };
+
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    const storedExpression =
+      ts.isVariableDeclaration(node) ||
+      ts.isParameter(node) ||
+      ts.isPropertyDeclaration(node) ||
+      ts.isBindingElement(node)
+        ? node.initializer
+        : ts.isBinaryExpression(node) &&
+            node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+          ? node.right
+          : undefined;
+    if (storedExpression !== undefined && expressionContainsPrincipalObject(storedExpression)) {
+      found = true;
+      return;
+    }
+    if (
+      (ts.isArrayLiteralExpression(node) ||
+        ts.isObjectLiteralExpression(node) ||
+        ts.isClassExpression(node)) &&
+      expressionContainsPrincipalObject(node)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ((ts.isReturnStatement(node) && node.expression !== undefined) ||
+        (ts.isYieldExpression(node) && node.expression !== undefined)) &&
+      expressionContainsPrincipalObject(node.expression)
+    ) {
+      let enclosing: ts.Node | undefined = node.parent;
+      while (enclosing !== undefined && !ts.isFunctionLike(enclosing)) {
+        enclosing = enclosing.parent;
+      }
+      if (enclosing !== undefined && isWithin(enclosing, root)) {
+        found = true;
+        return;
+      }
+    }
+    if (
+      ts.isThrowStatement(node) &&
+      node.expression !== undefined &&
+      expressionContainsPrincipalObject(node.expression)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isTaggedTemplateExpression(node) &&
+      (expressionContainsPrincipalObject(node.tag) ||
+        (ts.isTemplateExpression(node.template) &&
+          node.template.templateSpans.some((span) =>
+            expressionContainsPrincipalObject(span.expression),
+          )))
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isNewExpression(node) &&
+      (expressionContainsPrincipalObject(node.expression) ||
+        node.arguments?.some(expressionContainsPrincipalObject))
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      !allowed.has(node) &&
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      assignmentTargetContains(node.left, mutationTargetsPrincipal)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      !allowed.has(node) &&
+      ((ts.isPrefixUnaryExpression(node) &&
+        [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) ||
+        ts.isPostfixUnaryExpression(node)) &&
+      mutationTargetsPrincipal(node.operand)
+    ) {
+      found = true;
+      return;
+    }
+    if (!allowed.has(node) && ts.isDeleteExpression(node) && mutationTargetsPrincipal(node.expression)) {
+      found = true;
+      return;
+    }
+    if (!allowed.has(node) && ts.isCallExpression(node)) {
+      const target = node.arguments[0];
+      const directTarget = target !== undefined && objectCanContainPrincipal(target);
+      if (
+        directTarget &&
+        (propertyAccess(node.expression, "Object", "assign") ||
+          propertyAccess(node.expression, "Object", "defineProperties"))
+      ) {
+        found = true;
+        return;
+      }
+      const receiver =
+        ts.isPropertyAccessExpression(node.expression) ||
+        ts.isElementAccessExpression(node.expression)
+          ? node.expression.expression
+          : undefined;
+      if (
+        expressionContainsPrincipalObject(node.expression) ||
+        node.arguments.some(expressionContainsPrincipalObject) ||
+        (receiver !== undefined && objectCanContainPrincipal(receiver))
+      ) {
+        found = true;
+        return;
+      }
+      const namedProperty = node.arguments[1];
+      if (
+        directTarget &&
+        (namedProperty === undefined ||
+          !ts.isStringLiteralLike(namedProperty) ||
+          namedProperty.text === "id" ||
+          namedProperty.text === "user") &&
+        (propertyAccess(node.expression, "Object", "defineProperty") ||
+          propertyAccess(node.expression, "Reflect", "defineProperty") ||
+          propertyAccess(node.expression, "Reflect", "deleteProperty") ||
+          propertyAccess(node.expression, "Reflect", "set"))
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
+function isDirectStatementInTruthyIf(
+  node: ts.Node,
+  binding: string | undefined,
+  callback: CallbackFunction,
+): boolean {
+  const statement = node.parent;
+  const block = statement?.parent;
+  const guarded = block?.parent;
+  return (
+    binding !== undefined &&
+    statement !== undefined &&
+    ts.isExpressionStatement(statement) &&
+    block !== undefined &&
+    ts.isBlock(block) &&
+    guarded !== undefined &&
+    ts.isIfStatement(guarded) &&
+    ts.isBlock(callback.body) &&
+    guarded.parent === callback.body &&
+    guarded.thenStatement === block &&
+    ts.isIdentifier(guarded.expression) &&
+    guarded.expression.text === binding
+  );
+}
+
+function isDirectStatementInNumberGuard(
   node: ts.Node,
   tokenBinding: string | undefined,
-  stop: ts.Node,
+  callback: CallbackFunction,
 ): boolean {
-  let child = node;
-  for (let parent = node.parent; parent !== undefined && parent !== stop; parent = parent.parent) {
-    if (ts.isIfStatement(parent) && child === parent.thenStatement) {
-      const condition = parent.expression;
+  const statement = node.parent;
+  if (statement === undefined || !ts.isExpressionStatement(statement)) return false;
+  const parent = statement.parent;
+  const guarded = ts.isIfStatement(parent)
+    ? parent.thenStatement === statement
+      ? parent
+      : undefined
+    : ts.isBlock(parent) &&
+        ts.isIfStatement(parent.parent) &&
+        parent.parent.thenStatement === parent
+      ? parent.parent
+      : undefined;
+  if (guarded === undefined) return false;
+  const condition = guarded.expression;
+  return (
+    ts.isBlock(callback.body) &&
+    guarded.parent === callback.body &&
+    ts.isBinaryExpression(condition) &&
+    [ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken].includes(
+      condition.operatorToken.kind,
+    ) &&
+    ts.isTypeOfExpression(condition.left) &&
+    propertyAccess(condition.left.expression, tokenBinding, "authTime") &&
+    ts.isStringLiteral(condition.right) &&
+    condition.right.text === "number"
+  );
+}
+
+function hasExactTrailingBindingReturn(
+  callback: CallbackFunction,
+  binding: string | undefined,
+  evidence: ts.Node,
+): boolean {
+  if (binding === undefined || !ts.isBlock(callback.body)) return false;
+  const trailing = callback.body.statements.at(-1);
+  if (
+    trailing === undefined ||
+    !ts.isReturnStatement(trailing) ||
+    trailing.expression === undefined ||
+    !ts.isIdentifier(trailing.expression) ||
+    trailing.expression.text !== binding ||
+    evidence.end >= trailing.getStart()
+  ) {
+    return false;
+  }
+
+  let returns = 0;
+  const visit = (node: ts.Node): void => {
+    if (node !== callback && ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) returns += 1;
+    ts.forEachChild(node, visit);
+  };
+  visit(callback.body);
+  return returns === 1;
+}
+
+function directGuardingIf(
+  node: ts.Node,
+  callback: CallbackFunction,
+): ts.IfStatement | undefined {
+  const statement = node.parent;
+  if (statement === undefined || !ts.isExpressionStatement(statement)) return undefined;
+  const parent = statement.parent;
+  const guarded = ts.isIfStatement(parent)
+    ? parent.thenStatement === statement
+      ? parent
+      : undefined
+    : ts.isBlock(parent) &&
+        ts.isIfStatement(parent.parent) &&
+        parent.parent.thenStatement === parent
+      ? parent.parent
+      : undefined;
+  return guarded !== undefined && ts.isBlock(callback.body) && guarded.parent === callback.body
+    ? guarded
+    : undefined;
+}
+
+function isSafeSponsorSubjectExpression(
+  node: ts.Expression,
+  profileBinding: string | undefined,
+  helperBinding: string | undefined,
+): boolean {
+  if (!ts.isAwaitExpression(node) || helperBinding === undefined) return false;
+  const call = node.expression;
+  if (
+    !ts.isCallExpression(call) ||
+    !ts.isIdentifier(call.expression) ||
+    call.expression.text !== helperBinding ||
+    call.arguments.length !== 1
+  ) {
+    return false;
+  }
+  const subject = call.arguments[0];
+  return (
+    subject !== undefined &&
+    propertyAccess(subject, profileBinding, "sub") &&
+    subject.questionDotToken !== undefined
+  );
+}
+
+function exactSponsorCleanup(
+  node: ts.Node | undefined,
+  sessionBinding: string | undefined,
+): node is ts.CallExpression {
+  const property = node !== undefined && ts.isCallExpression(node) ? node.arguments[1] : undefined;
+  return (
+    node !== undefined &&
+    ts.isCallExpression(node) &&
+    propertyAccess(node.expression, "Reflect", "deleteProperty") &&
+    node.arguments.length === 2 &&
+    propertyPathAccess(node.arguments[0], sessionBinding, ["user"]) &&
+    property !== undefined &&
+    ts.isStringLiteralLike(property) &&
+    property.text === "id"
+  );
+}
+
+function branchExpression(branch: ts.Statement | undefined): ts.Expression | undefined {
+  if (branch === undefined) return undefined;
+  if (ts.isExpressionStatement(branch)) return branch.expression;
+  if (ts.isBlock(branch) && branch.statements.length === 1) {
+    const only = branch.statements[0];
+    if (only !== undefined && ts.isExpressionStatement(only)) return only.expression;
+  }
+  return undefined;
+}
+
+function sponsorPrincipalSurface(sourceFile: ts.SourceFile): SponsorPrincipalSurface {
+  const empty: SponsorPrincipalSurface = {
+    unresolvable: false,
+    jwtStampCount: 0,
+    safeJwtStampCount: 0,
+    sessionProjectionCount: 0,
+    safeSessionProjectionCount: 0,
+    sessionCleanupCount: 0,
+    safeSessionCleanupCount: 0,
+  };
+  const config = nextAuthConfig(sourceFile);
+  if (config === undefined) return empty;
+  const callbacksLookup = propertyOf(config, "callbacks");
+  const callbacks = asObjectLiteral(callbacksLookup.value);
+  if (callbacks === undefined) {
+    return { ...empty, unresolvable: callbacksLookup.unresolvable };
+  }
+  const jwtLookup = callbackFunction(callbacks, "jwt");
+  const sessionLookup = callbackFunction(callbacks, "session");
+  const surface = {
+    ...empty,
+    unresolvable:
+      callbacksLookup.unresolvable || jwtLookup.unresolvable || sessionLookup.unresolvable,
+  };
+  const jwt = jwtLookup.fn;
+  const session = sessionLookup.fn;
+  if (jwt === undefined || session === undefined) return surface;
+
+  const jwtToken = callbackBinding(jwt, "token");
+  const account = callbackBinding(jwt, "account");
+  const profile = callbackBinding(jwt, "profile");
+  const sessionBinding = callbackBinding(session, "session");
+  const sessionToken = callbackBinding(session, "token");
+  const importedSponsorHelper = exactNamedImportBinding(
+    sourceFile,
+    SPONSOR_ID_HELPER,
+    "sponsorIdFromGoogleSubject",
+  );
+  const sponsorHelper =
+    importedSponsorHelper !== undefined &&
+    !hasValueDeclaration(sourceFile, importedSponsorHelper) &&
+    !hasBindingWrite(sourceFile, importedSponsorHelper)
+      ? importedSponsorHelper
+      : undefined;
+  const importedCanonicalHelper = exactNamedImportBinding(
+    sourceFile,
+    SPONSOR_ID_HELPER,
+    "isCanonicalSponsorId",
+  );
+  const canonicalHelper =
+    importedCanonicalHelper !== undefined &&
+    !hasValueDeclaration(sourceFile, importedCanonicalHelper) &&
+    !hasBindingWrite(sourceFile, importedCanonicalHelper)
+      ? importedCanonicalHelper
+      : undefined;
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      propertyAccess(node.left, jwtToken, "sub")
+    ) {
+      surface.jwtStampCount += 1;
       if (
-        ts.isBinaryExpression(condition) &&
-        [ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken].includes(
-          condition.operatorToken.kind,
-        ) &&
-        ts.isTypeOfExpression(condition.left) &&
-        propertyAccess(condition.left.expression, tokenBinding, "authTime") &&
-        ts.isStringLiteral(condition.right) &&
-        condition.right.text === "number"
+        jwtToken !== undefined &&
+        account !== undefined &&
+        profile !== undefined &&
+        isWithin(node, jwt) &&
+        isSafeSponsorSubjectExpression(node.right, profile, sponsorHelper) &&
+        isDirectStatementInTruthyIf(node, account, jwt) &&
+        hasExactTrailingBindingReturn(jwt, jwtToken, node) &&
+        !hasValueDeclaration(jwt.body, jwtToken) &&
+        !hasValueDeclaration(jwt.body, account) &&
+        !hasValueDeclaration(jwt.body, profile) &&
+        !hasFieldMutationOtherThan(jwt.body, jwtToken, "sub", node) &&
+        !hasFieldMutationOtherThan(jwt.body, profile, "sub", jwt) &&
+        !hasWholeBindingEscape(jwt.body, jwtToken) &&
+        !hasWholeBindingEscape(jwt.body, profile) &&
+        !hasBindingWrite(jwt.body, account) &&
+        !hasBindingWrite(jwt.body, profile)
       ) {
-        return true;
+        surface.safeJwtStampCount += 1;
       }
     }
-    child = parent;
-  }
-  return false;
+
+    if (
+      ts.isCallExpression(node) &&
+      exactSponsorCleanup(node, sessionBinding) &&
+      isWithin(node, session)
+    ) {
+      surface.sessionCleanupCount += 1;
+    }
+
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      propertyPathAccess(node.left, sessionBinding, ["user", "id"])
+    ) {
+      surface.sessionProjectionCount += 1;
+      const guarded = directGuardingIf(node, session);
+      const condition = guarded?.expression;
+      const cleanup = branchExpression(guarded?.elseStatement);
+      const conditionIsCanonical =
+        canonicalHelper !== undefined &&
+        condition !== undefined &&
+        ts.isCallExpression(condition) &&
+        ts.isIdentifier(condition.expression) &&
+        condition.expression.text === canonicalHelper &&
+        condition.arguments.length === 1 &&
+        propertyAccess(condition.arguments[0], sessionToken, "sub");
+      const cleanupCall = exactSponsorCleanup(cleanup, sessionBinding) ? cleanup : undefined;
+      if (
+        sessionBinding !== undefined &&
+        sessionToken !== undefined &&
+        isWithin(node, session) &&
+        propertyAccess(node.right, sessionToken, "sub") &&
+        conditionIsCanonical &&
+        cleanupCall !== undefined &&
+        hasExactTrailingBindingReturn(session, sessionBinding, node) &&
+        !hasValueDeclaration(session.body, sessionBinding) &&
+        !hasValueDeclaration(session.body, sessionToken) &&
+        !hasDirectBindingWrite(session.body, sessionBinding) &&
+        !hasBindingWrite(session.body, sessionToken) &&
+        !hasFieldMutationOtherThan(session.body, sessionToken, "sub", session) &&
+        !hasWholeBindingEscape(session.body, sessionBinding) &&
+        !hasWholeBindingEscape(session.body, sessionToken) &&
+        !hasSponsorSessionMutationOtherThan(
+          session.body,
+          sessionBinding,
+          new Set<ts.Node>([node, cleanupCall]),
+        )
+      ) {
+        surface.safeSessionProjectionCount += 1;
+        surface.safeSessionCleanupCount += 1;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return surface;
 }
 
 /** Prove that only validated provider evidence can set decision step-up time. */
@@ -671,7 +1724,17 @@ export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface 
   // refreshable write that a callback-local walk never sees.
   const jwtToken = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "token");
   const account = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "account");
-  const profile = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "profile");
+  const importedAuthTimeHelper = exactNamedImportBinding(
+    sourceFile,
+    AUTH_TIME_HELPER,
+    "authTimeFromIdToken",
+  );
+  const authTimeHelper =
+    importedAuthTimeHelper !== undefined &&
+    !hasValueDeclaration(sourceFile, importedAuthTimeHelper) &&
+    !hasBindingWrite(sourceFile, importedAuthTimeHelper)
+      ? importedAuthTimeHelper
+      : undefined;
   const sessionToken = session.fn === undefined ? undefined : callbackBinding(session.fn, "token");
   const sessionBinding =
     session.fn === undefined ? undefined : callbackBinding(session.fn, "session");
@@ -690,8 +1753,17 @@ export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface 
           jwt.fn !== undefined &&
           isWithin(node, jwt.fn) &&
           propertyAccess(node.left, jwtToken, "authTime") &&
-          isSafeProviderAuthTimeExpression(node.right, profile) &&
-          isInsideTruthyIf(node, account, jwt.fn)
+          isSafeProviderAuthTimeExpression(node.right, account, authTimeHelper) &&
+          isDirectStatementInTruthyIf(node, account, jwt.fn) &&
+          hasExactTrailingBindingReturn(jwt.fn, jwtToken, node) &&
+          jwtToken !== undefined &&
+          account !== undefined &&
+          !hasValueDeclaration(jwt.fn.body, jwtToken) &&
+          !hasValueDeclaration(jwt.fn.body, account) &&
+          !hasFieldMutationOtherThan(jwt.fn.body, jwtToken, "authTime", node) &&
+          !hasWholeBindingEscape(jwt.fn.body, jwtToken) &&
+          !hasWholeBindingEscape(jwt.fn.body, account) &&
+          !hasBindingWrite(jwt.fn.body, account)
         ) {
           surface.safeJwtStampCount += 1;
         }
@@ -703,7 +1775,16 @@ export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface 
           isWithin(node, session.fn) &&
           propertyAccess(node.left, sessionBinding, "authIssuedAt") &&
           propertyAccess(node.right, sessionToken, "authTime") &&
-          isInsideNumberGuard(node, sessionToken, session.fn)
+          isDirectStatementInNumberGuard(node, sessionToken, session.fn) &&
+          hasExactTrailingBindingReturn(session.fn, sessionBinding, node) &&
+          sessionToken !== undefined &&
+          sessionBinding !== undefined &&
+          !hasValueDeclaration(session.fn.body, sessionToken) &&
+          !hasValueDeclaration(session.fn.body, sessionBinding) &&
+          !hasFieldMutationOtherThan(session.fn.body, sessionBinding, "authIssuedAt", node) &&
+          !hasWholeBindingEscape(session.fn.body, sessionBinding) &&
+          !hasWholeBindingEscape(session.fn.body, sessionToken) &&
+          !hasBindingWrite(session.fn.body, sessionToken)
         ) {
           surface.safeSessionProjectionCount += 1;
         }
@@ -865,6 +1946,160 @@ export function dynamicCode(sourceFile: ts.SourceFile): string[] {
   return found;
 }
 
+/**
+ * The exact executable-call surface `auth.ts` needs, as an allowlist.
+ *
+ * The shipped file performs six calls: the imported Auth.js factory, the
+ * imported Google provider, the two reviewed identity helpers, the canonical
+ * guard, and the exact `Reflect.deleteProperty` cleanup. Everything else that
+ * *executes* — ambient `fetch`/`console`/timer/storage/beacon calls, local
+ * helper functions, aliased or wrapped callees, `new` expressions, tagged
+ * templates, decorators — is refused by construction rather than enumerated:
+ * a call is allowed only when its callee resolves to a binding imported from
+ * an allowlisted module (and never shadowed or reassigned), or is the literal
+ * `Reflect.deleteProperty` member spelling on the intact global. A callee this
+ * function cannot resolve is a refusal, not a pass.
+ *
+ * Dynamic `import(...)` is deliberately skipped here: `dynamicCode` already
+ * reports it, and reporting it twice would blur which rule refused it.
+ */
+export function executableCallSurface(sourceFile: ts.SourceFile): string[] {
+  const bindings = importBindings(sourceFile);
+  const callableImport = (name: string): boolean => {
+    const moduleSpecifier = bindings.get(name);
+    return (
+      moduleSpecifier !== undefined &&
+      ALLOWED_IMPORTS.has(moduleSpecifier) &&
+      !hasValueDeclaration(sourceFile, name) &&
+      !hasBindingWrite(sourceFile, name)
+    );
+  };
+  const intactGlobal = (name: string): boolean =>
+    !bindings.has(name) &&
+    !hasValueDeclaration(sourceFile, name) &&
+    !hasBindingWrite(sourceFile, name);
+
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isNewExpression(node) ||
+      ts.isTaggedTemplateExpression(node) ||
+      ts.isDecorator(node)
+    ) {
+      found.push(node.getText(sourceFile));
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind !== ts.SyntaxKind.ImportKeyword
+    ) {
+      const callee = unwrapTransparentExpression(node.expression);
+      const allowed =
+        (ts.isIdentifier(callee) && callableImport(callee.text)) ||
+        (ts.isPropertyAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === "Reflect" &&
+          callee.name.text === "deleteProperty" &&
+          intactGlobal("Reflect"));
+      if (!allowed) found.push(node.getText(sourceFile));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+/**
+ * Every read of the raw provider-evidence bindings in the jwt callback that is
+ * not one of the three reviewed shapes.
+ *
+ * The call allowlist refuses the ambient sinks; this refuses the *values*
+ * moving toward any sink at all, including a plain `const leaked =
+ * profile?.email` with no call in sight. The completeness argument is the same
+ * one the environment rule relies on: every syntactic route to the evidence —
+ * alias, wrapper, computed access, closure capture, destructure, object or
+ * array packaging, template span — must reference the `profile` or `account`
+ * binding by its identifier somewhere, so allowlisting the identifier's three
+ * legitimate positions closes all of them at once. A shadowed or renamed
+ * binding fails closed: its uses stop matching the allowed shapes and are
+ * reported.
+ */
+export function providerEvidenceEscapes(sourceFile: ts.SourceFile): string[] {
+  const config = nextAuthConfig(sourceFile);
+  if (config === undefined) return [];
+  const callbacks = asObjectLiteral(propertyOf(config, "callbacks").value);
+  if (callbacks === undefined) return [];
+  const jwt = callbackFunction(callbacks, "jwt").fn;
+  if (jwt === undefined) return [];
+  const profile = callbackBinding(jwt, "profile");
+  const account = callbackBinding(jwt, "account");
+
+  const unshadowedNamedImport = (module: string, importedName: string): string | undefined => {
+    const binding = exactNamedImportBinding(sourceFile, module, importedName);
+    return binding !== undefined &&
+      !hasValueDeclaration(sourceFile, binding) &&
+      !hasBindingWrite(sourceFile, binding)
+      ? binding
+      : undefined;
+  };
+  const sponsorHelper = unshadowedNamedImport(SPONSOR_ID_HELPER, "sponsorIdFromGoogleSubject");
+  const authTimeHelper = unshadowedNamedImport(AUTH_TIME_HELPER, "authTimeFromIdToken");
+
+  const soleArgumentOfHelperCall = (
+    argument: ts.Expression,
+    helper: string | undefined,
+  ): boolean => {
+    const call = argument.parent;
+    return (
+      helper !== undefined &&
+      call !== undefined &&
+      ts.isCallExpression(call) &&
+      ts.isIdentifier(call.expression) &&
+      call.expression.text === helper &&
+      call.arguments.length === 1 &&
+      call.arguments[0] === argument
+    );
+  };
+
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && isValueReference(node)) {
+      if (profile !== undefined && node.text === profile) {
+        const access = node.parent;
+        const allowed =
+          access !== undefined &&
+          ts.isPropertyAccessExpression(access) &&
+          access.expression === node &&
+          access.name.text === "sub" &&
+          access.questionDotToken !== undefined &&
+          soleArgumentOfHelperCall(access, sponsorHelper);
+        if (!allowed) {
+          found.push(
+            (access !== undefined && !ts.isSourceFile(access) ? access : node).getText(sourceFile),
+          );
+        }
+      }
+      if (account !== undefined && node.text === account) {
+        const parent = node.parent;
+        const truthyGuard =
+          parent !== undefined && ts.isIfStatement(parent) && parent.expression === node;
+        const idTokenRead =
+          parent !== undefined &&
+          ts.isPropertyAccessExpression(parent) &&
+          parent.expression === node &&
+          parent.name.text === "id_token" &&
+          soleArgumentOfHelperCall(parent, authTimeHelper);
+        if (!truthyGuard && !idTokenRead) {
+          found.push(
+            (parent !== undefined && !ts.isSourceFile(parent) ? parent : node).getText(sourceFile),
+          );
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(jwt.body);
+  return found;
+}
+
 export function readAuthSurface(source: string, fileName = "auth.ts"): AuthSurface {
   const sourceFile = parse(source, fileName);
   return {
@@ -874,6 +2109,9 @@ export function readAuthSurface(source: string, fileName = "auth.ts"): AuthSurfa
     envAccesses: envAccesses(sourceFile),
     wiring: propylonExportWiring(sourceFile),
     dynamicCode: dynamicCode(sourceFile),
+    ambientCalls: executableCallSurface(sourceFile),
+    evidenceEscapes: providerEvidenceEscapes(sourceFile),
+    sponsorPrincipal: sponsorPrincipalSurface(sourceFile),
     recentAuth: recentAuthSurface(sourceFile),
   };
 }
@@ -907,6 +2145,7 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
   const surface = readAuthSurface(source, file);
   const providers = surface.providers;
   const recentAuth = surface.recentAuth;
+  const sponsorPrincipal = surface.sponsorPrincipal;
   const out: AuthViolation[] = [
     ...importViolations(surface, file),
     ...envViolations(surface, file),
@@ -915,6 +2154,20 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
         "AUTH_DYNAMIC_CODE_FORBIDDEN",
         file,
         `\`${text}\` loads or builds code that the import allowlist cannot see.`,
+      ),
+    ),
+    ...surface.ambientCalls.map((text) =>
+      violation(
+        "AUTH_CALL_NOT_ALLOWED",
+        file,
+        `\`${text}\` is not on the executable-call allowlist for auth.ts.`,
+      ),
+    ),
+    ...surface.evidenceEscapes.map((text) =>
+      violation(
+        "AUTH_PROVIDER_EVIDENCE_ESCAPE",
+        file,
+        `\`${text}\` reads or repackages raw provider evidence outside the reviewed helper arguments.`,
       ),
     ),
   ];
@@ -964,7 +2217,25 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
       violation(
         "AUTH_RECENT_AUTH_REFRESHABLE",
         file,
-        `Recent-auth wiring is unsafe: ${recentAuth.jwtStampCount} authTime stamp(s), ${recentAuth.safeJwtStampCount} account-guarded provider auth_time stamp(s), ${recentAuth.sessionProjectionCount} session projection(s), ${recentAuth.safeSessionProjectionCount} guarded stable projection(s), ${recentAuth.iatReads.length} iat read(s).`,
+        `Recent-auth wiring is unsafe: ${recentAuth.jwtStampCount} authTime stamp(s), ${recentAuth.safeJwtStampCount} account-guarded ID-token helper stamp(s), ${recentAuth.sessionProjectionCount} session projection(s), ${recentAuth.safeSessionProjectionCount} guarded stable projection(s), ${recentAuth.iatReads.length} iat read(s).`,
+      ),
+    );
+  }
+
+  if (
+    sponsorPrincipal.unresolvable ||
+    sponsorPrincipal.jwtStampCount !== 1 ||
+    sponsorPrincipal.safeJwtStampCount !== 1 ||
+    sponsorPrincipal.sessionProjectionCount !== 1 ||
+    sponsorPrincipal.safeSessionProjectionCount !== 1 ||
+    sponsorPrincipal.sessionCleanupCount !== 1 ||
+    sponsorPrincipal.safeSessionCleanupCount !== 1
+  ) {
+    out.push(
+      violation(
+        "AUTH_SPONSOR_PRINCIPAL_UNSAFE",
+        file,
+        `Sponsor-principal wiring is unsafe: ${sponsorPrincipal.jwtStampCount} subject-derived stamp(s), ${sponsorPrincipal.safeJwtStampCount} safe stamp(s), ${sponsorPrincipal.sessionProjectionCount} session projection(s), ${sponsorPrincipal.safeSessionProjectionCount} canonical projection(s), ${sponsorPrincipal.sessionCleanupCount} invalid-id cleanup(s), ${sponsorPrincipal.safeSessionCleanupCount} guarded cleanup(s).`,
       ),
     );
   }

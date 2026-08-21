@@ -13,7 +13,7 @@
  * out of this transport prevents an Agora convenience layer from becoming a
  * second writer or validator.
  */
-import { isTrustedStoaOrigin } from "@asimposium/contracts";
+import { isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
 
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./service-envelope";
 
@@ -28,10 +28,92 @@ export const DEFAULT_STOA_TIMEOUT_MS = 10_000;
  * and not unbounded — a caller may tune it inside this range and no further.
  */
 export const MAX_STOA_TIMEOUT_MS = 60_000;
+/** One console render may fetch at most two private workshop previews. */
+export const MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS = 2;
+/** One absolute budget covers every preview dispatch and response read in that render. */
+export const SPONSOR_WORKSHOP_PREVIEW_RENDER_TIMEOUT_MS = 12_000;
 
-/** The console previews the newest five rows from Stoa's DESC workshop view. */
-export function newestWorkshopPreview<T>(objects: readonly T[]): readonly T[] {
+export interface BoundedWorkshopPreviewPlan<T> {
+  readonly selected: readonly T[];
+  readonly omittedCount: number;
+}
+
+/** Select the stable Fellow-prefix that one bounded console render may inspect. */
+export function boundedWorkshopPreviewPlan<T>(
+  candidates: readonly T[],
+): BoundedWorkshopPreviewPlan<T> {
+  const selected = candidates.slice(0, MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS);
+  return { selected, omittedCount: candidates.length - selected.length };
+}
+
+export interface LoadedWorkshopPreviewPrefix<T, R> {
+  readonly loaded: readonly { readonly candidate: T; readonly value: R }[];
+  readonly omittedCount: number;
+}
+
+/** Execute the bounded prefix under one deadline that every transport call receives. */
+export async function loadBoundedWorkshopPreviewPrefix<T, R>(
+  candidates: readonly T[],
+  load: (candidate: T, deadlineAtMs: number) => Promise<R>,
+  now: () => number = () => performance.now(),
+): Promise<LoadedWorkshopPreviewPrefix<T, R>> {
+  const plan = boundedWorkshopPreviewPlan(candidates);
+  const deadlineAtMs = now() + SPONSOR_WORKSHOP_PREVIEW_RENDER_TIMEOUT_MS;
+  const loaded: { candidate: T; value: R }[] = [];
+  let omittedCount = plan.omittedCount;
+  for (const [index, candidate] of plan.selected.entries()) {
+    if (now() >= deadlineAtMs) {
+      omittedCount += plan.selected.length - index;
+      break;
+    }
+    loaded.push({ candidate, value: await load(candidate, deadlineAtMs) });
+  }
+  return { loaded, omittedCount };
+}
+
+/**
+ * Refusal text for a preview whose rows are not newest-first. Fixed and
+ * non-reflecting: it names the contract, never the offending sequence, index or
+ * row, so a console error can never republish private workshop ordering.
+ */
+export const WORKSHOP_PREVIEW_ORDER_ERROR =
+  "Stoa workshop rows must arrive newest-first with strictly descending workshop_seq";
+
+/**
+ * The console previews the newest five rows from Stoa's DESC workshop view.
+ *
+ * A bare `slice` would render the OLDEST five under a "newest" label if the
+ * Worker's `ORDER BY workshop_seq DESC` ever regressed — a Rule A4 pretence one
+ * cross-file edit away, invisible to any test that hands this function an
+ * already-sorted fixture. So the ordering is checked here rather than assumed:
+ * every row must carry a safe positive `workshop_seq`, and the sequence must be
+ * strictly descending, before any row is taken.
+ */
+export function newestWorkshopPreviewIfValid<T extends { readonly workshop_seq: number }>(
+  objects: readonly T[],
+): readonly T[] | undefined {
+  let previousSeq: number | undefined;
+  for (const object of objects) {
+    const seq = object.workshop_seq;
+    if (!Number.isSafeInteger(seq) || seq < 1) {
+      return undefined;
+    }
+    // Strict: an equal sequence is a duplicated row, not a tie to preserve.
+    if (previousSeq !== undefined && seq >= previousSeq) {
+      return undefined;
+    }
+    previousSeq = seq;
+  }
   return objects.slice(0, 5);
+}
+
+/** Strict adapter for callers that treat a malformed private page as a contract failure. */
+export function newestWorkshopPreview<T extends { readonly workshop_seq: number }>(
+  objects: readonly T[],
+): readonly T[] {
+  const preview = newestWorkshopPreviewIfValid(objects);
+  if (preview === undefined) throw new TypeError(WORKSHOP_PREVIEW_ORDER_ERROR);
+  return preview;
 }
 
 /**
@@ -172,6 +254,15 @@ function abortError(reason: unknown, message: string): unknown {
   return new DOMException(message, "TimeoutError");
 }
 
+async function cancelLateStoaResponse(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The request is already terminal. Cancellation is best-effort cleanup;
+    // a locked or transport-owned body must not replace the timeout refusal.
+  }
+}
+
 /**
  * Sign and dispatch one sponsor request without ever forwarding apex
  * credentials.  `rawBody` is copied once and that copy is passed unchanged to
@@ -201,6 +292,19 @@ export async function dispatchSignedSponsorRequest(
     !/^[A-Za-z0-9._-]{1,160}$/.test(options.idempotencyKey)
   ) {
     throw new TypeError("Idempotency-Key must be 1 to 160 safe opaque characters");
+  }
+  // The principal is the one field whose contract this transport asserts but
+  // used to leave to the receiver. Enforcing it HERE, before the envelope is
+  // minted, is what keeps a caller mistake from becoming a signed artifact: a
+  // Google subject or an email handed in by an upstream bug would otherwise be
+  // signed and transmitted in a request header before Stoa refused it, and
+  // Fable §14.3 treats a header exactly as it treats a log line.
+  //
+  // The refusal deliberately does not echo the value. Reflecting a rejected
+  // principal would move the same bytes into an exception message, a stack, and
+  // whatever collects them — which is the leak this check exists to prevent.
+  if (!SponsorIdSchema.safeParse(options.sponsorId).success) {
+    throw new TypeError("Stoa sponsor id must be a canonical opaque Worker principal");
   }
   const rawBody =
     typeof options.rawBody === "string" ? options.rawBody : copyBodyBytes(options.rawBody);
@@ -282,6 +386,16 @@ export async function dispatchSignedSponsorRequest(
       redirect: "error",
       signal: controller.signal,
     });
+    // Promise.race observes late rejection, but it cannot dispose of a late
+    // fulfillment. An injectable transport may ignore AbortSignal and resolve
+    // after the deadline; cancel that abandoned body without touching a
+    // response which won while the request was still live.
+    void dispatched.then(
+      (lateResponse) => {
+        if (controller.signal.aborted) void cancelLateStoaResponse(lateResponse);
+      },
+      () => undefined,
+    );
     // A transport is allowed to return an already-settled promise. Check the
     // state directly as well as racing the listener so its response cannot win
     // scheduling against cancellation triggered synchronously inside the call.

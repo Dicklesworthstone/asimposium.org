@@ -645,6 +645,32 @@ test("releasing the recovery lock readmits a retry", () => {
   expect(claimEnrollmentRecoveryLock(cell)).toBe(false);
 });
 
+test("a throwing retained recovery releases its real lock before immediate reacquire", async () => {
+  const cell = { current: false };
+  let dispatches = 0;
+  const invoke = async (dispatch: () => Promise<void>): Promise<boolean> => {
+    if (!claimEnrollmentRecoveryLock(cell)) return false;
+    try {
+      dispatches += 1;
+      await dispatch();
+      return true;
+    } finally {
+      releaseEnrollmentRecoveryLock(cell);
+    }
+  };
+
+  await expect(
+    invoke(async () => {
+      throw new Error("recovery dispatch failed");
+    }),
+  ).rejects.toThrow("recovery dispatch failed");
+  expect(cell.current).toBe(false);
+
+  await expect(invoke(async () => undefined)).resolves.toBe(true);
+  expect(dispatches).toBe(2);
+  expect(cell.current).toBe(false);
+});
+
 test("recovery locks are per-cell, so one retained decision cannot block another", () => {
   const first = { current: false };
   const second = { current: false };

@@ -237,8 +237,9 @@ test("cache invalidation cannot suppress an already committed one-time result", 
  * production-side is reshaped for the test: the action is driven through its
  * public signature with a genuinely sealed payload.
  */
-test("mintJoinUrl returns the exact Stoa authority when revalidation throws, without a second write", async () => {
+test("mintJoinUrl rejects a changed owner and returns the exact Stoa authority when revalidation throws", async () => {
   const sponsorId = "usr_01JXYZSPONSOR0000000000";
+  const otherSponsorId = "usr_01JXYZOTHERS00000000000";
   const rootHex = "a".repeat(64);
   const envelopeHex = "b".repeat(64);
   // Captured, not assumed absent: `delete` on a variable that was set would be a
@@ -265,6 +266,7 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
     request,
   });
   const owner = await enrollmentRecoveryOwner(rootHex, sponsorId);
+  const otherOwner = await enrollmentRecoveryOwner(rootHex, otherSponsorId);
 
   // The authority the Worker already committed, built through the production
   // contract rather than invented. `MintEnrollmentResponseSchema` cross-checks
@@ -283,6 +285,7 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
   let stoaCalls = 0;
   let ownerChecks = 0;
   let revalidations = 0;
+  let authenticatedSponsorId = otherSponsorId;
 
   // `mock.module` is process-global and this runner shares one process across
   // files, so anything left mocked silently reshapes sibling suites — an
@@ -306,7 +309,7 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
     },
   }));
   mock.module("@/auth", () => ({
-    auth: async () => ({ user: { id: sponsorId } }),
+    auth: async () => ({ user: { id: authenticatedSponsorId } }),
   }));
   // Every Stoa write the action module imports. The five the mint path must not
   // touch throw rather than returning a benign stub, so a stray second write
@@ -317,8 +320,9 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
   mock.module("@/lib/stoa", () => ({
     stoaEnrollmentRecoveryOwner: async (candidateSponsorId: string) => {
       ownerChecks += 1;
-      expect(candidateSponsorId).toBe(sponsorId);
-      return owner;
+      if (candidateSponsorId === sponsorId) return owner;
+      if (candidateSponsorId === otherSponsorId) return otherOwner;
+      throw new Error("unexpected recovery-owner principal");
     },
     stoaMintEnrollment: async () => {
       stoaCalls += 1;
@@ -344,6 +348,19 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
     const { mintJoinUrl } = (await import(
       hermeticSpecifier
     )) as typeof import("../../app/console/actions.ts");
+
+    const ownerMismatch = await mintJoinUrl(recoveryPayload, idempotencyKey, owner);
+    expect(ownerMismatch).toEqual({
+      ok: false,
+      recovery: "retain",
+      message:
+        "Your sponsor session changed after this write was prepared. Reload under the intended sponsor, then retry the exact unchanged attempt.",
+    });
+    expect(ownerChecks).toBe(1);
+    expect(stoaCalls).toBe(0);
+    expect(revalidations).toBe(0);
+
+    authenticatedSponsorId = sponsorId;
     result = await mintJoinUrl(recoveryPayload, idempotencyKey, owner);
   } finally {
     mock.module("@/lib/stoa", () => realStoa);
@@ -357,7 +374,7 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
 
   // Non-vacuity: both sides of the composition genuinely ran. Without these a
   // refusal before Stoa would satisfy nothing below and still look green.
-  expect(ownerChecks).toBe(1);
+  expect(ownerChecks).toBe(2);
   expect(stoaCalls).toBe(1);
   expect(revalidations).toBe(1);
 

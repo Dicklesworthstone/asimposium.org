@@ -16,26 +16,26 @@ import {
   decideProposal,
   fingerprintEnrollmentAttempt,
   fingerprintLifecycleAttempt,
+  type LifecycleAttemptScope,
+  type LifecycleReceipt,
   mintJoinUrl,
   recoverLifecycleAttempt,
   recoverMintJoinUrl,
   recoverProposalDecision,
-  type LifecycleAttemptScope,
-  type LifecycleReceipt,
 } from "./actions";
-import { buildJoinPasteBlock } from "./join-paste";
 import {
   availableSessionStorage,
   claimEnrollmentRecoveryLock,
   clearEnrollmentAttempt,
+  type EnrollmentAttemptFallback,
+  type EnrollmentAttemptScope,
   enrollmentAttemptKey,
   enrollmentAttemptsRemain,
+  type RetainedEnrollmentAttempt,
   releaseEnrollmentRecoveryLock,
   retainedEnrollmentAttempts,
-  type EnrollmentAttemptScope,
-  type EnrollmentAttemptFallback,
-  type RetainedEnrollmentAttempt,
 } from "./idempotency";
+import { buildJoinPasteBlock } from "./join-paste";
 
 const MINT_SCOPES: readonly {
   readonly scope: RequestedScope;
@@ -1282,12 +1282,8 @@ export function ProposalCard({
           {card.model} on {card.harness}
           {card.reasoning_effort ? ` · ${card.reasoning_effort}` : ""}
         </dd>
-        {card.tools_note ? (
-          <>
-            <dt>Tools it mentions</dt>
-            <dd>{card.tools_note}</dd>
-          </>
-        ) : null}
+        <dt>Agent-declared tools</dt>
+        <dd>{card.tools_note ?? "None declared"}</dd>
         <dt>It&rsquo;s asking to</dt>
         <dd>
           <ul className="plain-list">
@@ -1296,33 +1292,29 @@ export function ProposalCard({
             ))}
           </ul>
         </dd>
-        <dt>Assigned problem</dt>
+        <dt>Problem assignment</dt>
         <dd>{resources.problem_binding ?? "None — it picks when it starts"}</dd>
-        {resources.first_directive !== undefined ? (
-          <>
-            <dt>First task from you</dt>
-            <dd>{resources.first_directive}</dd>
-          </>
-        ) : null}
-        <dt>Event limit</dt>
+        <dt>First directive</dt>
+        <dd>{resources.first_directive ?? "None"}</dd>
+        <dt>Event budget</dt>
         <dd>
           {resources.event_budget === undefined
-            ? "No limit"
+            ? "Unbounded"
             : resources.event_budget.toLocaleString()}
         </dd>
-        <dt>Storage limit</dt>
+        <dt>Artifact budget</dt>
         <dd>
           {resources.artifact_budget_bytes === undefined
-            ? "No limit"
+            ? "Unbounded"
             : `${resources.artifact_budget_bytes.toLocaleString()} bytes`}
         </dd>
-        <dt>Its access ends</dt>
+        <dt>Fellow grant expires</dt>
         <dd>
           {resources.fellow_grant_expires_at === undefined
-            ? "Never (you can revoke it anytime from the console)"
+            ? "No grant expiry (you can revoke it anytime from the console)"
             : new Date(resources.fellow_grant_expires_at).toLocaleString()}
         </dd>
-        <dt>This offer expires</dt>
+        <dt>Proposal expires</dt>
         <dd>{new Date(card.proposal_expires_at).toLocaleString()}</dd>
       </dl>
 

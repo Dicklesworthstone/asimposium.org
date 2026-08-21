@@ -18,6 +18,7 @@ import {
   type OperatorFellowCapStateResponse,
   OperatorFellowCapStateResponseSchema,
   type ProblemCode,
+  ProblemCodeSchema,
   ProblemDocumentSchema,
   parseStoaJoinUrl,
   type SponsorBootstrapResponse,
@@ -52,7 +53,10 @@ import {
 } from "./enrollment-recovery";
 import { importEd25519PrivateSeedHex } from "./service-envelope";
 import { isCanonicalSponsorId } from "./sponsor-id";
-import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
+import {
+  dispatchSignedSponsorRequest,
+  MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS,
+} from "./stoa-sponsor";
 
 /**
  * Agora's typed client for the Stoa sponsor surface. Server-only: it reads the
@@ -107,6 +111,20 @@ export type StoaCall<T> =
       readonly problemCode?: ProblemCode;
     };
 
+/**
+ * The console may name a Worker refusal's public category and bounded title,
+ * but never its teaching payload or raw response bytes. Re-validate the code
+ * because this projection is also a runtime boundary for typed callers.
+ */
+export function sponsorWorkshopRefusalNotice(
+  view: StoaCall<unknown>,
+): { readonly problemCode: ProblemCode; readonly title: string } | undefined {
+  if (view.ok || view.reason !== "refused" || typeof view.detail !== "string") return undefined;
+  const problemCode = ProblemCodeSchema.safeParse(view.problemCode);
+  if (!problemCode.success || view.detail.length === 0) return undefined;
+  return { problemCode: problemCode.data, title: view.detail.slice(0, 200) };
+}
+
 interface StoaSigningConfig {
   readonly privateKey: CryptoKey;
   readonly kid: string;
@@ -118,6 +136,9 @@ export const MAX_STOA_SUCCESS_RESPONSE_BYTES = 262_144;
 export const MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES = 8 * 1024 * 1024;
 /** Bounded stopgap; e7j.2 owns byte-exact pagination for worst-case valid rows. */
 export const MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES = 16 * 1024 * 1024;
+/** Maximum private workshop bytes one bounded console preview render may accept. */
+export const MAX_STOA_SPONSOR_WORKSHOP_PREVIEW_ACCEPTED_BYTES =
+  MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES * MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS;
 /** 500 Fellow summaries can each carry bounded grants plus three credentials. */
 export const MAX_STOA_FELLOW_LIST_RESPONSE_BYTES = 16 * 1024 * 1024;
 /** 100 immutable operator receipts can each carry a 1,000-code-point reason. */
@@ -282,9 +303,10 @@ async function signingConfig(): Promise<StoaSigningConfig | undefined> {
 /** Retain only schema-validated problem metadata, never the raw refusal body. */
 async function refusalInfo(
   response: Response,
+  timeoutMs = STOA_RESPONSE_READ_TIMEOUT_MS,
 ): Promise<{ readonly detail?: string; readonly problemCode?: ProblemCode }> {
   try {
-    const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES);
+    const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES, timeoutMs);
     if (value === undefined) return {};
     const problem = ProblemDocumentSchema.safeParse(value);
     if (!problem.success || problem.data.status !== response.status) return {};
@@ -296,6 +318,14 @@ async function refusalInfo(
     // A refusal without a valid Worker problem remains ambiguous.
   }
   return {};
+}
+
+function remainingStoaCallTimeout(deadlineAtMs: number | undefined): number | undefined {
+  if (deadlineAtMs === undefined) return STOA_RESPONSE_READ_TIMEOUT_MS;
+  if (!Number.isFinite(deadlineAtMs) || deadlineAtMs < 0) return undefined;
+  const remaining = Math.ceil(deadlineAtMs - performance.now());
+  if (!Number.isSafeInteger(remaining) || remaining < 1) return undefined;
+  return Math.min(STOA_RESPONSE_READ_TIMEOUT_MS, remaining);
 }
 
 async function callStoa<T>(options: {
@@ -312,6 +342,8 @@ async function callStoa<T>(options: {
   readonly idempotencyKey?: string;
   /** Contract-shaped ceiling for this response kind. */
   readonly responseMaxBytes?: number;
+  /** Optional caller-owned monotonic millisecond deadline shared across phases. */
+  readonly deadlineAtMs?: number;
   /** Parse the response while retaining the exact origin used for this request. */
   readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
@@ -321,10 +353,15 @@ async function callStoa<T>(options: {
   if (options.principalType === "operator" && !operatorPrincipalIsAllowed(options.principalId)) {
     return { ok: false, reason: "unconfigured" };
   }
+  if (remainingStoaCallTimeout(options.deadlineAtMs) === undefined) {
+    return { ok: false, reason: "unreachable" };
+  }
   const stoaOrigin = configuredStoaOrigin();
   if (stoaOrigin === undefined) return { ok: false, reason: "unconfigured" };
   const config = await signingConfig();
   if (config === undefined) return { ok: false, reason: "unconfigured" };
+  const dispatchTimeoutMs = remainingStoaCallTimeout(options.deadlineAtMs);
+  if (dispatchTimeoutMs === undefined) return { ok: false, reason: "unreachable" };
 
   let response: Response;
   try {
@@ -341,14 +378,19 @@ async function callStoa<T>(options: {
       stoaOrigin,
       ...(stoaOrigin.startsWith("http://127.0.0.1:") ? { insecureLoopbackOrigin: stoaOrigin } : {}),
       now: Math.floor(Date.now() / 1_000),
-      timeoutMs: 8_000,
+      timeoutMs: dispatchTimeoutMs,
       idempotencyKey: options.idempotencyKey,
     });
   } catch {
     return { ok: false, reason: "unreachable" };
   }
+  const responseReadTimeoutMs = remainingStoaCallTimeout(options.deadlineAtMs);
+  if (responseReadTimeoutMs === undefined) {
+    discardStoaResponse(response);
+    return { ok: false, reason: "unreachable" };
+  }
   if (!response.ok) {
-    const refusal = await refusalInfo(response);
+    const refusal = await refusalInfo(response, responseReadTimeoutMs);
     return {
       ok: false,
       reason: "refused",
@@ -360,6 +402,7 @@ async function callStoa<T>(options: {
     const value = await readBoundedStoaJson(
       response,
       options.responseMaxBytes ?? MAX_STOA_SUCCESS_RESPONSE_BYTES,
+      responseReadTimeoutMs,
     );
     if (value === undefined) return { ok: false, reason: "unreachable" };
     return { ok: true, data: options.parse(value, stoaOrigin) };
@@ -448,6 +491,7 @@ export function stoaSponsorWorkshop(
   principalId: string,
   problemId: string,
   fellowId: string,
+  deadlineAtMs?: number,
 ): Promise<StoaCall<SponsorWorkshopViewContract>> {
   return callStoa({
     method: "POST",
@@ -457,7 +501,14 @@ export function stoaSponsorWorkshop(
     principalId,
     body: JSON.stringify({ problem_id: problemId, fellow_id: fellowId }),
     responseMaxBytes: MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES,
-    parse: (value) => SponsorWorkshopViewSchema.parse(value),
+    ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
+    parse: (value) => {
+      const response = SponsorWorkshopViewSchema.parse(value);
+      if (response.problem_id !== problemId || response.fellow_id !== fellowId) {
+        throw new TypeError("sponsor workshop response identity does not match the signed request");
+      }
+      return response;
+    },
   });
 }
 

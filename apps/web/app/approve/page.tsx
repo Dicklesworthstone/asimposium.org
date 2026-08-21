@@ -108,22 +108,25 @@ export default async function Approve() {
                   {recentAuthOk(session?.authIssuedAt) ? null : (
                     <div className="auth-step-up" role="status">
                       <p>
-                        <strong>One quick step first:</strong> approvals need a Google sign-in from
-                        the last 15 minutes. Re-authenticate below — it takes a few seconds and
-                        brings you right back here.
+                        <strong>One quick step first:</strong> approvals need Google&rsquo;s signed
+                        authentication time from the last 15 minutes. Recheck below; if the evidence
+                        remains stale, sign in to your Google Account again and recheck here.
                       </p>
                       <form
                         action={async () => {
                           "use server";
-                          // prompt: "login" (not select_account) is the point:
-                          // an account chooser returns the ORIGINAL session's
-                          // auth_time and the freshness check can never pass;
-                          // a genuine re-authentication mints a fresh one.
-                          await signIn("google", { redirectTo: "/approve" }, { prompt: "login" });
+                          // Google supports account selection here, not a
+                          // relying-party-forced reauthentication. The signed
+                          // auth_time remains the authority and may stay stale.
+                          await signIn(
+                            "google",
+                            { redirectTo: "/approve" },
+                            { prompt: "select_account" },
+                          );
                         }}
                       >
                         <button className="btn-google" type="submit">
-                          Re-authenticate with Google
+                          Recheck Google authentication
                         </button>
                       </form>
                     </div>

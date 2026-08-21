@@ -1,6 +1,6 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
-import { authTimeFromIdToken, validAuthTime } from "./lib/auth-time";
+import { authTimeFromIdToken } from "./lib/auth-time";
 import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-id";
 
 /**
@@ -48,7 +48,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // carries it, and Auth.js sources `profile` from userinfo. Decode the
         // (already signature-verified) ID token here — never trust a claim
         // from anywhere else.
-        token.authTime = authTimeFromIdToken(account.id_token) ?? validAuthTime(profile?.auth_time);
+        token.authTime = authTimeFromIdToken(account.id_token);
       }
       return token;
     },

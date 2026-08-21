@@ -7,6 +7,8 @@
  * extraction stays unit-testable.
  */
 
+const fatalUtf8 = new TextDecoder("utf-8", { fatal: true });
+
 /**
  * A claim is authentication evidence only as a non-negative safe integer
  * (the same bar the step-up check applies downstream).
@@ -23,10 +25,19 @@ export function validAuthTime(value: unknown): number | undefined {
  */
 export function authTimeFromIdToken(idToken: unknown): number | undefined {
   if (typeof idToken !== "string") return undefined;
-  const segment = idToken.split(".")[1];
-  if (segment === undefined) return undefined;
+  const segments = idToken.split(".");
+  const segment = segments[1];
+  if (
+    segments.length !== 3 ||
+    segment === undefined ||
+    !segments.every((part) => /^[A-Za-z0-9_-]+$/.test(part))
+  ) {
+    return undefined;
+  }
   try {
-    const payload: unknown = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
+    const payloadBytes = Buffer.from(segment, "base64url");
+    if (payloadBytes.toString("base64url") !== segment) return undefined;
+    const payload: unknown = JSON.parse(fatalUtf8.decode(payloadBytes));
     if (typeof payload !== "object" || payload === null) return undefined;
     return validAuthTime((payload as Record<string, unknown>).auth_time);
   } catch {
