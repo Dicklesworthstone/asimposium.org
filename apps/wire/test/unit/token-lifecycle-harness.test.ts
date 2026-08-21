@@ -418,7 +418,7 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain('"scripts/e2e-token-lifecycle.sh"');
   expect(script).toContain(`TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS="\${EXPECTED_MIGRATIONS[*]}"`);
   expect(script).toContain("migration closure does not match the expected journal");
-  expect(script).toContain('"0027_w58_remaining_objects.sql"');
+  expect(script).toContain('"0028_event_attribution.sql"');
   expect(script).toContain('"wrangler_started\\":false');
   expect(script).toContain("assert_migration_journal || exit 1");
   expect(script).toContain("assert_post_stop_d1_counts || exit 1");

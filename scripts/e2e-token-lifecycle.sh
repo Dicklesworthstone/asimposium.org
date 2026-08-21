@@ -69,6 +69,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0025_hypotheses.sql"
   "0026_evidence.sql"
   "0027_w58_remaining_objects.sql"
+  "0028_event_attribution.sql"
 )
 
 STATE_DIR=""
