@@ -38,7 +38,8 @@ fi
 #   * the loopback port is allocated dynamically and proven free before use; a
 #     caller-pinned `S1_LOCAL_PORT` is validated and refused when busy, rather
 #     than handed to wrangler to fail on later;
-#   * `--inspector-port 0` so two runs do not fight over the debugger port;
+#   * a distinct dynamically allocated inspector port per run, so concurrent
+#     proofs never share an implicit debugger-port selection;
 #   * readiness is tied to *our* child: the child must still be alive, the
 #     server must answer, and a mint carrying this run's unique token must be
 #     visible in this run's own persisted D1 state. A foreign server holding the
@@ -70,7 +71,11 @@ readonly REPRODUCE="scripts/e2e-s1-cold-enrollment.sh"
 readonly BLOCKED_EXIT_CODE=78
 readonly HARNESS_IDENTITIES=("claude-code" "codex" "gemini-cli")
 readonly REPO_ROOT="$(pwd -P)"
-readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/.bin/wrangler"
+# Wrangler 4.114 introduced a proxy failure that can terminate `wrangler dev`
+# with `Network connection lost` while this harness is driving an otherwise
+# healthy local Worker. Keep the repository's general Wrangler pin independent,
+# but run this real local-D1 proof through Cloudflare's commit-pinned repair.
+readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
 readonly LOCAL_WRANGLER_CONFIG="$REPO_ROOT/infra/wrangler.toml"
 readonly LOCAL_D1_WORKER="$REPO_ROOT/apps/wire/src/enrollment/local-d1-worker.ts"
 readonly LOCAL_D1_CLIENT="$REPO_ROOT/apps/wire/src/enrollment/local-d1-client.ts"
@@ -627,7 +632,11 @@ process_identity() {
   identity="$(printf '%s' "$identity" | tr -s '[:space:]' ' ')"
   [[ -n "${identity// /}" ]] || return 2
   if [[ -n "$marker" ]]; then
-    argv="$($PS_BIN -p "$1" -o args= 2>/dev/null)" || return 2
+    # The marker follows the deliberately large `bash -c` supervisor program.
+    # Force a narrow display environment and then override it with `-ww`, so
+    # deleting the width override deterministically loses the authority marker
+    # instead of depending on the caller terminal or capture transport.
+    argv="$(COLUMNS=80 "$PS_BIN" -ww -p "$1" -o args= 2>/dev/null)" || return 2
     # The marker is generated from /dev/urandom and passed as bash's $0. It is
     # therefore present in argv before the payload is released, while lstart
     # remains the independent birth identity for a recycled numeric PID/PGID.
@@ -1319,10 +1328,10 @@ port_is_free() {
 # which runs in the script's own shell. The same rule applies to every helper
 # invoked as `$(...)` in this file.
 allocate_port() {
-  local attempt port
+  local excluded="${1:-}" attempt port
   for ((attempt = 0; attempt < PORT_ALLOCATION_ATTEMPTS; attempt += 1)); do
     port=$((EPHEMERAL_PORT_FLOOR + RANDOM % EPHEMERAL_PORT_SPAN))
-    if port_is_free "$port"; then
+    if [[ "$port" != "$excluded" ]] && port_is_free "$port"; then
       printf '%s' "$port"
       return 0
     fi
@@ -4193,7 +4202,7 @@ terminal_local_client_failure() {
 run_local_d1() {
   [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
 
-  local local_port origin token server_log server_status_file ready readiness_deadline client_exit scope
+  local local_port inspector_port origin token server_log server_status_file ready readiness_deadline client_exit scope
   local evidence_path client_stdout client_stderr client_failure_code
   local migration_exit=0
   local server_status="" server_status_read=0
@@ -4212,6 +4221,8 @@ run_local_d1() {
   log_phase "state-retained" "dir=$STATE_DIR"
   log_phase "runtime-roots-ready" "scope=state-dir roots=home,tmp,xdg,wrangler,bun,cwd"
   log_phase "port-allocated" "port=$local_port pinned=$([[ -n "${S1_LOCAL_PORT:-}" ]] && printf 'yes' || printf 'no')"
+  inspector_port="$(allocate_port "$local_port")" || failed "LOCAL_INSPECTOR_PORT_UNAVAILABLE"
+  log_phase "inspector-port-allocated" "port=$inspector_port distinct=local-port"
   resolve_run_token
   token="$RUN_TOKEN"
   resolve_local_replay_key
@@ -4248,7 +4259,7 @@ run_local_d1() {
     "$LOCAL_WRANGLER" dev "$LOCAL_D1_WORKER" \
     --config "$LOCAL_WRANGLER_CONFIG" --local --persist-to "$STATE_DIR" --port "$local_port" \
       --env-file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" \
-      --inspector-port 0 \
+      --inspector-port "$inspector_port" \
       --log-level error --show-interactive-dev-session=false; then
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
   fi
