@@ -12,6 +12,7 @@ set -euo pipefail
 #                                                        exit 74 AGENT_DEVICE_FLOW_IDEMPOTENCY_VIOLATION)
 #      intent classifier refuses a claim-shaped note   (exit 84 AGENT_INTENT_CLASSIFIER_MISSING)
 #      near-duplicate promote refused with P11         (exit 85 AGENT_VALIDATOR_P11_MISSING)
+#      self-certification refused with P2/P4           (exit 86 AGENT_VALIDATOR_SELF_CERT_MISSING)
 #   4. pairing/session/pack/workshop/promote/delta/close: not yet implemented
 #      on any deployed surface                         (exit 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED)
 #
@@ -334,6 +335,15 @@ loop_intent="$(smoke_loop POST "/v1/sessions/$loop_session_id/workshop" '{"type"
 if [[ "${loop_intent##*$'\n'}" != "422" ]] || ! printf '%s' "${loop_intent%$'\n'*}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("code")=="LOOKS_LIKE_CLAIM" else 1)' 2>/dev/null; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_INTENT_CLASSIFIER_MISSING" "$reproduce"
   exit 84
+fi
+
+# Stage: the validator refuses a self-certification attempt (P2/P4). A promote
+# carrying an author-writable disposition/proof/status field is refused with
+# SCHEMA_INVALID and the P2/P4 rule citation, before the body parse.
+loop_selfcert="$(smoke_loop POST "/v1/sessions/$loop_session_id/promote" "{\"workshop_id\":\"$loop_workshop_id\",\"kind\":\"conjecture\",\"statement\":\"A smoke claim.\",\"falsifier\":\"A refutation.\",\"status\":\"proved\",\"relates_to\":[]}" refuse-selfcert)" || loop_selfcert=""
+if [[ "${loop_selfcert##*$'\n'}" != "422" ]] || ! printf '%s' "${loop_selfcert%$'\n'*}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("code")=="SCHEMA_INVALID" and d.get("rule")=="P2/P4") else 1)' 2>/dev/null; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_VALIDATOR_SELF_CERT_MISSING" "$reproduce"
+  exit 86
 fi
 
 # Stage: the validator refuses a falsifier-less conjecture with the P3 rule.
