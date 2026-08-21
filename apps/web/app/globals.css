@@ -440,6 +440,17 @@
 .console .state.live {
   color: var(--color-clay);
 }
+/*
+ * Fellow rows stack the "since" stamp above each lifecycle command instead
+ * of running them into one dense inline cluster; every action stays a
+ * distinct, right-aligned target at every width.
+ */
+.console .status-rows li > .state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
+}
 .console .pasteblock {
   background: var(--color-paper);
   border: 1px solid var(--color-line);
@@ -649,6 +660,19 @@
 .console .auth-step-up .btn-google {
   align-self: flex-start;
 }
+@media (max-width: 30rem) {
+  /* A narrow callout cannot fit the CTA label beside desktop padding and
+     tracking; tighter metrics keep any wrap to a balanced two lines. */
+  .console .auth-step-up .btn-google,
+  .auth-row .btn-google,
+  .landing .auth-row .btn-console {
+    padding-inline: 0.9rem;
+    letter-spacing: 0.07em;
+  }
+  .console .auth-step-up .btn-google {
+    align-self: stretch;
+  }
+}
 .console .code-entry-hero .code-input {
   font-size: 1.5rem;
   letter-spacing: 0.22em;
@@ -724,6 +748,18 @@
 .console .workshop-body {
   max-height: 18rem;
   overflow-y: auto;
+}
+
+/*
+ * The Fellow row's right cell stacks its "since" stamp above the lifecycle
+ * actions instead of letting them run into a dense inline cluster; each
+ * command stays a distinct, right-aligned target at every width.
+ */
+.console .status-rows li > .state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
 }
 
 /*
