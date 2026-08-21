@@ -10,6 +10,7 @@ set -euo pipefail
 #      contract shape + trusted verification origin    (exit 72 AGENT_DEVICE_FLOW_CONTRACT_VIOLATION)
 #      idempotent replay, same Idempotency-Key         (exit 73 AGENT_DEVICE_FLOW_REPLAY_REFUSED
 #                                                        exit 74 AGENT_DEVICE_FLOW_IDEMPOTENCY_VIOLATION)
+#      intent classifier refuses a claim-shaped note   (exit 84 AGENT_INTENT_CLASSIFIER_MISSING)
 #   4. pairing/session/pack/workshop/promote/delta/close: not yet implemented
 #      on any deployed surface                         (exit 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED)
 #
@@ -325,6 +326,14 @@ if [[ "${loop_push##*$'\n'}" != "201" ]]; then
   exit 79
 fi
 loop_workshop_id="$(printf '%s' "${loop_push%$'\n'*}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workshop_id",""))' 2>/dev/null)"
+
+# Stage: the intent classifier refuses a claim-shaped note with LOOKS_LIKE_CLAIM
+# (§7.6). A proposition-marked note without force_note must not bind as a note.
+loop_intent="$(smoke_loop POST "/v1/sessions/$loop_session_id/workshop" '{"type":"note","title":"smoke intent probe","body_md":"Therefore the smoke gate proves the classifier. We prove this note is claim-shaped.","relates_to":[]}' intent)" || loop_intent=""
+if [[ "${loop_intent##*$'\n'}" != "422" ]] || ! printf '%s' "${loop_intent%$'\n'*}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("code")=="LOOKS_LIKE_CLAIM" else 1)' 2>/dev/null; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_INTENT_CLASSIFIER_MISSING" "$reproduce"
+  exit 84
+fi
 
 # Stage: the validator refuses a falsifier-less conjecture with the P3 rule.
 loop_refused="$(smoke_loop POST "/v1/sessions/$loop_session_id/promote" "{\"workshop_id\":\"$loop_workshop_id\",\"kind\":\"conjecture\",\"statement\":\"A smoke claim without a falsifier.\",\"relates_to\":[]}" refuse-p3)" || loop_refused=""
