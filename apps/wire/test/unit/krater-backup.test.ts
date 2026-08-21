@@ -122,7 +122,7 @@ describe("the W2.8 backup export", () => {
   });
 
   test("the backup key is dated and content-addressed", async () => {
-    const key = backupKeyFor("2026-08-20", "P-4DSP", "sha256:" + "ab".repeat(32));
+    const key = backupKeyFor("2026-08-20", "P-4DSP", `sha256:${"ab".repeat(32)}`);
     expect(key).toMatch(/^backups\/2026-08-20\/P-4DSP\/[a-f0-9]{32}\.jsonl$/);
   });
 });

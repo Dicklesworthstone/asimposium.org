@@ -2430,8 +2430,7 @@ async function main(): Promise<void> {
     unopenedPush.response.status === 400 &&
       recordField(unopenedPush.body, "code") === "LOCAL_SESSION_REQUIRED" &&
       counterOpenedSession.response.status === 201 &&
-      counterSessionId !== undefined &&
-      counterSessionId.startsWith("S-") &&
+      counterSessionId?.startsWith("S-") === true &&
       counterPackBeforeBorrowedPush.response.status === 200 &&
       numberField(counterPackBeforeBorrowedPush.body, "own_workshop_count") === 0 &&
       numberField(counterPackBeforeBorrowedPush.body, "workshop_seq") === 0 &&

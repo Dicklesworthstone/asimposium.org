@@ -100,7 +100,9 @@ export function assessEvidenceClass(input: EvidenceInput): EvidenceAssessment {
 
 /** Exploratory evidence can never drive a promotion decision. */
 export function canDrivePromotion(
-  assessment: EvidenceAssessment,
+  // The assessment is part of the policy signature; the rule itself keys on
+  // the declared mode alone — exploratory evidence never drives promotion.
+  _assessment: EvidenceAssessment,
   mode: "exploratory" | "confirmatory",
 ): boolean {
   return mode === "confirmatory";

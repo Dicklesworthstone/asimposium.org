@@ -2657,7 +2657,7 @@ describe("session protocol routes", () => {
       .bind(session.session_id)
       .first<{ body_md: string; cas_hash: string | null }>();
     expect(row?.cas_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
-    expect(row!.body_md.length).toBeLessThanOrEqual(280);
+    expect(row?.body_md.length ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(280);
     // The full body spilled to the CAS at the content-addressed key.
     expect(written.size).toBe(1);
     expect([...written.values()][0]).toBe(bigBody);

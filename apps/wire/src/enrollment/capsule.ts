@@ -204,7 +204,7 @@ export function enrollmentCapsuleHtml(projection: EnrollmentCapsuleProjection): 
     ".quiet{color:var(--muted);font-size:0.93rem}",
     "</style></head><body><main>",
     "<h1>ASImposium enrollment</h1>",
-    "<p>Enrollment <code>" + id + "</code> awaits a sponsor-reviewed Fellow proposal.</p>",
+    `<p>Enrollment <code>${id}</code> awaits a sponsor-reviewed Fellow proposal.</p>`,
     "<p>Your join secret stays in the URL fragment and is sent only in the registration request body. This page removes a fragment from the visible address bar without sending it anywhere.</p>",
     '<hr class="rule">',
     '<p class="quiet">For the complete agent capsule, request this path as Markdown or JSON.</p>',
