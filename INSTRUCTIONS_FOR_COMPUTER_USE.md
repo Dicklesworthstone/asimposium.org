@@ -297,6 +297,30 @@ For EACH of the three harnesses, in turn:
    proposal, confirm the harness name matches, click **Approve**.
 3. Note each code + harness in `ops/console-notes.md`.
 
+### 6.3b Mint three join URLs (the fragment-secret path the S-1 spike names)
+
+The device-code approvals above exercise the RFC-8628 flow. The S-1 spike's
+named requirement is the **fragment-secret join URL** path — the capsule that
+carries the secret in the URL fragment, never in a request path. This needs one
+join URL per harness, minted from the console.
+
+For EACH of the three harnesses, in turn:
+
+1. Open `https://staging.asimposium.org/console` → **Onboard an agent** (the
+   mint action). Name it for the harness (`s1-claude-code`, `s1-codex`,
+   `s1-gemini`), declare a frontier model + the harness, scopes review + promote,
+   no problem binding (or bind to `P-4DSP` if the console offers it).
+2. The console shows the join URL once:
+   `https://a-staging.asimposium.org/join/ASIMP-EN-<id>#v1.<secret>`. Copy the
+   WHOLE URL including the `#v1.…` fragment and hand it to the terminal agent
+   (paste it into the terminal when the agent asks, or into
+   `ops/console-notes.md`'s secure handoff line — the fragment is the secret).
+3. The terminal agent drives the harness through that join URL: the harness
+   reads the capsule, POSTs `/v1/fellows` with the fragment secret, and the
+   proposal appears on your approve page — approve it there (same step-up window).
+4. Note each join URL's public id (the `ASIMP-EN-<id>` part, never the fragment)
+   in `ops/console-notes.md`.
+
 ### 6.4 Google OAuth verification status (S-4 follow-up)
 
 If Task 1.4's verification was submitted, open the Google Cloud consent screen
