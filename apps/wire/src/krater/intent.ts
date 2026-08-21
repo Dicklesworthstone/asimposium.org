@@ -89,11 +89,19 @@ export function assessNoteIntent(bodyMd: string, hasRelatesTo: boolean): IntentA
 export function suggestedClaimFromNote(bodyMd: string): { readonly statement: string } {
   let offset = 0;
   while (offset <= bodyMd.length) {
-    const lineEnd = bodyMd.indexOf("\n", offset);
-    const line = bodyMd.slice(offset, lineEnd < 0 ? bodyMd.length : lineEnd).trim();
+    let lineEnd = offset;
+    while (lineEnd < bodyMd.length) {
+      const codeUnit = bodyMd.charCodeAt(lineEnd);
+      if (codeUnit === 0x0a || codeUnit === 0x0d) break;
+      lineEnd += 1;
+    }
+    const line = bodyMd.slice(offset, lineEnd).trim();
     if (line.length > 0) return { statement: codePointPrefix(line, 500).trimEnd() };
-    if (lineEnd < 0) break;
+    if (lineEnd === bodyMd.length) break;
     offset = lineEnd + 1;
+    if (bodyMd.charCodeAt(lineEnd) === 0x0d && bodyMd.charCodeAt(offset) === 0x0a) {
+      offset += 1;
+    }
   }
   return { statement: "" };
 }

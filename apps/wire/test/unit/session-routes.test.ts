@@ -2628,21 +2628,30 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
     });
     const session = (await opened.json()) as { session_id: string };
+    const claimShapedNote = "\r  \rTherefore the invariant holds.\rA later derivation follows.";
 
     // A claim-shaped note (proposition markers) without force_note is refused.
+    // Bare CR is a legal Markdown line ending; the suggested statement must
+    // stop at its first nonblank line rather than absorb later author text.
     const refused = await call(`/v1/sessions/${session.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "intent-note" },
       body: JSON.stringify({
         type: "note",
         title: "A disguised claim",
-        body_md: "Therefore the invariant holds. We prove it below.",
+        body_md: claimShapedNote,
         relates_to: [],
       }),
     });
     expect(refused.status).toBe(422);
-    const refusedBody = (await refused.json()) as { code?: string };
+    const refusedBody = (await refused.json()) as {
+      code?: string;
+      suggested_claim?: { statement?: string };
+    };
     expect(refusedBody.code).toBe("LOOKS_LIKE_CLAIM");
+    expect(refusedBody.suggested_claim).toEqual({
+      statement: "Therefore the invariant holds.",
+    });
 
     // The recorded escape hatch: force_note admits the same body as a note.
     const forced = await call(`/v1/sessions/${session.session_id}/workshop`, {
@@ -2651,7 +2660,7 @@ describe("session protocol routes", () => {
       body: JSON.stringify({
         type: "note",
         title: "A disguised claim",
-        body_md: "Therefore the invariant holds. We prove it below.",
+        body_md: claimShapedNote,
         relates_to: [],
         force_note: true,
       }),

@@ -98,15 +98,21 @@ describe("the §7.6 intent classifier", () => {
     expect(assessNoteIntent(long, true).looksLikeClaim).toBe(false);
   });
 
-  test("the suggested claim prefills the statement from the first line", () => {
-    const note = "\n  \nThe map factors through the quotient.\n\nA longer derivation follows.";
-    expect(suggestedClaimFromNote(note).statement).toBe("The map factors through the quotient.");
+  test("the suggested claim prefills the first nonblank line for every Markdown line ending", () => {
+    for (const lineEnding of ["\n", "\r\n", "\r"] as const) {
+      const note = ["", "  ", "The map factors through the quotient.", "", "Later line."].join(
+        lineEnding,
+      );
+      const statement = suggestedClaimFromNote(note).statement;
+      expect(statement, JSON.stringify(lineEnding)).toBe("The map factors through the quotient.");
+      expect(statement, JSON.stringify(lineEnding)).not.toMatch(/[\r\n]/);
+    }
   });
 
-  // The walk uses `indexOf`/`slice` per line rather than splitting the body,
-  // so no full-body line-array is allocated. That is the whole of the claim:
-  // a single-line body with no newline still slices and trims the body itself,
-  // so this is not zero string allocation and is not asserted to be.
+  // The walk scans code units and slices only the selected line rather than
+  // splitting the body, so no full-body line-array is allocated. That is the
+  // whole of the claim: a single-line body still slices and trims the body
+  // itself, so this is not zero string allocation and is not asserted to be.
   test("the suggested statement preserves a valid surrogate pair at the code-point prefix", () => {
     const statement = suggestedClaimFromNote(`${"a".repeat(499)}🙂discarded`).statement;
     expect(Array.from(statement)).toHaveLength(500);
@@ -139,6 +145,7 @@ describe("the §7.6 intent classifier", () => {
   test("an empty or all-blank note has no suggested statement", () => {
     expect(suggestedClaimFromNote("")).toEqual({ statement: "" });
     expect(suggestedClaimFromNote("\n\n  \n")).toEqual({ statement: "" });
+    expect(suggestedClaimFromNote("\r\n\r\r  \r\n")).toEqual({ statement: "" });
   });
 
   test("the classifier is pure — same text, same verdict", () => {
