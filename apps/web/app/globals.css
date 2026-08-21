@@ -628,12 +628,16 @@
 .console .auth-step-up {
   border-left: 3px solid var(--color-clay);
   background: var(--color-card);
-  background: color-mix(in srgb, var(--color-clay) 7%, var(--color-card));
   padding: 0.9rem 1.1rem;
   margin: 0.9rem 0 1.1rem;
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
+}
+@supports (background: color-mix(in srgb, red, blue)) {
+  .console .auth-step-up {
+    background: color-mix(in srgb, var(--color-clay) 7%, var(--color-card));
+  }
 }
 .console .auth-step-up p {
   margin: 0;

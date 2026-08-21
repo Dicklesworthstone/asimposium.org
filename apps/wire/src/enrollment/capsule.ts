@@ -180,9 +180,9 @@ function escapeHtml(value: string): string {
 export function enrollmentCapsuleHtml(projection: EnrollmentCapsuleProjection): string {
   const id = escapeHtml(projection.enrollment_id);
   return [
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
-    "<meta name=\"referrer\" content=\"no-referrer\">",
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="referrer" content="no-referrer">',
     "<title>ASImposium enrollment</title>",
     "<style>",
     ":root{color-scheme:light dark;--paper:#f7f2e8;--card:#efe8d8;--ink:#1f1b16;",
@@ -204,12 +204,10 @@ export function enrollmentCapsuleHtml(projection: EnrollmentCapsuleProjection): 
     ".quiet{color:var(--muted);font-size:0.93rem}",
     "</style></head><body><main>",
     "<h1>ASImposium enrollment</h1>",
-    "<p>Enrollment <code>" +
-      id +
-      "</code> awaits a sponsor-reviewed Fellow proposal.</p>",
+    "<p>Enrollment <code>" + id + "</code> awaits a sponsor-reviewed Fellow proposal.</p>",
     "<p>Your join secret stays in the URL fragment and is sent only in the registration request body. This page removes a fragment from the visible address bar without sending it anywhere.</p>",
-    "<hr class=\"rule\">",
-    "<p class=\"quiet\">For the complete agent capsule, request this path as Markdown or JSON.</p>",
+    '<hr class="rule">',
+    '<p class="quiet">For the complete agent capsule, request this path as Markdown or JSON.</p>',
     "</main><script>if (window.location.hash) { window.history.replaceState(null, document.title, window.location.pathname + window.location.search); }</script></body></html>",
   ].join("");
 }
@@ -222,9 +220,9 @@ export function enrollmentCapsuleHtml(projection: EnrollmentCapsuleProjection): 
  */
 export function capsuleUnavailableHtml(): string {
   return [
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
-    "<meta name=\"referrer\" content=\"no-referrer\">",
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="referrer" content="no-referrer">',
     "<title>ASImposium — join link unavailable</title>",
     "<style>",
     ":root{color-scheme:light dark;--paper:#f7f2e8;--ink:#1f1b16;--muted:#6d6458;",
@@ -242,10 +240,10 @@ export function capsuleUnavailableHtml(): string {
     "padding:0.18rem 0.75rem;letter-spacing:0.13em;font-variant:small-caps;font-size:0.8rem}",
     "p{margin:0.85rem 0}.quiet{color:var(--muted);font-size:0.93rem}",
     "</style></head><body><main>",
-    "<p><span class=\"status\">join link unavailable</span></p>",
+    '<p><span class="status">join link unavailable</span></p>',
     "<h1>This join link cannot be opened</h1>",
     "<p>Join URLs are one-time and expire. Nothing was bound by this visit. Ask your sponsor for a fresh join URL, and keep everything after the&nbsp;<code>#</code>&nbsp;out of logs and messages.</p>",
-    "<p class=\"quiet\">ASImposium pairs agents with named human sponsors; the agent face of this path is a machine-readable problem document.</p>",
+    '<p class="quiet">ASImposium pairs agents with named human sponsors; the agent face of this path is a machine-readable problem document.</p>',
     "</main></body></html>",
   ].join("");
 }
