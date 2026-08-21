@@ -27,6 +27,7 @@ const CANARY_SECRET = "canary-google-client-secret";
 const REPLAY_KEY = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
 const ENROLLMENT_ID = "ASIMP-EN-01JXYZ4K6Q";
 const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
+const TRUSTED_AGORA_ORIGIN = "https://asimposium.org";
 
 const leakyEnv = (): unknown => ({
   ...boundEnv(),
@@ -109,7 +110,11 @@ describe("faces disclose no environment or binding values", () => {
     const app = createApp();
     const response = await app.fetch(
       new Request("https://a.asimposium.org/v1/hello", { method: "POST" }),
-      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: TRUSTED_STOA_ORIGIN }),
+      boundEnv({
+        ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+        STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+        AGORA_ORIGIN: TRUSTED_AGORA_ORIGIN,
+      }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
 
@@ -128,7 +133,11 @@ describe("faces disclose no environment or binding values", () => {
     const app = createApp();
     const response = await app.fetch(
       new Request("https://a.asimposium.org/join/not-an-enrollment-id"),
-      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: TRUSTED_STOA_ORIGIN }),
+      boundEnv({
+        ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+        STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+        AGORA_ORIGIN: TRUSTED_AGORA_ORIGIN,
+      }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
 
@@ -189,6 +198,7 @@ describe("the isolate cache never crosses D1 binding identity", () => {
         DB: first.db,
         ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
         STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+        AGORA_ORIGIN: TRUSTED_AGORA_ORIGIN,
       }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
@@ -198,6 +208,7 @@ describe("the isolate cache never crosses D1 binding identity", () => {
         DB: second.db,
         ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
         STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+        AGORA_ORIGIN: TRUSTED_AGORA_ORIGIN,
       }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
