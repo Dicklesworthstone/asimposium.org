@@ -430,7 +430,7 @@ describe("the pack viewer is audience-discriminated and refused when dishonest (
     // dishonest public viewer — audience public with a contributor membership
     // and an empty permission set — must not be assignable to a Projection
     // viewer. If ProjectionViewer ever regresses to a flat shape, the
-    // @ts-expect-error below becomes an unused directive and `bun run typecheck`
+    // suppression directive below becomes unused and `bun run typecheck` reds.
     // reds. The runtime casts/plants above prove the runtime gate; this proves
     // the type gate. Type-only intent — the value is never composed.
     const dishonestPublicViewer: Projection["viewer"] =

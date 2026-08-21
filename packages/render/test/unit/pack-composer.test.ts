@@ -247,16 +247,15 @@ describe("stable-prefix composition", () => {
     const projection = composedPackToProjection(
       composePack(input({ requested_max_tokens: 4_000 })),
     );
-    const viewer = projection.viewer;
-    if (viewer === undefined) {
-      throw new Error("the authenticated pack fixture must retain its viewer");
-    }
     expect(
       errorCode(() =>
         prepareProjection({
           ...projection,
+          // A session viewer may carry permissions; the ONLY defect here is the
+          // lone-surrogate permission value, which the runtime gate must refuse.
           viewer: {
-            ...viewer,
+            audience: "session",
+            membership: "contributor",
             effective_permissions: ["review\ud800"],
           },
         }),

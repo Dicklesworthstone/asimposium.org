@@ -25,6 +25,7 @@ import {
   type NextAction,
   type OmittedEntry,
   type Projection,
+  type ProjectionViewer,
 } from "./types.ts";
 
 /** The only cacheable token buckets from Fable §7.3. */
@@ -512,7 +513,24 @@ function packProjection(pack: PackContents, tokensEstimate: number): Projection 
     omitted: pack.omitted,
     next_actions: pack.next_actions,
     degraded: pack.degraded,
-    viewer: pack.viewer,
+    viewer: toProjectionViewer(pack.viewer),
+  };
+}
+
+/**
+ * Map the composer's loose PackViewer to the projection's strict discriminated
+ * union: a public pack claims no membership and no permissions (a public face
+ * has no authenticated principal), while a session pack passes its membership
+ * and effective permissions through unchanged.
+ */
+function toProjectionViewer(viewer: PackViewer): ProjectionViewer {
+  if (viewer.audience === "public") {
+    return { audience: "public", membership: "none", effective_permissions: [] };
+  }
+  return {
+    audience: "session",
+    membership: viewer.membership,
+    effective_permissions: viewer.effective_permissions,
   };
 }
 
