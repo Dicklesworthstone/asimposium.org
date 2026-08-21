@@ -689,7 +689,11 @@ export interface WorkshopBodyStorage {
 
 /** The minimal R2 write surface the spill needs. */
 export interface CasWriter {
-  put(key: string, body: string, options?: { readonly httpMetadata?: { readonly contentType?: string } }): Promise<unknown>;
+  put(
+    key: string,
+    body: string,
+    options?: { readonly httpMetadata?: { readonly contentType?: string } },
+  ): Promise<unknown>;
 }
 
 /**
@@ -709,7 +713,9 @@ export async function storeWorkshopBody(
   const casHash = `sha256:${digest}`;
   // The P7 wall: never CAS a secret-shaped body.
   if (bodyLooksSecretShaped(bodyMd)) {
-    throw new Error("ARTIFACT_SECRET_SHAPED: a workshop body carrying a credential-shaped string is refused before it binds");
+    throw new Error(
+      "ARTIFACT_SECRET_SHAPED: a workshop body carrying a credential-shaped string is refused before it binds",
+    );
   }
   await bucket.put(casKeyForHash(digest), bodyMd, {
     httpMetadata: { contentType: "text/markdown" },

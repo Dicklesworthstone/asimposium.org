@@ -1809,6 +1809,23 @@ describe("the self-test and the blocked external proof", () => {
     expect(source).not.toContain("SECONDS + TRANSIENT_INSPECTION_DEADLINE_SECONDS");
   });
 
+  test("S1: lifecycle barriers persist before publication and identity survives the launcher exec", () => {
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    const logPhase = source.slice(source.indexOf("log_phase()"), source.indexOf("blocked()"));
+    const retainedWrite = logPhase.indexOf('printf \'%s\\n\' "$line" >>"$PHASE_LOG"');
+    const stderrWrite = logPhase.indexOf("printf '%s\\n' \"$line\" >&2");
+    expect(retainedWrite).toBeGreaterThanOrEqual(0);
+    expect(stderrWrite).toBeGreaterThan(retainedWrite);
+
+    const processIdentity = source.slice(
+      source.indexOf("process_identity()"),
+      source.indexOf("supervisor_argv_excludes()"),
+    );
+    expect(processIdentity).toContain("-o pgid=,lstart=");
+    expect(processIdentity).not.toContain("pgid=,lstart=,comm=");
+    expect(processIdentity).toContain('[[ "$argv" == *"$marker"* ]]');
+  });
+
   test("S1: the bearer header is sourced from curl stdin configuration, not curl argv", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
     const curlBody = source.slice(
