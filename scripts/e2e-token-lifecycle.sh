@@ -64,6 +64,11 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0020_session_replay_atomic_claim.sql"
   "0021_problem_scoped_claim_identity.sql"
   "0022_workshop_cas_spill.sql"
+  "0023_claim_versions_deps.sql"
+  "0024_reviews.sql"
+  "0025_hypotheses.sql"
+  "0026_evidence.sql"
+  "0027_w58_remaining_objects.sql"
 )
 
 STATE_DIR=""
@@ -455,42 +460,29 @@ require_remaining() {
 source_closure_manifest() {
   # shellcheck disable=SC2016
   TOKEN_LIFECYCLE_CLOSURE_ROOT="${ROOT}" \
+    TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS="${EXPECTED_MIGRATIONS[*]}" \
     "${BUN}" --eval '
       import { existsSync, readdirSync, readFileSync } from "node:fs";
       import { dirname, extname, relative, resolve } from "node:path";
 
       const root = process.env.TOKEN_LIFECYCLE_CLOSURE_ROOT;
       if (root === undefined) throw new Error("closure root unavailable");
-      const migrations = [
-        "0001_krater_v0.sql",
-        "0002_enrollment_g0.sql",
-        "0003_auth_nonce_replay.sql",
-        "0004_krater_integrity_v1.sql",
-        "0005_krater_undigested_index.sql",
-        "0006_fellow_credential_lifecycle.sql",
-        "0007_outbox_quarantine_state.sql",
-        "0008_sponsors_bootstrap.sql",
-        "0009_device_flow.sql",
-        "0010_device_flow_hardening.sql",
-        "0011_fellow_credential_hardening.sql",
-        "0012_fellow_lifecycle_commands.sql",
-        "0013_sponsor_fellow_cap.sql",
-        "0014_sponsor_enrollment_rate_limit.sql",
-        "0015_sponsor_enrollment_bootstrap_invariant.sql",
-        "0016_operator_fellow_cap_override.sql",
-        "0017_sessions_workshop_cursor.sql",
-        "0018_session_write_replays.sql",
-        "0019_problem_memberships.sql",
-        "0020_session_replay_atomic_claim.sql",
-        "0021_problem_scoped_claim_identity.sql",
-        "0022_workshop_cas_spill.sql",
-      ];
+      const expectedMigrationRecord = process.env.TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS;
+      if (expectedMigrationRecord === undefined) throw new Error("migration closure unavailable");
+      const migrations = expectedMigrationRecord.split(" ");
+      if (
+        migrations.length === 0 ||
+        migrations.some((name) => !/^\d{4}_[a-z0-9_]+\.sql$/.test(name)) ||
+        new Set(migrations).size !== migrations.length
+      ) {
+        throw new Error("migration closure invalid");
+      }
       const migrationDirectory = resolve(root, "db/migrations");
       const discovered = readdirSync(migrationDirectory)
         .filter((name) => /^\d{4}_.+\.sql$/.test(name))
         .sort();
       if (JSON.stringify(discovered) !== JSON.stringify(migrations)) {
-        throw new Error("migration closure is not exactly 0001 through 0022");
+        throw new Error("migration closure does not match the expected journal");
       }
       const extensions = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".json"];
       const fileFor = (candidate) => {
