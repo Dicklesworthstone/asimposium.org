@@ -2620,6 +2620,49 @@ describe("session protocol routes", () => {
     expect(body).toContain("1 of 2");
   });
 
+  test("a workshop body over 1 KB spills to the CAS with an extract + hash in the row (W2.7)", async () => {
+    const { call, db, env } = await fixture();
+    // A fake CAS bucket captures the spilled bytes.
+    const written = new Map<string, string>();
+    env.ARTIFACTS = {
+      put: async (key: string, body: string) => {
+        written.set(key, body);
+        return {};
+      },
+      get: async () => null,
+    } as never;
+
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "spill-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    const bigBody = "A large derivation. ".repeat(200); // ~3600 bytes, over the 1 KB threshold
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "spill-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "A long derivation",
+        body_md: bigBody,
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+
+    // The row carries the extract + the CAS hash; the bytes are in the bucket.
+    const row = await db
+      .prepare("SELECT body_md, cas_hash FROM workshop_objects WHERE session_id = ?")
+      .bind(session.session_id)
+      .first<{ body_md: string; cas_hash: string | null }>();
+    expect(row?.cas_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(row!.body_md.length).toBeLessThanOrEqual(280);
+    // The full body spilled to the CAS at the content-addressed key.
+    expect(written.size).toBe(1);
+    expect([...written.values()][0]).toBe(bigBody);
+  });
+
   test("the §7.6 intent classifier refuses a claim-shaped note, and force_note is the recorded escape", async () => {
     const { call } = await fixture();
     const opened = await call("/v1/sessions", {

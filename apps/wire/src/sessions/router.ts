@@ -32,6 +32,7 @@ import type {
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
+import { storeWorkshopBody } from "../krater/cas";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   KraterIdempotencyConflictError,
@@ -1300,6 +1301,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
+    // W2.7: a body over the CAS spill threshold lives in the CAS; the row
+    // carries the 280-char extract + the content hash. The CAS write completes
+    // before the D1 commit so the transaction references durable bytes.
+    const bodyStorage = await storeWorkshopBody(c.env.ARTIFACTS, parsed.data.body_md, {
+      sha256Hex: sha256Text,
+    });
     try {
       const result = await replayOrCommit(
         db,
@@ -1367,8 +1374,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 .prepare(
                   `INSERT INTO workshop_objects
                      (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title,
-                      body_md, relates_to_json, force_note, created_at)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                      body_md, cas_hash, relates_to_json, force_note, created_at)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                    FROM session_write_replays
                    WHERE scope = 'workshop_push' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -1381,7 +1388,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   workshopSequence,
                   parsed.data.type,
                   parsed.data.title,
-                  parsed.data.body_md,
+                  bodyStorage.bodyMd,
+                  bodyStorage.casHash,
                   JSON.stringify(parsed.data.relates_to),
                   parsed.data.force_note === true ? 1 : 0,
                   createdAt,

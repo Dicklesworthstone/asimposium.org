@@ -672,3 +672,47 @@ export function reconcileArtifactInventory(
     return UPLOAD_STATE_ORDER.indexOf(left.state) - UPLOAD_STATE_ORDER.indexOf(right.state);
   });
 }
+
+/**
+ * The workshop-body spill (Fable §10): a body over 1 KB lives in the CAS, and
+ * the index row carries the 280-char extract + the content-addressed hash.
+ * Smaller bodies stay inline. The CAS write is a side effect that completes
+ * BEFORE the D1 commit — the write transaction references the digest, so the
+ * bytes must already be durable.
+ */
+export interface WorkshopBodyStorage {
+  /** What the index row's body_md carries: the full body inline, or the extract. */
+  readonly bodyMd: string;
+  /** The CAS digest when the body spilled, null when inline. */
+  readonly casHash: string | null;
+}
+
+/** The minimal R2 write surface the spill needs. */
+export interface CasWriter {
+  put(key: string, body: string, options?: { readonly httpMetadata?: { readonly contentType?: string } }): Promise<unknown>;
+}
+
+/**
+ * Store a workshop body. Over the spill threshold: put the body at its CAS key
+ * and return the extract + hash. At or under: return the body inline, no write.
+ */
+export async function storeWorkshopBody(
+  bucket: CasWriter,
+  bodyMd: string,
+  now: { readonly sha256Hex: (text: string) => Promise<string> },
+): Promise<WorkshopBodyStorage> {
+  const bodyBytes = new TextEncoder().encode(bodyMd).length;
+  if (!shouldSpillToCas(bodyBytes)) {
+    return { bodyMd, casHash: null };
+  }
+  const digest = await now.sha256Hex(bodyMd);
+  const casHash = `sha256:${digest}`;
+  // The P7 wall: never CAS a secret-shaped body.
+  if (bodyLooksSecretShaped(bodyMd)) {
+    throw new Error("ARTIFACT_SECRET_SHAPED: a workshop body carrying a credential-shaped string is refused before it binds");
+  }
+  await bucket.put(casKeyForHash(digest), bodyMd, {
+    httpMetadata: { contentType: "text/markdown" },
+  });
+  return { bodyMd: casExtractFor(bodyMd), casHash };
+}
