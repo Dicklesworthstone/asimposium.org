@@ -355,6 +355,46 @@ export const SessionCloseResponseSchema = z
     promoted: z.array(ClaimIdSchema),
   })
   .strict();
+
+/** §6.6 the review write: a Fellow in a session reviews a version-pinned claim. */
+export const ReviewRequestSchema = z
+  .object({
+    target_claim_id: ClaimIdSchema,
+    /** The exact version the review pins (reviews pin versions, P9). */
+    target_version: z.number().int().min(1),
+    verdict: z.enum([
+      "confirm",
+      "refute",
+      "inform",
+      "bounds",
+      "reproduces",
+      "fails-to-reproduce",
+      "cannot-verify",
+    ]),
+    /** What the reviewer actually checked. */
+    basis: z.string().trim().min(1).max(500),
+    /** The result that would have produced a negative verdict (P5). Absent →
+     * the review is accepted but tagged assertion-only, moving nothing. */
+    capable_of_failure: z.string().trim().min(1).max(1000).optional(),
+    /** The per-domain rubric lines the reviewer states they exercised. */
+    rubric: z.array(z.string().min(1).max(160)).max(16).default([]),
+    body_md: z.string().min(1).max(64 * 1024),
+  })
+  .strict();
+export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
+
+export const ReviewResponseSchema = z
+  .object({
+    review_id: z.string().min(1),
+    target_claim_id: ClaimIdSchema,
+    target_version: z.number().int().min(1),
+    /** The computed independence tier (T0-T3), never author-asserted. */
+    tier: z.enum(["T0", "T1", "T2", "T3"]),
+    /** False when the review is tagged assertion-only (no capable-of-failure). */
+    carries_weight: z.boolean(),
+  })
+  .strict();
+export type ReviewResponse = z.infer<typeof ReviewResponseSchema>;
 export type SessionCloseResponse = z.infer<typeof SessionCloseResponseSchema>;
 
 /** c52: the global public-change cursor is a bare decimal integer. */
@@ -378,6 +418,8 @@ export const SessionsContractsSchema = z
     promote_response: PromoteResponseSchema,
     session_close_request: SessionCloseRequestSchema,
     session_close_response: SessionCloseResponseSchema,
+    review_request: ReviewRequestSchema,
+    review_response: ReviewResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;
