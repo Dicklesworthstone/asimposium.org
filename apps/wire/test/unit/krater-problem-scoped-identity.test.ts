@@ -159,10 +159,7 @@ const DIGEST_B = "bb".repeat(32);
 function insertProblem(db: Database, id: string, digest: string): void {
   db.run(
     "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES (?, 1, ?, ?, ?)",
-    id,
-    NOW,
-    NOW,
-    digest,
+    [id, NOW, NOW, digest],
   );
 }
 
@@ -176,12 +173,7 @@ function insertClaim(
 ): void {
   db.run(
     "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    id,
-    problemId,
-    statement,
-    payloadSha256,
-    sourceSeq,
-    NOW,
+    [id, problemId, statement, payloadSha256, sourceSeq, NOW],
   );
 }
 
@@ -194,11 +186,7 @@ function insertProjection(
 ): void {
   db.run(
     "INSERT INTO claim_projections (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at) VALUES (?, ?, ?, 1, ?, 0, ?)",
-    claimId,
-    problemId,
-    sourceSeq,
-    buildDigest,
-    NOW,
+    [claimId, problemId, sourceSeq, buildDigest, NOW],
   );
 }
 
@@ -382,5 +370,25 @@ describe("the problem-scoped claim identity cutover (asimposiumorg-yxmo)", () =>
     );
     applyAtomically(legacyWorld, CUTOVER);
     insertClaim(legacyWorld, "P-BETA", "C-1", "beta's own first claim", DIGEST_B, 1);
+  });
+  // asimposiumorg-s5mx: the two application seams must disagree on exactly
+  // this scenario, so the footgun stays documented by an executable proof
+  // instead of a comment.
+  test("bun:sqlite bulk exec silently skips a refused mid-file statement and disarms the seam", () => {
+    insertProblem(legacyWorld, "P-ALPHA", DIGEST_A);
+    insertClaim(legacyWorld, "P-ALPHA", "C-1", "doomed rebuild source", DIGEST_A, 1);
+    insertProjection(legacyWorld, "C-1", "P-ALPHA", 2, DIGEST_B);
+
+    // The bulk seam: bun:sqlite executes the whole file and swallows the
+    // mid-file refusal. Statements after it still apply, so the database is
+    // left half-migrated and committed - the data-loss footgun itself.
+    expect(() => legacyWorld.exec(readFileSync(join(MIGRATIONS, CUTOVER), "utf8"))).not.toThrow();
+    expect(primaryKeyColumns(legacyWorld, "claims")).toEqual(["problem_id", "id"]);
+    expect(projectionRows(legacyWorld)).toEqual([]);
+
+    // Sharper still: the bulk seam already dropped the offending row, so the
+    // statement-wise seam now sees no contamination at all - the refusal that
+    // protects this cutover has been silently disarmed.
+    expect(() => applyAtomically(legacyWorld, CUTOVER)).not.toThrow();
   });
 });
