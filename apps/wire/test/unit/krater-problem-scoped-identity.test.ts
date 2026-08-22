@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -30,28 +30,124 @@ function openDb(): Database {
   return db;
 }
 
-/** A database at the exact pre-cutover shape: the global-identity nucleus. */
-function legacyDb(): Database {
-  const db = openDb();
-  for (const file of BEFORE_CUTOVER) db.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  return db;
+/**
+ * Split a migration file into complete statements. A bare ";" split is wrong
+ * for this corpus: trigger bodies contain semicolons, including nested
+ * `CASE ... END;` inside `BEGIN ... END;` and single-line triggers. This is
+ * the sqlite3_complete() rule specialized to these files: quoted strings and
+ * comments never terminate; elsewhere a ";" ends a statement unless an open
+ * CREATE TRIGGER body has not reached its closing END (CASE nests inside the
+ * body and consumes its own ENDs).
+ */
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let statement = "";
+  let token = "";
+  let priorToken = "";
+  let caseDepth = 0;
+  let inTrigger = false;
+  let triggerBodyClosed = false;
+  let index = 0;
+
+  const finishToken = (): void => {
+    if (token.length === 0) return;
+    const upper = token.toUpperCase();
+    if (priorToken === "CREATE" && upper === "TRIGGER") inTrigger = true;
+    else if (upper === "CASE") caseDepth += 1;
+    else if (upper === "END" && inTrigger) {
+      if (caseDepth > 0) caseDepth -= 1;
+      else triggerBodyClosed = true;
+    }
+    priorToken = upper;
+    token = "";
+  };
+
+  while (index < sql.length) {
+    const ch = sql[index] as string;
+    if (/[A-Za-z0-9_]/.test(ch)) {
+      token += ch;
+      statement += ch;
+      index += 1;
+      continue;
+    }
+    finishToken();
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      statement += ch;
+      index += 1;
+      while (index < sql.length) {
+        const inner = sql[index] as string;
+        statement += inner;
+        if (inner === quote) {
+          if (sql[index + 1] === quote) {
+            statement += sql[index + 1] as string;
+            index += 2;
+            continue;
+          }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (ch === "-" && sql[index + 1] === "-") {
+      while (index < sql.length && sql[index] !== "\n") index += 1;
+      continue;
+    }
+    if (ch === "/" && sql[index + 1] === "*") {
+      index += 2;
+      while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) index += 1;
+      index += 2;
+      continue;
+    }
+    if (ch === ";" && (!inTrigger || triggerBodyClosed)) {
+      const trimmed = statement.trim();
+      if (trimmed.length > 0) statements.push(trimmed);
+      statement = "";
+      inTrigger = false;
+      triggerBodyClosed = false;
+      caseDepth = 0;
+      priorToken = "";
+      index += 1;
+      continue;
+    }
+    statement += ch;
+    index += 1;
+  }
+  finishToken();
+  const rest = statement.trim();
+  if (rest.length > 0) statements.push(rest);
+  return statements;
 }
 
-/** A database at the fully migrated (current) shape. */
-function migratedDb(): Database {
-  const db = openDb();
-  for (const file of MIGRATION_FILES) db.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  return db;
+/**
+ * Apply one migration file statement by statement. D1 prepares and steps each
+ * statement and aborts the applying transaction on the first refusal; the seam
+ * below matches that. bun:sqlite's bulk db.run(file) must never be used here:
+ * it silently skips a statement that fails mid-file (observed with an
+ * FK-violating INSERT..SELECT during 0021), which would hide exactly the
+ * contamination refusal this cutover promises.
+ */
+function applyMigrationStatements(db: Database, file: string): void {
+  for (const statement of splitSqlStatements(readFileSync(join(MIGRATIONS, file), "utf8"))) {
+    db.run(statement);
+  }
 }
 
-/** Apply one forward migration the way D1 does: alone, inside a transaction. */
-function applyForward(db: Database, file: string): void {
-  db.run("BEGIN IMMEDIATE;");
+let savepointSeq = 0;
+
+/** Apply one forward migration atomically, composable inside an outer transaction. */
+function applyAtomically(db: Database, file: string): void {
+  savepointSeq += 1;
+  const savepoint = `yxmo_${savepointSeq}`;
+  db.run(`SAVEPOINT ${savepoint};`);
   try {
-    db.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-    db.run("COMMIT;");
+    applyMigrationStatements(db, file);
+    db.run(`RELEASE ${savepoint};`);
   } catch (error) {
-    db.run("ROLLBACK;");
+    db.run(`ROLLBACK TO ${savepoint};`);
+    db.run(`RELEASE ${savepoint};`);
     throw error;
   }
 }
@@ -164,93 +260,127 @@ function primaryKeyColumns(db: Database, table: string): string[] {
     .map((column) => column.name);
 }
 
+// The full 28-migration schema costs seconds to build, so both worlds are
+// constructed once and every test runs inside a savepoint that is rolled back
+// afterwards. SQLite DDL is transactional, which makes even the 0021 cutover
+// itself cleanly reversible between tests.
+let legacyWorld: Database;
+let currentWorld: Database;
+
+beforeAll(() => {
+  legacyWorld = openDb();
+  for (const file of BEFORE_CUTOVER) applyMigrationStatements(legacyWorld, file);
+  currentWorld = openDb();
+  for (const file of MIGRATION_FILES) applyMigrationStatements(currentWorld, file);
+}, 120_000);
+
+afterAll(() => {
+  legacyWorld.close();
+  currentWorld.close();
+});
+
+beforeEach(() => {
+  legacyWorld.run("SAVEPOINT test_case;");
+  currentWorld.run("SAVEPOINT test_case;");
+});
+
+afterEach(() => {
+  for (const world of [legacyWorld, currentWorld]) {
+    world.run("ROLLBACK TO test_case;");
+    world.run("RELEASE test_case;");
+  }
+});
+
 describe("the problem-scoped claim identity cutover (asimposiumorg-yxmo)", () => {
   test("the migrated schema keys claims by (problem_id, id)", () => {
-    const db = migratedDb();
-    expect(primaryKeyColumns(db, "claims")).toEqual(["problem_id", "id"]);
-    expect(primaryKeyColumns(db, "claim_projections")).toEqual(["problem_id", "claim_id"]);
+    expect(primaryKeyColumns(currentWorld, "claims")).toEqual(["problem_id", "id"]);
+    expect(primaryKeyColumns(currentWorld, "claim_projections")).toEqual([
+      "problem_id",
+      "claim_id",
+    ]);
   });
 
   test("two problems each hold their own C-1 and cannot alias", () => {
-    const db = migratedDb();
-    insertProblem(db, "P-ALPHA", DIGEST_A);
-    insertProblem(db, "P-BETA", DIGEST_B);
-    insertClaim(db, "P-ALPHA", "C-1", "alpha's first claim", DIGEST_A, 1);
-    insertClaim(db, "P-BETA", "C-1", "beta's first claim", DIGEST_B, 1);
+    insertProblem(currentWorld, "P-ALPHA", DIGEST_A);
+    insertProblem(currentWorld, "P-BETA", DIGEST_B);
+    insertClaim(currentWorld, "P-ALPHA", "C-1", "alpha's first claim", DIGEST_A, 1);
+    insertClaim(currentWorld, "P-BETA", "C-1", "beta's first claim", DIGEST_B, 1);
 
     // Within one problem the identifier stays unique.
     expect(() =>
-      insertClaim(db, "P-ALPHA", "C-1", "duplicate on the same problem", DIGEST_A, 2),
+      insertClaim(currentWorld, "P-ALPHA", "C-1", "duplicate on the same problem", DIGEST_A, 2),
     ).toThrow();
 
     // A lookup scoped to one problem resolves only that problem's row...
-    const beta = db
+    const beta = currentWorld
       .prepare("SELECT statement FROM claims WHERE id = ? AND problem_id = ?")
       .get("C-1", "P-BETA") as StatementRow | null;
     expect(beta?.statement).toBe("beta's first claim");
     // ...while the bare identifier now names two distinct identities.
-    const unscoped = db
+    const unscoped = currentWorld
       .prepare("SELECT COUNT(*) AS count FROM claims WHERE id = ?")
       .get("C-1") as CountRow;
     expect(unscoped.count).toBe(2);
 
     // Each problem's board reads only its own claim (ledger-face shape).
-    const alphaBoard = db
+    const alphaBoard = currentWorld
       .prepare("SELECT statement FROM claims WHERE problem_id = ? ORDER BY source_seq ASC")
       .all("P-ALPHA") as StatementRow[];
     expect(alphaBoard.map((row) => row.statement)).toEqual(["alpha's first claim"]);
   });
 
   test("the cutover preserves every retained row exactly and keeps them readable", () => {
-    const db = legacyDb();
-    insertProblem(db, "P-ALPHA", DIGEST_A);
-    insertProblem(db, "P-BETA", DIGEST_B);
-    insertClaim(db, "P-ALPHA", "C-1", "retained claim", DIGEST_A, 1);
-    insertProjection(db, "C-1", "P-ALPHA", 1, DIGEST_B);
+    insertProblem(legacyWorld, "P-ALPHA", DIGEST_A);
+    insertProblem(legacyWorld, "P-BETA", DIGEST_B);
+    insertClaim(legacyWorld, "P-ALPHA", "C-1", "retained claim", DIGEST_A, 1);
+    insertProjection(legacyWorld, "C-1", "P-ALPHA", 1, DIGEST_B);
 
-    const claimsBefore = claimRows(db);
-    const projectionsBefore = projectionRows(db);
+    const claimsBefore = claimRows(legacyWorld);
+    const projectionsBefore = projectionRows(legacyWorld);
 
     // Pre-cutover, the second problem cannot mint its own C-1: the bug.
-    expect(() => insertClaim(db, "P-BETA", "C-1", "collides globally", DIGEST_B, 1)).toThrow();
+    expect(() =>
+      insertClaim(legacyWorld, "P-BETA", "C-1", "collides globally", DIGEST_B, 1),
+    ).toThrow();
 
-    for (const file of FROM_CUTOVER) applyForward(db, file);
+    for (const file of FROM_CUTOVER) applyAtomically(legacyWorld, file);
 
-    expect(claimRows(db)).toEqual(claimsBefore);
-    expect(projectionRows(db)).toEqual(projectionsBefore);
+    expect(claimRows(legacyWorld)).toEqual(claimsBefore);
+    expect(projectionRows(legacyWorld)).toEqual(projectionsBefore);
 
     // Post-cutover the second problem mints C-1; the first still refuses a copy.
-    insertClaim(db, "P-BETA", "C-1", "beta's own first claim", DIGEST_B, 1);
+    insertClaim(legacyWorld, "P-BETA", "C-1", "beta's own first claim", DIGEST_B, 1);
     expect(() =>
-      insertClaim(db, "P-ALPHA", "C-1", "still unique per problem", DIGEST_A, 2),
+      insertClaim(legacyWorld, "P-ALPHA", "C-1", "still unique per problem", DIGEST_A, 2),
     ).toThrow();
   });
 
   test("a projection whose source sequence is not its claim's refuses the cutover atomically", () => {
-    const db = legacyDb();
-    insertProblem(db, "P-ALPHA", DIGEST_A);
-    insertProblem(db, "P-BETA", DIGEST_B);
-    insertClaim(db, "P-ALPHA", "C-1", "clean claim", DIGEST_A, 1);
+    insertProblem(legacyWorld, "P-ALPHA", DIGEST_A);
+    insertProblem(legacyWorld, "P-BETA", DIGEST_B);
+    insertClaim(legacyWorld, "P-ALPHA", "C-1", "clean claim", DIGEST_A, 1);
     // Representable under the old nucleus: the projection names the claim but
     // carries a source sequence the claim never had. The rebuilt triple foreign
     // key (problem_id, claim_id, source_seq) must refuse exactly this row.
-    insertProjection(db, "C-1", "P-ALPHA", 2, DIGEST_B);
+    insertProjection(legacyWorld, "C-1", "P-ALPHA", 2, DIGEST_B);
 
-    const claimsBefore = claimRows(db);
-    const projectionsBefore = projectionRows(db);
-    expect(() => applyForward(db, CUTOVER)).toThrow();
+    const claimsBefore = claimRows(legacyWorld);
+    const projectionsBefore = projectionRows(legacyWorld);
+    expect(() => applyAtomically(legacyWorld, CUTOVER)).toThrow();
 
-    // Rollback restores the old world bit-for-bit, global identity included:
-    // the second problem still cannot mint C-1 against the rolled-back schema.
-    expect(claimRows(db)).toEqual(claimsBefore);
-    expect(projectionRows(db)).toEqual(projectionsBefore);
+    // Refusal restores the old world bit-for-bit, global identity included:
+    // the second problem still cannot mint C-1 against the retained schema.
+    expect(claimRows(legacyWorld)).toEqual(claimsBefore);
+    expect(projectionRows(legacyWorld)).toEqual(projectionsBefore);
     expect(() =>
-      insertClaim(db, "P-BETA", "C-1", "global identity persists", DIGEST_B, 1),
+      insertClaim(legacyWorld, "P-BETA", "C-1", "global identity persists", DIGEST_B, 1),
     ).toThrow();
 
     // Repairing the contamination lets the same migration succeed.
-    db.run("DELETE FROM claim_projections WHERE claim_id = 'C-1' AND problem_id = 'P-ALPHA'");
-    applyForward(db, CUTOVER);
-    insertClaim(db, "P-BETA", "C-1", "beta's own first claim", DIGEST_B, 1);
+    legacyWorld.run(
+      "DELETE FROM claim_projections WHERE claim_id = 'C-1' AND problem_id = 'P-ALPHA'",
+    );
+    applyAtomically(legacyWorld, CUTOVER);
+    insertClaim(legacyWorld, "P-BETA", "C-1", "beta's own first claim", DIGEST_B, 1);
   });
 });
