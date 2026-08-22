@@ -2722,7 +2722,10 @@ describe("session protocol routes", () => {
       }),
     });
     expect(coerced.status).toBe(201);
-    const coercedBody = (await coerced.json()) as { computed_class?: string; coercion_flags?: string[] };
+    const coercedBody = (await coerced.json()) as {
+      computed_class?: string;
+      coercion_flags?: string[];
+    };
     expect(coercedBody.computed_class).toBe("heuristic");
     expect(coercedBody.coercion_flags).toContain("p5_no_detection_floor_coerced_to_heuristic");
   });
