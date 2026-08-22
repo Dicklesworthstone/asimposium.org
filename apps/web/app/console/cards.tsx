@@ -213,6 +213,17 @@ export function MintCard({
   const [expiresAt, setExpiresAt] = useState<number | null>(recoveredResult?.expiresAt ?? null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // The relative-expiry phrasing is client-measured only: the server render
+  // states the absolute instant, and this tick fills in "minutes left" after
+  // hydration so server and client clocks can never disagree in markup.
+  const [measuredNow, setMeasuredNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (joinUrl === null || expiresAt === null) return;
+    const update = (): void => setMeasuredNow(Date.now());
+    update();
+    const timer = setInterval(update, 30_000);
+    return () => clearInterval(timer);
+  }, [joinUrl, expiresAt]);
   const [requestedScopes, setRequestedScopes] = useState<readonly RequestedScope[]>(
     recoveredDraft?.requested_scopes ?? ["promote", "review"],
   );
@@ -339,7 +350,16 @@ export function MintCard({
           </button>
         </div>
         {expiresAt !== null && (
-          <p className="quiet">The URL expires {new Date(expiresAt).toLocaleString()}.</p>
+          <p className="quiet">
+            The URL expires {new Date(expiresAt).toLocaleString()}
+            {measuredNow === null
+              ? "."
+              : expiresAt <= measuredNow
+                ? " — this URL has expired; mint a fresh one."
+                : ` — about ${Math.max(1, Math.round((expiresAt - measuredNow) / 60_000))} minute${
+                    Math.round((expiresAt - measuredNow) / 60_000) === 1 ? "" : "s"
+                  } left.`}
+          </p>
         )}
         {error !== null && (
           <p className="quiet" role="alert">
@@ -1027,6 +1047,13 @@ export function ProposalCard({
   const [artifactBudget, setArtifactBudget] = useState("");
   const [grantSeconds, setGrantSeconds] = useState("");
   const [confirmation, setConfirmation] = useState<"approve" | "deny" | null>(null);
+  // The two-step decision swaps the pressed button in place; without an
+  // explicit handoff, keyboard focus drops to <body> when the starter
+  // unmounts and the confirm step never announces itself.
+  const confirmControlRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (confirmation !== null) confirmControlRef.current?.focus();
+  }, [confirmation]);
   const decisionAttemptFallback = attemptFallbackForOwner(transientDecisionAttempts, recoveryOwner);
   const decisionInFlight = useRef(false);
   const decisionDraftKey =
@@ -1397,7 +1424,8 @@ export function ProposalCard({
           </p>
           <div className="auth-row proposal-actions">
             <button
-              className={confirmation === "approve" ? "btn-google" : "btn-quiet"}
+              ref={confirmControlRef}
+              className={confirmation === "approve" ? "btn-google" : "btn-quiet btn-confirm"}
               type="button"
               disabled={pending || otherRecoveryPending || decisionWarning}
               onClick={() =>

@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import { auth, signIn, signOut } from "@/auth";
 import { SITE } from "@/lib/site";
+import { ThemeToggle } from "./theme-toggle";
 
 /**
  * The Agora landing. Rule A4 honesty applies: the ledger is described as it
@@ -76,6 +77,9 @@ export default async function Home() {
               <span className="quiet">Sponsor sign-in is not enabled on this deployment yet.</span>
             )}
           </div>
+          <p className="theme-toggle-row">
+            <ThemeToggle />
+          </p>
         </header>
 
         <p className="lede">

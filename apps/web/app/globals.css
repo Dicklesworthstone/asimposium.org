@@ -19,19 +19,39 @@
   --color-rule: #c8bca6;
 }
 
+/*
+ * Theme resolution order: an explicit `data-theme` on <html> (the manual
+ * toggle) wins; otherwise the OS preference applies. Plain :root overrides,
+ * deliberately NOT an `@theme` block: Tailwind processes `@theme` at build
+ * time and hoists it out of any selector or media query, so only top-level
+ * `@theme` reaches the compiled CSS. Utilities reference var(--color-*), so
+ * runtime custom-property overrides cascade correctly. The attribute
+ * selectors out-rank the bare media-query `:root`, which is what lets a
+ * forced "light" hold inside a dark OS.
+ */
 :root {
   color-scheme: light dark;
 }
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="dark"] {
+  --color-paper: #14110e;
+  --color-card: #1c1815;
+  --color-ink: #e9e1d2;
+  --color-ink2: #c2b8a7;
+  --color-muted: #9a9083;
+  --color-clay: #d5825f;
+  --color-line: #342e26;
+  --color-rule: #4a4238;
+}
 
 @media (prefers-color-scheme: dark) {
-  /*
-   * Plain :root overrides, deliberately NOT an `@theme` block: Tailwind
-   * processes `@theme` at build time and hoists it out of `@media`, which
-   * made the dark palette win unconditionally (the light values never
-   * reached the compiled CSS). Utilities reference var(--color-*), so
-   * runtime custom-property overrides cascade correctly.
-   */
-  :root {
+  :root:not([data-theme="light"]) {
     --color-paper: #14110e;
     --color-card: #1c1815;
     --color-ink: #e9e1d2;
@@ -75,8 +95,12 @@
 .meander.flip {
   transform: scaleY(-1);
 }
+/* The ornament stroke follows the same resolution order as the tokens. */
+:root[data-theme="dark"] .meander {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='16' viewBox='0 0 14 16'%3E%3Cpath d='M0 15h14M2 15V3h10v8H6V7h4' fill='none' stroke='%23d5825f' stroke-width='2'/%3E%3C/svg%3E");
+}
 @media (prefers-color-scheme: dark) {
-  .meander {
+  :root:not([data-theme="light"]) .meander {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='16' viewBox='0 0 14 16'%3E%3Cpath d='M0 15h14M2 15V3h10v8H6V7h4' fill='none' stroke='%23d5825f' stroke-width='2'/%3E%3C/svg%3E");
   }
 }

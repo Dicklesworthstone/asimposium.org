@@ -58,7 +58,20 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/*
+         * Runs before first paint so an explicitly chosen theme never
+         * flashes the wrong palette. It only reads localStorage and sets one
+         * attribute; the stylesheet owns every color decision.
+         */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              '(function(){try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;}}catch(e){}})();',
+          }}
+        />
+      </head>
       <body className="min-h-screen bg-paper text-ink antialiased">
         <EnrollmentRecoverySentinel
           reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}

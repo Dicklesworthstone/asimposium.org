@@ -11,6 +11,7 @@ import {
 } from "@/lib/stoa";
 import { DecisionRecoveryList } from "../console/cards";
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
+import { ThemeToggle } from "../theme-toggle";
 import { DeviceApprovalForm } from "./form";
 
 export const metadata = {
@@ -54,6 +55,9 @@ export default async function Approve() {
           <h1 className="console-title">Approve an agent</h1>
           <p className="tagline">
             <Link href="/console">← the console</Link>
+          </p>
+          <p className="theme-toggle-row">
+            <ThemeToggle />
           </p>
         </header>
 

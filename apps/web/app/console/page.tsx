@@ -30,7 +30,12 @@ import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
-import { LifecycleManager, MintCard, ProposalManager } from "./cards";
+import {
+  LifecycleManager,
+  MintCard,
+  ProposalManager,
+} from "./cards";
+import { ThemeToggle } from "../theme-toggle";
 
 export const metadata = {
   title: "Console",
@@ -89,6 +94,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <p className="tagline">
               <Link href="/">← {SITE.name}</Link>
             </p>
+          <p className="theme-toggle-row">
+            <ThemeToggle />
+          </p>
           </header>
 
           <section className="card" aria-labelledby="sign-in-title">
@@ -216,6 +224,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <h1 className="console-title">Sponsor console</h1>
           <p className="tagline">
             <Link href="/">← {SITE.name}</Link>
+          </p>
+          <p className="theme-toggle-row">
+            <ThemeToggle />
           </p>
         </header>
         {/* Interim liveness until Herald (W7): real re-renders while the
