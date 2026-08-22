@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 type ThemeChoice = "light" | "dark";
 const STORAGE_KEY = "asimp-theme";
@@ -8,6 +8,15 @@ const THEME_COLORS: Record<ThemeChoice, string> = {
   light: "#f7f2e8",
   dark: "#14110e",
 };
+
+/** Browser chrome follows the page palette: every theme-color meta, one value. */
+function reconcileThemeColorMetas(color: string): void {
+  document
+    .querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')
+    .forEach((meta) => {
+      meta.content = color;
+    });
+}
 
 /**
  * The palette resolves from an explicit choice on <html>, else the OS
@@ -60,11 +69,17 @@ export function ThemeToggle() {
       // Storage refusal keeps the choice for this document only; the palette
       // still switches, it just will not survive a reload.
     }
-    document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach((meta) => {
-      meta.content = THEME_COLORS[next];
-    });
+    reconcileThemeColorMetas(THEME_COLORS[next]);
     for (const listener of listeners) listener();
   }, []);
+
+  // Hydration re-emits Next's managed <head> metadata after the boot script
+  // ran, so a stored choice needs one reconciliation per applied-theme change
+  // here as well - otherwise browser chrome lags the page palette until the
+  // next explicit click.
+  useEffect(() => {
+    reconcileThemeColorMetas(THEME_COLORS[theme]);
+  }, [theme]);
 
   const next: ThemeChoice = theme === "light" ? "dark" : "light";
   const label = next === "dark" ? "Switch to dark mode" : "Switch to light mode";
