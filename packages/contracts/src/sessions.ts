@@ -480,7 +480,10 @@ export const HypothesisRequestSchema = z
     /** The discriminating predictions the discriminate move consumes. */
     discriminating_predictions: z.array(z.string().min(1).max(500)).max(16).default([]),
     origin: z.enum(["proposed", "third-alternative", "refinement"]),
-    body_md: z.string().min(1).max(64 * 1024),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
   })
   .strict();
 export type HypothesisRequest = z.infer<typeof HypothesisRequestSchema>;

@@ -2091,7 +2091,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // The hypothesis must exist and be open; a killed route is preserved (P6)
     // and cannot be re-killed.
     const hypothesis = await db
-      .prepare("SELECT hypothesis_id, status FROM hypotheses WHERE hypothesis_id = ? AND problem_id = ?")
+      .prepare(
+        "SELECT hypothesis_id, status FROM hypotheses WHERE hypothesis_id = ? AND problem_id = ?",
+      )
       .bind(hypothesisId, session.problem_id)
       .first<{ hypothesis_id: string; status: string }>();
     if (hypothesis === null || hypothesis === undefined) {
