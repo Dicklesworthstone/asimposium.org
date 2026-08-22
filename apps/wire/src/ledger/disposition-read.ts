@@ -7,11 +7,11 @@
  */
 
 import {
-  EMPTY_CLAIM_CONTEXT,
-  evaluateClaimTransition,
   type ClaimDisposition,
   type ClaimEvent,
   type ClaimTransitionContext,
+  EMPTY_CLAIM_CONTEXT,
+  evaluateClaimTransition,
 } from "./dispositions.ts";
 
 /**
