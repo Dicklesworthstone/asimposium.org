@@ -531,7 +531,7 @@ function validateProjectionStrings(projection: Projection): void {
   // rather than emitting a structurally corrupt agent face.
   for (const { field, value, reject_control_comment } of fields) {
     if (!reject_control_comment) continue;
-    if (!hasAsimpControlComment(value)) {
+    if (hasAsimpControlComment(value)) {
       refuse(
         "INVALID_HEADER_VALUE",
         "Server-authored Markdown may not contain renderer control comments",
@@ -540,6 +540,14 @@ function validateProjectionStrings(projection: Projection): void {
         "A1",
       );
     }
+    // Only these three are interpolated structurally into the markdown face:
+    // title after "# ", the preamble as a raw paragraph, and why_included
+    // inside a single-backtick code span. Other trusted fields (next_actions,
+    // omitted, degraded) carry their own dedicated grammars — e.g.
+    // INVALID_NEXT_ACTION for urls — which must keep precedence here.
+    const markdownInterpolated =
+      field === "title" || field === "preamble" || field.endsWith(".why_included");
+    if (!markdownInterpolated) continue;
     const backtickOffset = value.indexOf("`");
     if (backtickOffset !== -1) {
       refuse(
