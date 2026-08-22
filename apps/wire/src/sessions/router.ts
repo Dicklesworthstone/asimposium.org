@@ -34,6 +34,7 @@ import type {
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
+import { computeClaimDisposition } from "../ledger/disposition-read";
 import { storeWorkshopBody } from "../krater/cas";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
@@ -968,15 +969,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           stable_prefix: 10,
         });
       } else {
+        // W5.4 read side: each claim's honest standing is computed from its
+        // ledger events (never a stored field) and displayed with the claim.
         for (const [index, claim] of claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT).entries()) {
+          const claimEvents = await db
+            .prepare(
+              `SELECT type FROM events
+               WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ? AND seq <= ?
+               ORDER BY seq ASC`,
+            )
+            .bind(session.problem_id, claim.id, cursor)
+            .all<{ type: string }>();
+          const eventKinds = (claimEvents.results ?? []).map((row) =>
+            row.type === "claim.created" ? ({ kind: "promote" } as const) : null,
+          );
+          const disposition = computeClaimDisposition(
+            eventKinds.filter((event): event is { readonly kind: "promote" } => event !== null),
+          );
           candidates.push({
             kind: "claim",
             id: claim.id,
             scope: "ledger",
             tokens: 1,
             untrusted: true,
-            body: `${claim.id} (seq ${claim.source_seq}): ${claim.statement}`,
-            why_included: "include a live public claim in ledger sequence order",
+            body: `${claim.id} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}`,
+            why_included: "include a live public claim in ledger sequence order, with its computed disposition",
             stable_prefix: 100 + index,
           });
         }
