@@ -2111,6 +2111,9 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
   mock.module("@/app/enrollment-recovery-sentinel", () => ({
     EnrollmentRecoveryFence: (props: { children?: ReactNode }) => props.children ?? null,
   }));
+  mock.module("@/app/console/console-auto-refresh", () => ({
+    ConsoleAutoRefresh: () => null,
+  }));
   mock.module("next/link", () => ({
     default: (props: { href?: unknown; children?: ReactNode }) =>
       createElement(

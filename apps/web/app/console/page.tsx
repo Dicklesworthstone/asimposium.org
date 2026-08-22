@@ -29,6 +29,7 @@ import {
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
+import { ConsoleAutoRefresh } from "./console-auto-refresh";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 
 export const metadata = {
@@ -217,6 +218,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <Link href="/">← {SITE.name}</Link>
           </p>
         </header>
+        {/* Interim liveness until Herald (W7): real re-renders while the
+            sponsor watches for an agent's proposal. Renders nothing. */}
+        <ConsoleAutoRefresh />
 
         <section className="card" aria-labelledby="account-title">
           <h2 className="card-title" id="account-title">
