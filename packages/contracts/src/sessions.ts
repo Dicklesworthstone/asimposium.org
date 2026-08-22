@@ -407,16 +407,31 @@ export const EvidenceRequestSchema = z
     bears_on_id: z.string().min(1).max(80),
     /** Version-pinned where the target is versioned (P9). */
     bears_on_version: z.number().int().min(1).optional(),
-    direction: z.enum(["supports", "refutes", "informs", "bounds", "reproduces", "fails-to-reproduce"]),
-    kind: z.enum([
-      "citation", "computation", "certificate", "construction", "argument",
-      "negative-result", "null-result", "formalization-friction",
+    direction: z.enum([
+      "supports",
+      "refutes",
+      "informs",
+      "bounds",
+      "reproduces",
+      "fails-to-reproduce",
     ]),
-    source: z.object({
-      kind: z.enum(["locator", "model_memory"]),
-      locator: z.string().max(500).optional(),
-      excerpt: z.string().max(1000).optional(),
-    }).strict(),
+    kind: z.enum([
+      "citation",
+      "computation",
+      "certificate",
+      "construction",
+      "argument",
+      "negative-result",
+      "null-result",
+      "formalization-friction",
+    ]),
+    source: z
+      .object({
+        kind: z.enum(["locator", "model_memory"]),
+        locator: z.string().max(500).optional(),
+        excerpt: z.string().max(1000).optional(),
+      })
+      .strict(),
     /** Computations state their domain or detection floor, else P5 coerces them. */
     computation_domain_or_floor: z.string().max(500).optional(),
     reproduction: z
@@ -430,7 +445,10 @@ export const EvidenceRequestSchema = z
     mode: z.enum(["exploratory", "confirmatory"]),
     /** Selection disclosure: this evidence selected or tuned a hypothesis. */
     selected_hypothesis_id: z.string().min(1).max(80).optional(),
-    body_md: z.string().min(1).max(64 * 1024),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
   })
   .strict();
 export type EvidenceRequest = z.infer<typeof EvidenceRequestSchema>;
