@@ -66,7 +66,9 @@
                     "SESSION_CLOSE_BODY_INVALID",
                     "REVIEW_BODY_INVALID",
                     "EVIDENCE_BODY_INVALID",
-                    "HYPOTHESIS_BODY_INVALID"
+                    "HYPOTHESIS_BODY_INVALID",
+                    "HYPOTHESIS_NOT_FOUND",
+                    "HYPOTHESIS_ALREADY_KILLED"
                   ]
                 },
                 "detail": {
@@ -409,7 +411,9 @@
                 "SESSION_CLOSE_BODY_INVALID",
                 "REVIEW_BODY_INVALID",
                 "EVIDENCE_BODY_INVALID",
-                "HYPOTHESIS_BODY_INVALID"
+                "HYPOTHESIS_BODY_INVALID",
+                "HYPOTHESIS_NOT_FOUND",
+                "HYPOTHESIS_ALREADY_KILLED"
               ]
             },
             "detail": {
@@ -731,6 +735,8 @@
         "REVIEW_BODY_INVALID",
         "EVIDENCE_BODY_INVALID",
         "HYPOTHESIS_BODY_INVALID",
+        "HYPOTHESIS_NOT_FOUND",
+        "HYPOTHESIS_ALREADY_KILLED",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",

@@ -492,6 +492,28 @@ export const HypothesisResponseSchema = z
   })
   .strict();
 export type HypothesisResponse = z.infer<typeof HypothesisResponseSchema>;
+
+/** §6.7 the hypothesis kill: a route is killed by refuting evidence. P6: the
+ * killed route is preserved, never erased — the killing evidence is recorded. */
+export const HypothesisKillRequestSchema = z
+  .object({
+    hypothesis_id: z.string().min(1).max(80),
+    /** The evidence that killed the route (the refuting evidence id). */
+    killed_by_evidence_id: z.string().min(1).max(80),
+    /** Why the route dies, stated precisely. */
+    reason: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+export type HypothesisKillRequest = z.infer<typeof HypothesisKillRequestSchema>;
+
+export const HypothesisKillResponseSchema = z
+  .object({
+    hypothesis_id: z.string().min(1),
+    status: z.literal("killed"),
+    killed_at: z.string().datetime(),
+  })
+  .strict();
+export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema>;
 export type SessionCloseResponse = z.infer<typeof SessionCloseResponseSchema>;
 
 /** c52: the global public-change cursor is a bare decimal integer. */
@@ -521,6 +543,8 @@ export const SessionsContractsSchema = z
     evidence_response: EvidenceResponseSchema,
     hypothesis_request: HypothesisRequestSchema,
     hypothesis_response: HypothesisResponseSchema,
+    hypothesis_kill_request: HypothesisKillRequestSchema,
+    hypothesis_kill_response: HypothesisKillResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

@@ -2,6 +2,8 @@ import {
   CursorResponseSchema,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
+  HypothesisKillRequestSchema,
+  HypothesisKillResponseSchema,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
   type PackProfile,
@@ -2051,6 +2053,99 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       status: "open",
     });
     return privateNoStore(c.json(response, 201));
+  });
+
+  // --- POST /v1/sessions/:id/hypotheses/:hid/kill (W5.6: a route dies, P6) ---
+  app.post("/v1/sessions/:id/hypotheses/:hid/kill", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const hypothesisId = c.req.param("hid");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = HypothesisKillRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "HYPOTHESIS_BODY_INVALID",
+        title: "The hypothesis kill does not match the contract",
+        detail: "The JSON body does not match the hypothesis-kill contract.",
+        fixHint: "Send {hypothesis_id, killed_by_evidence_id, reason}.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            hypothesis_id: "H-1",
+            killed_by_evidence_id: "E-1",
+            reason: "The 4-path counterexample kills the induction route.",
+          },
+        },
+      });
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    // The hypothesis must exist and be open; a killed route is preserved (P6)
+    // and cannot be re-killed.
+    const hypothesis = await db
+      .prepare("SELECT hypothesis_id, status FROM hypotheses WHERE hypothesis_id = ? AND problem_id = ?")
+      .bind(hypothesisId, session.problem_id)
+      .first<{ hypothesis_id: string; status: string }>();
+    if (hypothesis === null || hypothesis === undefined) {
+      return problem({
+        status: 404,
+        code: "HYPOTHESIS_NOT_FOUND",
+        title: "No such hypothesis",
+        detail: `No hypothesis named ${hypothesisId} exists on ${session.problem_id}.`,
+        fixHint: "Check the hypothesis id against the problem's hypotheses board.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            hypothesis_id: "H-1",
+            killed_by_evidence_id: "E-1",
+            reason: "The counterexample kills the route.",
+          },
+        },
+      });
+    }
+    if (hypothesis.status === "killed") {
+      return problem({
+        status: 422,
+        code: "HYPOTHESIS_ALREADY_KILLED",
+        title: "The hypothesis is already killed",
+        detail: "A killed route is preserved, never re-killed or erased.",
+        fixHint: "The route's killing evidence is already recorded.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            hypothesis_id: "H-1",
+            killed_by_evidence_id: "E-1",
+            reason: "The counterexample kills the route.",
+          },
+        },
+      });
+    }
+
+    const killedAt = new Date().toISOString();
+    await db
+      .prepare(
+        `UPDATE hypotheses SET status = 'killed', killed_at = ?, killed_by_evidence_id = ?
+         WHERE hypothesis_id = ? AND problem_id = ? AND status = 'open'`,
+      )
+      .bind(killedAt, parsed.data.killed_by_evidence_id, hypothesisId, session.problem_id)
+      .run();
+
+    const response = HypothesisKillResponseSchema.parse({
+      hypothesis_id: hypothesisId,
+      status: "killed",
+      killed_at: killedAt,
+    });
+    return privateNoStore(c.json(response, 200));
   });
 
   // --- POST /v1/sessions/:id/evidence (W5.6: the computed-class write) ------

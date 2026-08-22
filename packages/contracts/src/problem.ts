@@ -83,6 +83,10 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "EVIDENCE_BODY_INVALID",
   // W5.6: the hypothesis write joins the same teaching family.
   "HYPOTHESIS_BODY_INVALID",
+  // W5.6: the hypothesis kill's teaching refusals (a missing target, a
+  // re-kill of a preserved route) cite the rule and the fix.
+  "HYPOTHESIS_NOT_FOUND",
+  "HYPOTHESIS_ALREADY_KILLED",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
