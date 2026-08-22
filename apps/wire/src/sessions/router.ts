@@ -48,6 +48,7 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
+import type { ClaimEvent } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { gateReviewSubmission } from "../ledger/review-gate";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
@@ -976,6 +977,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       } else {
         // W5.4 read side: each claim's honest standing is computed from its
         // ledger events (never a stored field) and displayed with the claim.
+        // The promote opens it; the reviews on the exact pinned version drive
+        // it further (corroborated, disputed, …) via the state machine.
         for (const [index, claim] of claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT).entries()) {
           const claimEvents = await db
             .prepare(
@@ -985,12 +988,40 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             )
             .bind(session.problem_id, claim.id, cursor)
             .all<{ type: string }>();
-          const eventKinds = (claimEvents.results ?? []).map((row) =>
-            row.type === "claim.created" ? ({ kind: "promote" } as const) : null,
-          );
-          const disposition = computeClaimDisposition(
-            eventKinds.filter((event): event is { readonly kind: "promote" } => event !== null),
-          );
+          const reviewRows = await db
+            .prepare(
+              `SELECT review_id, reviewer_fellow_id, tier, verdict FROM reviews
+               WHERE problem_id = ? AND target_claim_id = ? ORDER BY created_at ASC`,
+            )
+            .bind(session.problem_id, claim.id)
+            .all<{
+              review_id: string;
+              reviewer_fellow_id: string;
+              tier: "T0" | "T1" | "T2" | "T3";
+              verdict: string;
+            }>();
+          const claimEventList: ClaimEvent[] = (claimEvents.results ?? [])
+            .map((row) => (row.type === "claim.created" ? ({ kind: "promote" } as const) : null))
+            .filter((event): event is { readonly kind: "promote" } => event !== null);
+          // The reviews fold as review-verified events (the disposition machine
+          // counts the landing review itself).
+          const reviewEvents: ClaimEvent[] = (reviewRows.results ?? []).map((review) => ({
+            kind: "review-verified" as const,
+            review: {
+              review_id: review.review_id,
+              reviewer_id: review.reviewer_fellow_id,
+              tier: review.tier,
+              cross_family: review.tier === "T2" || review.tier === "T3",
+              full_write_up: true,
+              finding:
+                review.verdict === "confirm"
+                  ? ("support" as const)
+                  : review.verdict === "refute"
+                    ? ("dispute" as const)
+                    : ("statement-defect" as const),
+            },
+          }));
+          const disposition = computeClaimDisposition([...claimEventList, ...reviewEvents]);
           candidates.push({
             kind: "claim",
             id: claim.id,
