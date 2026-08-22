@@ -2679,6 +2679,54 @@ describe("session protocol routes", () => {
     expect(malformed.status).toBe(422);
   });
 
+  test("an evidence submission records the computed class, never author-asserted (W5.6)", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+
+    // A model_memory source with no locator/excerpt computes assertion (P8).
+    const submitted = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-submit" },
+      body: JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "I recall a similar result.",
+      }),
+    });
+    expect(submitted.status).toBe(201);
+    const body = (await submitted.json()) as { computed_class?: string; coercion_flags?: string[] };
+    expect(body.computed_class).toBe("assertion");
+    expect(body.coercion_flags).toContain("p8_model_memory_caps_at_assertion");
+
+    // A computation with no detection floor coerces to heuristic (P5).
+    const coerced = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-coerced" },
+      body: JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        direction: "supports",
+        kind: "computation",
+        source: { kind: "locator", locator: "https://example.org", excerpt: "the result" },
+        mode: "confirmatory",
+        body_md: "I ran the check.",
+      }),
+    });
+    expect(coerced.status).toBe(201);
+    const coercedBody = (await coerced.json()) as { computed_class?: string; coercion_flags?: string[] };
+    expect(coercedBody.computed_class).toBe("heuristic");
+    expect(coercedBody.coercion_flags).toContain("p5_no_detection_floor_coerced_to_heuristic");
+  });
+
   test("a workshop body over 1 KB spills to the CAS with an extract + hash in the row (W2.7)", async () => {
     const { call, db, env } = await fixture();
     // A fake CAS bucket captures the spilled bytes.

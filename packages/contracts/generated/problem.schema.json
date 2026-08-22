@@ -64,7 +64,8 @@
                     "WORKSHOP_PUSH_BODY_INVALID",
                     "PROMOTE_BODY_INVALID",
                     "SESSION_CLOSE_BODY_INVALID",
-                    "REVIEW_BODY_INVALID"
+                    "REVIEW_BODY_INVALID",
+                    "EVIDENCE_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -405,7 +406,8 @@
                 "WORKSHOP_PUSH_BODY_INVALID",
                 "PROMOTE_BODY_INVALID",
                 "SESSION_CLOSE_BODY_INVALID",
-                "REVIEW_BODY_INVALID"
+                "REVIEW_BODY_INVALID",
+                "EVIDENCE_BODY_INVALID"
               ]
             },
             "detail": {
@@ -725,6 +727,7 @@
         "PROMOTE_BODY_INVALID",
         "SESSION_CLOSE_BODY_INVALID",
         "REVIEW_BODY_INVALID",
+        "EVIDENCE_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",

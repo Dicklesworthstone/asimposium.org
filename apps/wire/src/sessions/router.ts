@@ -4,6 +4,8 @@ import {
   PackResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
+  EvidenceRequestSchema,
+  EvidenceResponseSchema,
   ReviewRequestSchema,
   ReviewResponseSchema,
   SessionCloseRequestSchema,
@@ -45,6 +47,7 @@ import {
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
 import { gateReviewSubmission } from "../ledger/review-gate";
+import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
 /**
@@ -1948,6 +1951,101 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       target_version: parsed.data.target_version,
       tier: gate.tier,
       carries_weight: gate.carriesWeight,
+    });
+    return privateNoStore(c.json(response, 201));
+  });
+
+  // --- POST /v1/sessions/:id/evidence (W5.6: the computed-class write) ------
+  app.post("/v1/sessions/:id/evidence", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = EvidenceRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "EVIDENCE_BODY_INVALID",
+        title: "The evidence does not match the contract",
+        detail: "The JSON body does not match the evidence contract.",
+        fixHint:
+          "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            direction: "supports",
+            kind: "citation",
+            source: { kind: "locator", locator: "https://arxiv.org/abs/…", excerpt: "…the result…" },
+            mode: "confirmatory",
+            body_md: "The cited result establishes the bound.",
+          },
+        },
+      });
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    // The class is COMPUTED from the evidence's shape, never author-asserted.
+    const assessment = assessEvidenceClass({
+      source: {
+        kind: parsed.data.source.kind,
+        locator: parsed.data.source.locator,
+        excerpt: parsed.data.source.excerpt,
+      },
+      computation:
+        parsed.data.kind === "computation"
+          ? { domainOrFloor: parsed.data.computation_domain_or_floor }
+          : undefined,
+      selectedHypothesis: parsed.data.selected_hypothesis_id !== undefined,
+      mode: parsed.data.mode,
+    });
+
+    const evidenceId = mintId("E");
+    const createdAt = new Date().toISOString();
+    await db
+      .prepare(
+        `INSERT INTO evidence
+           (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
+            direction, kind, source_kind, locator, excerpt, computation_domain_or_floor,
+            reproduction_json, mode, selected_hypothesis_id, computed_class,
+            coercion_flags_json, author_fellow_id, body_md, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        evidenceId,
+        session.problem_id,
+        parsed.data.bears_on_kind,
+        parsed.data.bears_on_id,
+        parsed.data.bears_on_version ?? null,
+        parsed.data.direction,
+        parsed.data.kind,
+        parsed.data.source.kind,
+        parsed.data.source.locator ?? null,
+        parsed.data.source.excerpt ?? null,
+        parsed.data.computation_domain_or_floor ?? null,
+        parsed.data.reproduction === undefined ? null : JSON.stringify(parsed.data.reproduction),
+        parsed.data.mode,
+        parsed.data.selected_hypothesis_id ?? null,
+        assessment.class,
+        JSON.stringify(assessment.flags),
+        auth.binding.fellowId,
+        parsed.data.body_md,
+        createdAt,
+      )
+      .run();
+
+    const response = EvidenceResponseSchema.parse({
+      evidence_id: evidenceId,
+      computed_class: assessment.class,
+      coercion_flags: [...assessment.flags],
+      drives_promotion: canDrivePromotion(assessment, parsed.data.mode),
     });
     return privateNoStore(c.json(response, 201));
   });

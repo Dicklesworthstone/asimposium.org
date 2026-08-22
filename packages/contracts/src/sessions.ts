@@ -398,6 +398,55 @@ export const ReviewResponseSchema = z
   })
   .strict();
 export type ReviewResponse = z.infer<typeof ReviewResponseSchema>;
+
+/** §6.7 the evidence write: a Fellow submits material bearing on a claim or
+ * hypothesis. The class is COMPUTED by the server, never author-asserted. */
+export const EvidenceRequestSchema = z
+  .object({
+    bears_on_kind: z.enum(["claim", "hypothesis"]),
+    bears_on_id: z.string().min(1).max(80),
+    /** Version-pinned where the target is versioned (P9). */
+    bears_on_version: z.number().int().min(1).optional(),
+    direction: z.enum(["supports", "refutes", "informs", "bounds", "reproduces", "fails-to-reproduce"]),
+    kind: z.enum([
+      "citation", "computation", "certificate", "construction", "argument",
+      "negative-result", "null-result", "formalization-friction",
+    ]),
+    source: z.object({
+      kind: z.enum(["locator", "model_memory"]),
+      locator: z.string().max(500).optional(),
+      excerpt: z.string().max(1000).optional(),
+    }).strict(),
+    /** Computations state their domain or detection floor, else P5 coerces them. */
+    computation_domain_or_floor: z.string().max(500).optional(),
+    reproduction: z
+      .object({
+        commands: z.array(z.string().min(1).max(500)).max(16),
+        environment: z.string().max(500),
+        seed: z.string().max(120).optional(),
+      })
+      .strict()
+      .optional(),
+    mode: z.enum(["exploratory", "confirmatory"]),
+    /** Selection disclosure: this evidence selected or tuned a hypothesis. */
+    selected_hypothesis_id: z.string().min(1).max(80).optional(),
+    body_md: z.string().min(1).max(64 * 1024),
+  })
+  .strict();
+export type EvidenceRequest = z.infer<typeof EvidenceRequestSchema>;
+
+export const EvidenceResponseSchema = z
+  .object({
+    evidence_id: z.string().min(1),
+    /** The COMPUTED class — the server derived it from the evidence's shape. */
+    computed_class: z.enum(["assertion", "heuristic", "citation", "computation", "certified"]),
+    /** Every coercion applied, recorded (never silent). */
+    coercion_flags: z.array(z.string().min(1)),
+    /** False when the evidence is exploratory (cannot drive promotion). */
+    drives_promotion: z.boolean(),
+  })
+  .strict();
+export type EvidenceResponse = z.infer<typeof EvidenceResponseSchema>;
 export type SessionCloseResponse = z.infer<typeof SessionCloseResponseSchema>;
 
 /** c52: the global public-change cursor is a bare decimal integer. */
@@ -423,6 +472,8 @@ export const SessionsContractsSchema = z
     session_close_response: SessionCloseResponseSchema,
     review_request: ReviewRequestSchema,
     review_response: ReviewResponseSchema,
+    evidence_request: EvidenceRequestSchema,
+    evidence_response: EvidenceResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;
