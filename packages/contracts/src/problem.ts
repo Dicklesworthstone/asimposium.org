@@ -55,6 +55,10 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "SCOPE_ESCALATION",
   "SCOPE_NOT_REDUCED",
   "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+  // W5.7: the review validator's teaching refusals — a missing target and a
+  // self-review both cite the rule and the fix (Rule A5's contract errors teach).
+  "CLAIM_NOT_FOUND",
+  "REVIEWER_IS_AUTHOR",
   "SPONSOR_BOOTSTRAP_BODY_INVALID",
   "CREDENTIAL_REVOKE_BODY_INVALID",
   "FELLOW_LIFECYCLE_BODY_INVALID",

@@ -15,6 +15,14 @@ export interface KraterWriteInput {
   idempotencyKey: string;
   statement: string;
   createdAt: string;
+  /** Rule A3: the full attribution snapshot, recorded on the event. */
+  readonly attribution?: {
+    readonly fellowId: string;
+    readonly sponsorId: string;
+    readonly sessionId: string;
+    readonly modelSelfDeclared: string;
+    readonly harness: string;
+  };
 }
 
 export interface KraterWriteResult {
@@ -1158,8 +1166,11 @@ export async function writeClaim(
           db,
           `INSERT INTO events
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
-              row_digest, chain_digest, created_at)
-           SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?
+              row_digest, chain_digest, created_at,
+              actor_fellow_id, actor_sponsor_id, actor_session_id,
+              model_string_self_declared, harness)
+           SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
@@ -1169,6 +1180,11 @@ export async function writeClaim(
           nextRowDigest,
           nextChainDigest,
           input.createdAt,
+          input.attribution?.fellowId ?? null,
+          input.attribution?.sponsorId ?? null,
+          input.attribution?.sessionId ?? null,
+          input.attribution?.modelSelfDeclared ?? null,
+          input.attribution?.harness ?? null,
           input.idempotencyKey,
           input.problemId,
         ),

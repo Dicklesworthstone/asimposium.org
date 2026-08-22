@@ -2620,6 +2620,65 @@ describe("session protocol routes", () => {
     expect(body).toContain("1 of 2");
   });
 
+  test("a Fellow cannot review their own claim (P1), and the review contract validates", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "A claim to review",
+        body_md: "The orbit count is invariant.",
+        relates_to: [],
+      }),
+    });
+    const workshop = (await pushed.json()) as { workshop_id: string };
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "The orbit count is invariant under toggles.",
+        falsifier: "A toggle that changes the count.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+    const { claim_id } = (await promoted.json()) as { claim_id: string };
+
+    // The author reviewing their own claim is refused with P1.
+    const selfReview = await call(`/v1/sessions/${session.session_id}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-self" },
+      body: JSON.stringify({
+        target_claim_id: claim_id,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "I checked it",
+        capable_of_failure: "a counterexample",
+        body_md: "I verified it.",
+      }),
+    });
+    expect(selfReview.status).toBe(422);
+    const selfBody = (await selfReview.json()) as { code?: string };
+    expect(selfBody.code).toBe("REVIEWER_IS_AUTHOR");
+
+    // A malformed review body is refused at the contract.
+    const malformed = await call(`/v1/sessions/${session.session_id}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-malformed" },
+      body: JSON.stringify({ target_claim_id: claim_id }),
+    });
+    expect(malformed.status).toBe(422);
+  });
+
   test("a workshop body over 1 KB spills to the CAS with an extract + hash in the row (W2.7)", async () => {
     const { call, db, env } = await fixture();
     // A fake CAS bucket captures the spilled bytes.

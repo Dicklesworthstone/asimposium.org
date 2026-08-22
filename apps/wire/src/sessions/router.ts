@@ -1613,6 +1613,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           idempotencyKey: kraterIdempotencyKey,
           statement: parsed.data.statement,
           createdAt: new Date().toISOString(),
+          // Rule A3: the full attribution snapshot on the claim.created event.
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+          },
         },
         {},
         {
@@ -1784,7 +1792,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint:
           "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
         rule: "A5",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "I checked the statement against the proof.",
+            body_md: "Verified the quantifier scope.",
+          },
+        },
       });
     }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
@@ -1802,6 +1819,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "No such claim",
         detail: `No claim named ${parsed.data.target_claim_id} exists on ${session.problem_id}.`,
         fixHint: "Check the claim id against the problem's claims board.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "I checked the statement against the proof.",
+            body_md: "Verified the quantifier scope.",
+          },
+        },
       });
     }
 
@@ -1857,7 +1885,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         detail: "The review fails a validator hard rule.",
         fixHint: gate.fixHint,
         rule: gate.rule,
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "I checked the statement against the proof.",
+            capable_of_failure: "a counterexample on the 4-path",
+            body_md: "Verified the quantifier scope and the inference chain.",
+          },
+        },
       });
     }
 

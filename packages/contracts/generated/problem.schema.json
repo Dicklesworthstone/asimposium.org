@@ -50,6 +50,8 @@
                     "SCOPE_ESCALATION",
                     "SCOPE_NOT_REDUCED",
                     "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+                    "CLAIM_NOT_FOUND",
+                    "REVIEWER_IS_AUTHOR",
                     "SPONSOR_BOOTSTRAP_BODY_INVALID",
                     "CREDENTIAL_REVOKE_BODY_INVALID",
                     "FELLOW_LIFECYCLE_BODY_INVALID",
@@ -61,7 +63,8 @@
                     "SESSION_OPEN_BODY_INVALID",
                     "WORKSHOP_PUSH_BODY_INVALID",
                     "PROMOTE_BODY_INVALID",
-                    "SESSION_CLOSE_BODY_INVALID"
+                    "SESSION_CLOSE_BODY_INVALID",
+                    "REVIEW_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -388,6 +391,8 @@
                 "SCOPE_ESCALATION",
                 "SCOPE_NOT_REDUCED",
                 "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+                "CLAIM_NOT_FOUND",
+                "REVIEWER_IS_AUTHOR",
                 "SPONSOR_BOOTSTRAP_BODY_INVALID",
                 "CREDENTIAL_REVOKE_BODY_INVALID",
                 "FELLOW_LIFECYCLE_BODY_INVALID",
@@ -399,7 +404,8 @@
                 "SESSION_OPEN_BODY_INVALID",
                 "WORKSHOP_PUSH_BODY_INVALID",
                 "PROMOTE_BODY_INVALID",
-                "SESSION_CLOSE_BODY_INVALID"
+                "SESSION_CLOSE_BODY_INVALID",
+                "REVIEW_BODY_INVALID"
               ]
             },
             "detail": {
@@ -704,6 +710,8 @@
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
         "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
+        "CLAIM_NOT_FOUND",
+        "REVIEWER_IS_AUTHOR",
         "SPONSOR_BOOTSTRAP_BODY_INVALID",
         "CREDENTIAL_REVOKE_BODY_INVALID",
         "FELLOW_LIFECYCLE_BODY_INVALID",
@@ -716,6 +724,7 @@
         "WORKSHOP_PUSH_BODY_INVALID",
         "PROMOTE_BODY_INVALID",
         "SESSION_CLOSE_BODY_INVALID",
+        "REVIEW_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
