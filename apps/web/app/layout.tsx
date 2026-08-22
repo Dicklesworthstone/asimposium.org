@@ -65,12 +65,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
          * explicitly chosen theme never flashes the wrong palette. The App
          * Router owns <head>, so this cannot live there. It only reads
          * localStorage and sets one attribute; the stylesheet owns every
-         * color decision.
+         * color decision. The meta[name=theme-color] reconciliation mirrors
+         * ThemeToggle.choose(): without it, a stored choice on a device whose
+         * OS preference disagrees would paint the page correctly but leave
+         * the browser chrome on the other scheme after every reload. The hex
+         * literals intentionally mirror THEME_COLORS in app/theme-toggle.tsx.
          */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              '(function(){try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;}}catch(e){}})();',
+              '(function(){try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;var c=t==="dark"?"#14110e":"#f7f2e8";var m=document.querySelectorAll(\'meta[name="theme-color"]\');for(var i=0;i<m.length;i++){m[i].setAttribute("content",c);}}}catch(e){}})();',
           }}
         />
         <EnrollmentRecoverySentinel
