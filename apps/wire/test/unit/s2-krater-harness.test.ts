@@ -4305,6 +4305,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(onDisk).toContain("0025_hypotheses.sql");
     expect(onDisk).toContain("0026_evidence.sql");
     expect(onDisk).toContain("0027_w58_remaining_objects.sql");
+    expect(onDisk).toContain("0028_event_attribution.sql");
     const listed = new Set(declaredSourcePaths());
     for (const name of onDisk) expect(listed.has(`db/migrations/${name}`)).toBe(true);
   });

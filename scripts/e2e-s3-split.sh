@@ -58,11 +58,25 @@ port_is_busy() {
   return 1
 }
 
+S3_NO_WORKER_PORT_PRESTART=0
+if [[ "${S3_SELF_TEST_CHECKER_TIMEOUT:-0}" == "1" || \
+  "${S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE:-0}" == "1" || \
+  "${S3_SELF_TEST_CHECKER_EXIT_1:-0}" == "1" || \
+  "${S3_SELF_TEST_IDENTITY_MISMATCH:-0}" == "1" ]]; then
+  S3_NO_WORKER_PORT_PRESTART=1
+fi
+readonly S3_NO_WORKER_PORT_PRESTART
 if [[ -n "${S3_PORT:-}" ]]; then
   if ! [[ "${S3_PORT}" =~ ^[0-9]{2,5}$ ]] || (( S3_PORT < 1024 || S3_PORT > 65535 )); then
     emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_PORT_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
     exit 1
   fi
+elif (( S3_NO_WORKER_PORT_PRESTART == 1 )); then
+  # This self-test exits before the Worker launch. Allocating and releasing an
+  # unrelated Worker port here created a bind gap in which a concurrent local
+  # process could claim the port and divert the checker-only proof through the
+  # global S3_PORT_OCCUPIED preflight.
+  S3_PORT=0
 else
   S3_PORT="$(allocate_port)"
 fi
@@ -82,7 +96,7 @@ if ! [[ "${S3_RUN_TOKEN}" =~ ^[a-f0-9]{64}$ && "${S3_READINESS_NONCE}" =~ ^s3-re
 fi
 readonly S3_RUN_TOKEN S3_READINESS_NONCE
 
-if port_is_busy "${S3_PORT}"; then
+if (( S3_PORT != 0 )) && port_is_busy "${S3_PORT}"; then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_PORT_OCCUPIED","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
 fi
@@ -105,6 +119,7 @@ readonly SERVER_LOG="${STATE_DIR}/wrangler.log"
 readonly CHECK_LOG="${STATE_DIR}/check.log"
 readonly TERM_RESISTANT_STATE_FILE="${STATE_DIR}/term-resistant-held-open"
 readonly CHECKER_RESISTANT_STATE_FILE="${STATE_DIR}/checker-resistant-held-open"
+readonly CHECKER_RESOURCE_PORT_FILE="${STATE_DIR}/checker-resource-port"
 if [[ ! -d "${STATE_DIR}" || -L "${STATE_DIR}" ]]; then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"LOCAL_PERSIST_DIR_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
@@ -690,6 +705,10 @@ assert_group_empty() {
 
 assert_listener_empty() {
   local listeners status
+  # Port zero is the explicit no-Worker self-test sentinel. Those modes prove
+  # their owned process group empty and never launch a server listener; asking
+  # lsof for tcp:0 instead enumerates unrelated listeners rather than a port.
+  (( S3_PORT == 0 )) && return 0
   listeners="$(listener_pids "${S3_PORT}")"
   status=$?
   (( status == 0 )) || return 1
@@ -1261,30 +1280,76 @@ run_startup_signal_window_self_test() {
   exit "${start_status}"
 }
 
+read_checker_resource_port() {
+  local mode size port extra
+  [[ -f "${CHECKER_RESOURCE_PORT_FILE}" && ! -L "${CHECKER_RESOURCE_PORT_FILE}" ]] || return 1
+  mode="$(stat -f '%Lp' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  size="$(stat -f '%z' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  [[ "${mode}" == "600" && "${size}" =~ ^[0-9]+$ ]] || return 1
+  {
+    IFS= read -r port || return 1
+    if IFS= read -r extra; then return 1; fi
+  } <"${CHECKER_RESOURCE_PORT_FILE}"
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+  (( port >= 1024 && port <= 65535 && size == ${#port} + 1 )) || return 1
+  [[ "${port}" != "${S3_PORT}" ]] || return 1
+  CHECKER_RESOURCE_PORT="${port}"
+}
+
 start_checker_resource_fixture() {
   local resist_signals="$1" members listeners holders status
   [[ "${resist_signals}" =~ ^[01]$ ]] || return 1
-  CHECKER_RESOURCE_PORT="$(allocate_port)" || return 1
-  [[ "${CHECKER_RESOURCE_PORT}" =~ ^[0-9]+$ && "${CHECKER_RESOURCE_PORT}" != "${S3_PORT}" ]] || return 1
-  port_is_busy "${CHECKER_RESOURCE_PORT}" && return 1
+  [[ ! -e "${CHECKER_RESOURCE_PORT_FILE}" && ! -L "${CHECKER_RESOURCE_PORT_FILE}" ]] || return 1
+  # The payload binds port 0 itself and publishes that already-owned port. A
+  # parent-side allocate/close followed by a later child bind is inherently
+  # racy and made concurrent containment plants collide with one another.
+  # shellcheck disable=SC2016 # Embedded Bun source expands only in the child.
   S3_CHECKER_FIXTURE_STATE="${CHECKER_RESISTANT_STATE_FILE}" \
-    S3_CHECKER_FIXTURE_PORT="${CHECKER_RESOURCE_PORT}" \
+    S3_CHECKER_FIXTURE_PORT_FILE="${CHECKER_RESOURCE_PORT_FILE}" \
     S3_CHECKER_FIXTURE_RESIST="${resist_signals}" \
     start_supervised_payload checker "${CHECK_LOG}" bun --eval '
-      import { openSync } from "node:fs";
+      import { closeSync, constants, fsyncSync, openSync, writeSync } from "node:fs";
       const stateFile = process.env.S3_CHECKER_FIXTURE_STATE;
-      const port = Number(process.env.S3_CHECKER_FIXTURE_PORT);
+      const portFile = process.env.S3_CHECKER_FIXTURE_PORT_FILE;
       const resist = process.env.S3_CHECKER_FIXTURE_RESIST;
-      if (!stateFile || !Number.isSafeInteger(port) || !["0", "1"].includes(resist ?? "")) {
+      if (!stateFile || !portFile || !["0", "1"].includes(resist ?? "")) {
         process.exit(2);
       }
       openSync(stateFile, "w");
       if (resist === "1") {
         for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});
       }
-      Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("checker-fixture") });
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () => new Response("checker-fixture"),
+      });
+      const portRecord = `${server.port}\n`;
+      const portFd = openSync(
+        portFile,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          (constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      try {
+        let offset = 0;
+        while (offset < portRecord.length) {
+          const written = writeSync(portFd, portRecord.slice(offset), offset, "utf8");
+          if (written <= 0) process.exit(2);
+          offset += written;
+        }
+        fsyncSync(portFd);
+      } finally {
+        closeSync(portFd);
+      }
     ' || return 1
   for _wait in {1..60}; do
+    if [[ -z "${CHECKER_RESOURCE_PORT}" ]] && ! read_checker_resource_port; then
+      sleep 0.05
+      continue
+    fi
     members="$(group_members "${CHECKER_PGID}")"; status=$?
     (( status == 0 )) || return 1
     listeners="$(listener_pids "${CHECKER_RESOURCE_PORT}")"; status=$?
@@ -1367,16 +1432,12 @@ on_exit() {
   if ! cleanup_with_retry; then
     emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"LOCAL_WORKER_CLEANUP_FAILED\",\"original_status\":${original_status},\"reproduce\":\"${REPRODUCE}\"}"
     if (( TEST_IDENTITY_RECOVERY == 1 )); then
-      local members listeners holders status preserved=0
+      local members status preserved=0
       members="$(group_members "${SERVER_PGID}")"; status=$?
       if (( status == 0 )) && [[ -n "${members}" ]] && \
         supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
           "${TEST_IDENTITY_REAL_STARTED_AT}" "${TEST_IDENTITY_REAL_TOKEN}"; then
-        listeners="$(listener_pids "${S3_PORT}")"; status=$?
-        if (( status == 0 )) && [[ -n "${listeners}" ]]; then
-          holders="$(fixture_state_holder_pids)"; status=$?
-          if (( status == 0 )) && [[ -n "${holders}" ]]; then preserved=1; fi
-        fi
+        preserved=1
       fi
       SERVER_SUPERVISOR_STARTED_AT="${TEST_IDENTITY_REAL_STARTED_AT}"
       SERVER_SUPERVISOR_TOKEN="${TEST_IDENTITY_REAL_TOKEN}"
@@ -1459,7 +1520,9 @@ run_term_resistant_descendant_self_test() {
 }
 
 run_identity_mismatch_self_test() {
-  start_term_resistant_fixture || return 1
+  start_supervised_payload server "${SERVER_LOG}" bash -c \
+    'trap "exit 0" TERM; trap ":" INT HUP; while :; do sleep 1; done' \
+    s3-identity-mismatch-fixture || return 1
   TEST_IDENTITY_REAL_STARTED_AT="${SERVER_SUPERVISOR_STARTED_AT}"
   TEST_IDENTITY_REAL_TOKEN="${SERVER_SUPERVISOR_TOKEN}"
   TEST_IDENTITY_RECOVERY=1

@@ -4066,6 +4066,11 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "wait_for_reaped_group_empty() {",
     "stop_group() {",
   );
+  const checkerResourceSource = sourceRegion(
+    script,
+    "start_checker_resource_fixture() {",
+    "run_checker_timeout_self_test() {",
+  );
   const publicShapePoisonAssertionSource = sourceRegion(
     checker,
     '"post_promotion_public_projection_search_and_export_apply_shape_guards",',
@@ -4120,6 +4125,12 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("signal_exact_direct_supervisor");
   expect(script).toContain("signal_exact_group_supervisor");
   expect(script).toContain("start_supervised_payload checker");
+  expect(script).toContain("S3_NO_WORKER_PORT_PRESTART=1");
+  expect(checkerResourceSource).toContain("port: 0,");
+  expect(checkerResourceSource).toContain("S3_CHECKER_FIXTURE_PORT_FILE");
+  expect(checkerResourceSource).toContain("read_checker_resource_port");
+  expect(checkerResourceSource).not.toContain("allocate_port");
+  expect(checkerResourceSource).not.toContain("port_is_busy");
   expect(script).toContain("LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED");
   const containmentDispatch =
     "if (( checker_containment_mode == 1 )); then\n  run_checker_containment_self_test;";
