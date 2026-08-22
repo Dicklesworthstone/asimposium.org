@@ -59,11 +59,13 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <head>
+      <body className="min-h-screen bg-paper text-ink antialiased">
         {/*
-         * Runs before first paint so an explicitly chosen theme never
-         * flashes the wrong palette. It only reads localStorage and sets one
-         * attribute; the stylesheet owns every color decision.
+         * Runs before first paint (synchronous, ahead of all markup) so an
+         * explicitly chosen theme never flashes the wrong palette. The App
+         * Router owns <head>, so this cannot live there. It only reads
+         * localStorage and sets one attribute; the stylesheet owns every
+         * color decision.
          */}
         <script
           dangerouslySetInnerHTML={{
@@ -71,8 +73,6 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               '(function(){try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;}}catch(e){}})();',
           }}
         />
-      </head>
-      <body className="min-h-screen bg-paper text-ink antialiased">
         <EnrollmentRecoverySentinel
           reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}
         />

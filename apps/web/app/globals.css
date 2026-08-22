@@ -358,6 +358,16 @@
   border-color: var(--color-clay);
   color: var(--color-clay);
 }
+.theme-toggle-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 0.9rem;
+}
+.theme-toggle {
+  font-size: 0.78rem;
+  font-variant: small-caps;
+  letter-spacing: 0.1em;
+}
 .btn-google,
 .btn-quiet,
 .landing a.btn-console {
