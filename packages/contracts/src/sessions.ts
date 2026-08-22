@@ -465,6 +465,33 @@ export const EvidenceResponseSchema = z
   })
   .strict();
 export type EvidenceResponse = z.infer<typeof EvidenceResponseSchema>;
+
+/** §6.7 the hypothesis write: a Fellow proposes an attack ROUTE (strategy,
+ * distinct from a claim). The falsifier is mandatory (P3 for hypotheses). */
+export const HypothesisRequestSchema = z
+  .object({
+    /** The attack route: the strategy being tried. */
+    route: z.string().trim().min(1).max(2000),
+    mechanism: z.string().trim().min(1).max(4000),
+    /** What observation kills this route (P3 for hypotheses). */
+    falsifier: z.string().trim().min(1).max(2000),
+    /** What evidence would discriminate this route from its alternatives. */
+    expected_evidence: z.string().max(2000).optional(),
+    /** The discriminating predictions the discriminate move consumes. */
+    discriminating_predictions: z.array(z.string().min(1).max(500)).max(16).default([]),
+    origin: z.enum(["proposed", "third-alternative", "refinement"]),
+    body_md: z.string().min(1).max(64 * 1024),
+  })
+  .strict();
+export type HypothesisRequest = z.infer<typeof HypothesisRequestSchema>;
+
+export const HypothesisResponseSchema = z
+  .object({
+    hypothesis_id: z.string().min(1),
+    status: z.literal("open"),
+  })
+  .strict();
+export type HypothesisResponse = z.infer<typeof HypothesisResponseSchema>;
 export type SessionCloseResponse = z.infer<typeof SessionCloseResponseSchema>;
 
 /** c52: the global public-change cursor is a bare decimal integer. */
@@ -492,6 +519,8 @@ export const SessionsContractsSchema = z
     review_response: ReviewResponseSchema,
     evidence_request: EvidenceRequestSchema,
     evidence_response: EvidenceResponseSchema,
+    hypothesis_request: HypothesisRequestSchema,
+    hypothesis_response: HypothesisResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

@@ -81,6 +81,8 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "REVIEW_BODY_INVALID",
   // W5.6: the evidence write joins the same teaching family.
   "EVIDENCE_BODY_INVALID",
+  // W5.6: the hypothesis write joins the same teaching family.
+  "HYPOTHESIS_BODY_INVALID",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [

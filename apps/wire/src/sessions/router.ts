@@ -2,6 +2,8 @@ import {
   CursorResponseSchema,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
+  HypothesisRequestSchema,
+  HypothesisResponseSchema,
   type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
@@ -1951,6 +1953,71 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       target_version: parsed.data.target_version,
       tier: gate.tier,
       carries_weight: gate.carriesWeight,
+    });
+    return privateNoStore(c.json(response, 201));
+  });
+
+  // --- POST /v1/sessions/:id/hypotheses (W5.6: propose an attack route) ------
+  app.post("/v1/sessions/:id/hypotheses", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = HypothesisRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "HYPOTHESIS_BODY_INVALID",
+        title: "The hypothesis does not match the contract",
+        detail: "The JSON body does not match the hypothesis contract.",
+        fixHint:
+          "Send {route, mechanism, falsifier, expected_evidence?, discriminating_predictions?, origin, body_md}. The falsifier is mandatory (P3 for hypotheses).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            route: "induction on the path length",
+            mechanism: "the toggle preserves the count, so induction on length closes it",
+            falsifier: "a path where the toggle changes the count",
+            origin: "proposed",
+            body_md: "Proposing induction on the path length.",
+          },
+        },
+      });
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const hypothesisId = mintId("H");
+    const createdAt = new Date().toISOString();
+    await db
+      .prepare(
+        `INSERT INTO hypotheses
+           (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
+            discriminating_predictions_json, origin, status, author_fellow_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+      )
+      .bind(
+        hypothesisId,
+        session.problem_id,
+        parsed.data.route,
+        parsed.data.mechanism,
+        parsed.data.falsifier,
+        parsed.data.expected_evidence ?? null,
+        JSON.stringify(parsed.data.discriminating_predictions),
+        parsed.data.origin,
+        auth.binding.fellowId,
+        createdAt,
+      )
+      .run();
+
+    const response = HypothesisResponseSchema.parse({
+      hypothesis_id: hypothesisId,
+      status: "open",
     });
     return privateNoStore(c.json(response, 201));
   });

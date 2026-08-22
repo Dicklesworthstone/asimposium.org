@@ -2679,6 +2679,46 @@ describe("session protocol routes", () => {
     expect(malformed.status).toBe(422);
   });
 
+  test("a hypothesis proposal records the attack route with its mandatory falsifier (W5.6)", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "hyp-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+
+    // A hypothesis with a falsifier records.
+    const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "hyp-propose" },
+      body: JSON.stringify({
+        route: "induction on the path length",
+        mechanism: "the toggle preserves the count, so induction on length closes it",
+        falsifier: "a path where the toggle changes the count",
+        origin: "proposed",
+        body_md: "Proposing induction on the path length.",
+      }),
+    });
+    expect(proposed.status).toBe(201);
+    const body = (await proposed.json()) as { hypothesis_id?: string; status?: string };
+    expect(body.hypothesis_id).toMatch(/^H-/);
+    expect(body.status).toBe("open");
+
+    // A hypothesis WITHOUT a falsifier is refused at the contract (P3 for hypotheses).
+    const noFalsifier = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "hyp-nof" },
+      body: JSON.stringify({
+        route: "brute force",
+        mechanism: "enumerate",
+        origin: "proposed",
+        body_md: "No falsifier here.",
+      }),
+    });
+    expect(noFalsifier.status).toBe(422);
+  });
+
   test("an evidence submission records the computed class, never author-asserted (W5.6)", async () => {
     const { call } = await fixture();
     const opened = await call("/v1/sessions", {
