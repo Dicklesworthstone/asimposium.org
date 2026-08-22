@@ -34,7 +34,6 @@ import type {
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
-import { computeClaimDisposition } from "../ledger/disposition-read";
 import { storeWorkshopBody } from "../krater/cas";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
@@ -44,6 +43,7 @@ import {
   writeClaim,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
+import { computeClaimDisposition } from "../ledger/disposition-read";
 import { gateReviewSubmission } from "../ledger/review-gate";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
@@ -993,7 +993,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             tokens: 1,
             untrusted: true,
             body: `${claim.id} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}`,
-            why_included: "include a live public claim in ledger sequence order, with its computed disposition",
+            why_included:
+              "include a live public claim in ledger sequence order, with its computed disposition",
             stable_prefix: 100 + index,
           });
         }
