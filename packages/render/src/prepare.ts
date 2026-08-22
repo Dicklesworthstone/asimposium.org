@@ -521,15 +521,35 @@ function validateProjectionStrings(projection: Projection): void {
     }
   }
 
+  // The markdown face interpolates exactly these server-authored fields raw
+  // (`# ${title}`, the preamble paragraph) or inside a single-backtick code
+  // span (`_why included:_ ${why_included}`). A backtick in any of them either
+  // opens a fenced code block — which would swallow every following line,
+  // including the renderer's own <!-- asimp … --> structural delimiters — or
+  // breaks that code span. A projection whose trusted prose cannot be rendered
+  // faithfully into the canonical agent face is invalid, so fail closed here
+  // rather than emitting a structurally corrupt agent face.
   for (const { field, value, reject_control_comment } of fields) {
-    if (!reject_control_comment || !hasAsimpControlComment(value)) continue;
-    refuse(
-      "INVALID_HEADER_VALUE",
-      "Server-authored Markdown may not contain renderer control comments",
-      `${field} contains an ASImposium control comment; only the renderer may author <!-- asimp … --> face and item delimiters`,
-      "Keep this server-authored field as ordinary Markdown prose and remove the <!-- asimp … --> comment. The renderer adds its own structural delimiters.",
-      "A1",
-    );
+    if (!reject_control_comment) continue;
+    if (!hasAsimpControlComment(value)) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Server-authored Markdown may not contain renderer control comments",
+        `${field} contains an ASImposium control comment; only the renderer may author <!-- asimp … --> face and item delimiters`,
+        "Keep this server-authored field as ordinary Markdown prose and remove the <!-- asimp … --> comment. The renderer adds its own structural delimiters.",
+        "A1",
+      );
+    }
+    const backtickOffset = value.indexOf("`");
+    if (backtickOffset !== -1) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Server-authored Markdown prose may not contain backticks",
+        `${field} contains a backtick at code-unit offset ${backtickOffset}; in the markdown face it would open or close CommonMark code structure around prose the renderer authors`,
+        "Write this server-authored field as ordinary prose without backticks; untrusted item bodies are fenced automatically and may contain them.",
+        "A1",
+      );
+    }
   }
 }
 

@@ -10,11 +10,12 @@
  */
 
 import { byteLength, contentFingerprint, stableStringify } from "./canonical.ts";
-import { codePointCountThroughLimit, MAX_BODY_CODE_POINTS } from "./prepare.ts";
+import { codePointCountThroughLimit, ITEM_ID_PATTERN, MAX_BODY_CODE_POINTS } from "./prepare.ts";
 import { renderProjection } from "./render.ts";
 import {
   fenceFor,
   firstUnpairedUtf16SurrogateOffset,
+  hasAsimpControlComment,
   isSafeHeaderValue,
   isSafeWorkerPath,
   neutralizeUntrustedBody,
@@ -244,6 +245,13 @@ function assertCandidateBody(value: unknown, field: string): string {
   if (offset !== undefined) {
     return refuse("INVALID_INPUT", `${field} contains an unpaired UTF-16 surrogate at ${offset}`);
   }
+  // U+0000 is refused by the renderer's scalar pass (INVALID_HEADER_VALUE).
+  // Refuse it here too so every candidate defect leaves as PackComposerError:
+  // a Worker adapter coded to this module's single error contract must not
+  // depend on which rule happens to trip first inside prepareProjection.
+  if (value.includes("\0")) {
+    return refuse("INVALID_CANDIDATE", `${field} contains U+0000`);
+  }
   return value;
 }
 
@@ -340,6 +348,15 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
     }
 
     const id = assertScalarText(candidate.id, `candidates[${index}].id`);
+    // Mirror the renderer's item-id grammar (prepare.ts) so these refusals
+    // keep the composer's own error type instead of leaking
+    // RenderContractError out of the selection-time estimation pass.
+    if (!ITEM_ID_PATTERN.test(id) || !isSafeHeaderValue(id)) {
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidate id ${JSON.stringify(id)} does not match ${ITEM_ID_PATTERN.source} or contains a sequence that is illegal in an HTML control comment`,
+      );
+    }
     if (ids.has(id))
       refuse("DUPLICATE_ITEM_ID", `candidate id ${JSON.stringify(id)} appears twice`);
     ids.add(id);
@@ -354,14 +371,31 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
       );
     }
 
+    const kind = assertScalarText(candidate.kind, `candidates[${index}].kind`);
+    if (!isSafeHeaderValue(kind)) {
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidate kind ${JSON.stringify(kind)} is not a safe control-header token`,
+      );
+    }
+    const whyIncluded = assertScalarText(
+      candidate.why_included,
+      `candidates[${index}].why_included`,
+    );
+    if (hasAsimpControlComment(whyIncluded)) {
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidates[${index}].why_included contains an ASImposium control comment; only the renderer may author <!-- asimp … --> delimiters`,
+      );
+    }
     const validated: PackCandidate = {
-      kind: assertScalarText(candidate.kind, `candidates[${index}].kind`),
+      kind,
       id,
       scope,
       tokens: assertTokenEstimate(candidate.tokens, `candidates[${index}].tokens`),
       untrusted: candidate.untrusted,
       body: assertCandidateBody(candidate.body, `candidates[${index}].body`),
-      why_included: assertScalarText(candidate.why_included, `candidates[${index}].why_included`),
+      why_included: whyIncluded,
       stable_prefix: assertStablePrefix(
         candidate.stable_prefix,
         `candidates[${index}].stable_prefix`,
