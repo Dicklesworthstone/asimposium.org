@@ -1,11 +1,11 @@
 import {
   CursorResponseSchema,
+  EvidenceRequestSchema,
+  EvidenceResponseSchema,
   type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
-  EvidenceRequestSchema,
-  EvidenceResponseSchema,
   ReviewRequestSchema,
   ReviewResponseSchema,
   SessionCloseRequestSchema,
@@ -46,8 +46,8 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
-import { gateReviewSubmission } from "../ledger/review-gate";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
+import { gateReviewSubmission } from "../ledger/review-gate";
 import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
 /**
@@ -1972,8 +1972,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "EVIDENCE_BODY_INVALID",
         title: "The evidence does not match the contract",
         detail: "The JSON body does not match the evidence contract.",
-        fixHint:
-          "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
+        fixHint: "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -1982,7 +1981,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             bears_on_id: "C-1",
             direction: "supports",
             kind: "citation",
-            source: { kind: "locator", locator: "https://arxiv.org/abs/…", excerpt: "…the result…" },
+            source: {
+              kind: "locator",
+              locator: "https://arxiv.org/abs/…",
+              excerpt: "…the result…",
+            },
             mode: "confirmatory",
             body_md: "The cited result establishes the bound.",
           },
