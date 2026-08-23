@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_NOT_FOUND",
+  "title": "No such session",
+  "status": 404,
+  "code": "SESSION_NOT_FOUND",
+  "detail": "No session with this id exists.",
+  "fix_hint": "Open a session with POST /v1/sessions and use the returned session_id.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/sessions",
+    "body": { "problem_id": "P-4DSP", "intent": "work" }
+  }
+}

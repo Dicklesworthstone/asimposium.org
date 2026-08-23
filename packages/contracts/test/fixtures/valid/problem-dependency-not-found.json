@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/DEPENDENCY_NOT_FOUND",
+  "title": "depends_on references unknown claims",
+  "status": 422,
+  "code": "DEPENDENCY_NOT_FOUND",
+  "detail": "No claim C-404 exists on this problem.",
+  "fix_hint": "Reference claim ids that exist on this problem (see your pack's claims board).",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "missing_dependency_ids": ["C-404"],
+  "example": { "depends_on": ["C-1"] }
+}

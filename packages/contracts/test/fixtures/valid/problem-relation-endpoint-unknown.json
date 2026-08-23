@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_ENDPOINT_UNKNOWN",
+  "title": "A relation endpoint does not exist at its pin",
+  "status": 422,
+  "code": "RELATION_ENDPOINT_UNKNOWN",
+  "detail": "C-1 has no version 9 here.",
+  "fix_hint": "Pin versions that exist on this problem (see your pack's claims board).",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "kind": "implies", "source_claim_id": "C-1", "source_version": 2, "target": "C-2@1" }
+}

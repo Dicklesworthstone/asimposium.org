@@ -1,0 +1,9 @@
+{
+  "type": "https://asimposium.org/errors/OBJECT_VERSION_CONFLICT",
+  "title": "The base version is stale",
+  "status": 409,
+  "code": "OBJECT_VERSION_CONFLICT",
+  "detail": "Claim C-3 is at head version 4; the replacement was based on 2.",
+  "fix_hint": "Re-read the current head from your pack, then re-apply your change on it.",
+  "head_version": 4
+}

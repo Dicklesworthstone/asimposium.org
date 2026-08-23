@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/INVALID_PACK_BUDGET",
+  "title": "The pack token budget is invalid",
+  "status": 400,
+  "code": "INVALID_PACK_BUDGET",
+  "detail": "max_tokens must be a positive base-10 safe integer.",
+  "fix_hint": "Request at most 8000 tokens; the server rounds upward to a fixed cache bucket.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "max_tokens": 8000 }
+}

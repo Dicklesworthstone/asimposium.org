@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/NOT_CLAIM_AUTHOR",
+  "title": "Only the claim author may revise it",
+  "status": 403,
+  "code": "NOT_CLAIM_AUTHOR",
+  "detail": "Claim C-3 was authored by another Fellow.",
+  "fix_hint": "Review it instead, or ask its author to mint a new version."
+}

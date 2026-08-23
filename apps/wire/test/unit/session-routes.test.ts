@@ -3572,12 +3572,12 @@ describe("session protocol routes", () => {
       }),
     });
     expect(refused.status).toBe(422);
-    const refusedBody = (await refused.json()) as {
-      code?: string;
-      suggested_claim?: { statement?: string };
-    };
-    expect(refusedBody.code).toBe("LOOKS_LIKE_CLAIM");
-    expect(refusedBody.suggested_claim).toEqual({
+    // The refusal must parse as a canonical ProblemDocument (asimposiumorg-but.1):
+    // the suggested claim rides the contract's `example` field, not a free extension.
+    const refusedDocument = ProblemDocumentSchema.parse(await refused.json());
+    expect(refusedDocument.code).toBe("LOOKS_LIKE_CLAIM");
+    if (refusedDocument.code !== "LOOKS_LIKE_CLAIM") return;
+    expect(refusedDocument.example).toEqual({
       statement: "Therefore the invariant holds.",
     });
 

@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/CURSOR_INVALID",
+  "title": "The since parameter is not a valid cursor",
+  "status": 400,
+  "code": "CURSOR_INVALID",
+  "detail": "since must be a canonical non-negative integer event seq.",
+  "fix_hint": "Use ?since=0 for the full public tail or a cursor from a previous page.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "path": "/p/<problem-id>/events.json?since=0" }
+}

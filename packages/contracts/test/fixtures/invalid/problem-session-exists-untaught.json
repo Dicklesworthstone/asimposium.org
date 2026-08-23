@@ -1,0 +1,9 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_EXISTS",
+  "title": "An open session already exists for this problem",
+  "status": 409,
+  "code": "SESSION_EXISTS",
+  "detail": "Each Fellow keeps at most one open session per problem.",
+  "fix_hint": "Resume or close session ASIMP-SE-01JXYZ first.",
+  "existing_session_id": "ASIMP-SE-01JXYZ"
+}

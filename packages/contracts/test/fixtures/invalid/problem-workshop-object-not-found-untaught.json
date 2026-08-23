@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_OBJECT_NOT_FOUND",
+  "title": "No such workshop object in this session",
+  "status": 404,
+  "code": "WORKSHOP_OBJECT_NOT_FOUND",
+  "detail": "The workshop id is not one this session and Fellow own.",
+  "fix_hint": "Promote an id from your own workshop (see your pack's workshop-heads)."
+}

@@ -35,7 +35,14 @@ drift=0
 # stricter one that would sit permanently red on honest debt.
 RECORDED_DEBT="$(sed -n '/^const CORPUS_COVERAGE_DEBT/,/^);/p' "${CORPUS_LEDGER}" | LC_ALL=C grep -oE '"[a-z0-9-]+"' | tr -d '"' | LC_ALL=C sort -u || true)"
 
-for code in $(LC_ALL=C grep -oE '^  "[A-Z][A-Z0-9_]+",' "${PROBLEM_SRC}" | LC_ALL=C sort -u | tr -d ' ",'); do
+# Extract codes only from the two closed code arrays. A whole-file grep for
+# indented uppercase strings would also match ProblemRuleSchema members (the
+# rule vocabulary grew onto its own lines), inventing phantom "codes".
+for code in $(awk '
+  /^const (GENERAL_CONTRACT_PROBLEM_CODES|OPAQUE_PROBLEM_CODES) = \[/ {inarray=1; next}
+  /^\] as const;/ {inarray=0}
+  inarray && /^  "[A-Z][A-Z0-9_]+",?$/ {gsub(/[",]/, ""); print}
+' "${PROBLEM_SRC}" | LC_ALL=C sort -u); do
   slug="$(printf '%s' "${code}" | tr '[:upper:]_' '[:lower:]-')"
   if [[ ! -f "${VALID_DIR}/problem-${slug}.json" ]]; then
     if LC_ALL=C grep -qxF "${slug}" <<<"${RECORDED_DEBT}"; then

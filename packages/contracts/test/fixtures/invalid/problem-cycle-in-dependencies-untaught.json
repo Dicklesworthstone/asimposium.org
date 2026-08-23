@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CYCLE_IN_DEPENDENCIES",
+  "title": "A claim cannot depend on itself",
+  "status": 422,
+  "code": "CYCLE_IN_DEPENDENCIES",
+  "detail": "C-3 lists itself in depends_on.",
+  "fix_hint": "Remove the self-reference from depends_on."
+}

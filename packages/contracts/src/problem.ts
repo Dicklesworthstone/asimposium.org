@@ -99,6 +99,30 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",
   "HYPOTHESIS_ALREADY_KILLED",
+  // W4/W5 mounted session-surface refusals (asimposiumorg-but.1). Each names
+  // the exact failed precondition so the caller can repair the request: a
+  // bad pack budget, an unknown/closed/duplicate session, an unknown problem,
+  // promote-time validator refusals (authoritative fields, missing falsifier,
+  // near-duplicate statement), and dependency/relation pin failures.
+  "INVALID_PACK_BUDGET",
+  "SESSION_NOT_FOUND",
+  "SESSION_CLOSED",
+  "PROBLEM_NOT_FOUND",
+  "SESSION_EXISTS",
+  "SCHEMA_INVALID",
+  "MISSING_FALSIFIER",
+  "WORKSHOP_OBJECT_NOT_FOUND",
+  "DEPENDENCY_NOT_FOUND",
+  "DUPLICATE_CLAIM",
+  "OBJECT_VERSION_CONFLICT",
+  "RELATION_ENDPOINT_UNKNOWN",
+  "RELATION_ALREADY_ASSERTED",
+  "NOT_CLAIM_AUTHOR",
+  "LOOKS_LIKE_CLAIM",
+  "CYCLE_IN_DEPENDENCIES",
+  // Public event-tail cursor refusal (ledger faces): a malformed ?since= is
+  // fully described by the request, so it teaches the canonical form.
+  "CURSOR_INVALID",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -139,12 +163,32 @@ export const OPAQUE_PROBLEM_CODES = [
   "UNAUTHORIZED",
   "WORKSHOP_NOT_FOUND",
   "WRONG_PRINCIPAL",
+  // The one session-write policy face (ADR-18): credential-state refusals on
+  // session writes answer byte-identically across every operator reason, so
+  // the caller cannot probe why a credential went unwritable.
+  "WRITE_REFUSED",
 ] as const;
 
 export const ProblemCodeSchema = z.enum([...CONTRACT_PROBLEM_CODES, ...OPAQUE_PROBLEM_CODES]);
 
 /** Rule ids a teaching refusal may cite. Each resolves to published text. */
-export const ProblemRuleSchema = z.enum(["A5", "ADR-20", "P-EN-NAME"]);
+export const ProblemRuleSchema = z.enum([
+  "A5",
+  "ADR-20",
+  "P-EN-NAME",
+  // Validator P-rules cited by mounted ledger/session surfaces (A9): P1
+  // identity, P2/P4 self-certification split, P3 falsifier, P6 preserved
+  // dead ends, P9 authorship, P10 reference integrity, P11 near-duplicate,
+  // and §7.6, the served session-protocol section defining note-vs-claim.
+  "P1",
+  "P2/P4",
+  "P3",
+  "P6",
+  "P9",
+  "P10",
+  "P11",
+  "§7.6",
+]);
 
 /**
  * Fields present only on contract refusals. `example` is a synthetic,
@@ -177,6 +221,17 @@ const generalContractProblem = z
     ...teachingFields,
     /** Available Fellow names, present only on name-policy refusals. */
     suggestions: z.array(z.string().min(1).max(32)).max(3).optional(),
+    /**
+     * Machine-readable reconciliation targets (asimposiumorg-but.1), each
+     * present only on the refusal that names that target: the open session
+     * blocking a new one, the near-duplicate claim to review or refine, and
+     * the unknown depends_on ids on a promote/revise.
+     */
+    existing_session_id: z.string().min(1).max(64).optional(),
+    existing_claim_id: z.string().min(1).max(64).optional(),
+    missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
+    /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
+    head_version: z.number().int().min(1).optional(),
   })
   .strict();
 

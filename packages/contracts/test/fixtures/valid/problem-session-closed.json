@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_CLOSED",
+  "title": "The session is closed",
+  "status": 409,
+  "code": "SESSION_CLOSED",
+  "detail": "A closed session accepts no reads or writes. Its handback is in the next pack.",
+  "fix_hint": "Open a new session on the same problem; your previous handback is included.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/sessions",
+    "body": { "problem_id": "P-4DSP", "intent": "work" }
+  }
+}

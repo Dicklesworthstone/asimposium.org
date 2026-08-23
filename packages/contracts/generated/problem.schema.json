@@ -74,7 +74,24 @@
                     "GAP_TARGET_UNKNOWN",
                     "RELATION_BODY_INVALID",
                     "HYPOTHESIS_NOT_FOUND",
-                    "HYPOTHESIS_ALREADY_KILLED"
+                    "HYPOTHESIS_ALREADY_KILLED",
+                    "INVALID_PACK_BUDGET",
+                    "SESSION_NOT_FOUND",
+                    "SESSION_CLOSED",
+                    "PROBLEM_NOT_FOUND",
+                    "SESSION_EXISTS",
+                    "SCHEMA_INVALID",
+                    "MISSING_FALSIFIER",
+                    "WORKSHOP_OBJECT_NOT_FOUND",
+                    "DEPENDENCY_NOT_FOUND",
+                    "DUPLICATE_CLAIM",
+                    "OBJECT_VERSION_CONFLICT",
+                    "RELATION_ENDPOINT_UNKNOWN",
+                    "RELATION_ALREADY_ASSERTED",
+                    "NOT_CLAIM_AUTHOR",
+                    "LOOKS_LIKE_CLAIM",
+                    "CYCLE_IN_DEPENDENCIES",
+                    "CURSOR_INVALID"
                   ]
                 },
                 "detail": {
@@ -92,7 +109,15 @@
                   "enum": [
                     "A5",
                     "ADR-20",
-                    "P-EN-NAME"
+                    "P-EN-NAME",
+                    "P1",
+                    "P2/P4",
+                    "P3",
+                    "P6",
+                    "P9",
+                    "P10",
+                    "P11",
+                    "§7.6"
                   ]
                 },
                 "schema": {
@@ -115,6 +140,30 @@
                     "minLength": 1,
                     "maxLength": 32
                   }
+                },
+                "existing_session_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "existing_claim_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "missing_dependency_ids": {
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "head_version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
                 }
               },
               "required": [
@@ -167,7 +216,15 @@
                   "enum": [
                     "A5",
                     "ADR-20",
-                    "P-EN-NAME"
+                    "P-EN-NAME",
+                    "P1",
+                    "P2/P4",
+                    "P3",
+                    "P6",
+                    "P9",
+                    "P10",
+                    "P11",
+                    "§7.6"
                   ]
                 },
                 "schema": {
@@ -244,7 +301,15 @@
                   "enum": [
                     "A5",
                     "ADR-20",
-                    "P-EN-NAME"
+                    "P-EN-NAME",
+                    "P1",
+                    "P2/P4",
+                    "P3",
+                    "P6",
+                    "P9",
+                    "P10",
+                    "P11",
+                    "§7.6"
                   ]
                 },
                 "schema": {
@@ -332,7 +397,8 @@
                 "STEP_UP_REQUIRED",
                 "UNAUTHORIZED",
                 "WORKSHOP_NOT_FOUND",
-                "WRONG_PRINCIPAL"
+                "WRONG_PRINCIPAL",
+                "WRITE_REFUSED"
               ]
             },
             "detail": {
@@ -425,7 +491,24 @@
                 "GAP_TARGET_UNKNOWN",
                 "RELATION_BODY_INVALID",
                 "HYPOTHESIS_NOT_FOUND",
-                "HYPOTHESIS_ALREADY_KILLED"
+                "HYPOTHESIS_ALREADY_KILLED",
+                "INVALID_PACK_BUDGET",
+                "SESSION_NOT_FOUND",
+                "SESSION_CLOSED",
+                "PROBLEM_NOT_FOUND",
+                "SESSION_EXISTS",
+                "SCHEMA_INVALID",
+                "MISSING_FALSIFIER",
+                "WORKSHOP_OBJECT_NOT_FOUND",
+                "DEPENDENCY_NOT_FOUND",
+                "DUPLICATE_CLAIM",
+                "OBJECT_VERSION_CONFLICT",
+                "RELATION_ENDPOINT_UNKNOWN",
+                "RELATION_ALREADY_ASSERTED",
+                "NOT_CLAIM_AUTHOR",
+                "LOOKS_LIKE_CLAIM",
+                "CYCLE_IN_DEPENDENCIES",
+                "CURSOR_INVALID"
               ]
             },
             "detail": {
@@ -443,7 +526,15 @@
               "enum": [
                 "A5",
                 "ADR-20",
-                "P-EN-NAME"
+                "P-EN-NAME",
+                "P1",
+                "P2/P4",
+                "P3",
+                "P6",
+                "P9",
+                "P10",
+                "P11",
+                "§7.6"
               ]
             },
             "schema": {
@@ -466,6 +557,30 @@
                 "minLength": 1,
                 "maxLength": 32
               }
+            },
+            "existing_session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "existing_claim_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "missing_dependency_ids": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "head_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
             }
           },
           "required": [
@@ -518,7 +633,15 @@
               "enum": [
                 "A5",
                 "ADR-20",
-                "P-EN-NAME"
+                "P-EN-NAME",
+                "P1",
+                "P2/P4",
+                "P3",
+                "P6",
+                "P9",
+                "P10",
+                "P11",
+                "§7.6"
               ]
             },
             "schema": {
@@ -595,7 +718,15 @@
               "enum": [
                 "A5",
                 "ADR-20",
-                "P-EN-NAME"
+                "P-EN-NAME",
+                "P1",
+                "P2/P4",
+                "P3",
+                "P6",
+                "P9",
+                "P10",
+                "P11",
+                "§7.6"
               ]
             },
             "schema": {
@@ -683,7 +814,8 @@
             "STEP_UP_REQUIRED",
             "UNAUTHORIZED",
             "WORKSHOP_NOT_FOUND",
-            "WRONG_PRINCIPAL"
+            "WRONG_PRINCIPAL",
+            "WRITE_REFUSED"
           ]
         },
         "detail": {
@@ -755,6 +887,23 @@
         "RELATION_BODY_INVALID",
         "HYPOTHESIS_NOT_FOUND",
         "HYPOTHESIS_ALREADY_KILLED",
+        "INVALID_PACK_BUDGET",
+        "SESSION_NOT_FOUND",
+        "SESSION_CLOSED",
+        "PROBLEM_NOT_FOUND",
+        "SESSION_EXISTS",
+        "SCHEMA_INVALID",
+        "MISSING_FALSIFIER",
+        "WORKSHOP_OBJECT_NOT_FOUND",
+        "DEPENDENCY_NOT_FOUND",
+        "DUPLICATE_CLAIM",
+        "OBJECT_VERSION_CONFLICT",
+        "RELATION_ENDPOINT_UNKNOWN",
+        "RELATION_ALREADY_ASSERTED",
+        "NOT_CLAIM_AUTHOR",
+        "LOOKS_LIKE_CLAIM",
+        "CYCLE_IN_DEPENDENCIES",
+        "CURSOR_INVALID",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
@@ -782,7 +931,8 @@
         "STEP_UP_REQUIRED",
         "UNAUTHORIZED",
         "WORKSHOP_NOT_FOUND",
-        "WRONG_PRINCIPAL"
+        "WRONG_PRINCIPAL",
+        "WRITE_REFUSED"
       ]
     }
   },

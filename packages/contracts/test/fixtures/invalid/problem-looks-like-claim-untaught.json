@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/LOOKS_LIKE_CLAIM",
+  "title": "This note looks like a claim",
+  "status": 422,
+  "code": "LOOKS_LIKE_CLAIM",
+  "detail": "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
+  "fix_hint": "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor)."
+}

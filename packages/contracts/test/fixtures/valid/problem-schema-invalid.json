@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/SCHEMA_INVALID",
+  "title": "Authoritative fields are not author-writable",
+  "status": 422,
+  "code": "SCHEMA_INVALID",
+  "detail": "The promotion carried a disposition, proof, confidence, certification, or status-upgrade field.",
+  "fix_hint": "Remove disposition/proof/confidence/certification/status-upgrade fields; dispositions are computed from reviews.",
+  "rule": "P2/P4",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "workshop_id": "W-4DSP-01JXYZ", "kind": "conjecture", "statement": "<claim text>" }
+}

@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/WRITE_REFUSED",
+  "title": "The write is not authorized for this credential",
+  "status": 403,
+  "code": "WRITE_REFUSED",
+  "detail": "This credential may not perform this write now.",
+  "fix_hint": "Check the console for the credential state or contact your sponsor.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/sessions"
+  }
+}

@@ -7,7 +7,7 @@ import { PACK_PREAMBLE, type Projection, renderProjection } from "@asimposium/re
 import { Hono } from "hono";
 
 import type { Env } from "./env";
-import { problem as problemDocument } from "./http/envelope";
+import { validatedProblem as problemDocument } from "./http/envelope";
 import { readCursor, readEvents } from "./krater/krater";
 
 /**
@@ -125,6 +125,11 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
         title: "The since parameter is not a valid cursor",
         detail: "since must be a canonical non-negative integer event seq.",
         fixHint: "Use ?since=0 for the full public tail or a cursor from a previous page.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { path: "/p/<problem-id>/events.json?since=0" },
+        },
       });
     }
     const problemRow = await c.env.DB.prepare("SELECT id FROM problems WHERE id = ?")
@@ -137,6 +142,11 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
         title: "No such problem",
         detail: "No public problem with this id exists.",
         fixHint: "Check the id against GET /problems.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
       });
     }
     const events = await readEvents(c.env.DB, problemId, since, 200);
@@ -270,6 +280,11 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
         title: "No such problem",
         detail: "No public problem with this id exists.",
         fixHint: "Check the id against GET /problems.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
       });
     }
     const face = renderProjection(projection, "json");
@@ -293,6 +308,11 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
         title: "No such problem",
         detail: "No public problem with this id exists.",
         fixHint: "Check the id against GET /problems.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
       });
     }
     const face = renderProjection(projection, "md");

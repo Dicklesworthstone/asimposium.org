@@ -294,30 +294,32 @@ function idempotencyConflictProblem(): Response {
 function packBudgetOrRefusal(raw: string | null, profile: PackProfile): number | Response {
   if (raw === null) return DEFAULT_PACK_TOKENS[profile];
   if (!/^[1-9][0-9]*$/.test(raw)) {
-    return problem({
+    return validatedProblem({
       status: 400,
       code: "INVALID_PACK_BUDGET",
       title: "The pack token budget is invalid",
       detail: "max_tokens must be a positive base-10 safe integer.",
       fixHint: `Request at most ${PACK_BUDGET_BUCKETS.at(-1)} tokens; the server rounds upward to a fixed cache bucket.`,
+      rule: "A5",
       extensions: {
         schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-        allowed_buckets: PACK_BUDGET_BUCKETS,
+        example: { max_tokens: PACK_BUDGET_BUCKETS.at(-1) },
       },
     });
   }
   const requested = Number(raw);
   const maximum = PACK_BUDGET_BUCKETS.at(-1);
   if (!Number.isSafeInteger(requested) || maximum === undefined || requested > maximum) {
-    return problem({
+    return validatedProblem({
       status: 400,
       code: "INVALID_PACK_BUDGET",
       title: "The pack token budget is invalid",
       detail: `max_tokens must be no greater than ${maximum ?? 8000}.`,
       fixHint: `Use one of the fixed buckets directly, or request a positive value that rounds up to one: ${PACK_BUDGET_BUCKETS.join(", ")}.`,
+      rule: "A5",
       extensions: {
         schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-        allowed_buckets: PACK_BUDGET_BUCKETS,
+        example: { max_tokens: PACK_BUDGET_BUCKETS.at(-1) },
       },
     });
   }
@@ -505,7 +507,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
    * it just refused. The operator reason stays on the operator channel.
    */
   const writeRefusedProblem = (): Response =>
-    problem({
+    validatedProblem({
       status: 403,
       code: "WRITE_REFUSED",
       title: "The write is not authorized for this credential",
@@ -567,33 +569,57 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(sessionId)
       .first<SessionRow>();
     if (row === null || row === undefined) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "SESSION_NOT_FOUND",
         title: "No such session",
         detail: "No session with this id exists.",
         fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            method: "POST",
+            path: "/v1/sessions",
+            body: { problem_id: "P-4DSP", intent: "work" },
+          },
+        },
       });
     }
     if (row.fellow_id !== fellowId) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "SESSION_NOT_FOUND",
         title: "No such session",
         detail: "No session with this id exists.",
         fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            method: "POST",
+            path: "/v1/sessions",
+            body: { problem_id: "P-4DSP", intent: "work" },
+          },
+        },
       });
     }
     if (row.closed_at !== null) {
-      return problem({
+      return validatedProblem({
         status: 409,
         code: "SESSION_CLOSED",
         title: "The session is closed",
         detail: "A closed session accepts no reads or writes. Its handback is in the next pack.",
         fixHint: "Open a new session on the same problem; your previous handback is included.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            method: "POST",
+            path: "/v1/sessions",
+            body: { problem_id: "P-4DSP", intent: "work" },
+          },
+        },
       });
     }
     return row;
@@ -611,25 +637,41 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(sessionId, fellowId)
       .first<PackSessionRow>();
     if (row === null || row === undefined) {
-      const response = problem({
+      const response = validatedProblem({
         status: 404,
         code: "SESSION_NOT_FOUND",
         title: "No such session",
         detail: "No session with this id exists.",
         fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            method: "POST",
+            path: "/v1/sessions",
+            body: { problem_id: "P-4DSP", intent: "work" },
+          },
+        },
       });
       response.headers.set("cache-control", "private, no-store");
       return response;
     }
     if (row.closed_at !== null) {
-      const response = problem({
+      const response = validatedProblem({
         status: 409,
         code: "SESSION_CLOSED",
         title: "The session is closed",
         detail: "A closed session accepts no reads or writes. Its handback is in the next pack.",
         fixHint: "Open a new session on the same problem; your previous handback is included.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            method: "POST",
+            path: "/v1/sessions",
+            body: { problem_id: "P-4DSP", intent: "work" },
+          },
+        },
       });
       response.headers.set("cache-control", "private, no-store");
       return response;
@@ -802,25 +844,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof SessionProblemMissingError) {
-        return problem({
+        return validatedProblem({
           status: 404,
           code: "PROBLEM_NOT_FOUND",
           title: "No such problem",
           detail: `No problem named ${error.problemId} exists on this ledger.`,
           fixHint: "Check the problem id against GET /problems.json and retry.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
         });
       }
       if (error instanceof SessionExistsError) {
-        return problem({
+        return validatedProblem({
           status: 409,
           code: "SESSION_EXISTS",
           title: "An open session already exists for this problem",
           detail: "Each Fellow keeps at most one open session per problem.",
           fixHint: `Resume or close session ${error.sessionId} first.`,
+          rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
             existing_session_id: error.sessionId,
+            example: { path: "/v1/sessions/<existing_session_id>/pack?profile=working" },
           },
         });
       }
@@ -830,12 +878,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           .bind(parsed.data.problem_id)
           .first<{ id: string }>();
         if (problemRow === null || problemRow === undefined) {
-          return problem({
+          return validatedProblem({
             status: 404,
             code: "PROBLEM_NOT_FOUND",
             title: "No such problem",
             detail: `No problem named ${parsed.data.problem_id} exists on this ledger.`,
             fixHint: "Check the problem id against GET /problems.json and retry.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { method: "GET", path: "/problems.json" },
+            },
           });
         }
         const existing = await db
@@ -845,13 +898,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           .bind(auth.binding.fellowId, parsed.data.problem_id)
           .first<{ session_id: string }>();
         if (existing !== null && existing !== undefined) {
-          return problem({
+          return validatedProblem({
             status: 409,
             code: "SESSION_EXISTS",
             title: "An open session already exists for this problem",
             detail: "Each Fellow keeps at most one open session per problem.",
             fixHint: `Resume or close session ${existing.session_id} first.`,
-            extensions: { existing_session_id: existing.session_id },
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              existing_session_id: existing.session_id,
+              example: { path: "/v1/sessions/<existing_session_id>/pack?profile=working" },
+            },
           });
         }
         // Every contract-shaped cause is excluded above, so the election was
@@ -1348,7 +1406,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (parsed.data.type === "note" && parsed.data.force_note !== true) {
       const assessment = assessNoteIntent(parsed.data.body_md, parsed.data.relates_to.length > 0);
       if (assessment.looksLikeClaim) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "LOOKS_LIKE_CLAIM",
           title: "This note looks like a claim",
@@ -1358,9 +1416,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
           rule: "§7.6",
           extensions: {
-            signals: assessment.signals,
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            suggested_claim: suggestedClaimFromNote(parsed.data.body_md),
+            example: suggestedClaimFromNote(parsed.data.body_md),
           },
         });
       }
@@ -1528,7 +1585,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (rawBody !== undefined && typeof rawBody === "object" && rawBody !== null) {
       const authoritative = rejectAuthoritativeFields(rawBody as Record<string, unknown>);
       if (authoritative !== null) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "SCHEMA_INVALID",
           title: "Authoritative fields are not author-writable",
@@ -1536,7 +1593,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             "The promotion carried a disposition, proof, confidence, certification, or status-upgrade field.",
           fixHint: authoritative.fixHint,
           rule: "P2/P4",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { workshop_id: "W-4DSP-01JXYZ", kind: "conjecture", statement: "<claim text>" },
+          },
         });
       }
     }
@@ -1563,7 +1623,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     if (parsed.data.kind === "conjecture" && parsed.data.falsifier === undefined) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "MISSING_FALSIFIER",
         title: "Conjecture-class claims require a falsifier",
@@ -1644,13 +1704,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
       .first<{ workshop_id: string }>();
     if (ownedWorkshop === null || ownedWorkshop === undefined) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "WORKSHOP_OBJECT_NOT_FOUND",
         title: "No such workshop object in this session",
         detail: "The workshop id is not one this session and Fellow own.",
         fixHint: "Promote an id from your own workshop (see your pack's workshop-heads).",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            workshop_id: "W-4DSP-01JXYZ",
+            kind: "conjecture",
+            statement: "The orbit count is invariant under all eight toggles.",
+            falsifier: "A toggle sequence that changes the orbit count.",
+          },
+        },
       });
     }
 
@@ -1666,7 +1735,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .first<{ id: string }>();
     if (existingDuplicate !== null && existingDuplicate !== undefined) {
       const refusal = duplicateClaimRefusal(existingDuplicate.id);
-      return problem({
+      return validatedProblem({
         status: 409,
         code: refusal.code,
         title: "A near-duplicate claim already exists",
@@ -1676,6 +1745,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           existing_claim_id: refusal.existingId,
+          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
         },
       });
     }
@@ -1695,7 +1765,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const known = new Set((found.results ?? []).map((row) => row.id));
       const missing = resolvedDeps.filter((dep) => !known.has(dep));
       if (missing.length > 0) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "DEPENDENCY_NOT_FOUND",
           title: "depends_on references unknown claims",
@@ -1705,6 +1775,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
             missing_dependency_ids: missing,
+            example: { depends_on: ["C-1"] },
           },
         });
       }
@@ -1940,7 +2011,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           .bind(session.problem_id, candidateHash)
           .first<{ id: string }>();
         const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
-        return problem({
+        return validatedProblem({
           status: 409,
           code: refusal.code,
           title: "A near-duplicate claim already exists",
@@ -1950,6 +2021,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
             existing_claim_id: refusal.existingId,
+            example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
           },
         });
       }
@@ -1957,13 +2029,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return idempotencyConflictProblem();
       }
       if (error instanceof KraterProblemNotFoundError) {
-        return problem({
+        return validatedProblem({
           status: 404,
           code: "PROBLEM_NOT_FOUND",
           title: "No such problem",
           detail: "The session's problem is missing from the ledger.",
           fixHint: "Check the problem id against GET /problems.json.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
         });
       }
       const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
@@ -1999,7 +2075,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (rawBody !== undefined && typeof rawBody === "object" && rawBody !== null) {
       const authoritative = rejectAuthoritativeFields(rawBody as Record<string, unknown>);
       if (authoritative !== null) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "SCHEMA_INVALID",
           title: "Authoritative fields are not author-writable",
@@ -2007,7 +2083,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             "The revision carried a disposition, proof, confidence, certification, or status-upgrade field.",
           fixHint: authoritative.fixHint,
           rule: "P2/P4",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "<claim text>" },
+          },
         });
       }
     }
@@ -2034,7 +2113,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     if (parsed.data.kind === "conjecture" && parsed.data.falsifier === undefined) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "MISSING_FALSIFIER",
         title: "Conjecture-class claims require a falsifier",
@@ -2111,28 +2190,35 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(session.problem_id, parsed.data.claim_id)
       .first<{ head_version: number; author_fellow_id: string }>();
     if (claimHead === null || claimHead === undefined) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "CLAIM_NOT_FOUND",
         title: "No such claim on this problem",
         detail: `Claim ${parsed.data.claim_id} does not exist on this problem.`,
         fixHint: "Check the id against your pack's claims board.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "<claim text>" },
+        },
       });
     }
     if (claimHead.author_fellow_id !== auth.binding.fellowId) {
-      return problem({
+      return validatedProblem({
         status: 403,
         code: "NOT_CLAIM_AUTHOR",
         title: "Only the claim author may revise it",
         detail: `Claim ${parsed.data.claim_id} was authored by another Fellow.`,
         fixHint: "Review it instead, or ask its author to mint a new version.",
         rule: "P9",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { kind: "review", target_claim_id: "C-1", verdict: "confirm" },
+        },
       });
     }
     if (claimHead.head_version !== parsed.data.base_version) {
-      return problem({
+      return validatedProblem({
         status: 409,
         code: "OBJECT_VERSION_CONFLICT",
         title: "The base version is stale",
@@ -2142,6 +2228,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           head_version: claimHead.head_version,
+          example: { claim_id: "C-1", base_version: 2, kind: "conjecture", statement: "<new text>" },
         },
       });
     }
@@ -2157,7 +2244,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .first<{ id: string }>();
     if (existingDuplicate !== null && existingDuplicate !== undefined) {
       const refusal = duplicateClaimRefusal(existingDuplicate.id);
-      return problem({
+      return validatedProblem({
         status: 409,
         code: refusal.code,
         title: "A near-duplicate claim already exists",
@@ -2167,20 +2254,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           existing_claim_id: refusal.existingId,
+          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
         },
       });
     }
 
     const resolvedDeps = [...new Set(parsed.data.depends_on)];
     if (resolvedDeps.includes(parsed.data.claim_id)) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "CYCLE_IN_DEPENDENCIES",
         title: "A claim cannot depend on itself",
         detail: `${parsed.data.claim_id} lists itself in depends_on.`,
         fixHint: "Remove the self-reference from depends_on.",
         rule: "P10",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { depends_on: ["C-2"] },
+        },
       });
     }
     if (resolvedDeps.length > 0) {
@@ -2193,7 +2284,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const known = new Set((found.results ?? []).map((row) => row.id));
       const missing = resolvedDeps.filter((dep) => !known.has(dep));
       if (missing.length > 0) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "DEPENDENCY_NOT_FOUND",
           title: "depends_on references unknown claims",
@@ -2203,6 +2294,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
             missing_dependency_ids: missing,
+            example: { depends_on: ["C-1"] },
           },
         });
       }
@@ -2375,14 +2467,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // The stale-base backstop: a concurrent revision minted @base+1 first,
         // so this batch died on the claim_versions primary key without
         // minting anything.
-        return problem({
+        return validatedProblem({
           status: 409,
           code: "OBJECT_VERSION_CONFLICT",
           title: "The base version is stale",
           detail: `A concurrent revision of ${parsed.data.claim_id} won the race to version ${parsed.data.base_version + 1}; nothing was minted.`,
           fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
           rule: "P9",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { claim_id: "C-1", base_version: 2, kind: "conjecture", statement: "<new text>" },
+          },
         });
       }
       if (
@@ -2397,7 +2492,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           .bind(session.problem_id, candidateHash)
           .first<{ id: string }>();
         const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
-        return problem({
+        return validatedProblem({
           status: 409,
           code: refusal.code,
           title: "A near-duplicate claim already exists",
@@ -2407,6 +2502,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
             existing_claim_id: refusal.existingId,
+            example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
           },
         });
       }
@@ -2414,13 +2510,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return idempotencyConflictProblem();
       }
       if (error instanceof KraterProblemNotFoundError) {
-        return problem({
+        return validatedProblem({
           status: 404,
           code: "PROBLEM_NOT_FOUND",
           title: "No such problem",
           detail: "The session's problem is missing from the ledger.",
           fixHint: "Check the problem id against GET /problems.json.",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
         });
       }
       const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
@@ -2515,7 +2615,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       targetHead.head_version === null ||
       parsed.data.target_version > targetHead.head_version
     ) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "GAP_TARGET_UNKNOWN",
         title: "The pinned claim version does not exist",
@@ -2689,7 +2789,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(session.problem_id, parsed.data.gap_id)
       .first<{ status: string }>();
     if (gapRow === null || gapRow === undefined) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "GAP_NOT_FOUND",
         title: "No such gap on this problem",
@@ -2708,7 +2808,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     if (gapRow.status !== "open") {
-      return problem({
+      return validatedProblem({
         status: 409,
         code: "GAP_ALREADY_SETTLED",
         title: "The gap is already settled",
@@ -2732,7 +2832,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(session.problem_id, closedByRef.split("@")[0])
         .first<{ id: string }>();
       if (refClaim === null || refClaim === undefined) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "GAP_TARGET_UNKNOWN",
           title: "closed_by references an unknown claim",
@@ -2756,7 +2856,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(session.problem_id, closedByRef.split("@")[0])
         .first<{ id: string }>();
       if (refEvidence === null || refEvidence === undefined) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "GAP_TARGET_UNKNOWN",
           title: "closed_by references unknown evidence",
@@ -2862,7 +2962,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(session.problem_id, parsed.data.gap_id)
         .first<{ status: string }>();
       if (currentGap !== null && currentGap !== undefined && currentGap.status !== "open") {
-        return problem({
+        return validatedProblem({
           status: 409,
           code: "GAP_ALREADY_SETTLED",
           title: "The gap is already settled",
@@ -2965,7 +3065,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       parsed.data.source_version > sourceHead.head ||
       target === null
     ) {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "RELATION_ENDPOINT_UNKNOWN",
         title: "A relation endpoint does not exist at its pin",
@@ -2975,7 +3075,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             : `${parsed.data.source_claim_id} has no version ${parsed.data.source_version} here.`,
         fixHint: "Pin versions that exist on this problem (see your pack's claims board).",
         rule: "P10",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { kind: "implies", source_claim_id: "C-1", source_version: 2, target: "C-2@1" },
+        },
       });
     }
     if (target.kind === "claim") {
@@ -2993,14 +3096,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         targetHeadRow.head === null ||
         (target.version ?? 0) > targetHeadRow.head
       ) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "RELATION_ENDPOINT_UNKNOWN",
           title: "The pinned target version does not exist",
           detail: `${target.claimId} has no version ${target.version} on this problem.`,
           fixHint: "Pin the exact published version your pack shows.",
           rule: "P10",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { kind: "implies", source_claim_id: "C-1", source_version: 2, target: "C-2@1" },
+          },
         });
       }
     } else {
@@ -3009,14 +3115,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(session.problem_id, target.gapId)
         .first<{ status: string }>();
       if (gapRow === null || gapRow === undefined || gapRow.status === "withdrawn") {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "GAP_NOT_FOUND",
           title: "addresses-gap targets an unknown or withdrawn gap",
           detail: `Gap ${target.gapId} is not an open obligation on this problem.`,
           fixHint: "File the gap first, or address one of the open obligations in your pack.",
           rule: "P10",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { gap_id: "G-1" },
+          },
         });
       }
     }
@@ -3106,14 +3215,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // The natural key is the duplicate guard: asserting the same edge twice
       // aborts the loser's whole batch.
       if (error instanceof Error && /claim_relations/.test(error.message)) {
-        return problem({
+        return validatedProblem({
           status: 409,
           code: "RELATION_ALREADY_ASSERTED",
           title: "This exact edge is already asserted",
           detail: `An identical ${parsed.data.kind} edge between these pins already exists; cite it instead of restating it.`,
           fixHint: "Reference the existing edge's assertion event rather than filing a copy.",
           rule: "P11",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { kind: "implies", source_claim_id: "C-1", source_version: 2, target: "C-2@1" },
+          },
         });
       }
       throw error;

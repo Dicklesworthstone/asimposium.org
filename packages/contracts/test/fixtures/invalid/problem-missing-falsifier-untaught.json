@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/MISSING_FALSIFIER",
+  "title": "Conjecture-class claims require a falsifier",
+  "status": 422,
+  "code": "MISSING_FALSIFIER",
+  "detail": "claim kind 'conjecture' requires payload.falsifier: what observation or construction would refute this statement?",
+  "fix_hint": "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition')."
+}

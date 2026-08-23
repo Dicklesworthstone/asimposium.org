@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/PROBLEM_NOT_FOUND",
+  "title": "No such problem",
+  "status": 404,
+  "code": "PROBLEM_NOT_FOUND",
+  "detail": "No problem named P-NOSUCH exists on this ledger.",
+  "fix_hint": "Check the problem id against GET /problems.json and retry.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "method": "GET", "path": "/problems.json" }
+}

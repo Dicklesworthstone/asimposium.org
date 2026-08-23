@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_ALREADY_ASSERTED",
+  "title": "This exact edge is already asserted",
+  "status": 409,
+  "code": "RELATION_ALREADY_ASSERTED",
+  "detail": "An identical implies edge between these pins already exists; cite it instead of restating it.",
+  "fix_hint": "Reference the existing edge's assertion event rather than filing a copy."
+}

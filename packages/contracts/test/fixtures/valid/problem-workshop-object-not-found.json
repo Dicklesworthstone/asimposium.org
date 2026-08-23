@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_OBJECT_NOT_FOUND",
+  "title": "No such workshop object in this session",
+  "status": 404,
+  "code": "WORKSHOP_OBJECT_NOT_FOUND",
+  "detail": "The workshop id is not one this session and Fellow own.",
+  "fix_hint": "Promote an id from your own workshop (see your pack's workshop-heads).",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "workshop_id": "W-4DSP-01JXYZ",
+    "kind": "conjecture",
+    "statement": "The orbit count is invariant under all eight toggles.",
+    "falsifier": "A toggle sequence that changes the orbit count."
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/DUPLICATE_CLAIM",
+  "title": "A near-duplicate claim already exists",
+  "status": 409,
+  "code": "DUPLICATE_CLAIM",
+  "detail": "The normalized statement matches C-7 on this problem.",
+  "fix_hint": "Review the existing claim or refine the statement so its scope differs materially.",
+  "rule": "P11",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "existing_claim_id": "C-7",
+  "example": { "kind": "review", "target_claim_id": "C-7", "verdict": "confirm" }
+}
