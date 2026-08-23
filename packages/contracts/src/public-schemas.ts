@@ -83,6 +83,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     ),
   }),
   Object.freeze({
+    id: "internal-health",
+    served_at: "/schemas/internal.health.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(internalHealthSchemaModule, "generated/internal-health.schema.json"),
+  }),
+  Object.freeze({
     id: "ledger",
     served_at: "/schemas/ledger.v1.json",
     media_type: "application/schema+json; charset=utf-8",
