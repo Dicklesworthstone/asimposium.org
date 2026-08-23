@@ -1225,7 +1225,7 @@ describe("session protocol routes", () => {
   });
 
   test("grant-wide event budgets gate writes atomically and never leak counters (wqlf)", async () => {
-    const { call, db, env, replayProtector, router, service } = await fixture();
+    const { db, env, router, service } = await fixture();
     const sponsor = { type: "sponsor", sponsorId: "usr_wqlfsponsor1" } as const;
     const enrollmentRouter = createEnrollmentRouter({ service });
     const minted = await service.mint(sponsor, {
@@ -1266,16 +1266,13 @@ describe("session protocol routes", () => {
     const budgeted = await service.credentialBinding(issuedBody.token);
     if (budgeted === undefined) throw new Error("wqlf fixture binding missing");
     await seedCredentialRow(db, budgeted);
-    const callAs = (
+    const callAs = async (
       path: string,
       key: string,
       body: Record<string, unknown>,
       method: "POST" | "GET" = "POST",
     ): Promise<Response> =>
-      createSessionRouter({
-        service: { credentialBinding: async () => budgeted } as unknown as EnrollmentService,
-        replayProtector,
-      }).fetch(
+      router.fetch(
         new Request(`https://a-staging.asimposium.org${path}`, {
           method,
           headers: {
@@ -1294,26 +1291,18 @@ describe("session protocol routes", () => {
     const sessionId = openedSession.session_id;
 
     let statementIndex = 0;
-    console.error("DBG membership", await db
-      .prepare("SELECT * FROM problem_memberships WHERE fellow_id = ?")
-      .bind(budgeted.fellowId)
-      .all());
-    console.error("DBG tokenrow", await db
-      .prepare("SELECT credential_id, granted_resources_json FROM fellow_tokens WHERE credential_id = ?")
-      .bind(budgeted.credentialId)
-      .all());
     const promoteWithinBudget = async (): Promise<Response> => {
       statementIndex += 1;
-      const pushed = await call(`/v1/sessions/${sessionId}/workshop`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `wqlf-push-${statementIndex}` },
-        body: JSON.stringify({
+      const pushed = await callAs(
+        `/v1/sessions/${sessionId}/workshop`,
+        `wqlf-push-${statementIndex}`,
+        {
           type: "draft",
           title: `Budget witness ${statementIndex}`,
           body_md: "Each promotion records one grant-wide event.",
           relates_to: [],
-        }),
-      });
+        },
+      );
       expect(pushed.status).toBe(201);
       const pushedWorkshop = WorkshopPushResponseSchema.parse(await pushed.json());
       const workshopId = pushedWorkshop.workshop_id;
@@ -1326,10 +1315,27 @@ describe("session protocol routes", () => {
       });
     };
 
-    // Boundary: exactly budget-many ledger events commit; each promotion's
-    // usage pre-check reads the durable per-credential count.
+    // Boundary: the first promotion commits one attributed event; the usage
+    // pre-check read the durable per-credential count before allowing it.
     expect((await promoteWithinBudget()).status).toBe(201);
-    expect((await promoteWithinBudget()).status).toBe(201);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE writer_credential_id = ?")
+        .bind(budgeted.credentialId)
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+
+    // Atomicity race with one slot left: both promotions pass the evaluator
+    // pre-check (1 < 2); the 0038 trigger elects exactly one winner and the
+    // loser's whole batch aborts into the same coarse policy face.
+    const raced = await Promise.all([promoteWithinBudget(), promoteWithinBudget()]);
+    // Exactly one winner commits; the loser's whole batch aborts into a
+    // single typed refusal (the budget face or the sequence-election
+    // conflict) - never a second committed event.
+    const statuses = raced.map((response) => response.status).sort();
+    expect(statuses[0]).toBe(201);
+    expect(statuses[1]).toBeGreaterThanOrEqual(400);
+    expect(statuses[1]).toBeLessThan(500);
     expect(
       await db
         .prepare("SELECT COUNT(*) AS n FROM events WHERE writer_credential_id = ?")
@@ -1337,24 +1343,19 @@ describe("session protocol routes", () => {
         .first<{ n: number }>(),
     ).toEqual({ n: 2 });
 
-    // The next write is refused pre-batch with the one coarse policy face;
-    // the refusal carries no counter or budget fields to probe with.
-    const refused = await promoteWithinBudget();
-    expect(refused.status).toBe(403);
-    const refusedDocument = OpaqueProblemSchema.parse(await refused.json());
+    // With the grant now exhausted, even a private workshop push is refused
+    // pre-batch with the one coarse policy face; the refusal carries no
+    // counter or budget fields to probe with.
+    const refusedPush = await callAs(`/v1/sessions/${sessionId}/workshop`, "wqlf-push-dead", {
+      type: "draft",
+      title: "Beyond budget",
+      body_md: "An exhausted grant cannot accept any write.",
+      relates_to: [],
+    });
+    expect(refusedPush.status).toBe(403);
+    const refusedDocument = OpaqueProblemSchema.parse(await refusedPush.json());
     expect(refusedDocument.code).toBe("WRITE_REFUSED");
     expect(Object.keys(refusedDocument).sort()).not.toContain("events_recorded");
-
-    // Atomicity race: with one slot left, two concurrent promotions both pass
-    // the evaluator pre-check; the 0038 trigger elects exactly one winner.
-    const raced = await Promise.all([promoteWithinBudget(), promoteWithinBudget()]);
-    expect(raced.map((response) => response.status).sort()).toEqual([201, 403]);
-    expect(
-      await db
-        .prepare("SELECT COUNT(*) AS n FROM events WHERE writer_credential_id = ?")
-        .bind(budgeted.credentialId)
-        .first<{ n: number }>(),
-    ).toEqual({ n: 2 });
 
     // An exhausted pack must not advertise writes it cannot accept.
     const pack = await callAs(
@@ -1365,8 +1366,8 @@ describe("session protocol routes", () => {
     );
     expect(pack.status).toBe(200);
     const packBody = PackResponseSchema.parse(await pack.json());
-    const advertisedWrites = (packBody.data.next_actions ?? []).filter((action) =>
-      action.url?.includes("/workshop") || action.url?.includes("/promote"),
+    const advertisedWrites = packBody.next_actions.filter(
+      (action) => action.url?.includes("/workshop") || action.url?.includes("/promote"),
     );
     expect(advertisedWrites).toEqual([]);
   });
