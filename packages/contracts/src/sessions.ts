@@ -642,6 +642,8 @@ export const GapClosedResponseSchema = z
   .object({
     gap_id: z.string().regex(/^G-[0-9]+$/),
     status: z.enum(["closed-by", "withdrawn"]),
+    /** The per-problem public seq of the gap transition event. */
+    seq: z.number().int().positive(),
   })
   .strict();
 export type GapClosedResponse = z.infer<typeof GapClosedResponseSchema>;

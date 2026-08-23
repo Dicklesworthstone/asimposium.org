@@ -2767,11 +2767,17 @@
             "closed-by",
             "withdrawn"
           ]
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
         "gap_id",
-        "status"
+        "status",
+        "seq"
       ],
       "additionalProperties": false
     },
