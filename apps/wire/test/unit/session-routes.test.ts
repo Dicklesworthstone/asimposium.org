@@ -1900,6 +1900,7 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ gap_id: filedBody.gap_id, outcome: "withdrawn" }),
     });
     expect(withdrawn.status).toBe(201);
+    if (withdrawn.status !== 201) console.error("WITHDRAW-BODY", await withdrawn.text());
     expect(await withdrawn.json()).toEqual({
       gap_id: filedBody.gap_id,
       status: "withdrawn",
