@@ -24,6 +24,7 @@ import {
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+import type { Env } from "../../src/env.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
 import {
@@ -143,10 +144,10 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
     ) {
       return runBatch(statements);
     },
-  } as unknown as import("../../src/env.ts").Env["DB"];
+  } as unknown as Env["DB"];
 }
 
-function migratedDb(options: LocalD1Options = {}): import("../../src/env.ts").Env["DB"] {
+function migratedDb(options: LocalD1Options = {}): Env["DB"] {
   const sqlite = new Database(":memory:", { strict: true });
   const files = readdirSync(MIGRATIONS)
     .filter((name) => name.endsWith(".sql"))
@@ -229,7 +230,7 @@ interface CredentialRowOverrides {
  * immutable authority row.
  */
 async function seedCredentialAuthority(
-  db: import("../../src/env.ts").Env["DB"],
+  db: Env["DB"],
   binding: CredentialSeedBinding,
 ): Promise<void> {
   const grantedScopesJson = JSON.stringify(binding.grantedScopes);
@@ -337,7 +338,7 @@ async function seedCredentialAuthority(
  * while retaining the same real migrated D1 grant.
  */
 async function seedCredentialRow(
-  db: import("../../src/env.ts").Env["DB"],
+  db: Env["DB"],
   binding: CredentialSeedBinding,
   overrides: CredentialRowOverrides = {},
 ): Promise<void> {
@@ -441,7 +442,7 @@ async function fixture(options: LocalD1Options = {}) {
   const binding = await service.credentialBinding(token);
   if (binding === undefined) throw new Error("fixture binding missing");
   await seedCredentialRow(db, binding);
-  const env = { DB: db } as unknown as import("../../src/env.ts").Env;
+  const env = { DB: db } as unknown as Env;
   const call = (path: string, init: RequestInit = {}) =>
     sessionRouter.fetch(
       new Request(`https://a-staging.asimposium.org${path}`, {
@@ -4614,7 +4615,7 @@ describe("session protocol routes", () => {
       STOA_ORIGIN: "https://a.asimposium.org",
       AGORA_ORIGIN: "https://asimposium.org",
       ENROLLMENT_REPLAY_KEY: "C".repeat(43),
-    } as import("../../src/env.ts").Env;
+    } as Env;
     const callMounted = (path: string, init: RequestInit = {}) =>
       app.fetch(
         new Request(`https://a.asimposium.org${path}`, {
@@ -4787,7 +4788,7 @@ describe("session protocol routes", () => {
       new Request(
         `https://a-staging.asimposium.org/v1/sponsors/workshop?problem_id=P-4DSP&fellow_id=${binding.fellowId}`,
       ),
-      { DB: db } as import("../../src/env.ts").Env,
+      { DB: db } as Env,
     );
     expect(legacyUnsignedQuery.status).toBe(404);
 
@@ -4796,7 +4797,7 @@ describe("session protocol routes", () => {
         method: "POST",
         body: requestBody,
       }),
-      { DB: db } as import("../../src/env.ts").Env,
+      { DB: db } as Env,
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -4819,7 +4820,7 @@ describe("session protocol routes", () => {
           method: "POST",
           body: invalidBody,
         }),
-        { DB: db } as import("../../src/env.ts").Env,
+        { DB: db } as Env,
       );
       expect(invalidRequest.status).toBe(422);
       expect(invalidRequest.headers.get("cache-control")).toBe("private, no-store");
@@ -4844,7 +4845,7 @@ describe("session protocol routes", () => {
         method: "POST",
         body: requestBody,
       }),
-      { DB: db } as import("../../src/env.ts").Env,
+      { DB: db } as Env,
     );
     const snapshotResponse = async (response: Response) => ({
       status: response.status,
@@ -4878,7 +4879,7 @@ describe("session protocol routes", () => {
           fellow_id: "fellow-no-such",
         }),
       }),
-      { DB: db } as import("../../src/env.ts").Env,
+      { DB: db } as Env,
     );
     expect(await snapshotResponse(absentFellow)).toEqual(wrongSponsorSnapshot);
 
@@ -4887,7 +4888,7 @@ describe("session protocol routes", () => {
         method: "POST",
         body: requestBody,
       }),
-      { DB: db } as import("../../src/env.ts").Env,
+      { DB: db } as Env,
     );
     expect(unavailable.status).toBe(503);
     expect(unavailable.headers.get("cache-control")).toBe("private, no-store");
@@ -4914,7 +4915,7 @@ describe("session protocol routes", () => {
         method: "POST",
         body: requestBody,
       }),
-      { DB: db } as import("../../src/env.ts").Env,
+      { DB: db } as Env,
     );
     expect(verifierRefusal.status).toBe(401);
     expect(verifierRefusal.statusText).toBe("Verifier refused");
@@ -4928,6 +4929,95 @@ describe("session protocol routes", () => {
     expect(await verifierRefusal.text()).toBe(verifierBytes);
   });
 
+  test("the sponsor workshop page is a byte-bounded keyset with exact cursor continuity (asimposiumorg-e7j.2)", async () => {
+    const { call, db, binding, service, replayProtector } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "page-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    // Seed 17 rows through the real mounted write path: seqs 1..17, newest last.
+    for (let index = 1; index <= 17; index += 1) {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `page-push-${index}` },
+        body: JSON.stringify({
+          type: "note",
+          title: `Row ${index}`,
+          body_md: `Body for row ${index}.`,
+          relates_to: [],
+        }),
+      });
+      expect(pushed.status).toBe(201);
+    }
+
+    const sponsorRouter = createSessionRouter({
+      service,
+      replayProtector,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: binding.sponsorId },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+    });
+    const readPage = async (body: Record<string, unknown>) =>
+      sponsorRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        { DB: db } as Env,
+      );
+
+    // Page one: exactly 16 of the 17 rows, newest-first, cursor at the page tail.
+    const pageOne = await readPage({ problem_id: "P-4DSP", fellow_id: binding.fellowId });
+    expect(pageOne.status).toBe(200);
+    expect(pageOne.headers.get("cache-control")).toBe("private, no-store");
+    const oneView = SponsorWorkshopViewSchema.parse(await pageOne.json());
+    expect(oneView.objects.map((row) => row.workshop_seq)).toEqual([
+      17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+    ]);
+    expect(oneView.has_more).toBe(true);
+    expect(oneView.next_cursor).toBe(2);
+
+    // Page two via the signed keyset cursor: the single remaining oldest row,
+    // terminal, so the cursor is null exactly when has_more is false.
+    const pageTwo = await readPage({
+      problem_id: "P-4DSP",
+      fellow_id: binding.fellowId,
+      before_workshop_seq: oneView.next_cursor ?? undefined,
+    });
+    const twoView = SponsorWorkshopViewSchema.parse(await pageTwo.json());
+    expect(twoView.objects.map((row) => row.workshop_seq)).toEqual([1]);
+    expect(twoView.has_more).toBe(false);
+    expect(twoView.next_cursor).toBe(null);
+
+    // Exactly-at-limit workshop is terminal on page one: no phantom second page.
+    const trimmed = await db
+      .prepare("DELETE FROM workshop_objects WHERE problem_id = 'P-4DSP' AND workshop_seq = 1")
+      .run();
+    expect(trimmed.meta.changes).toBe(1);
+    const onlyPage = await readPage({ problem_id: "P-4DSP", fellow_id: binding.fellowId });
+    const onlyView = SponsorWorkshopViewSchema.parse(await onlyPage.json());
+    expect(onlyView.objects.length).toBe(16);
+    expect(onlyView.has_more).toBe(false);
+    expect(onlyView.next_cursor).toBe(null);
+
+    // The cursor is part of the signed-body contract: malformed values are
+    // teaching refusals before any D1 read.
+    for (const bad of [0, -1, 1.5]) {
+      const refused = await readPage({
+        problem_id: "P-4DSP",
+        fellow_id: binding.fellowId,
+        before_workshop_seq: bad,
+      });
+      expect(refused.status, String(bad)).toBe(422);
+      expect(ProblemDocumentSchema.parse(await refused.json())).toMatchObject({
+        code: "WORKSHOP_READ_BODY_INVALID",
+      });
+    }
+  }, 30000);
   test("PLANTED: sponsor workshop storage and materialization faults stay private and fixed", async () => {
     const dependencyCanary = "PRIVATE-SPONSOR-WORKSHOP-DEPENDENCY-CANARY";
     let fault: "fellow-first" | "workshop-all" | undefined;
@@ -4979,7 +5069,7 @@ describe("session protocol routes", () => {
           method: "POST",
           body: requestBody,
         }),
-        { DB: db } as import("../../src/env.ts").Env,
+        { DB: db } as Env,
       );
     const snapshotUnavailable = async () => {
       const response = await requestWorkshop();
@@ -5920,7 +6010,7 @@ describe("session protocol routes", () => {
 });
 
 describe("committed promotion outbox nudge", () => {
-  type SessionEnv = import("../../src/env.ts").Env;
+  type SessionEnv = Env;
   type Caller = (path: string, init?: RequestInit) => Response | Promise<Response>;
 
   const sleep = (ms: number): Promise<void> =>

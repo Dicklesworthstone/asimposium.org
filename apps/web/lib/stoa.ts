@@ -21,6 +21,7 @@ import {
   ProblemCodeSchema,
   ProblemDocumentSchema,
   parseStoaJoinUrl,
+  SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
   type SponsorCredentialRevokeRequest,
@@ -134,9 +135,11 @@ interface StoaSigningConfig {
 export const MAX_STOA_SUCCESS_RESPONSE_BYTES = 262_144;
 /** 100 approval cards can each carry two independently bounded resource grants. */
 export const MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES = 8 * 1024 * 1024;
-/** Bounded stopgap; e7j.2 owns byte-exact pagination for worst-case valid rows. */
-export const MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES = 16 * 1024 * 1024;
-/** Maximum private workshop bytes one bounded console preview render may accept. */
+/**
+ * The matching Agora-side reader ceiling for one workshop page (e7j.2). The
+ * Worker refuses pages beyond this same bound, so a valid response always fits.
+ */
+export const MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES = SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES;
 export const MAX_STOA_SPONSOR_WORKSHOP_PREVIEW_ACCEPTED_BYTES =
   MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES * MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS;
 /** 500 Fellow summaries can each carry bounded grants plus three credentials. */
@@ -486,20 +489,36 @@ export function stoaPendingProposals(
   });
 }
 
-/** The sponsor's live workshop view (Rule A2): envelope-verified, own fellows only. */
+/**
+ * The sponsor's live workshop view (Rule A2): envelope-verified, own fellows
+ * only, one byte-bounded keyset page per call (asimposiumorg-e7j.2). The
+ * cursor is signed into the request body, so a tampered page request fails the
+ * envelope signature rather than reaching the Worker unauthenticated.
+ */
 export function stoaSponsorWorkshop(
   principalId: string,
   problemId: string,
   fellowId: string,
   deadlineAtMs?: number,
+  beforeWorkshopSeq?: number,
 ): Promise<StoaCall<SponsorWorkshopViewContract>> {
+  if (
+    beforeWorkshopSeq !== undefined &&
+    (!Number.isSafeInteger(beforeWorkshopSeq) || beforeWorkshopSeq <= 0)
+  ) {
+    throw new TypeError("sponsor workshop cursor must be a positive safe integer");
+  }
   return callStoa({
     method: "POST",
     route: ROUTE_SPONSOR_WORKSHOP,
     path: ROUTE_SPONSOR_WORKSHOP,
     action: ACTION_WORKSHOP_READ,
     principalId,
-    body: JSON.stringify({ problem_id: problemId, fellow_id: fellowId }),
+    body: JSON.stringify({
+      problem_id: problemId,
+      fellow_id: fellowId,
+      ...(beforeWorkshopSeq === undefined ? {} : { before_workshop_seq: beforeWorkshopSeq }),
+    }),
     responseMaxBytes: MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES,
     ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
     parse: (value) => {

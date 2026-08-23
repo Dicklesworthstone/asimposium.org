@@ -155,14 +155,16 @@ test("PLANTED: a 500-Fellow console page loads only the bounded workshop prefix"
     ),
   );
   expect(MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS).toBe(2);
-  expect(MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES).toBe(16_777_216);
-  expect(MAX_STOA_SPONSOR_WORKSHOP_PREVIEW_ACCEPTED_BYTES).toBe(33_554_432);
+  expect(MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES).toBe(8 * 1024 * 1024);
+  expect(MAX_STOA_SPONSOR_WORKSHOP_PREVIEW_ACCEPTED_BYTES).toBe(
+    MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES * MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS,
+  );
 });
 
 test("PLANTED: the shared render deadline omits an unstarted second preview", async () => {
+  let tick = 0;
   const candidates = [{ id: "first" }, { id: "second" }, { id: "third" }];
   const ticks = [1_000, 1_000, 1_000 + SPONSOR_WORKSHOP_PREVIEW_RENDER_TIMEOUT_MS];
-  let tick = 0;
   const loaded = await loadBoundedWorkshopPreviewPrefix(
     candidates,
     async (candidate) => candidate.id,
@@ -1159,6 +1161,8 @@ describe("public Agora Stoa origin binding", () => {
           created_at: "2026-08-19T00:00:00.000Z",
         },
       ],
+      has_more: false,
+      next_cursor: null,
     };
 
     for (const [label, body, expected, schemaValid] of [
@@ -1204,6 +1208,8 @@ describe("public Agora Stoa origin binding", () => {
       problem_id: "P-4DSP",
       fellow_id: "fellow-01JXYZ",
       objects: [],
+      has_more: false,
+      next_cursor: null,
     });
     const exactBytes = new TextEncoder().encode(responseText);
     expect(exactBytes.byteLength).toBeLessThan(1_024);
@@ -1247,8 +1253,12 @@ describe("public Agora Stoa origin binding", () => {
         },
       },
     );
-    expect(exactCapResponse.headers.get("content-length")).toBe("16777216");
-    expect(plusOneResponse.headers.get("content-length")).toBe("16777217");
+    expect(exactCapResponse.headers.get("content-length")).toBe(
+      String(MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES),
+    );
+    expect(plusOneResponse.headers.get("content-length")).toBe(
+      String(MAX_STOA_SPONSOR_WORKSHOP_RESPONSE_BYTES + 1),
+    );
     const fetchSpy = spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(exactCapResponse)
       .mockResolvedValueOnce(plusOneResponse);
