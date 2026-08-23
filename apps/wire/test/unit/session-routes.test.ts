@@ -7,6 +7,8 @@ import {
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
+  PromoteResponseSchema,
+  SessionOpenResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -19,6 +21,7 @@ import {
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
 import {
   KRATER_OUTBOX_NUDGE_DEADLINE_MS,
@@ -26,6 +29,7 @@ import {
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
+import { sha256Hex } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -1358,6 +1362,217 @@ describe("session protocol routes", () => {
         .prepare("SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote'")
         .first<{ count: number }>(),
     ).toEqual({ count: 0 });
+  });
+
+  test("a promotion mints the pinned v1 content version with a durable kind and falsifier", async () => {
+    const { call, db, binding } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "v1-mint-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "v1-mint-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Version witness",
+        body_md: "The version row must outlive the request.",
+        relates_to: [],
+      }),
+    });
+    const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "v1-mint-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "The v1 version row survives the request.",
+        falsifier: "A promotion whose claim_versions row is absent.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+    const promotion = PromoteResponseSchema.parse(await promoted.json());
+    expect(promotion).toMatchObject({ claim_id: "C-1", version: 1 });
+
+    const version = await db
+      .prepare(
+        `SELECT claim_id, version, kind, statement, falsifier, content_digest, editor_fellow_id
+         FROM claim_versions WHERE problem_id = 'P-4DSP'`,
+      )
+      .first<{
+        claim_id: string;
+        version: number;
+        kind: string;
+        statement: string;
+        falsifier: string | null;
+        content_digest: string;
+        editor_fellow_id: string;
+      }>();
+    const mintContent = {
+      kind: "conjecture",
+      statement: "The v1 version row survives the request.",
+      falsifier: "A promotion whose claim_versions row is absent.",
+    } as const;
+    expect(version).toEqual({
+      claim_id: "C-1",
+      version: 1,
+      kind: mintContent.kind,
+      statement: mintContent.statement,
+      falsifier: mintContent.falsifier,
+      content_digest: await claimContentDigest(mintContent, sha256Hex),
+      editor_fellow_id: binding.fellowId,
+    });
+  });
+
+  test("a promotion records depends_on edges for existing claims and refuses dangling ones", async () => {
+    const { call, db } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "deps-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const promote = async (key: string, workshopId: string, statement: string, deps: string[]) =>
+      call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({
+          workshop_id: workshopId,
+          kind: "lemma",
+          statement,
+          depends_on: deps,
+          relates_to: [],
+        }),
+      });
+
+    // A dangling target is a teaching refusal before any write happens.
+    const dangling = await promote(
+      "deps-dangling",
+      await push("deps-push-a", "Dangling dep witness"),
+      "A lemma citing a claim that does not exist.",
+      ["C-99"],
+    );
+    expect(dangling.status).toBe(422);
+    expect(await dangling.json()).toMatchObject({
+      code: "DEPENDENCY_NOT_FOUND",
+      rule: "P10",
+      missing_dependency_ids: ["C-99"],
+    });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+
+    // The base claim commits, then an edge to it lands in the same batch as
+    // the dependent claim's own version row.
+    const base = await promote(
+      "deps-base",
+      await push("deps-push-b", "Base lemma"),
+      "The base lemma holds.",
+      [],
+    );
+    expect(base.status).toBe(201);
+    const dependent = await promote(
+      "deps-dependent",
+      await push("deps-push-c", "Dependent lemma"),
+      "The dependent lemma reduces to the base.",
+      ["C-1"],
+    );
+    expect(dependent.status).toBe(201);
+    expect(
+      await db
+        .prepare(
+          `SELECT depends_on_claim_id FROM claim_deps
+           WHERE problem_id = 'P-4DSP' AND claim_id = 'C-2'`,
+        )
+        .first<{ depends_on_claim_id: string }>(),
+    ).toEqual({ depends_on_claim_id: "C-1" });
+  });
+
+  test("a concurrent identical promotion loses its whole batch and names the winner", async () => {
+    // Deterministic interleave: once armed, the first writer's batch suspends
+    // before BEGIN until released. The second writer then commits in full, so
+    // the suspended writer's pre-gate lookup ran against an empty ledger and
+    // only the (problem_id, norm_hash) unique index can refuse it — whether it
+    // reaches that insert or re-runs its gate after release, the answer is a
+    // typed 409 naming the winner.
+    const armed = { on: false };
+    const gate = Promise.withResolvers<void>();
+    let heldOnce = false;
+    const { call, db } = await fixture({
+      beforeBatch: async () => {
+        if (!armed.on || heldOnce) return;
+        heldOnce = true;
+        await gate.promise;
+      },
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "race-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "race-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Race witness",
+        body_md: "One normalized statement, two keys.",
+        relates_to: [],
+      }),
+    });
+    const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+    const attempt = (key: string) =>
+      call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({
+          workshop_id: workshop.workshop_id,
+          kind: "conjecture",
+          // Whitespace differs; the norm hash does not.
+          statement: "Only   one claim may own this normalized   statement.",
+          falsifier: "Two committed claims sharing one norm hash.",
+          relates_to: [],
+        }),
+      });
+
+    armed.on = true;
+    const suspended = attempt("race-a");
+    const committedResponse = await attempt("race-b");
+    expect(committedResponse.status).toBe(201);
+    const committed = PromoteResponseSchema.parse(await committedResponse.json());
+    expect(committed.claim_id).toBe("C-1");
+    gate.resolve();
+    const loserResponse = await suspended;
+    expect(loserResponse.status).toBe(409);
+    const loserBody: unknown = await loserResponse.json();
+    if (
+      typeof loserBody !== "object" ||
+      loserBody === null ||
+      !("existing_claim_id" in loserBody)
+    ) {
+      throw new Error("the duplicate refusal must name the winning claim");
+    }
+    expect(loserBody.existing_claim_id).toBe("C-1");
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claim_versions").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
   });
 
   test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
@@ -3307,12 +3522,14 @@ describe("session protocol routes", () => {
         problem_id: string;
         queue_position: number;
         seq: number;
+        version: number;
       },
     ).toEqual({
       claim_id: "C-1",
       problem_id: "P-4DSP",
       queue_position: 0,
       seq: 1,
+      version: 1,
     });
     expect(
       await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
@@ -3430,12 +3647,14 @@ describe("session protocol routes", () => {
           problem_id: string;
           queue_position: number;
           seq: number;
+          version: number;
         },
       ).toEqual({
         claim_id: "C-2",
         problem_id: "P-4DSP",
         queue_position: 0,
         seq: 2,
+        version: 1,
       });
       recordReads = false;
       expect(
@@ -3682,7 +3901,6 @@ describe("session protocol routes", () => {
   // 2,000-character bodies, so at any workable budget a missing claim there is
   // as easily budget truncation as the cap. `C-130` was never a boundary
   // either: the query fetches `PACK_CLAIM_CANDIDATE_LIMIT + 1` rows, so a
-  // 130th row is never read and its absence held under any cap. 129 is the
   // first row the cap itself excludes, so that is where the plant belongs.
   test("PLANTED: the claim candidate cap marks the exact 128/129 query boundary", async () => {
     const { call, db } = await fixture();
@@ -3755,7 +3973,10 @@ describe("session protocol routes", () => {
       { reason: "candidate_limit", detail: "claims" },
       { reason: "budget_exceeded" },
     ]);
-  });
+    // The 128-claim seed plus two full pack compositions sit close enough to
+    // bun's default 5s per-test budget that file-order load flips them over;
+    // the assertions are unchanged, the budget is just made explicit.
+  }, 20000);
 
   test("the sponsor workshop view is private and never shared-cacheable", async () => {
     const { call, db, binding, service, replayProtector } = await fixture();

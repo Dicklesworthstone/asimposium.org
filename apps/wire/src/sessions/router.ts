@@ -41,6 +41,7 @@ import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
 import { storeWorkshopBody } from "../krater/cas";
+import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   KraterIdempotencyConflictError,
@@ -53,7 +54,12 @@ import { computeClaimDisposition } from "../ledger/disposition-read";
 import type { ClaimEvent } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { gateReviewSubmission } from "../ledger/review-gate";
-import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
+import {
+  duplicateClaimRefusal,
+  normHash,
+  rejectAuthoritativeFields,
+  sha256Hex,
+} from "../split/policy";
 
 /**
  * The session protocol (Fable §7): open → pack → workshop push → promote →
@@ -1623,26 +1629,57 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    // P11: the norm-hash near-duplicate gate. Same normalized statement on
-    // the same problem is a refusal carrying the existing claim id.
+    // P11: the norm-hash near-duplicate gate. The stored norm_hash column
+    // turns this into one indexed equality lookup, and the unique index on
+    // (problem_id, norm_hash) is the commit-time atomic guard: a concurrent
+    // identical promotion aborts its own batch and maps to this same refusal
+    // in the catch below.
     const candidateHash = await normHash(parsed.data.statement);
-    const existingClaims = await db
-      .prepare("SELECT id, statement FROM claims WHERE problem_id = ?")
-      .bind(session.problem_id)
-      .all<{ id: string; statement: string }>();
-    for (const existing of existingClaims.results ?? []) {
-      if ((await normHash(existing.statement)) === candidateHash) {
-        const refusal = duplicateClaimRefusal(existing.id);
+    const existingDuplicate = await db
+      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+      .bind(session.problem_id, candidateHash)
+      .first<{ id: string }>();
+    if (existingDuplicate !== null && existingDuplicate !== undefined) {
+      const refusal = duplicateClaimRefusal(existingDuplicate.id);
+      return problem({
+        status: 409,
+        code: refusal.code,
+        title: "A near-duplicate claim already exists",
+        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+        fixHint: refusal.fixHint,
+        rule: refusal.rule,
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          existing_claim_id: refusal.existingId,
+        },
+      });
+    }
+
+    // W5.3: resolve depends_on targets before any write. Each must name an
+    // existing claim on this problem; deps point at earlier sequences, which
+    // makes a promote-time cycle structurally impossible (the self-edge is
+    // refused in-batch), so no cycle walk belongs on this path.
+    const resolvedDeps = [...new Set(parsed.data.depends_on)];
+    if (resolvedDeps.length > 0) {
+      const found = await db
+        .prepare(
+          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
+        )
+        .bind(session.problem_id, ...resolvedDeps)
+        .all<{ id: string }>();
+      const known = new Set((found.results ?? []).map((row) => row.id));
+      const missing = resolvedDeps.filter((dep) => !known.has(dep));
+      if (missing.length > 0) {
         return problem({
-          status: 409,
-          code: refusal.code,
-          title: "A near-duplicate claim already exists",
-          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
-          fixHint: refusal.fixHint,
-          rule: refusal.rule,
+          status: 422,
+          code: "DEPENDENCY_NOT_FOUND",
+          title: "depends_on references unknown claims",
+          detail: `No claim ${missing.join(", ")} exists on this problem.`,
+          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
+          rule: "P10",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            existing_claim_id: refusal.existingId,
+            missing_dependency_ids: missing,
           },
         });
       }
@@ -1657,6 +1694,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // its entire Krater batch unless this exact claim token wins the public
       // (scope, Fellow, caller key) replay row.
       const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
+      // W5.3: one timestamp for the claim row, its version and its deps, and
+      // the v1 content mint (P9) computed before the batch — the content is
+      // fixed by the request, so the digest is too.
+      const promotedAt = new Date().toISOString();
+      const versionMint = await mintClaimVersion({
+        currentVersion: 0,
+        newContent: {
+          kind: parsed.data.kind,
+          statement: parsed.data.statement,
+          falsifier: parsed.data.falsifier ?? null,
+        },
+        editorFellowId: auth.binding.fellowId,
+        sha256Hex,
+      });
       const write = await writeClaim(
         db,
         {
@@ -1668,7 +1719,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           eventId,
           idempotencyKey: kraterIdempotencyKey,
           statement: parsed.data.statement,
-          createdAt: new Date().toISOString(),
+          normHash: candidateHash,
+          createdAt: promotedAt,
           // Rule A3: the full attribution snapshot on the claim.created event.
           attribution: {
             fellowId: auth.binding.fellowId,
@@ -1687,6 +1739,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               claim_id: attempt.claimId,
               problem_id: session.problem_id,
               seq: attempt.sequence,
+              version: versionMint.version,
               queue_position: 0,
             });
             const sealed = await options.replayProtector.seal(JSON.stringify(value));
@@ -1770,6 +1823,57 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   attempt.eventId,
                   attempt.sequence,
                 ),
+              // W5.3 (Rule A6): the v1 content version commits in the same
+              // batch as the claim row. kind/falsifier/statement/digest become
+              // durable facts a review can pin — never request-scoped bytes.
+              db
+                .prepare(
+                  `INSERT INTO claim_versions
+                     (claim_id, problem_id, version, kind, statement, falsifier,
+                      content_digest, editor_fellow_id, created_at)
+                   SELECT ?, p.id, ?, ?, ?, ?, ?, ?, ?
+                   FROM problems p
+                   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                   WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
+                )
+                .bind(
+                  attempt.claimId,
+                  versionMint.version,
+                  parsed.data.kind,
+                  parsed.data.statement,
+                  parsed.data.falsifier ?? null,
+                  versionMint.contentDigest,
+                  versionMint.editorFellowId,
+                  promotedAt,
+                  kraterIdempotencyKey,
+                  session.problem_id,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
+              // The depends_on edges (P10). Each insert re-checks ownership of
+              // the winning event and refuses a self-edge (`? != ?`): a client
+              // that guesses its own future sequence cannot mint a cycle.
+              ...resolvedDeps.map((dep) =>
+                db
+                  .prepare(
+                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+                     SELECT p.id, ?, ?, ?
+                     FROM problems p
+                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ? AND ? != ?`,
+                  )
+                  .bind(
+                    attempt.claimId,
+                    dep,
+                    promotedAt,
+                    kraterIdempotencyKey,
+                    session.problem_id,
+                    attempt.eventId,
+                    attempt.sequence,
+                    attempt.claimId,
+                    dep,
+                  ),
+              ),
             ];
           },
         },
@@ -1796,6 +1900,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       } catch (replayError) {
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
+      }
+      // P11 commit-time guard: a concurrent identical promotion committed
+      // first and this batch died on claims_problem_norm_hash_idx — the read
+      // above ran before the winner landed. Name the winning claim in the
+      // same typed refusal the friendly path returns; this batch rolled back,
+      // so the caller key stays unused and a retry is clean.
+      if (
+        error instanceof Error &&
+        /claims_problem_norm_hash_idx|UNIQUE constraint failed: claims\./.test(error.message)
+      ) {
+        const winnerClaim = await db
+          .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+          .bind(session.problem_id, candidateHash)
+          .first<{ id: string }>();
+        const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
+        return problem({
+          status: 409,
+          code: refusal.code,
+          title: "A near-duplicate claim already exists",
+          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+          fixHint: refusal.fixHint,
+          rule: refusal.rule,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            existing_claim_id: refusal.existingId,
+          },
+        });
       }
       if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
         return idempotencyConflictProblem();

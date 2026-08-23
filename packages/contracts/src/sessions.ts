@@ -322,8 +322,15 @@ export const PromoteRequestSchema = z
       .max(4 * 1024)
       .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
-  })
-  .strict();
+    /**
+     * W5.3: the depends_on edges (P10). Problem-scoped claim refs ("C-12");
+     * every target must exist on the same problem and the closure must stay
+     * acyclic — the route refuses with DEPENDENCY_NOT_FOUND / CYCLE-in-DEPS
+     * citations instead of minting a dangling or circular edge.
+     */
+    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+   })
+   .strict();
 export type PromoteRequest = z.infer<typeof PromoteRequestSchema>;
 
 export const PromoteResponseSchema = z
@@ -332,6 +339,8 @@ export const PromoteResponseSchema = z
     problem_id: ProblemIdSchema,
     /** The per-problem public seq allocated by the write transaction. */
     seq: z.number().int().positive(),
+    /** The pinned content version this promotion minted (P9; v1 on promote). */
+    version: z.number().int().min(1),
     queue_position: z.number().int().nonnegative(),
   })
   .strict();

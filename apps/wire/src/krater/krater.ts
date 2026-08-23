@@ -14,6 +14,14 @@ export interface KraterWriteInput {
   eventId: string;
   idempotencyKey: string;
   statement: string;
+  /**
+   * The split/policy.ts normHash of the statement, supplied by the caller so
+   * the claims row itself carries the normalized identity (P11). When set it
+   * must be lowercase SHA-256 hex; the unique index on (problem_id, norm_hash)
+   * then makes a concurrent duplicate promotion abort its own batch. Optional:
+   * local S-2 harness callers omit it and insert NULL.
+   */
+  readonly normHash?: string;
   createdAt: string;
   /** Rule A3: the full attribution snapshot, recorded on the event. */
   readonly attribution?: {
@@ -341,6 +349,9 @@ function validateWriteInput(input: KraterWriteInput, serverNowMs: number): void 
     new TextEncoder().encode(input.statement).byteLength > MAX_STATEMENT_BYTES
   ) {
     inputError("statement must be non-empty and within the Krater v0 byte limit.");
+  }
+  if (input.normHash !== undefined && !/^[0-9a-f]{64}$/.test(input.normHash)) {
+    inputError("normHash, when supplied, must be lowercase SHA-256 hex.");
   }
   validateKraterIngressTimestamp(input.createdAt, serverNowMs);
 }
@@ -1136,14 +1147,15 @@ export async function writeClaim(
         ),
         statement(
           db,
-          `INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-           SELECT ?, p.id, ?, ?, p.public_seq, ?
+          `INSERT INTO claims (id, problem_id, statement, payload_sha256, norm_hash, source_seq, created_at)
+           SELECT ?, p.id, ?, ?, ?, p.public_seq, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
           attemptInput.claimId,
           attemptInput.statement,
           payloadSha256,
+          attemptInput.normHash ?? null,
           input.createdAt,
           input.idempotencyKey,
           input.problemId,
