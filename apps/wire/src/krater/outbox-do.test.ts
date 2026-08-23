@@ -1304,15 +1304,22 @@ describe("Krater outbox Durable Object contracts", () => {
   // 6js.3: this plant's property is key-independent and worth keeping — a
   // Durable Object storage failure AFTER the authoritative D1 CAS must not undo
   // the quarantine or strand the attempt tally. The injection used to target
-  // the per-row `quarantine:<id>` put, which no longer exists; it now targets
-  // the counters put that still runs at the same point in the sequence, so the
-  // same fault is injected at the same moment for the same reason.
+  // the per-row `quarantine:<id>` put, which no longer exists. It targets the
+  // counters put that still runs inside `quarantine()` after the CAS, and it
+  // MUST stay guarded on `quarantined_at`: the drain preamble's
+  // owner-acquisition counters write happens before any row is examined, and
+  // an unguarded one-shot fault would abort the drain there instead of
+  // striking the post-CAS forensic write this property is about.
   test("PLANTED: a post-quarantine forensic failure cannot strand a legacy tally", async () => {
     const rows = [outboxRow(1, false)];
     const attemptKey = `attempt:${rows[0]?.event_id}`;
     const harness = outboxHarness(rows, {
       initialStorage: { [attemptKey]: 3 },
-      failStorageOnce: ({ kind, key }) => kind === "put" && key === "counters",
+      failStorageOnce:
+        ({ kind, key }) =>
+        kind === "put" &&
+        key === "counters" &&
+        rows[0]?.quarantined_at !== null,
     });
 
     const failed = await harness.drainer.fetch(drainRequest());
@@ -1673,12 +1680,20 @@ describe("Krater outbox Durable Object contracts", () => {
   test("PLANTED: quarantine records forensics before retiring a stale attempt tally", async () => {
     const rows = [outboxRow(1, false)];
     const attemptKey = `attempt:${rows[0]?.event_id}`;
-    const harness = outboxHarness(rows, { initialStorage: { [attemptKey]: 3 } });
+    const harness = outboxHarness(rows, {
+      initialStorage: { [attemptKey]: 3 },
+      // The canary lives only in the reconstructed ledger source. If any
+      // quarantine-path byte ever echoed claim payload material into the
+      // drain response, the counters record, or retained DO state, the
+      // no-reflection assertions below red.
+      sourceStatement: "SECRET-CANARY-quarantine-must-not-echo-payload",
+    });
 
     const response = await harness.drainer.fetch(drainRequest());
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ delivered: 0, quarantined: 1 });
+    const responseBody = (await response.json()) as Record<string, unknown>;
+    expect(responseBody).toMatchObject({ delivered: 0, quarantined: 1 });
     // 6js.3: quarantining writes NO per-row Durable Object key. D1 already
     // holds the identifiers, digest, code and timestamp, so a DO copy was
     // duplicate state that grew without bound. This is the assertion that reds
@@ -1691,6 +1706,18 @@ describe("Krater outbox Durable Object contracts", () => {
       last_phase: "quarantined",
     });
     expect(harness.storageValue(attemptKey)).toBeUndefined();
+    // 6js.3 no-reflection property: the quarantine path reads identifier,
+    // digest, and code fields but echoes none of them — nor any ledger payload
+    // material — through the drain response, the counters record, or retained
+    // Durable Object state.
+    const reflected = JSON.stringify([
+      responseBody,
+      harness.storageValue("counters"),
+      harness.storageValue(attemptKey),
+      harness.storageValue("quarantine:1"),
+    ]);
+    expect(reflected).not.toContain("SECRET-CANARY");
+    expect(reflected).not.toContain((rows[0]?.payload_sha256 ?? "").slice(0, 24));
     await drainScheduledAlarms(harness);
   });
 
