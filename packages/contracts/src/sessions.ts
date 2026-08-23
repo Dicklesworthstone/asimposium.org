@@ -598,9 +598,85 @@ export const SessionsContractsSchema = z
     hypothesis_request: HypothesisRequestSchema,
     hypothesis_response: HypothesisResponseSchema,
     hypothesis_kill_request: HypothesisKillRequestSchema,
-    hypothesis_kill_response: HypothesisKillResponseSchema,
     revise_request: ReviseRequestSchema,
     revise_response: ReviseResponseSchema,
+    gap_file_request: GapFileRequestSchema,
+    gap_filed_response: GapFiledResponseSchema,
+    gap_transition_request: GapTransitionRequestSchema,
+    gap_closed_response: GapClosedResponseSchema,
+    revise_response: ReviseResponseSchema,
   })
+
+/**
+ * W5.5 proof gaps (G-n): a named unresolved obligation in a proof — no
+ * hiding behind "standard" or "it follows". The gap pins the exact claim
+ * version it obligates, so a silent strengthening cannot retroactively close
+ * what an earlier statement owed.
+ */
+export const GapFileRequestSchema = z
+  .object({
+    /** The claim version this obligation attaches to (exact-version pin). */
+    target_claim_id: ClaimIdSchema,
+    target_version: z.number().int().min(1),
+    /** The precise missing step. Vagueness is the defect the validator exists */
+    obligation: z.string().trim().min(1).max(2_000),
+    /** What closing the gap would establish. */
+    closes_what: z.string().trim().min(1).max(1_000),
+  })
+  .strict();
+export type GapFileRequest = z.infer<typeof GapFileRequestSchema>;
+
+export const GapFiledResponseSchema = z
+  .object({
+    gap_id: z.string().regex(/^G-[0-9]+$/),
+    problem_id: ProblemIdSchema,
+    /** The per-problem public seq of the gap.filed event. */
+    seq: z.number().int().positive(),
+  })
+  .strict();
+export type GapFiledResponse = z.infer<typeof GapFiledResponseSchema>;
+
+export const GapTransitionRequestSchema = z
+  .object({
+    gap_id: z.string().regex(/^G-[0-9]+$/),
+    outcome: z.enum(["closed-by", "withdrawn"]),
+    /**
+     * Required for outcome 'closed-by': the claim or evidence ref that
+     * discharges the obligation ("C-12@2", "E-4"). Forbidden for 'withdrawn'.
+     */
+    closed_by: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(/^[CE]-[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.outcome === "closed-by" && value.closed_by === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["closed_by"],
+        message: "outcome 'closed-by' requires closed_by: the ref that discharges the obligation.",
+      });
+    }
+    if (value.outcome === "withdrawn" && value.closed_by !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["closed_by"],
+        message: "a withdrawn gap carries no closing ref.",
+      });
+    }
+  });
+export type GapTransitionRequest = z.infer<typeof GapTransitionRequestSchema>;
+
+export const GapClosedResponseSchema = z
+  .object({
+    gap_id: z.string().regex(/^G-[0-9]+$/),
+    status: z.enum(["closed-by", "withdrawn"]),
+    seq: z.number().int().positive(),
+  })
+  .strict();
+export type GapClosedResponse = z.infer<typeof GapClosedResponseSchema>;
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;
