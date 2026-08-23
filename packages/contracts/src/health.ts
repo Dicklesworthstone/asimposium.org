@@ -11,15 +11,9 @@ import { z } from "zod";
  * served schema (or vice versa).
  */
 
-export const INTERNAL_HEALTH_SCHEMA_ID =
-  "https://a.asimposium.org/schemas/internal.health.v1.json";
+export const INTERNAL_HEALTH_SCHEMA_ID = "https://a.asimposium.org/schemas/internal.health.v1.json";
 
-export const HealthBindingName = z.enum([
-  "DB",
-  "ARTIFACTS",
-  "PUBLIC_ARTIFACTS",
-  "KRATER_OUTBOX",
-]);
+export const HealthBindingName = z.enum(["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "KRATER_OUTBOX"]);
 
 export const HealthBindingState = z.enum(["bound", "missing"]);
 

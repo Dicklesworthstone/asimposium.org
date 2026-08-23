@@ -329,8 +329,8 @@ export const PromoteRequestSchema = z
      * citations instead of minting a dangling or circular edge.
      */
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
-   })
-   .strict();
+  })
+  .strict();
 export type PromoteRequest = z.infer<typeof PromoteRequestSchema>;
 
 export const PromoteResponseSchema = z
@@ -624,8 +624,7 @@ export const GapTransitionRequestSchema = z
       ctx.addIssue({
         code: "custom",
         path: ["closed_by"],
-        message:
-          "outcome 'closed-by' requires closed_by: the ref that discharges the obligation.",
+        message: "outcome 'closed-by' requires closed_by: the ref that discharges the obligation.",
       });
     }
     if (value.outcome === "withdrawn" && value.closed_by !== undefined) {

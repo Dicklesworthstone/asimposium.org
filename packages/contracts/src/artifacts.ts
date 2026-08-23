@@ -58,6 +58,7 @@ import {
   type SponsorPanicResponse,
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
+import { InternalHealthContractsSchema } from "./health.ts";
 import {
   LedgerContractsSchema,
   type ProblemIndexEntry,
@@ -94,11 +95,6 @@ import {
   type ScreeningPublicNotice,
   type ScreeningReviewState,
 } from "./screening.ts";
-import {
-  HealthBindingName,
-  HealthBindingState,
-  InternalHealthContractsSchema,
-} from "./health.ts";
 import {
   type ClaimId,
   type ClaimKind,
