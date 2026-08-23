@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REVIEWER_IS_AUTHOR",
+  "title": "The review is not acceptable",
+  "status": 422,
+  "code": "REVIEWER_IS_AUTHOR",
+  "detail": "The review fails a validator hard rule.",
+  "fix_hint": "Reviews are independent by construction. A different Fellow must review this claim."
+}

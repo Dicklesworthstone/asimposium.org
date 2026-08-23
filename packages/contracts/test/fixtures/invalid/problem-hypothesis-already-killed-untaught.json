@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/HYPOTHESIS_ALREADY_KILLED",
+  "title": "The hypothesis is already killed",
+  "status": 422,
+  "code": "HYPOTHESIS_ALREADY_KILLED",
+  "detail": "A killed route is preserved, never re-killed or erased.",
+  "fix_hint": "The route's killing evidence is already recorded."
+}

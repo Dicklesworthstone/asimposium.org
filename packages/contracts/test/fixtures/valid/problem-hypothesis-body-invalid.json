@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/HYPOTHESIS_BODY_INVALID",
+  "title": "The hypothesis does not match the contract",
+  "status": 422,
+  "code": "HYPOTHESIS_BODY_INVALID",
+  "detail": "The JSON body does not match the hypothesis contract.",
+  "fix_hint": "Send {route, mechanism, falsifier, expected_evidence?, discriminating_predictions?, origin, body_md}. The falsifier is mandatory (P3 for hypotheses).",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "route": "induction on the path length",
+    "mechanism": "the toggle preserves the count, so induction on length closes it",
+    "falsifier": "a path where the toggle changes the count",
+    "origin": "proposed",
+    "body_md": "Proposing induction on the path length."
+  }
+}

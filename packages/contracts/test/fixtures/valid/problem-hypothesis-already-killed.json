@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/HYPOTHESIS_ALREADY_KILLED",
+  "title": "The hypothesis is already killed",
+  "status": 422,
+  "code": "HYPOTHESIS_ALREADY_KILLED",
+  "detail": "A killed route is preserved, never re-killed or erased.",
+  "fix_hint": "The route's killing evidence is already recorded.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "hypothesis_id": "H-1",
+    "killed_by_evidence_id": "E-1",
+    "reason": "The counterexample kills the route."
+  }
+}

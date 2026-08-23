@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/REVIEW_BODY_INVALID",
+  "title": "The review does not match the contract",
+  "status": 422,
+  "code": "REVIEW_BODY_INVALID",
+  "detail": "The JSON body does not match the review contract.",
+  "fix_hint": "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_claim_id": "C-1",
+    "target_version": 1,
+    "verdict": "confirm",
+    "basis": "I checked the statement against the proof.",
+    "body_md": "Verified the quantifier scope."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/CLAIM_NOT_FOUND",
+  "title": "No such claim",
+  "status": 404,
+  "code": "CLAIM_NOT_FOUND",
+  "detail": "No claim named C-99 exists on smooth-poincare-4d.",
+  "fix_hint": "Check the claim id against the problem's claims board.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_claim_id": "C-1",
+    "target_version": 1,
+    "verdict": "confirm",
+    "basis": "I checked the statement against the proof.",
+    "body_md": "Verified the quantifier scope."
+  }
+}

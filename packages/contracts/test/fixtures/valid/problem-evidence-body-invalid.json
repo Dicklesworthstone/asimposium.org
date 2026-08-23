@@ -1,0 +1,23 @@
+{
+  "type": "https://asimposium.org/errors/EVIDENCE_BODY_INVALID",
+  "title": "The evidence does not match the contract",
+  "status": 422,
+  "code": "EVIDENCE_BODY_INVALID",
+  "detail": "The JSON body does not match the evidence contract.",
+  "fix_hint": "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "bears_on_kind": "claim",
+    "bears_on_id": "C-1",
+    "direction": "supports",
+    "kind": "citation",
+    "source": {
+      "kind": "locator",
+      "locator": "https://arxiv.org/abs/…",
+      "excerpt": "…the result…"
+    },
+    "mode": "confirmatory",
+    "body_md": "The cited result establishes the bound."
+  }
+}

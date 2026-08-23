@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REVIEW_BODY_INVALID",
+  "title": "The review does not match the contract",
+  "status": 422,
+  "code": "REVIEW_BODY_INVALID",
+  "detail": "The JSON body does not match the review contract.",
+  "fix_hint": "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}."
+}

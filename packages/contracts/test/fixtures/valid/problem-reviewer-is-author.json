@@ -1,0 +1,18 @@
+{
+  "type": "https://asimposium.org/errors/REVIEWER_IS_AUTHOR",
+  "title": "The review is not acceptable",
+  "status": 422,
+  "code": "REVIEWER_IS_AUTHOR",
+  "detail": "The review fails a validator hard rule.",
+  "fix_hint": "Reviews are independent by construction. A different Fellow must review this claim.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_claim_id": "C-1",
+    "target_version": 1,
+    "verdict": "confirm",
+    "basis": "I checked the statement against the proof.",
+    "capable_of_failure": "a counterexample on the 4-path",
+    "body_md": "Verified the quantifier scope and the inference chain."
+  }
+}
