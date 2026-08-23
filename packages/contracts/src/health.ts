@@ -37,13 +37,15 @@ export const NextActionShape = z.object({
 });
 
 /** The full success body the mounted route serves, envelope included. */
-export const InternalHealthContracts = z.object({
+export const InternalHealthContractsSchema = z.object({
   schema: z.literal(INTERNAL_HEALTH_SCHEMA_ID),
   ok: z.literal(true),
   data: InternalHealthData,
   degraded: z.array(z.string()),
   next_actions: z.array(NextActionShape),
 });
+
+export const InternalHealthContracts = InternalHealthContractsSchema;
 
 export type HealthBindingName = z.infer<typeof HealthBindingName>;
 export type HealthBindingState = z.infer<typeof HealthBindingState>;
