@@ -1315,11 +1315,8 @@ describe("Krater outbox Durable Object contracts", () => {
     const attemptKey = `attempt:${rows[0]?.event_id}`;
     const harness = outboxHarness(rows, {
       initialStorage: { [attemptKey]: 3 },
-      failStorageOnce:
-        ({ kind, key }) =>
-        kind === "put" &&
-        key === "counters" &&
-        rows[0]?.quarantined_at !== null,
+      failStorageOnce: ({ kind, key }) =>
+        kind === "put" && key === "counters" && rows[0]?.quarantined_at !== null,
     });
 
     const failed = await harness.drainer.fetch(drainRequest());

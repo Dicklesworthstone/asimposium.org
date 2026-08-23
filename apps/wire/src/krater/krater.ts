@@ -2160,7 +2160,12 @@ export async function writeRelationEvent(
   const writeClaimStartedAt = performance.now();
   const serverNowMs = Date.now();
   const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
-  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt, serverNowMs);
+  const preflight = await backfillKraterIntegrity(
+    db,
+    input.problemId,
+    input.createdAt,
+    serverNowMs,
+  );
   const writePhaseStartedAt = performance.now();
   let retryCount = 0;
 

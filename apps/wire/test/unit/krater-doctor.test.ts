@@ -1,16 +1,15 @@
-import {
-  projectionReplayMatches,
-  transactionBoundaryMatches,
-  type KraterOutboxRecord,
-} from "../../src/krater/krater.ts";
 import { describe, expect, test } from "bun:test";
-
 import {
   doctorProjections,
   MAX_PROJECTION_DOCTOR_INPUT_ROWS,
   ProjectionDoctorInputError,
 } from "../../src/krater/doctor.ts";
 import type { ClaimProjection, KraterEvent } from "../../src/krater/krater.ts";
+import {
+  type KraterOutboxRecord,
+  projectionReplayMatches,
+  transactionBoundaryMatches,
+} from "../../src/krater/krater.ts";
 
 function event(seq: number, claimId: string): KraterEvent {
   return {
