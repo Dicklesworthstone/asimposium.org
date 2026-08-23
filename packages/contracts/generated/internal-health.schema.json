@@ -1,0 +1,103 @@
+{
+  "$id": "https://a.asimposium.org/schemas/internal.health.v1.json",
+  "title": "ASImposium internal health readiness envelope",
+  "description": "Shape-only readiness for the mounted GET /internal/health scaffold face: binding names and bound/missing states, never values, ids, or secrets. The advertised schema literal is part of the contract.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "https://a.asimposium.org/schemas/internal.health.v1.json"
+    },
+    "ok": {
+      "type": "boolean",
+      "const": true
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "service": {
+          "type": "string",
+          "const": "wire"
+        },
+        "role": {
+          "type": "string",
+          "const": "stoa"
+        },
+        "format": {
+          "type": "string",
+          "const": "json"
+        },
+        "bindings": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "enum": [
+              "DB",
+              "ARTIFACTS",
+              "PUBLIC_ARTIFACTS",
+              "KRATER_OUTBOX"
+            ]
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "bound",
+              "missing"
+            ]
+          },
+          "required": [
+            "DB",
+            "ARTIFACTS",
+            "PUBLIC_ARTIFACTS",
+            "KRATER_OUTBOX"
+          ]
+        }
+      },
+      "required": [
+        "service",
+        "role",
+        "format",
+        "bindings"
+      ],
+      "additionalProperties": false
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "url",
+          "why"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "ok",
+    "data",
+    "degraded",
+    "next_actions"
+  ],
+  "additionalProperties": false
+}
