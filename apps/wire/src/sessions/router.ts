@@ -10,12 +10,12 @@ import {
   HypothesisKillResponseSchema,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
-  RelationFiledResponseSchema,
-  RelationFileRequestSchema,
   type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
+  RelationFiledResponseSchema,
+  RelationFileRequestSchema,
   ReviewRequestSchema,
   ReviewResponseSchema,
   ReviseRequestSchema,
@@ -49,8 +49,8 @@ import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
 import { storeWorkshopBody } from "../krater/cas";
-import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import { mintClaimVersion } from "../krater/claim-version";
+import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   KraterIdempotencyConflictError,
   KraterProblemNotFoundError,
@@ -60,11 +60,11 @@ import {
   writeGapEvent,
   writeRelationEvent,
 } from "../krater/krater";
-import { parseRelationTarget } from "../ledger/relations";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
 import type { ClaimEvent } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
+import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
 import {
   duplicateClaimRefusal,
@@ -2914,7 +2914,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/relations`, parsed.data);
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/relations`,
+      parsed.data,
+    );
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -2950,7 +2953,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // Both endpoints must exist at their pinned versions on this problem — an
     // edge about claims that do not exist asserts nothing.
     const sourceHead = await db
-      .prepare("SELECT MAX(version) AS head FROM claim_versions WHERE problem_id = ? AND claim_id = ?")
+      .prepare(
+        "SELECT MAX(version) AS head FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
+      )
       .bind(session.problem_id, parsed.data.source_claim_id)
       .first<{ head: number | null }>();
     const target = parseRelationTarget(parsed.data.target);
@@ -3100,10 +3105,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       // The natural key is the duplicate guard: asserting the same edge twice
       // aborts the loser's whole batch.
-      if (
-        error instanceof Error &&
-        /claim_relations/.test(error.message)
-      ) {
+      if (error instanceof Error && /claim_relations/.test(error.message)) {
         return problem({
           status: 409,
           code: "RELATION_ALREADY_ASSERTED",

@@ -6,10 +6,10 @@ import {
   ContractProblemSchema,
   GapFiledResponseSchema,
   OpaqueProblemSchema,
-  RelationFiledResponseSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
   PromoteResponseSchema,
+  RelationFiledResponseSchema,
   ReviseResponseSchema,
   SessionOpenResponseSchema,
   SponsorWorkshopViewSchema,
@@ -24,8 +24,6 @@ import {
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
-import { parseRelationTarget, relationPinState } from "../../src/ledger/relations.ts";
-import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
 import {
@@ -33,6 +31,8 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
+import { parseRelationTarget, relationPinState } from "../../src/ledger/relations.ts";
+import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
@@ -2094,7 +2094,6 @@ describe("session protocol routes", () => {
       await db.prepare("SELECT COUNT(*) AS count FROM claim_relations").first<{ count: number }>(),
     ).toEqual({ count: 1 });
   });
-
 
   test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
     const { call, db, env, binding, router, service } = await fixture();
