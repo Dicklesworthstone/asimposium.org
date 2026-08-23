@@ -515,6 +515,44 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint: "Check the console for the credential state or contact your sponsor.",
     });
 
+  // Fable §5.5: the global two-open-session cap (asimposiumorg-zdz.6). A
+  // teaching refusal: it names the open sessions to close so the caller can
+  // free a slot without a second round trip.
+  const sessionCapReachedProblem = (openSessionIds: readonly string[]): Response =>
+    validatedProblem({
+      status: 409,
+      code: "SESSION_CAP_REACHED",
+      title: "The Fellow open-session cap is reached",
+      detail: "A Fellow keeps at most two open sessions across all problems.",
+      fixHint: "Close one of the open sessions with POST /v1/sessions/:id/close, then reopen.",
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        open_session_ids: [...openSessionIds].slice(0, 2),
+        example: {
+          method: "POST",
+          path: `/v1/sessions/${openSessionIds[0] ?? "<session_id>"}/close`,
+          body: { handback: "Freeing a slot for the next session." },
+        },
+      },
+    });
+
+  async function openSessionIdsOf(db: Env["DB"], fellowId: string): Promise<string[]> {
+    const rows = await db
+      .prepare(
+        `SELECT session_id FROM sessions
+         WHERE fellow_id = ? AND closed_at IS NULL
+         ORDER BY opened_at, session_id`,
+      )
+      .bind(fellowId)
+      .all<{ session_id: string }>();
+    return (rows.results ?? []).map((row) => row.session_id);
+  }
+
+  /** The 0037 trigger aborts the batch with this message at commit time. */
+  const isSessionCapAbort = (error: unknown): boolean =>
+    error instanceof Error && error.message.includes("SESSION_OPEN_CAP_EXCEEDED");
+
   const fellowTokenInvalidProblem = (): Response =>
     problem({
       status: 401,
@@ -760,6 +798,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           if (existing !== null && existing !== undefined) {
             throw new SessionExistsError(existing.session_id);
           }
+          // Fable §5.5: at most two open sessions per Fellow across ALL
+          // problems. This pre-check only picks the friendly refusal payload;
+          // the commit-time trigger (0037) makes the cap binding under races.
+          const openElsewhere = await db
+            .prepare(
+              `SELECT session_id FROM sessions
+               WHERE fellow_id = ? AND closed_at IS NULL
+               ORDER BY opened_at, session_id`,
+            )
+            .bind(auth.binding.fellowId)
+            .all<{ session_id: string }>();
+          const openIds = (openElsewhere.results ?? []).map((row) => row.session_id);
+          if (openIds.length >= 2) throw new SessionCapReachedError(openIds);
           const now = new Date();
           const sessionId = mintId("S");
           const openedAt = now.toISOString();
@@ -857,6 +908,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
+      if (error instanceof SessionCapReachedError || isSessionCapAbort(error)) {
+        return sessionCapReachedProblem(
+          error instanceof SessionCapReachedError
+            ? error.openSessionIds
+            : await openSessionIdsOf(db, auth.binding.fellowId),
+        );
+      }
       if (error instanceof SessionExistsError) {
         return validatedProblem({
           status: 409,
@@ -912,6 +970,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             },
           });
         }
+        // The cap trigger can abort the batch at commit time when a concurrent
+        // same-Fellow open won the last free slot: re-read the live count and
+        // answer the teaching cap face instead of the coarse policy face.
+        const openIds = await openSessionIdsOf(db, auth.binding.fellowId);
+        if (openIds.length >= 2) return sessionCapReachedProblem(openIds);
         // Every contract-shaped cause is excluded above, so the election was
         // lost to the commit-time credential liveness clause: a revoke landed
         // between this request's authentication and its batch. It answers with
@@ -4081,6 +4144,13 @@ class SessionExistsError extends Error {
   constructor(readonly sessionId: string) {
     super("open session exists");
     this.name = "SessionExistsError";
+  }
+}
+
+class SessionCapReachedError extends Error {
+  constructor(readonly openSessionIds: readonly string[]) {
+    super("fellow open-session cap reached");
+    this.name = "SessionCapReachedError";
   }
 }
 

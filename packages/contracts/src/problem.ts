@@ -123,6 +123,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // Public event-tail cursor refusal (ledger faces): a malformed ?since= is
   // fully described by the request, so it teaches the canonical form.
   "CURSOR_INVALID",
+  // Fable §5.5 global admission cap (asimposiumorg-zdz.6): a Fellow holds at
+  // most two open sessions across all problems; the refusal names them.
+  "SESSION_CAP_REACHED",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -232,6 +235,8 @@ const generalContractProblem = z
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
     /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
     head_version: z.number().int().min(1).optional(),
+    /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
+    open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),
   })
   .strict();
 
