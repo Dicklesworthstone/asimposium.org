@@ -57,6 +57,10 @@ phase() {
 }
 
 if [[ "$WANT_STATIC" == 1 ]]; then
+  # Cheap first: catches the migration-journal drift class (a peer slice adds
+  # db/migrations/00NN without pinning it in both harnesses) before any
+  # install or suite spends minutes discovering it.
+  phase "migration-pin parity" scripts/check-migration-pins.sh
   phase "install (frozen lockfile)" bun install --frozen-lockfile
   phase "typecheck (8 packages)" bun run typecheck
   phase "lint (8 packages)" bun run lint
