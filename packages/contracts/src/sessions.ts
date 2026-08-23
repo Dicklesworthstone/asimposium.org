@@ -270,10 +270,30 @@ export const SponsorWorkshopObjectSchema = z
   .strict();
 export type SponsorWorkshopObject = z.infer<typeof SponsorWorkshopObjectSchema>;
 
+/**
+ * The private workshop read is a byte-bounded keyset page (asimposiumorg-e7j.2):
+ * at most this many objects per response, newest-first, with `has_more` and a
+ * nullable `next_cursor` carrying the exact consistency invariant. The limit is
+ * part of the contract, not a Worker tuning knob — the Agora reader ceiling is
+ * sized against it.
+ */
+export const SPONSOR_WORKSHOP_PAGE_LIMIT = 16;
+
+/**
+ * Hard ceiling on the serialized private page both planes enforce: the Worker
+ * refuses to serve beyond it and the Agora reader refuses to accept beyond it.
+ * Sixteen objects at contract bounds stay far below this; the ceiling exists so
+ * a future contract regression cannot silently resurrect unbounded reads.
+ */
+export const SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+
 export const SponsorWorkshopRequestSchema = z
   .object({
     problem_id: ProblemIdSchema,
     fellow_id: FellowIdSchema,
+    // Keyset cursor: only objects strictly older than this workshop_seq are
+    // eligible. Absent means page one (the newest end of the workshop).
+    before_workshop_seq: z.number().int().positive().optional(),
   })
   .strict();
 export type SponsorWorkshopRequest = z.infer<typeof SponsorWorkshopRequestSchema>;
@@ -283,9 +303,35 @@ export const SponsorWorkshopViewSchema = z
     schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
     problem_id: ProblemIdSchema,
     fellow_id: FellowIdSchema,
-    objects: z.array(SponsorWorkshopObjectSchema).max(200),
+    objects: z.array(SponsorWorkshopObjectSchema).max(SPONSOR_WORKSHOP_PAGE_LIMIT),
+    has_more: z.boolean(),
+    next_cursor: z.number().int().positive().nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    const last = value.objects.at(-1);
+    if (value.has_more) {
+      if (value.next_cursor === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["next_cursor"],
+          message: "has_more requires next_cursor",
+        });
+      } else if (last === undefined || value.next_cursor !== last.workshop_seq) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["next_cursor"],
+          message: "next_cursor must equal the last emitted object's workshop_seq",
+        });
+      }
+    } else if (value.next_cursor !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["next_cursor"],
+        message: "next_cursor must be null when has_more is false",
+      });
+    }
+  });
 export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
 
 /** §6.1/§7.2: the promoted object kinds the validator accepts in v1. */

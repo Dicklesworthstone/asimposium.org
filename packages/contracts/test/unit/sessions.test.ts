@@ -5,6 +5,7 @@ import {
   PromoteRequestSchema,
   SessionCloseRequestSchema,
   SessionOpenRequestSchema,
+  SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushRequestSchema,
@@ -211,31 +212,88 @@ test("the pack viewer is audience-discriminated so a public face cannot claim au
   ).toBe(false);
 });
 
-test("the sponsor workshop view is strict private-data contract", () => {
-  const valid = {
+test("the sponsor workshop view is a strict byte-bounded page contract", () => {
+  const object = {
+    workshop_id: `W-${"A".repeat(26)}`,
+    type: "note",
+    title: "Private note",
+    body_md: "Visible only to the Fellow and sponsor.",
+    relates_to: [],
+    workshop_seq: 1,
+    created_at: "2026-08-19T00:00:00.000Z",
+  };
+  const validTerminal = {
     schema: "https://a.asimposium.org/schemas/sessions.v1.json",
     problem_id: "P-4DSP",
     fellow_id: "fellow-01JXYZ",
-    objects: [
-      {
-        workshop_id: `W-${"A".repeat(26)}`,
-        type: "note",
-        title: "Private note",
-        body_md: "Visible only to the Fellow and sponsor.",
-        relates_to: [],
-        workshop_seq: 1,
-        created_at: "2026-08-19T00:00:00.000Z",
-      },
-    ],
+    objects: [object],
+    has_more: false,
+    next_cursor: null,
   };
-  expect(SponsorWorkshopViewSchema.safeParse(valid).success).toBe(true);
-  expect(SponsorWorkshopViewSchema.safeParse({ ...valid, leaked: true }).success).toBe(false);
+  expect(SponsorWorkshopViewSchema.safeParse(validTerminal).success).toBe(true);
+  expect(SponsorWorkshopViewSchema.safeParse({ ...validTerminal, leaked: true }).success).toBe(
+    false,
+  );
   expect(
     SponsorWorkshopViewSchema.safeParse({
-      ...valid,
-      objects: [{ ...valid.objects[0], body_md: 7 }],
+      ...validTerminal,
+      objects: [{ ...object, body_md: 7 }],
     }).success,
   ).toBe(false);
+
+  // Exact consistency invariant, one mutation per plant.
+  expect(SponsorWorkshopViewSchema.safeParse({ ...validTerminal, next_cursor: 1 }).success).toBe(
+    false,
+  );
+  const continued = {
+    ...validTerminal,
+    has_more: true,
+    next_cursor: 1,
+    objects: [{ ...object, workshop_seq: 1 }],
+  };
+  expect(SponsorWorkshopViewSchema.safeParse(continued).success).toBe(true);
+  expect(SponsorWorkshopViewSchema.safeParse({ ...continued, next_cursor: null }).success).toBe(
+    false,
+  );
+  expect(SponsorWorkshopViewSchema.safeParse({ ...continued, next_cursor: 2 }).success).toBe(false);
+  // A continuation page that somehow carries no rows cannot claim more.
+  expect(
+    SponsorWorkshopViewSchema.safeParse({
+      ...validTerminal,
+      has_more: true,
+      next_cursor: 9,
+      objects: [],
+    }).success,
+  ).toBe(false);
+});
+
+test("the page limit is a contract constant the view enforces", () => {
+  const object = {
+    workshop_id: `W-${"B".repeat(26)}`,
+    type: "note",
+    title: "Page limit probe",
+    body_md: "row",
+    relates_to: [],
+    workshop_seq: 1,
+    created_at: "2026-08-19T00:00:00.000Z",
+  };
+  const pageOf = (n: number) => ({
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    problem_id: "P-4DSP",
+    fellow_id: "fellow-01JXYZ",
+    objects: Array.from({ length: n }, (_, index) => ({
+      ...object,
+      workshop_seq: n - index,
+    })),
+    has_more: false,
+    next_cursor: null,
+  });
+  expect(SponsorWorkshopViewSchema.safeParse(pageOf(SPONSOR_WORKSHOP_PAGE_LIMIT)).success).toBe(
+    true,
+  );
+  expect(SponsorWorkshopViewSchema.safeParse(pageOf(SPONSOR_WORKSHOP_PAGE_LIMIT + 1)).success).toBe(
+    false,
+  );
 });
 
 test("the signed sponsor workshop request accepts only canonical scope identifiers", () => {
@@ -258,4 +316,29 @@ test("the signed sponsor workshop request accepts only canonical scope identifie
       unexpected: true,
     }).success,
   ).toBe(false);
+});
+
+test("the keyset cursor is optional, positive, and integral (asimposiumorg-e7j.2)", () => {
+  expect(
+    SponsorWorkshopRequestSchema.safeParse({
+      problem_id: "P-4DSP",
+      fellow_id: "fellow-01JXYZ",
+      before_workshop_seq: 7,
+    }).success,
+  ).toBe(true);
+  for (const [label, before] of [
+    ["zero", 0],
+    ["negative", -1],
+    ["fraction", 1.5],
+    ["non-integer string", "7"],
+  ] as const) {
+    expect(
+      SponsorWorkshopRequestSchema.safeParse({
+        problem_id: "P-4DSP",
+        fellow_id: "fellow-01JXYZ",
+        before_workshop_seq: before,
+      }).success,
+      label,
+    ).toBe(false);
+  }
 });

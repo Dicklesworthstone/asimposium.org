@@ -25,6 +25,8 @@ import {
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SponsorIdSchema,
+  SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
+  SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushRequestSchema,
@@ -4072,8 +4074,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           status: 422,
           code: "WORKSHOP_READ_BODY_INVALID",
           title: "Workshop read body is invalid",
-          detail: "The signed JSON body must contain exactly problem_id and fellow_id.",
-          fixHint: "Send the problem and one of your own Fellows in the signed JSON body.",
+          detail:
+            "The signed JSON body must contain exactly problem_id and fellow_id, plus an optional positive before_workshop_seq cursor.",
+          fixHint:
+            "Send the problem and one of your own Fellows in the signed JSON body; pass before_workshop_seq from a prior page's next_cursor to page older rows.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -4101,12 +4105,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }),
         );
       }
+      // Keyset page: at most LIMIT+1 rows are read so `has_more` is a fact
+      // about the table, and the emitted page serializes exactly once under a
+      // hard byte ceiling (asimposiumorg-e7j.2). Ownership was proven above,
+      // before this query ever runs.
+      const beforeWorkshopSeq = parsedRequest.data.before_workshop_seq;
       const objects = await c.env.DB.prepare(
         `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at
            FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
-           ORDER BY workshop_seq DESC LIMIT 200`,
+             AND (? IS NULL OR workshop_seq < ?)
+           ORDER BY workshop_seq DESC LIMIT ${SPONSOR_WORKSHOP_PAGE_LIMIT + 1}`,
       )
-        .bind(problemId, fellowId)
+        .bind(problemId, fellowId, beforeWorkshopSeq ?? null, beforeWorkshopSeq ?? null)
         .all<{
           workshop_id: string;
           type: string;
@@ -4116,25 +4126,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           workshop_seq: number;
           created_at: string;
         }>();
-      return c.json(
-        SponsorWorkshopViewSchema.parse({
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          problem_id: problemId,
-          fellow_id: fellowId,
-          objects: (objects.results ?? []).map((row) => ({
-            workshop_id: row.workshop_id,
-            type: row.type,
-            title: row.title,
-            body_md: row.body_md,
-            relates_to: JSON.parse(row.relates_to_json) as string[],
-            workshop_seq: row.workshop_seq,
-            created_at: row.created_at,
-          })),
-        }),
-        200,
-        { "cache-control": "private, no-store" },
-      );
-    } catch {
+      const rows = objects.results ?? [];
+      const hasMore = rows.length > SPONSOR_WORKSHOP_PAGE_LIMIT;
+      const pageRows = hasMore ? rows.slice(0, SPONSOR_WORKSHOP_PAGE_LIMIT) : rows;
+      const view = SponsorWorkshopViewSchema.parse({
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        problem_id: problemId,
+        fellow_id: fellowId,
+        objects: pageRows.map((row) => ({
+          workshop_id: row.workshop_id,
+          type: row.type,
+          title: row.title,
+          body_md: row.body_md,
+          relates_to: JSON.parse(row.relates_to_json) as string[],
+          workshop_seq: row.workshop_seq,
+          created_at: row.created_at,
+        })),
+        has_more: hasMore,
+        next_cursor: hasMore ? (pageRows.at(-1)?.workshop_seq ?? null) : null,
+      });
+      // Serialize exactly once; the ceiling applies to these exact bytes.
+      const body = new TextEncoder().encode(JSON.stringify(view));
+      if (body.byteLength > SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES) {
+        return privateNoStore(
+          validatedProblem({
+            status: 500,
+            code: "INTERNAL_ERROR",
+            title: "The workshop page exceeds its byte budget",
+            detail: "The private page could not be served within the transport bound.",
+            fixHint: "Retry shortly; if this persists the operator must compact the workshop.",
+          }),
+        );
+      }
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "cache-control": "private, no-store",
+          "content-type": "application/json; charset=utf-8",
+          "content-length": String(body.byteLength),
+        },
+      });
       // D1 diagnostics and malformed private rows never cross this response.
       return sponsorWorkshopUnavailable();
     }

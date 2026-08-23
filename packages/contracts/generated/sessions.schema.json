@@ -1958,6 +1958,11 @@
           "minLength": 1,
           "maxLength": 80,
           "pattern": "^[^\\u0000]*$"
+        },
+        "before_workshop_seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
@@ -1984,7 +1989,7 @@
           "pattern": "^[^\\u0000]*$"
         },
         "objects": {
-          "maxItems": 200,
+          "maxItems": 16,
           "type": "array",
           "items": {
             "type": "object",
@@ -2045,13 +2050,30 @@
             ],
             "additionalProperties": false
           }
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "schema",
         "problem_id",
         "fellow_id",
-        "objects"
+        "objects",
+        "has_more",
+        "next_cursor"
       ],
       "additionalProperties": false
     },
