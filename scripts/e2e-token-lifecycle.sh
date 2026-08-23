@@ -70,6 +70,9 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0026_evidence.sql"
   "0027_w58_remaining_objects.sql"
   "0028_event_attribution.sql"
+  "0029_claim_norm_hash.sql"
+  "0030_claim_dep_fk_parent_repair.sql"
+  "0031_revise_replay_scope.sql"
 )
 
 STATE_DIR=""
