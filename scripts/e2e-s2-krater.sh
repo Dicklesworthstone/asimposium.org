@@ -116,6 +116,11 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0026_evidence.sql
   db/migrations/0027_w58_remaining_objects.sql
   db/migrations/0028_event_attribution.sql
+  db/migrations/0029_claim_norm_hash.sql
+  # 0029+0030 landed with the W5.3 norm-hash duplicate gate slice; journal and
+  # provenance list move in the same review per the provenance contract below.
+  db/migrations/0030_claim_dep_fk_parent_repair.sql
+  db/migrations/0031_revise_replay_scope.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -175,6 +180,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/disposition-read.ts
   apps/wire/src/ledger/evidence-class.ts
   apps/wire/src/ledger/dispositions.ts
+  apps/wire/src/krater/claim-version.ts
+  # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
+  # (mintClaimVersion on the promote path); the mechanical walk flagged it the
+  # moment that import landed, which is this attestation working as intended.
   apps/wire/src/krater/intent.ts
   apps/wire/src/krater/cas.ts
   apps/wire/src/screening/aggregate.ts
@@ -254,6 +263,9 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0026_evidence.sql
   0027_w58_remaining_objects.sql
   0028_event_attribution.sql
+  0029_claim_norm_hash.sql
+  0030_claim_dep_fk_parent_repair.sql
+  0031_revise_replay_scope.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
