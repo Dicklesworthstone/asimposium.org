@@ -342,10 +342,6 @@ interface PackSessionRow {
 
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
-  app.onError((error, c) => {
-    console.error("HONO-ERR:", c.req.path, error instanceof Error ? error.stack : String(error));
-    return c.text("Internal Server Error", 500);
-  });
   const privateNoStore = (response: Response): Response => {
     const headers = new Headers(response.headers);
     headers.set("cache-control", "private, no-store");
