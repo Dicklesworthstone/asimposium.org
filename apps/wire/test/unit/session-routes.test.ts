@@ -1132,6 +1132,91 @@ describe("session protocol routes", () => {
     ).toEqual({ count: 4 });
   });
 
+  test("the global two-open-session cap refuses a third open, survives a same-slot race, and frees on close (zdz.6)", async () => {
+    const { call, db, binding, env, replayProtector } = await fixture();
+    const now = new Date().toISOString();
+    for (const id of ["P-OTHER", "P-THIRD", "P-FOURTH"]) {
+      await db
+        .prepare("INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, ?, ?)")
+        .bind(id, now, now)
+        .run();
+    }
+
+    // An unbound credential may open on any existing problem, which lets one
+    // Fellow fan out across distinct problems — exactly the §5.5 hazard.
+    const unbound = {
+      ...binding,
+      grantedResources: { ...binding.grantedResources, problemBinding: undefined },
+    };
+    const callAs = async (
+      credential: typeof binding,
+      path: string,
+      key: string,
+      body: Record<string, unknown>,
+    ): Promise<Response> =>
+      createSessionRouter({
+        service: { credentialBinding: async () => credential } as unknown as EnrollmentService,
+        replayProtector,
+      }).fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer cap-fixture",
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          body: JSON.stringify(body),
+        }),
+        env,
+      );
+
+    const first = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cap-open-1" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    expect(first.status).toBe(201);
+    const second = await callAs(unbound, "/v1/sessions", "cap-open-2", { problem_id: "P-OTHER" });
+    expect(second.status).toBe(201);
+    const openedIds = (
+      await db
+        .prepare("SELECT session_id FROM sessions WHERE closed_at IS NULL ORDER BY session_id")
+        .all<{ session_id: string }>()
+    ).results?.map((row) => row.session_id) ?? [];
+    expect(openedIds).toHaveLength(2);
+
+    // Boundary: a third open is refused with the teaching cap face naming both slots.
+    const third = await callAs(unbound, "/v1/sessions", "cap-open-3", { problem_id: "P-THIRD" });
+    expect(third.status).toBe(409);
+    const capDocument = ProblemDocumentSchema.parse(await third.json());
+    expect(capDocument.code).toBe("SESSION_CAP_REACHED");
+    if (capDocument.code !== "SESSION_CAP_REACHED") return;
+    expect([...(capDocument.open_session_ids ?? [])].sort()).toEqual([...openedIds].sort());
+    expect(
+      await db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE closed_at IS NULL").first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+
+    // Commit-time race: with one slot free, two concurrent opens on distinct
+    // problems elect exactly one winner via the 0037 trigger's batch abort.
+    const closeOne = await callAs(unbound, `/v1/sessions/${openedIds[1]}/close`, "cap-close-1", {
+      handback: "Freeing a slot.",
+    });
+    expect(closeOne.status).toBe(201);
+    const raced = await Promise.all([
+      callAs(unbound, "/v1/sessions", "cap-race-a", { problem_id: "P-THIRD" }),
+      callAs(unbound, "/v1/sessions", "cap-race-b", { problem_id: "P-FOURTH" }),
+    ]);
+    expect(raced.map((response) => response.status).sort()).toEqual([201, 409]);
+    const loser = raced.find((response) => response.status === 409);
+    if (loser !== undefined) {
+      const loserDocument = ProblemDocumentSchema.parse(await loser.json());
+      expect(loserDocument.code).toBe("SESSION_CAP_REACHED");
+    }
+    expect(
+      await db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE closed_at IS NULL").first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+  });
+
   test("concurrent same-key promotions with different bodies return a typed conflict", async () => {
     const barrier = stagedReadBarrier();
     const { call, db } = await fixture({
