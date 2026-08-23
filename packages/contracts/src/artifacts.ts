@@ -95,6 +95,11 @@ import {
   type ScreeningReviewState,
 } from "./screening.ts";
 import {
+  HealthBindingName,
+  HealthBindingState,
+  InternalHealthContractsSchema,
+} from "./health.ts";
+import {
   type ClaimId,
   type ClaimKind,
   type CursorResponse,
