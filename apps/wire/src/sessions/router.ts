@@ -338,7 +338,6 @@ interface PackSessionRow {
 
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
-
   const privateNoStore = (response: Response): Response => {
     const headers = new Headers(response.headers);
     headers.set("cache-control", "private, no-store");
@@ -2629,7 +2628,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint:
           "Send {gap_id, outcome: 'closed-by', closed_by} or {gap_id, outcome: 'withdrawn'} — closed-by names the discharging ref; withdrawn carries none.",
         rule: "A5",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { gap_id: "G-2", outcome: "closed-by", closed_by: "C-1@2" },
+        },
       });
     }
 
@@ -2698,34 +2700,35 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     // A closed-by ref must discharge against a real object on this problem.
-    if (parsed.data.outcome === "closed-by" && parsed.data.closed_by.startsWith("C-")) {
+    const closedByRef = parsed.data.outcome === "closed-by" ? parsed.data.closed_by : undefined;
+    if (closedByRef?.startsWith("C-")) {
       const refClaim = await db
         .prepare("SELECT id FROM claims WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, parsed.data.closed_by.split("@")[0])
+        .bind(session.problem_id, closedByRef.split("@")[0])
         .first<{ id: string }>();
       if (refClaim === null || refClaim === undefined) {
         return problem({
           status: 422,
           code: "GAP_TARGET_UNKNOWN",
           title: "closed_by references an unknown claim",
-          detail: `No claim matching ${parsed.data.closed_by} exists on this problem.`,
+          detail: `No claim matching ${closedByRef} exists on this problem.`,
           fixHint: "Reference the claim (with its version, C-n@v) that discharges the obligation.",
           rule: "P10",
           extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
         });
       }
     }
-    if (parsed.data.outcome === "closed-by" && parsed.data.closed_by.startsWith("E-")) {
+    if (closedByRef?.startsWith("E-")) {
       const refEvidence = await db
         .prepare("SELECT id FROM evidence WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, parsed.data.closed_by.split("@")[0])
+        .bind(session.problem_id, closedByRef.split("@")[0])
         .first<{ id: string }>();
       if (refEvidence === null || refEvidence === undefined) {
         return problem({
           status: 422,
           code: "GAP_TARGET_UNKNOWN",
           title: "closed_by references unknown evidence",
-          detail: `No evidence matching ${parsed.data.closed_by} exists on this problem.`,
+          detail: `No evidence matching ${closedByRef} exists on this problem.`,
           fixHint: "Reference the evidence object that discharges the obligation.",
           rule: "P10",
           extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
@@ -2744,7 +2747,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           eventId,
           idempotencyKey: kraterIdempotencyKey,
           gapId: parsed.data.gap_id,
-          closedBy: parsed.data.outcome === "closed-by" ? parsed.data.closed_by : null,
+          closedBy: parsed.data.outcome === "closed-by" ? (parsed.data.closed_by ?? null) : null,
           actorFellowId: auth.binding.fellowId,
           createdAt: new Date().toISOString(),
         },
@@ -2804,13 +2807,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
     } catch (error) {
-      console.error("GAPCLOSE-ENTER:", error instanceof Error ? error.message : String(error));
       try {
         const winner = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
         if (winner !== undefined) {
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
-      console.error("GAPTRACE pre-write", parsed.data.gap_id, parsed.data.outcome);
       } catch (replayError) {
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
@@ -2835,7 +2836,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
-      if (error instanceof Error) console.error("GAPCLOSE-CAUGHT:", error.message);
       throw error;
     }
   });

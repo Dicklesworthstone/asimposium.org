@@ -1932,9 +1932,7 @@ export async function writeGapEvent(
                AND g.closed_at IS ?
            )`;
     const settleGuardBinds: readonly string[] =
-      input.mode === "filed"
-        ? []
-        : [input.problemId, input.gapId, input.mode, input.createdAt];
+      input.mode === "filed" ? [] : [input.problemId, input.gapId, input.mode, input.createdAt];
 
     let results: D1Result<SequenceRow>[];
     try {

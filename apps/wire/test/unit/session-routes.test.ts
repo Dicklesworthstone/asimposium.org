@@ -4,10 +4,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   ContractProblemSchema,
+  GapFiledResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
-  GapFiledResponseSchema,
   PromoteResponseSchema,
   ReviseResponseSchema,
   SessionOpenResponseSchema,
@@ -1808,7 +1808,6 @@ describe("session protocol routes", () => {
     ).toEqual({ count: 1 });
   });
 
-
   test("a filed gap pins its claim version and closes only once", async () => {
     const { call, db } = await fixture();
     const opened = await call("/v1/sessions", {
@@ -1900,7 +1899,6 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ gap_id: filedBody.gap_id, outcome: "withdrawn" }),
     });
     expect(withdrawn.status).toBe(201);
-    if (withdrawn.status !== 201) console.error("WITHDRAW-BODY", await withdrawn.text());
     expect(await withdrawn.json()).toEqual({
       gap_id: filedBody.gap_id,
       status: "withdrawn",
@@ -4146,9 +4144,7 @@ describe("session protocol routes", () => {
     ).toEqual(["C-1", "C-2"]);
   });
 
-  test(
-    "mounted packs budget the exact rendered face and quarantine hostile ledger text",
-    async () => {
+  test("mounted packs budget the exact rendered face and quarantine hostile ledger text", async () => {
     const { call, db, binding } = await fixture();
     const opened = await call("/v1/sessions", {
       method: "POST",
@@ -4280,9 +4276,7 @@ describe("session protocol routes", () => {
     // 5s per-test budget under peer build load; assertions unchanged.
   }, 20000);
 
-  test(
-    "PLANTED: createApp refuses a corrupt oversized claim without reflecting it",
-    async () => {
+  test("PLANTED: createApp refuses a corrupt oversized claim without reflecting it", async () => {
     const { db, enrollmentStore, token } = await fixture();
     const app = createApp({ createEnrollmentStore: () => enrollmentStore });
     const env = {
