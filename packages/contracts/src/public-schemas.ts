@@ -23,6 +23,7 @@ import internalHealthSchemaModule from "../generated/internal-health.schema.json
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment",
   "enrollment-capsule",
+  "internal-health",
   "ledger",
   "problem",
   "screening",
