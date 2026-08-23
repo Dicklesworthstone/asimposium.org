@@ -4166,6 +4166,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "content-length": String(body.byteLength),
         },
       });
+    } catch {
       // D1 diagnostics and malformed private rows never cross this response.
       return sponsorWorkshopUnavailable();
     }
