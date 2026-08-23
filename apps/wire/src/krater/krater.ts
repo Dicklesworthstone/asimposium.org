@@ -1815,7 +1815,6 @@ export async function writeClaimRevision(
   throw new Error("Krater chain retry budget exhausted.");
 }
 
-
 /**
  * W5.5: the proof-gap ledger write (file or settle) — one atomic batch per
  * event, mirroring the Krater envelope. Gap ids derive from the shared
@@ -1863,11 +1862,21 @@ function canonicalGapPayload(input: KraterGapInput): string {
   );
 }
 
-export async function writeGapEvent(db: D1Database, input: KraterGapInput): Promise<KraterWriteResult> {
+export async function writeGapEvent(
+  db: D1Database,
+  input: KraterGapInput,
+  _hooks: KraterWriteHooks = {},
+  companion?: KraterAtomicCompanion,
+): Promise<KraterWriteResult> {
   const writeClaimStartedAt = performance.now();
   const serverNowMs = Date.now();
   const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
-  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt, serverNowMs);
+  const preflight = await backfillKraterIntegrity(
+    db,
+    input.problemId,
+    input.createdAt,
+    serverNowMs,
+  );
   const writePhaseStartedAt = performance.now();
   let retryCount = 0;
 
@@ -1908,17 +1917,24 @@ export async function writeGapEvent(db: D1Database, input: KraterGapInput): Prom
       candidateSeq,
       nextChainDigest,
     );
-    // Settle mode guards every post-bump statement on the gap still being
-    // open, so a concurrent transition wins and this batch commits nothing.
-    const openGuardSql =
+    // Settle mode guards every post-bump statement on THIS attempt owning
+    // the transition: the UPDATE stamps status + closed_at together, and a
+    // concurrent winner leaves those untouched, so a losing batch no-ops
+    // entirely instead of fabricating a second settle event.
+    const settleGuardSql =
       input.mode === "filed"
         ? ""
         : ` AND EXISTS (
              SELECT 1 FROM proof_gaps g
-             WHERE g.problem_id = ? AND g.gap_id = ? AND g.status = 'open'
+             WHERE g.problem_id = ?
+               AND g.gap_id = ?
+               AND g.status = ?
+               AND g.closed_at IS ?
            )`;
-    const openGuardBinds: readonly string[] =
-      input.mode === "filed" ? [] : [input.problemId, input.gapId];
+    const settleGuardBinds: readonly string[] =
+      input.mode === "filed"
+        ? []
+        : [input.problemId, input.gapId, input.mode, input.createdAt];
 
     let results: D1Result<SequenceRow>[];
     try {
@@ -1995,7 +2011,7 @@ export async function writeGapEvent(db: D1Database, input: KraterGapInput): Prom
                   ?, NULL, NULL, NULL, NULL
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL${openGuardSql}`,
+           WHERE p.id = ? AND i.event_id IS NULL${settleGuardSql}`,
           input.eventId,
           gapId,
           payloadSha256,
@@ -2005,27 +2021,27 @@ export async function writeGapEvent(db: D1Database, input: KraterGapInput): Prom
           input.mode === "filed" ? input.authorFellowId : input.actorFellowId,
           input.idempotencyKey,
           input.problemId,
-          ...openGuardBinds,
+          ...settleGuardBinds,
         ),
         statement(
           db,
           `INSERT INTO event_content (event_id, payload_sha256, payload_json)
            SELECT ?, ?, ?
            FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${openGuardSql}`,
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${settleGuardSql}`,
           input.eventId,
           payloadSha256,
           payloadJson,
           input.problemId,
           input.idempotencyKey,
-          ...openGuardBinds,
+          ...settleGuardBinds,
         ),
         statement(
           db,
           `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
            SELECT ?, ?, 'search.index', ?, ?, ?
            FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${openGuardSql}`,
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${settleGuardSql}`,
           input.eventId,
           input.problemId,
           `search.index:${input.eventId}`,
@@ -2033,7 +2049,7 @@ export async function writeGapEvent(db: D1Database, input: KraterGapInput): Prom
           outboxCreatedAt,
           input.problemId,
           input.idempotencyKey,
-          ...openGuardBinds,
+          ...settleGuardBinds,
         ),
         statement(
           db,
@@ -2043,26 +2059,31 @@ export async function writeGapEvent(db: D1Database, input: KraterGapInput): Prom
            SELECT p.id, p.public_seq, p.chain_digest, ?, 1, 'unsigned-v0', ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL${openGuardSql}`,
+           WHERE p.id = ? AND i.event_id IS NULL${settleGuardSql}`,
           nextCheckpointDigest,
           input.createdAt,
           input.idempotencyKey,
           input.problemId,
-          ...openGuardBinds,
+          ...settleGuardBinds,
         ),
         statement(
           db,
           `UPDATE idempotency
            SET event_id = ?, event_seq = (SELECT seq FROM events WHERE id = ?)
            WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
-             AND EXISTS (SELECT 1 FROM events WHERE id = ?)${openGuardSql}`,
+             AND EXISTS (SELECT 1 FROM events WHERE id = ?)${settleGuardSql}`,
           input.eventId,
           input.eventId,
           input.problemId,
           input.idempotencyKey,
           input.eventId,
-          ...openGuardBinds,
+          ...settleGuardBinds,
         ),
+        ...((await companion?.statementsForAttempt({
+          sequence: candidateSeq,
+          claimId: gapId,
+          eventId: input.eventId,
+        })) ?? []),
       ]);
     } catch (error) {
       const latestHead = await readProblemHead(db, input.problemId);

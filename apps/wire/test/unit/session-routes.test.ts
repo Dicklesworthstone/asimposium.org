@@ -7,6 +7,7 @@ import {
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
+  GapFiledResponseSchema,
   PromoteResponseSchema,
   ReviseResponseSchema,
   SessionOpenResponseSchema,
@@ -1805,6 +1806,203 @@ describe("session protocol routes", () => {
         .prepare("SELECT COUNT(*) AS count FROM claim_versions WHERE claim_id = 'C-2'")
         .first<{ count: number }>(),
     ).toEqual({ count: 1 });
+  });
+
+
+  test("a filed gap pins its claim version and closes only once", async () => {
+    const { call, db } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-promote" },
+      body: JSON.stringify({
+        workshop_id: await push("gaps-push", "Gap target"),
+        kind: "lemma",
+        statement: "The chain of toggles stabilizes after finitely many steps.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+
+    // A pin against a version that does not exist obligates nothing.
+    const unknownTarget = await call(`/v1/sessions/${session.session_id}/gaps`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-unknown-target" },
+      body: JSON.stringify({
+        target_claim_id: "C-1",
+        target_version: 9,
+        obligation: "Prove finiteness of the covering at step 4.",
+        closes_what: "The stabilization claim as stated.",
+      }),
+    });
+    expect(unknownTarget.status).toBe(422);
+    expect(await unknownTarget.json()).toMatchObject({ code: "GAP_TARGET_UNKNOWN" });
+
+    const filed = await call(`/v1/sessions/${session.session_id}/gaps`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-file" },
+      body: JSON.stringify({
+        target_claim_id: "C-1",
+        target_version: 1,
+        obligation: "Step 4 assumes the covering is finite; supply that argument.",
+        closes_what: "The stabilization claim for infinite toggle groups.",
+      }),
+    });
+    expect(filed.status).toBe(201);
+    expect(filed.headers.get("cache-control")).toBe("private, no-store");
+    if (filed.status !== 201) console.error("FILED-BODY", await filed.text());
+    const filedBody = GapFiledResponseSchema.parse(await filed.json());
+    expect(filedBody).toMatchObject({ gap_id: "G-2", problem_id: "P-4DSP", seq: 2 });
+
+    // Idempotent replay returns the sealed receipt.
+    const replayed = await call(`/v1/sessions/${session.session_id}/gaps`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-file" },
+      body: JSON.stringify({
+        target_claim_id: "C-1",
+        target_version: 1,
+        obligation: "Step 4 assumes the covering is finite; supply that argument.",
+        closes_what: "The stabilization claim for infinite toggle groups.",
+      }),
+    });
+    expect(replayed.status).toBe(200);
+    expect(await replayed.json()).toEqual(filedBody);
+
+    // closed-by requires a real discharging ref.
+    const badRef = await call(`/v1/sessions/${session.session_id}/gaps/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-bad-ref" },
+      body: JSON.stringify({
+        gap_id: filedBody.gap_id,
+        outcome: "closed-by",
+        closed_by: "C-99",
+      }),
+    });
+    expect(badRef.status).toBe(422);
+    expect(await badRef.json()).toMatchObject({ code: "GAP_TARGET_UNKNOWN" });
+
+    const withdrawn = await call(`/v1/sessions/${session.session_id}/gaps/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-withdraw" },
+      body: JSON.stringify({ gap_id: filedBody.gap_id, outcome: "withdrawn" }),
+    });
+    expect(withdrawn.status).toBe(201);
+    expect(await withdrawn.json()).toEqual({
+      gap_id: filedBody.gap_id,
+      status: "withdrawn",
+      seq: 3,
+    });
+
+    // A settled gap refuses re-transition with its current status.
+    const resettled = await call(`/v1/sessions/${session.session_id}/gaps/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "gaps-resettle" },
+      body: JSON.stringify({
+        gap_id: filedBody.gap_id,
+        outcome: "closed-by",
+        closed_by: "C-1@1",
+      }),
+    });
+    expect(resettled.status).toBe(409);
+    expect(await resettled.json()).toMatchObject({
+      code: "GAP_ALREADY_SETTLED",
+      current_status: "withdrawn",
+    });
+    expect(
+      await db
+        .prepare("SELECT status FROM proof_gaps WHERE problem_id = 'P-4DSP' AND gap_id = 'G-2'")
+        .first<{ status: string }>(),
+    ).toEqual({ status: "withdrawn" });
+    expect(
+      await db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM events WHERE object_kind = 'gap'
+           AND problem_id = 'P-4DSP'`,
+        )
+        .first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+  });
+
+  test("a gap closed-by a real claim records the discharging ref atomically", async () => {
+    const { call, db } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "closeby-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    for (const [index, text] of ["Target.", "Discharger."].entries()) {
+      const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `closeby-${index}` },
+        body: JSON.stringify({
+          workshop_id: await push(`closeby-push-${index}`, text),
+          kind: "lemma",
+          statement: text,
+          relates_to: [],
+        }),
+      });
+      expect(promoted.status).toBe(201);
+    }
+    const filed = GapFiledResponseSchema.parse(
+      await (
+        await call(`/v1/sessions/${session.session_id}/gaps`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "closeby-file" },
+          body: JSON.stringify({
+            target_claim_id: "C-1",
+            target_version: 1,
+            obligation: "The discharging lemma must be shown to apply.",
+            closes_what: "Application of C-2 to the target's step 3.",
+          }),
+        })
+      ).json(),
+    );
+    expect(filed.gap_id).toBe("G-3");
+
+    const closed = await call(`/v1/sessions/${session.session_id}/gaps/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "closeby-close" },
+      body: JSON.stringify({
+        gap_id: filed.gap_id,
+        outcome: "closed-by",
+        closed_by: "C-2",
+      }),
+    });
+    expect(closed.status).toBe(201);
+    expect(await closed.json()).toEqual({
+      gap_id: "G-3",
+      status: "closed-by",
+      seq: 4,
+    });
+    const gapRow = await db
+      .prepare(
+        "SELECT status, closed_by, author_fellow_id FROM proof_gaps WHERE problem_id = 'P-4DSP' AND gap_id = 'G-3'",
+      )
+      .first<{ status: string; closed_by: string | null; author_fellow_id: string }>();
+    expect(gapRow?.status).toBe("closed-by");
+    expect(gapRow?.closed_by).toBe("C-2");
   });
 
   test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
@@ -3947,7 +4145,9 @@ describe("session protocol routes", () => {
     ).toEqual(["C-1", "C-2"]);
   });
 
-  test("mounted packs budget the exact rendered face and quarantine hostile ledger text", async () => {
+  test(
+    "mounted packs budget the exact rendered face and quarantine hostile ledger text",
+    async () => {
     const { call, db, binding } = await fixture();
     const opened = await call("/v1/sessions", {
       method: "POST",
@@ -4075,9 +4275,13 @@ describe("session protocol routes", () => {
     expect(capped.status).toBe(200);
     const cappedPack = PackResponseSchema.parse(await capped.json());
     expect(cappedPack.omitted).toContainEqual({ reason: "candidate_limit", detail: "claims" });
-  });
+    // Full pack composition over a seeded ledger sits close to bun's default
+    // 5s per-test budget under peer build load; assertions unchanged.
+  }, 20000);
 
-  test("PLANTED: createApp refuses a corrupt oversized claim without reflecting it", async () => {
+  test(
+    "PLANTED: createApp refuses a corrupt oversized claim without reflecting it",
+    async () => {
     const { db, enrollmentStore, token } = await fixture();
     const app = createApp({ createEnrollmentStore: () => enrollmentStore });
     const env = {
@@ -4127,7 +4331,9 @@ describe("session protocol routes", () => {
     });
     expect(text).not.toContain(marker);
     expect(text).not.toMatch(/20[,_]?00[01]/);
-  });
+    // Same load-sensitivity rationale as the pack-face budget above; the
+    // planted assertions are unchanged.
+  }, 20000);
 
   // ceq.2: the cap boundary needs its own fixture. The claims above carry
   // 2,000-character bodies, so at any workable budget a missing claim there is

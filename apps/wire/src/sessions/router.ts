@@ -2,6 +2,10 @@ import {
   CursorResponseSchema,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
+  GapClosedResponseSchema,
+  GapFiledResponseSchema,
+  GapFileRequestSchema,
+  GapTransitionRequestSchema,
   HypothesisKillRequestSchema,
   HypothesisKillResponseSchema,
   HypothesisRequestSchema,
@@ -51,6 +55,7 @@ import {
   readCursor,
   writeClaim,
   writeClaimRevision,
+  writeGapEvent,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
@@ -343,10 +348,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       headers,
     });
   };
-
-  type ReplayScope = "session_open" | "workshop_push" | "promote" | "revise" | "session_close";
-
   type SessionPreparedStatement = ReturnType<Env["DB"]["prepare"]>;
+
+  type ReplayScope =
+    | "session_open"
+    | "workshop_push"
+    | "promote"
+    | "revise"
+    | "gaps"
+    | "session_close";
 
   interface ReplayRecord {
     readonly plaintext: string;
@@ -2417,6 +2427,415 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       ) {
         return writeRefusedProblem();
       }
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/gaps (W5.5: file a proof gap, G-n) ------------
+  app.post("/v1/sessions/:id/gaps", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = GapFileRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "GAP_BODY_INVALID",
+        title: "The gap does not match the contract",
+        detail: "The JSON body does not match the gap-filing contract.",
+        fixHint:
+          "Send {target_claim_id, target_version, obligation, closes_what} — the obligation is the exact missing step, never 'it follows'.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 2,
+            obligation:
+              "Step 4 assumes the covering is finite without proving it; supply the finiteness argument.",
+            closes_what: "The orbit-count invariance for infinite toggle groups.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/gaps`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "gaps",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    // The pin must name an existing claim version on this problem — a gap
+    // against an unknown or future version obligates nothing.
+    const targetHead = await db
+      .prepare(
+        `SELECT MAX(version) AS head_version FROM claim_versions
+         WHERE problem_id = ? AND claim_id = ?`,
+      )
+      .bind(session.problem_id, parsed.data.target_claim_id)
+      .first<{ head_version: number | null }>();
+    if (
+      targetHead === null ||
+      targetHead.head_version === null ||
+      parsed.data.target_version > targetHead.head_version
+    ) {
+      return problem({
+        status: 422,
+        code: "GAP_TARGET_UNKNOWN",
+        title: "The pinned claim version does not exist",
+        detail: `No version ${parsed.data.target_version} of ${parsed.data.target_claim_id} exists on this problem.`,
+        fixHint: "Pin the exact published version your pack shows (C-n@v).",
+        rule: "P3",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+
+    try {
+      const eventId = mintId("E");
+      const filedAt = new Date().toISOString();
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(mintId("R"));
+      await writeGapEvent(
+        db,
+        {
+          mode: "filed",
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          obligation: parsed.data.obligation,
+          closesWhat: parsed.data.closes_what,
+          targetClaimId: parsed.data.target_claim_id,
+          targetVersion: parsed.data.target_version,
+          authorFellowId: auth.binding.fellowId,
+          createdAt: filedAt,
+        },
+        {},
+        {
+          requestDigest: digest,
+          statementsForAttempt: async (attempt) => {
+            const value = GapFiledResponseSchema.parse({
+              gap_id: `G-${attempt.sequence}`,
+              problem_id: session.problem_id,
+              seq: attempt.sequence,
+            });
+            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at)
+                   SELECT 'gaps', ?, ?, ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'gaps' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest),
+            ];
+          },
+        },
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+      if (replay === undefined) {
+        throw new Error("Krater gap filing committed without its atomic replay");
+      }
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/gaps/close (W5.5: closed-by or withdrawn) -----
+  app.post("/v1/sessions/:id/gaps/close", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = GapTransitionRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "GAP_BODY_INVALID",
+        title: "The gap transition does not match the contract",
+        detail: "The JSON body does not match the gap-close contract.",
+        fixHint:
+          "Send {gap_id, outcome: 'closed-by', closed_by} or {gap_id, outcome: 'withdrawn'} — closed-by names the discharging ref; withdrawn carries none.",
+        rule: "A5",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/gaps/close`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "gaps",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const gapRow = await db
+      .prepare("SELECT status FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+      .bind(session.problem_id, parsed.data.gap_id)
+      .first<{ status: string }>();
+    if (gapRow === null || gapRow === undefined) {
+      return problem({
+        status: 404,
+        code: "GAP_NOT_FOUND",
+        title: "No such gap on this problem",
+        detail: `Gap ${parsed.data.gap_id} does not exist on this problem.`,
+        fixHint: "Check the id against your pack's open obligations.",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    if (gapRow.status !== "open") {
+      return problem({
+        status: 409,
+        code: "GAP_ALREADY_SETTLED",
+        title: "The gap is already settled",
+        detail: `Gap ${parsed.data.gap_id} is ${gapRow.status}; only an open gap transitions.`,
+        fixHint: "Re-read the gap's current state from your pack.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          current_status: gapRow.status,
+        },
+      });
+    }
+    // A closed-by ref must discharge against a real object on this problem.
+    if (parsed.data.outcome === "closed-by" && parsed.data.closed_by.startsWith("C-")) {
+      const refClaim = await db
+        .prepare("SELECT id FROM claims WHERE problem_id = ? AND id = ?")
+        .bind(session.problem_id, parsed.data.closed_by.split("@")[0])
+        .first<{ id: string }>();
+      if (refClaim === null || refClaim === undefined) {
+        return problem({
+          status: 422,
+          code: "GAP_TARGET_UNKNOWN",
+          title: "closed_by references an unknown claim",
+          detail: `No claim matching ${parsed.data.closed_by} exists on this problem.`,
+          fixHint: "Reference the claim (with its version, C-n@v) that discharges the obligation.",
+          rule: "P10",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+    }
+    if (parsed.data.outcome === "closed-by" && parsed.data.closed_by.startsWith("E-")) {
+      const refEvidence = await db
+        .prepare("SELECT id FROM evidence WHERE problem_id = ? AND id = ?")
+        .bind(session.problem_id, parsed.data.closed_by.split("@")[0])
+        .first<{ id: string }>();
+      if (refEvidence === null || refEvidence === undefined) {
+        return problem({
+          status: 422,
+          code: "GAP_TARGET_UNKNOWN",
+          title: "closed_by references unknown evidence",
+          detail: `No evidence matching ${parsed.data.closed_by} exists on this problem.`,
+          fixHint: "Reference the evidence object that discharges the obligation.",
+          rule: "P10",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+    }
+
+    try {
+      const eventId = mintId("E");
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(mintId("R"));
+      await writeGapEvent(
+        db,
+        {
+          mode: parsed.data.outcome,
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          gapId: parsed.data.gap_id,
+          closedBy: parsed.data.outcome === "closed-by" ? parsed.data.closed_by : null,
+          actorFellowId: auth.binding.fellowId,
+          createdAt: new Date().toISOString(),
+        },
+        {},
+        {
+          requestDigest: digest,
+          statementsForAttempt: async (attempt) => {
+            const value = GapClosedResponseSchema.parse({
+              gap_id: parsed.data.gap_id,
+              status: parsed.data.outcome,
+              seq: attempt.sequence,
+            });
+            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at)
+                   SELECT 'gaps', ?, ?, ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'gaps' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest),
+            ];
+          },
+        },
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+      if (replay === undefined) {
+        throw new Error("Krater gap close committed without its atomic replay");
+      }
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
+    } catch (error) {
+      console.error("GAPCLOSE-ENTER:", error instanceof Error ? error.message : String(error));
+      try {
+        const winner = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      console.error("GAPTRACE pre-write", parsed.data.gap_id, parsed.data.outcome);
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      // The settle race lost: re-read the gap; if it is no longer open, the
+      // concurrent transition won and nothing was double-written.
+      const currentGap = await db
+        .prepare("SELECT status FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+        .bind(session.problem_id, parsed.data.gap_id)
+        .first<{ status: string }>();
+      if (currentGap !== null && currentGap !== undefined && currentGap.status !== "open") {
+        return problem({
+          status: 409,
+          code: "GAP_ALREADY_SETTLED",
+          title: "The gap is already settled",
+          detail: `A concurrent transition set ${parsed.data.gap_id} to ${currentGap.status}.`,
+          fixHint: "Re-read the gap's current state from your pack.",
+          rule: "P6",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            current_status: currentGap.status,
+          },
+        });
+      }
+      if (error instanceof Error) console.error("GAPCLOSE-CAUGHT:", error.message);
       throw error;
     }
   });
