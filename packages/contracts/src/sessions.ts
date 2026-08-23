@@ -615,8 +615,8 @@ export const GapTransitionRequestSchema = z
       .string()
       .trim()
       .min(1)
-      .max(64)
-      .regex(/^[CE]-[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/),
+      .regex(/^[CE]-[A-Za-z0-9][A-Za-z0-9.@:_-]{0,62}$/)
+      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -624,7 +624,8 @@ export const GapTransitionRequestSchema = z
       ctx.addIssue({
         code: "custom",
         path: ["closed_by"],
-        message: "outcome 'closed-by' requires closed_by: the ref that discharges the obligation.",
+        message:
+          "outcome 'closed-by' requires closed_by: the ref that discharges the obligation.",
       });
     }
     if (value.outcome === "withdrawn" && value.closed_by !== undefined) {

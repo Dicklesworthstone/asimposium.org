@@ -2745,14 +2745,12 @@
         "closed_by": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[CE]-[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$"
+          "pattern": "^[CE]-[A-Za-z0-9][A-Za-z0-9.@:_-]{0,62}$"
         }
       },
       "required": [
         "gap_id",
-        "outcome",
-        "closed_by"
+        "outcome"
       ],
       "additionalProperties": false
     },
