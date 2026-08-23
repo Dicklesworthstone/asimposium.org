@@ -604,9 +604,9 @@ export const SessionsContractsSchema = z
     gap_filed_response: GapFiledResponseSchema,
     gap_transition_request: GapTransitionRequestSchema,
     gap_closed_response: GapClosedResponseSchema,
-    revise_response: ReviseResponseSchema,
   })
-
+  .strict();
+export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;
 /**
  * W5.5 proof gaps (G-n): a named unresolved obligation in a proof — no
  * hiding behind "standard" or "it follows". The gap pins the exact claim
@@ -678,5 +678,3 @@ export const GapClosedResponseSchema = z
   })
   .strict();
 export type GapClosedResponse = z.infer<typeof GapClosedResponseSchema>;
-  .strict();
-export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

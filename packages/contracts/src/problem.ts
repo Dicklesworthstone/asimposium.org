@@ -86,6 +86,12 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // W5.3: the revision write joins the same teaching family — a malformed
   // revision body names its contract so the caller can repair it.
   "REVISE_BODY_INVALID",
+  // W5.5: the proof-gap writes join the teaching family — a malformed body
+  // names its contract; settled gaps refuse re-transition with their status.
+  "GAP_BODY_INVALID",
+  "GAP_NOT_FOUND",
+  "GAP_ALREADY_SETTLED",
+  "GAP_TARGET_UNKNOWN",
   // W5.6: the hypothesis kill's teaching refusals (a missing target, a
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",
