@@ -16,6 +16,9 @@ import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "t
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
+import internalHealthSchemaModule from "../generated/internal-health.schema.json" with {
+  type: "text",
+};
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment",
