@@ -1,13 +1,10 @@
-import Ajv from "ajv";
 import { describe, expect, test } from "bun:test";
-import {
-  HealthBindingName,
-  INTERNAL_HEALTH_SCHEMA_ID,
-} from "@asimposium/contracts";
+import { HealthBindingName, INTERNAL_HEALTH_SCHEMA_ID } from "@asimposium/contracts";
+import Ajv2020 from "ajv/dist/2020";
 import { createApp } from "../../src/app";
-import { boundEnv } from "../support/bindings";
 import { REQUIRED_BINDINGS } from "../../src/env";
 import { HEALTH_SCHEMA } from "../../src/http/health";
+import { boundEnv } from "../support/bindings";
 
 /**
  * asimposiumorg-261q: the health success envelope advertises
@@ -26,8 +23,6 @@ type WorkerReply = {
 };
 
 async function callWorker(path: string): Promise<WorkerReply> {
-  const { createApp } = await import("../../src/app");
-  const { boundEnv } = await import("../support/bindings");
   const app = createApp();
   const response = await app.fetch(new Request(`https://a.asimposium.org${path}`), boundEnv());
   const bodyText = await response.text();
@@ -37,7 +32,12 @@ async function callWorker(path: string): Promise<WorkerReply> {
   } catch {
     // non-JSON replies stay text
   }
-  return { status: response.status, contentType: response.headers.get("content-type") ?? "", bodyText, body };
+  return {
+    status: response.status,
+    contentType: response.headers.get("content-type") ?? "",
+    bodyText,
+    body,
+  };
 }
 
 function stripKey(object: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -60,7 +60,7 @@ describe("GET /schemas/internal.health.v1.json", () => {
     const health = await callWorker("/internal/health");
     expect(health.status).toBe(200);
 
-    const ajv = new Ajv({ strict: false, allErrors: true });
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
     const validate = ajv.compile(JSON.parse(servedDocument));
     const valid = validate(health.body);
 
@@ -70,7 +70,7 @@ describe("GET /schemas/internal.health.v1.json", () => {
 
   test("rejects drifted producer shapes against the served document", async () => {
     const schemaRes = await callWorker(SCHEMA_PATH);
-    const ajv = new Ajv({ strict: false, allErrors: true });
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
     const validate = ajv.compile(JSON.parse(schemaRes.bodyText));
 
     const goodBody = (await callWorker("/internal/health")).body as Record<string, unknown>;
@@ -85,7 +85,10 @@ describe("GET /schemas/internal.health.v1.json", () => {
       // wrong binding state
       {
         ...structuredClone(goodBody),
-        data: { ...goodData, bindings: { ...goodData.bindings, DB: "maybe" } },
+        data: {
+          ...goodData,
+          bindings: { ...(goodData.bindings as Record<string, unknown>), DB: "maybe" },
+        },
       },
       // self-referential constant drift: advertised id no longer matches
       {

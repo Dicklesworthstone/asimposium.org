@@ -154,6 +154,14 @@ export {
   stoaJoinUrl,
 } from "./enrollment.ts";
 export {
+  HealthBindingName,
+  HealthBindingState,
+  INTERNAL_HEALTH_SCHEMA_ID,
+  type InternalHealthContracts,
+  InternalHealthContractsSchema,
+  type InternalHealthData,
+} from "./health.ts";
+export {
   LedgerContractsSchema,
   type ProblemIndexEntry,
   ProblemIndexEntrySchema,
