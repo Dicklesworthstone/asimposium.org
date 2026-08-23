@@ -642,10 +642,76 @@ export const GapClosedResponseSchema = z
   .object({
     gap_id: z.string().regex(/^G-[0-9]+$/),
     status: z.enum(["closed-by", "withdrawn"]),
-    seq: z.number().int().positive(),
   })
   .strict();
 export type GapClosedResponse = z.infer<typeof GapClosedResponseSchema>;
+
+/**
+ * W5.5 typed claim relations (Fable §6.4a, ADR-21): an edge is an ASSERTION,
+ * not a fact — asserted by an attributed event, version-pinned at BOTH ends,
+ * and citable by its ledger event (#seq). No public edge id exists outside
+ * that event reference.
+ */
+export const ClaimRelationKindSchema = z.enum([
+  "implies",
+  "equivalent-to",
+  "contradicts",
+  "narrows",
+  "generalizes",
+  "uses-definition",
+  "addresses-gap",
+]);
+export type ClaimRelationKind = z.infer<typeof ClaimRelationKindSchema>;
+
+export const RelationFileRequestSchema = z
+  .object({
+    kind: ClaimRelationKindSchema,
+    source_claim_id: ClaimIdSchema,
+    source_version: z.number().int().min(1),
+    /**
+     * The pinned target: "C-7@2" for claim relations (version REQUIRED — an
+     * edge never silently survives a material revision) or "G-2" when the
+     * kind is addresses-gap.
+     */
+    target: z
+      .string()
+      .trim()
+      .min(3)
+      .max(80)
+      .regex(/^(C-[A-Za-z0-9][A-Za-z0-9._:-]*@[0-9]+|G-[0-9]+)$/),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const isGapTarget = value.target.startsWith("G-");
+    if (value.kind === "addresses-gap" && !isGapTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "addresses-gap targets a proof gap (G-n), not a claim.",
+      });
+    }
+    if (value.kind !== "addresses-gap" && isGapTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "only addresses-gap may target a gap; claim relations pin C-n@v.",
+      });
+    }
+  });
+export type RelationFileRequest = z.infer<typeof RelationFileRequestSchema>;
+
+export const RelationFiledResponseSchema = z
+  .object({
+    problem_id: ProblemIdSchema,
+    kind: ClaimRelationKindSchema,
+    /** Version-pinned endpoints, exactly as asserted. */
+    source: z.string().min(1),
+    target: z.string().min(1),
+    /** The per-problem public seq of the relation.asserted event — the edge's cite. */
+    seq: z.number().int().positive(),
+  })
+  .strict();
+export type RelationFiledResponse = z.infer<typeof RelationFiledResponseSchema>;
 /**
  * The session-protocol contract set as one document, so the published JSON
  * Schema shows every route shape at once and drift is one regenerated file.
@@ -676,6 +742,8 @@ export const SessionsContractsSchema = z
     gap_filed_response: GapFiledResponseSchema,
     gap_transition_request: GapTransitionRequestSchema,
     gap_closed_response: GapClosedResponseSchema,
+    relation_file_request: RelationFileRequestSchema,
+    relation_filed_response: RelationFiledResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

@@ -92,6 +92,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "GAP_NOT_FOUND",
   "GAP_ALREADY_SETTLED",
   "GAP_TARGET_UNKNOWN",
+  // W5.5: the relation write joins the same teaching family — a malformed
+  // edge body names its contract so the caller can repair it.
+  "RELATION_BODY_INVALID",
   // W5.6: the hypothesis kill's teaching refusals (a missing target, a
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",

@@ -2134,6 +2134,258 @@ export async function writeGapEvent(
   throw new Error("Krater chain retry budget exhausted.");
 }
 
+/**
+ * W5.5: the relation-assertion write (ADR-21). One atomic batch: the
+ * claim_relations row (natural key — a duplicate edge refuses here), the
+ * relation.asserted event, content, outbox and checkpoint. The edge's public
+ * cite is the assertion event's #seq.
+ */
+export interface KraterRelationInput {
+  readonly problemId: string;
+  readonly eventId: string;
+  readonly idempotencyKey: string;
+  readonly kind: string;
+  readonly sourceClaimId: string;
+  readonly sourceVersion: number;
+  readonly targetRef: string;
+  readonly assertedByFellow: string;
+  readonly createdAt: string;
+}
+
+export async function writeRelationEvent(
+  db: D1Database,
+  input: KraterRelationInput,
+  companion?: KraterAtomicCompanion,
+): Promise<KraterWriteResult> {
+  const writeClaimStartedAt = performance.now();
+  const serverNowMs = Date.now();
+  const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
+  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt, serverNowMs);
+  const writePhaseStartedAt = performance.now();
+  let retryCount = 0;
+
+  while (retryCount <= MAX_CHAIN_RETRIES) {
+    const before = await readProblemHead(db, input.problemId);
+    if (
+      !Number.isSafeInteger(before.public_seq) ||
+      before.public_seq < 0 ||
+      before.public_seq >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new KraterSequenceExhaustedError(
+        "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+      );
+    }
+    const candidateSeq = before.public_seq + 1;
+    const objectId = `${input.sourceClaimId}@${input.sourceVersion}-${input.kind}-${input.targetRef}`;
+    const payloadJson = canonicalJson({
+      kind: input.kind,
+      source: `${input.sourceClaimId}@${input.sourceVersion}`,
+      target: input.targetRef,
+    });
+    const payloadSha256 = await sha256Hex(payloadJson);
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      before.chain_digest,
+    );
+    const nextRowDigest = await eventEnvelopeRowDigest({
+      eventId: input.eventId,
+      problemId: input.problemId,
+      seq: candidateSeq,
+      type: "relation.asserted",
+      objectKind: "relation",
+      objectId,
+      objectVersion: 1,
+      payloadSha256,
+      createdAt: input.createdAt,
+    });
+    const nextCheckpointDigest = await checkpointDigest(
+      input.problemId,
+      candidateSeq,
+      nextChainDigest,
+    );
+
+    let results: D1Result<SequenceRow>[];
+    try {
+      results = await db.batch<SequenceRow>([
+        statement(
+          db,
+          `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
+           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+           ON CONFLICT(problem_id, idempotency_key) DO NOTHING`,
+          input.problemId,
+          input.idempotencyKey,
+          payloadSha256,
+          input.createdAt,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+             SELECT 1 FROM idempotency
+             WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+           )
+           RETURNING public_seq`,
+          nextChainDigest,
+          input.createdAt,
+          input.problemId,
+          before.public_seq,
+          before.chain_digest,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        statement(
+          db,
+          `INSERT INTO claim_relations
+             (problem_id, kind, source_claim_id, source_version, target_ref,
+              status, asserted_by_event, asserted_by_fellow, created_at)
+           SELECT p.id, ?, ?, ?, ?, 'asserted', ?, ?, ?
+           FROM problems p
+           JOIN claims c ON c.problem_id = p.id AND c.id = ?
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
+          input.kind,
+          input.sourceClaimId,
+          input.sourceVersion,
+          input.targetRef,
+          input.eventId,
+          input.assertedByFellow,
+          input.createdAt,
+          input.sourceClaimId,
+          input.idempotencyKey,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+              row_digest, chain_digest, created_at,
+              actor_fellow_id, actor_sponsor_id, actor_session_id,
+              model_string_self_declared, harness)
+           SELECT ?, p.id, p.public_seq, 'relation.asserted', 'relation', ?, 1, ?, ?, ?, ?,
+                  ?, NULL, NULL, NULL, NULL
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
+          input.eventId,
+          objectId,
+          payloadSha256,
+          nextRowDigest,
+          nextChainDigest,
+          input.createdAt,
+          input.assertedByFellow,
+          input.idempotencyKey,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+           SELECT ?, ?, ?
+           FROM idempotency i
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
+          input.eventId,
+          payloadSha256,
+          payloadJson,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        statement(
+          db,
+          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+           SELECT ?, ?, 'search.index', ?, ?, ?
+           FROM idempotency i
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
+          input.eventId,
+          input.problemId,
+          `search.index:${input.eventId}`,
+          payloadSha256,
+          outboxCreatedAt,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        statement(
+          db,
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
+              checkpoint_mode, created_at)
+           SELECT p.id, p.public_seq, p.chain_digest, ?, 1, 'unsigned-v0', ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
+          nextCheckpointDigest,
+          input.createdAt,
+          input.idempotencyKey,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `UPDATE idempotency
+           SET event_id = ?, event_seq = (SELECT seq FROM events WHERE id = ?)
+           WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+             AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+          input.eventId,
+          input.eventId,
+          input.problemId,
+          input.idempotencyKey,
+          input.eventId,
+        ),
+        ...((await companion?.statementsForAttempt({
+          sequence: candidateSeq,
+          claimId: objectId,
+          eventId: input.eventId,
+        })) ?? []),
+      ]);
+    } catch (error) {
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (
+        retryCount < MAX_CHAIN_RETRIES &&
+        (isRetryableChainConflict(error) || latestHead.chain_digest !== before.chain_digest)
+      ) {
+        retryCount += 1;
+        continue;
+      }
+      throw error;
+    }
+
+    const settled = await statement(
+      db,
+      `SELECT request_digest, event_id, event_seq
+       FROM idempotency WHERE problem_id = ? AND idempotency_key = ?`,
+      input.problemId,
+      input.idempotencyKey,
+    ).first<IdempotencyRow>();
+    if (settled === null || settled.event_id === null || settled.event_seq === null) {
+      throw new Error("Krater relation write did not settle an event envelope.");
+    }
+    const after = await readProblemHead(db, input.problemId);
+    return {
+      eventId: settled.event_id,
+      claimId: objectId,
+      seq: settled.event_seq,
+      idempotent: false,
+      preCursor: before.public_seq,
+      postCursor: after.public_seq,
+      payloadSha256,
+      rowDigest: nextRowDigest,
+      buildDigest: "",
+      chainDigest: nextChainDigest,
+      checkpointDigest: nextCheckpointDigest,
+      writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
+      successfulBatchRowsRead: metricSum(results, "rows_read"),
+      successfulBatchRowsWritten: metricSum(results, "rows_written"),
+      successfulBatchSqlMs: sqlDuration(results),
+      preflight,
+      writeClaimWallMs: Math.round((performance.now() - writeClaimStartedAt) * 1_000) / 1_000,
+      lockWaitMs: null,
+      retryCount,
+    };
+  }
+
+  throw new Error("Krater chain retry budget exhausted.");
+}
+
 export async function readCursor(db: D1Database, problemId: string): Promise<number> {
   requireIdentifier("problemId", problemId);
   try {

@@ -72,6 +72,7 @@
                     "GAP_NOT_FOUND",
                     "GAP_ALREADY_SETTLED",
                     "GAP_TARGET_UNKNOWN",
+                    "RELATION_BODY_INVALID",
                     "HYPOTHESIS_NOT_FOUND",
                     "HYPOTHESIS_ALREADY_KILLED"
                   ]
@@ -422,6 +423,7 @@
                 "GAP_NOT_FOUND",
                 "GAP_ALREADY_SETTLED",
                 "GAP_TARGET_UNKNOWN",
+                "RELATION_BODY_INVALID",
                 "HYPOTHESIS_NOT_FOUND",
                 "HYPOTHESIS_ALREADY_KILLED"
               ]
@@ -750,6 +752,7 @@
         "GAP_NOT_FOUND",
         "GAP_ALREADY_SETTLED",
         "GAP_TARGET_UNKNOWN",
+        "RELATION_BODY_INVALID",
         "HYPOTHESIS_NOT_FOUND",
         "HYPOTHESIS_ALREADY_KILLED",
         "UNKNOWN_FORMAT",

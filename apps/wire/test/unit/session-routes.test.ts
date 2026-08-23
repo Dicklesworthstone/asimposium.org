@@ -6,6 +6,7 @@ import {
   ContractProblemSchema,
   GapFiledResponseSchema,
   OpaqueProblemSchema,
+  RelationFiledResponseSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
   PromoteResponseSchema,
@@ -23,6 +24,8 @@ import {
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+import { parseRelationTarget, relationPinState } from "../../src/ledger/relations.ts";
+import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
 import {
@@ -30,7 +33,6 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
-import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
@@ -1900,6 +1902,7 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "gaps-withdraw" },
       body: JSON.stringify({ gap_id: filedBody.gap_id, outcome: "withdrawn" }),
     });
+    if (withdrawn.status !== 201) console.error("WITHDRAW-BODY", await withdrawn.text());
     expect(withdrawn.status).toBe(201);
     expect(await withdrawn.json()).toEqual({
       gap_id: filedBody.gap_id,
@@ -2007,6 +2010,91 @@ describe("session protocol routes", () => {
     expect(gapRow?.status).toBe("closed-by");
     expect(gapRow?.closed_by).toBe("C-2");
   });
+
+  test("an asserted relation pins both endpoints and refuses exact duplicates", async () => {
+    const { call, db } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "rel-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    for (const [index, text] of ["Source claim.", "Target claim."].entries()) {
+      const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `rel-${index}` },
+        body: JSON.stringify({
+          workshop_id: await push(`rel-push-${index}`, text),
+          kind: "lemma",
+          statement: text,
+          relates_to: [],
+        }),
+      });
+      expect(promoted.status).toBe(201);
+    }
+
+    // A pin against a version that does not exist is refused before any write.
+    const unknownPin = await call(`/v1/sessions/${session.session_id}/relations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "rel-unknown-pin" },
+      body: JSON.stringify({
+        kind: "implies",
+        source_claim_id: "C-1",
+        source_version: 9,
+        target: "C-2@1",
+      }),
+    });
+    expect(unknownPin.status).toBe(422);
+    expect(await unknownPin.json()).toMatchObject({ code: "RELATION_ENDPOINT_UNKNOWN" });
+
+    const asserted = await call(`/v1/sessions/${session.session_id}/relations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "rel-assert" },
+      body: JSON.stringify({
+        kind: "implies",
+        source_claim_id: "C-1",
+        source_version: 1,
+        target: "C-2@1",
+      }),
+    });
+    expect(asserted.status).toBe(201);
+    expect(asserted.headers.get("cache-control")).toBe("private, no-store");
+    const edge = RelationFiledResponseSchema.parse(await asserted.json());
+    expect(edge).toEqual({
+      problem_id: "P-4DSP",
+      kind: "implies",
+      source: "C-1@1",
+      target: "C-2@1",
+      seq: 3,
+    });
+
+    // ADR-21: restating the same edge adds nothing — the natural key refuses
+    // the duplicate atomically.
+    const duplicated = await call(`/v1/sessions/${session.session_id}/relations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "rel-dup" },
+      body: JSON.stringify({
+        kind: "implies",
+        source_claim_id: "C-1",
+        source_version: 1,
+        target: "C-2@1",
+      }),
+    });
+    expect(duplicated.status).toBe(409);
+    expect(await duplicated.json()).toMatchObject({ code: "RELATION_ALREADY_ASSERTED" });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claim_relations").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+  });
+
 
   test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
     const { call, db, env, binding, router, service } = await fixture();

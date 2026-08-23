@@ -10,6 +10,8 @@ import {
   HypothesisKillResponseSchema,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
+  RelationFiledResponseSchema,
+  RelationFileRequestSchema,
   type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
@@ -47,8 +49,8 @@ import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem, validatedProblem } from "../http/envelope";
 import { storeWorkshopBody } from "../krater/cas";
-import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
+import { mintClaimVersion } from "../krater/claim-version";
 import {
   KraterIdempotencyConflictError,
   KraterProblemNotFoundError,
@@ -56,7 +58,9 @@ import {
   writeClaim,
   writeClaimRevision,
   writeGapEvent,
+  writeRelationEvent,
 } from "../krater/krater";
+import { parseRelationTarget } from "../ledger/relations";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
 import type { ClaimEvent } from "../ledger/dispositions";
@@ -355,6 +359,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "promote"
     | "revise"
     | "gaps"
+    | "relations"
     | "session_close";
 
   interface ReplayRecord {
@@ -2871,6 +2876,242 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               decision: "withdraw",
             },
           },
+        });
+      }
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/relations (W5.5: assert a typed edge) --------
+  app.post("/v1/sessions/:id/relations", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = RelationFileRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "RELATION_BODY_INVALID",
+        title: "The relation does not match the contract",
+        detail: "The JSON body does not match the relation contract.",
+        fixHint:
+          "Send {kind, source_claim_id, source_version, target} — target is the pinned endpoint (C-n@v, or G-n for addresses-gap).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: "implies",
+            source_claim_id: "C-1",
+            source_version: 2,
+            target: "C-2@1",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/relations`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "relations",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    // Both endpoints must exist at their pinned versions on this problem — an
+    // edge about claims that do not exist asserts nothing.
+    const sourceHead = await db
+      .prepare("SELECT MAX(version) AS head FROM claim_versions WHERE problem_id = ? AND claim_id = ?")
+      .bind(session.problem_id, parsed.data.source_claim_id)
+      .first<{ head: number | null }>();
+    const target = parseRelationTarget(parsed.data.target);
+    if (
+      sourceHead === null ||
+      sourceHead.head === null ||
+      parsed.data.source_version > sourceHead.head ||
+      target === null
+    ) {
+      return problem({
+        status: 422,
+        code: "RELATION_ENDPOINT_UNKNOWN",
+        title: "A relation endpoint does not exist at its pin",
+        detail:
+          target === null
+            ? `The target ref ${parsed.data.target} is not a valid pinned endpoint.`
+            : `${parsed.data.source_claim_id} has no version ${parsed.data.source_version} here.`,
+        fixHint: "Pin versions that exist on this problem (see your pack's claims board).",
+        rule: "P10",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    if (target.kind === "claim") {
+      const sameClaim = target.claimId === parsed.data.source_claim_id;
+      const targetHeadRow = sameClaim
+        ? sourceHead
+        : await db
+            .prepare(
+              "SELECT MAX(version) AS head FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
+            )
+            .bind(session.problem_id, target.claimId)
+            .first<{ head: number | null }>();
+      if (
+        targetHeadRow === null ||
+        targetHeadRow.head === null ||
+        (target.version ?? 0) > targetHeadRow.head
+      ) {
+        return problem({
+          status: 422,
+          code: "RELATION_ENDPOINT_UNKNOWN",
+          title: "The pinned target version does not exist",
+          detail: `${target.claimId} has no version ${target.version} on this problem.`,
+          fixHint: "Pin the exact published version your pack shows.",
+          rule: "P10",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+    } else {
+      const gapRow = await db
+        .prepare("SELECT status FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+        .bind(session.problem_id, target.gapId)
+        .first<{ status: string }>();
+      if (gapRow === null || gapRow === undefined || gapRow.status === "withdrawn") {
+        return problem({
+          status: 422,
+          code: "GAP_NOT_FOUND",
+          title: "addresses-gap targets an unknown or withdrawn gap",
+          detail: `Gap ${target.gapId} is not an open obligation on this problem.`,
+          fixHint: "File the gap first, or address one of the open obligations in your pack.",
+          rule: "P10",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+    }
+
+    try {
+      const eventId = mintId("E");
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(mintId("R"));
+      await writeRelationEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          kind: parsed.data.kind,
+          sourceClaimId: parsed.data.source_claim_id,
+          sourceVersion: parsed.data.source_version,
+          targetRef: parsed.data.target,
+          assertedByFellow: auth.binding.fellowId,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          requestDigest: digest,
+          statementsForAttempt: async (attempt) => {
+            const value = RelationFiledResponseSchema.parse({
+              problem_id: session.problem_id,
+              kind: parsed.data.kind,
+              source: `${parsed.data.source_claim_id}@${parsed.data.source_version}`,
+              target: parsed.data.target,
+              seq: attempt.sequence,
+            });
+            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at)
+                   SELECT 'relations', ?, ?, ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'relations' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest),
+            ];
+          },
+        },
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(db, "relations", auth.binding.fellowId, key, digest);
+      if (replay === undefined) {
+        throw new Error("Krater relation committed without its atomic replay");
+      }
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(db, "relations", auth.binding.fellowId, key, digest);
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      // The natural key is the duplicate guard: asserting the same edge twice
+      // aborts the loser's whole batch.
+      if (
+        error instanceof Error &&
+        /claim_relations/.test(error.message)
+      ) {
+        return problem({
+          status: 409,
+          code: "RELATION_ALREADY_ASSERTED",
+          title: "This exact edge is already asserted",
+          detail: `An identical ${parsed.data.kind} edge between these pins already exists; cite it instead of restating it.`,
+          fixHint: "Reference the existing edge's assertion event rather than filing a copy.",
+          rule: "P11",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
         });
       }
       throw error;
