@@ -159,6 +159,9 @@ const LEDGER_SCHEMA_ID = "https://a.asimposium.org/schemas/ledger.v1.json";
 const SCREENING_TYPES_ARTIFACT = "generated/screening.types.ts";
 const SCREENING_JSON_SCHEMA_ARTIFACT = "generated/screening.schema.json";
 const SCREENING_SCHEMA_ID = "https://a.asimposium.org/schemas/screening.v1.json";
+const INTERNAL_HEALTH_TYPES_ARTIFACT = "generated/internal-health.types.ts";
+const INTERNAL_HEALTH_JSON_SCHEMA_ARTIFACT = "generated/internal-health.schema.json";
+const INTERNAL_HEALTH_SCHEMA_ID = "https://a.asimposium.org/schemas/internal.health.v1.json";
 const SESSIONS_TYPES_ARTIFACT = "generated/sessions.types.ts";
 const SESSIONS_JSON_SCHEMA_ARTIFACT = "generated/sessions.schema.json";
 const SESSIONS_SCHEMA_ID = "https://a.asimposium.org/schemas/sessions.v1.json";
@@ -541,11 +544,46 @@ function generatedScreeningTypes(): string {
   ].join("\n");
 }
 
+function generatedInternalHealthJsonSchema(): string {
+  const document = {
+    $id: INTERNAL_HEALTH_SCHEMA_ID,
+    title: "ASImposium internal health readiness envelope",
+    description:
+      "Shape-only readiness for the mounted GET /internal/health scaffold face: binding names and bound/missing states, never values, ids, or secrets. The advertised schema literal is part of the contract.",
+    ...z.toJSONSchema(InternalHealthContractsSchema),
+  };
+  return formatJson(document);
+}
+
+function generatedInternalHealthTypes(): string {
+  const typeNames = [
+    "HealthBindingName",
+    "HealthBindingState",
+    "InternalHealthContracts",
+    "InternalHealthData",
+  ] as const satisfies readonly (keyof {
+    HealthBindingName: import("./health.ts").HealthBindingName;
+    HealthBindingState: import("./health.ts").HealthBindingState;
+    InternalHealthContracts: import("./health.ts").InternalHealthContracts;
+    InternalHealthData: import("./health.ts").InternalHealthData;
+  })[];
+  return [
+    "// Generated from src/health.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/health.ts";`,
+    "",
+  ].join("\n");
+}
+
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
     { relativePath: ENROLLMENT_JSON_SCHEMA_ARTIFACT, content: generatedEnrollmentJsonSchema() },
+    {
+      relativePath: INTERNAL_HEALTH_JSON_SCHEMA_ARTIFACT,
+      content: generatedInternalHealthJsonSchema(),
+    },
+    { relativePath: INTERNAL_HEALTH_TYPES_ARTIFACT, content: generatedInternalHealthTypes() },
     {
       relativePath: ENROLLMENT_CAPSULE_JSON_SCHEMA_ARTIFACT,
       content: generatedEnrollmentCapsuleJsonSchema(),
