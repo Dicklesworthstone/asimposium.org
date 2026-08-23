@@ -1812,6 +1812,305 @@ export async function writeClaimRevision(
       retryCount,
     };
   }
+  throw new Error("Krater chain retry budget exhausted.");
+}
+
+
+/**
+ * W5.5: the proof-gap ledger write (file or settle) — one atomic batch per
+ * event, mirroring the Krater envelope. Gap ids derive from the shared
+ * problem sequence (`G-<seq>`), so allocation races resolve exactly like
+ * claim ids: the loser's batch aborts on the primary key and retries against
+ * the moved head.
+ *
+ * Settle mode guards every post-bump statement on the gap still being open,
+ * so a concurrent transition wins and this batch commits nothing.
+ */
+export type KraterGapInput =
+  | {
+      readonly mode: "filed";
+      readonly problemId: string;
+      readonly eventId: string;
+      readonly idempotencyKey: string;
+      readonly obligation: string;
+      readonly closesWhat: string;
+      readonly targetClaimId: string;
+      readonly targetVersion: number;
+      readonly authorFellowId: string;
+      readonly createdAt: string;
+    }
+  | {
+      readonly mode: "closed-by" | "withdrawn";
+      readonly problemId: string;
+      readonly eventId: string;
+      readonly idempotencyKey: string;
+      readonly gapId: string;
+      readonly closedBy: string | null;
+      readonly actorFellowId: string;
+      readonly createdAt: string;
+    };
+
+function canonicalGapPayload(input: KraterGapInput): string {
+  return canonicalJson(
+    input.mode === "filed"
+      ? {
+          closes_what: input.closesWhat,
+          obligation: input.obligation,
+          target_claim_id: input.targetClaimId,
+          target_version: input.targetVersion,
+        }
+      : { closed_by: input.closedBy, gap_id: input.gapId, outcome: input.mode },
+  );
+}
+
+export async function writeGapEvent(db: D1Database, input: KraterGapInput): Promise<KraterWriteResult> {
+  const writeClaimStartedAt = performance.now();
+  const serverNowMs = Date.now();
+  const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
+  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt, serverNowMs);
+  const writePhaseStartedAt = performance.now();
+  let retryCount = 0;
+
+  while (retryCount <= MAX_CHAIN_RETRIES) {
+    const before = await readProblemHead(db, input.problemId);
+    if (
+      !Number.isSafeInteger(before.public_seq) ||
+      before.public_seq < 0 ||
+      before.public_seq >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new KraterSequenceExhaustedError(
+        "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+      );
+    }
+    const candidateSeq = before.public_seq + 1;
+    const gapId = input.mode === "filed" ? `G-${candidateSeq}` : input.gapId;
+    const payloadJson = canonicalGapPayload(input);
+    const payloadSha256 = await sha256Hex(payloadJson);
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      before.chain_digest,
+    );
+    const nextRowDigest = await eventEnvelopeRowDigest({
+      eventId: input.eventId,
+      problemId: input.problemId,
+      seq: candidateSeq,
+      type: `gap.${input.mode}`,
+      objectKind: "gap",
+      objectId: gapId,
+      objectVersion: 1,
+      payloadSha256,
+      createdAt: input.createdAt,
+    });
+    const nextCheckpointDigest = await checkpointDigest(
+      input.problemId,
+      candidateSeq,
+      nextChainDigest,
+    );
+    // Settle mode guards every post-bump statement on the gap still being
+    // open, so a concurrent transition wins and this batch commits nothing.
+    const openGuardSql =
+      input.mode === "filed"
+        ? ""
+        : ` AND EXISTS (
+             SELECT 1 FROM proof_gaps g
+             WHERE g.problem_id = ? AND g.gap_id = ? AND g.status = 'open'
+           )`;
+    const openGuardBinds: readonly string[] =
+      input.mode === "filed" ? [] : [input.problemId, input.gapId];
+
+    let results: D1Result<SequenceRow>[];
+    try {
+      results = await db.batch<SequenceRow>([
+        statement(
+          db,
+          `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
+           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+           ON CONFLICT(problem_id, idempotency_key) DO NOTHING`,
+          input.problemId,
+          input.idempotencyKey,
+          payloadSha256,
+          input.createdAt,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+             SELECT 1 FROM idempotency
+             WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+           )
+           RETURNING public_seq`,
+          nextChainDigest,
+          input.createdAt,
+          input.problemId,
+          before.public_seq,
+          before.chain_digest,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        ...(input.mode === "filed"
+          ? [
+              statement(
+                db,
+                `INSERT INTO proof_gaps (gap_id, problem_id, obligation, closes_what,
+                   target_claim_id, target_version, status, author_fellow_id, created_at)
+                 SELECT ${gapId.startsWith("G-") ? `'${gapId.replaceAll("'", "''")}'` : "NULL"}, p.id, ?, ?, ?, ?, 'open', ?, ?
+                 FROM problems p
+                 JOIN claims c ON c.problem_id = p.id AND c.id = ?
+                 JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                 WHERE p.id = ? AND i.event_id IS NULL`,
+                input.obligation,
+                input.closesWhat,
+                input.targetClaimId,
+                input.targetVersion,
+                input.authorFellowId,
+                input.createdAt,
+                input.targetClaimId,
+                input.idempotencyKey,
+                input.problemId,
+              ),
+            ]
+          : [
+              statement(
+                db,
+                `UPDATE proof_gaps SET status = ?, closed_by = ?, closed_at = ?
+                 WHERE problem_id = ? AND gap_id = ? AND status = 'open'`,
+                input.mode,
+                input.closedBy,
+                input.createdAt,
+                input.problemId,
+                input.gapId,
+              ),
+            ]),
+        statement(
+          db,
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+              row_digest, chain_digest, created_at,
+              actor_fellow_id, actor_sponsor_id, actor_session_id,
+              model_string_self_declared, harness)
+           SELECT ?, p.id, p.public_seq, 'gap.${input.mode}', 'gap', ?, 1, ?, ?, ?, ?,
+                  ?, NULL, NULL, NULL, NULL
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL${openGuardSql}`,
+          input.eventId,
+          gapId,
+          payloadSha256,
+          nextRowDigest,
+          nextChainDigest,
+          input.createdAt,
+          input.mode === "filed" ? input.authorFellowId : input.actorFellowId,
+          input.idempotencyKey,
+          input.problemId,
+          ...openGuardBinds,
+        ),
+        statement(
+          db,
+          `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+           SELECT ?, ?, ?
+           FROM idempotency i
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${openGuardSql}`,
+          input.eventId,
+          payloadSha256,
+          payloadJson,
+          input.problemId,
+          input.idempotencyKey,
+          ...openGuardBinds,
+        ),
+        statement(
+          db,
+          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+           SELECT ?, ?, 'search.index', ?, ?, ?
+           FROM idempotency i
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${openGuardSql}`,
+          input.eventId,
+          input.problemId,
+          `search.index:${input.eventId}`,
+          payloadSha256,
+          outboxCreatedAt,
+          input.problemId,
+          input.idempotencyKey,
+          ...openGuardBinds,
+        ),
+        statement(
+          db,
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
+              checkpoint_mode, created_at)
+           SELECT p.id, p.public_seq, p.chain_digest, ?, 1, 'unsigned-v0', ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL${openGuardSql}`,
+          nextCheckpointDigest,
+          input.createdAt,
+          input.idempotencyKey,
+          input.problemId,
+          ...openGuardBinds,
+        ),
+        statement(
+          db,
+          `UPDATE idempotency
+           SET event_id = ?, event_seq = (SELECT seq FROM events WHERE id = ?)
+           WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+             AND EXISTS (SELECT 1 FROM events WHERE id = ?)${openGuardSql}`,
+          input.eventId,
+          input.eventId,
+          input.problemId,
+          input.idempotencyKey,
+          input.eventId,
+          ...openGuardBinds,
+        ),
+      ]);
+    } catch (error) {
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (
+        retryCount < MAX_CHAIN_RETRIES &&
+        (isRetryableChainConflict(error) || latestHead.chain_digest !== before.chain_digest)
+      ) {
+        retryCount += 1;
+        continue;
+      }
+      throw error;
+    }
+
+    const settled = await statement(
+      db,
+      `SELECT request_digest, event_id, event_seq
+       FROM idempotency WHERE problem_id = ? AND idempotency_key = ?`,
+      input.problemId,
+      input.idempotencyKey,
+    ).first<IdempotencyRow>();
+    if (settled === null || settled.event_id === null || settled.event_seq === null) {
+      // A settled-gap race leaves every guarded statement a no-op; the caller
+      // sees GAP_ALREADY_SETTLED rather than a fabricated event envelope.
+      throw new Error("Krater gap write did not settle an event envelope.");
+    }
+    const after = await readProblemHead(db, input.problemId);
+    return {
+      eventId: settled.event_id,
+      claimId: gapId,
+      seq: settled.event_seq,
+      idempotent: false,
+      preCursor: before.public_seq,
+      postCursor: after.public_seq,
+      payloadSha256,
+      rowDigest: nextRowDigest,
+      buildDigest: "",
+      chainDigest: nextChainDigest,
+      checkpointDigest: nextCheckpointDigest,
+      writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
+      successfulBatchRowsRead: metricSum(results, "rows_read"),
+      successfulBatchRowsWritten: metricSum(results, "rows_written"),
+      successfulBatchSqlMs: sqlDuration(results),
+      preflight,
+      writeClaimWallMs: Math.round((performance.now() - writeClaimStartedAt) * 1_000) / 1_000,
+      lockWaitMs: null,
+      retryCount,
+    };
+  }
 
   throw new Error("Krater chain retry budget exhausted.");
 }
