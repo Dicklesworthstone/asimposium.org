@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/GAP_BODY_INVALID",
+  "title": "The gap does not match the contract",
+  "status": 422,
+  "code": "GAP_BODY_INVALID",
+  "detail": "The JSON body does not match the gap-filing contract.",
+  "fix_hint": "Send {target_claim_id, target_version, obligation, closes_what} — the obligation is the exact missing step, never 'it follows'."
+}

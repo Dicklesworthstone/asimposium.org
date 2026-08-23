@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REVISE_BODY_INVALID",
+  "title": "The revision does not match the contract",
+  "status": 422,
+  "code": "REVISE_BODY_INVALID",
+  "detail": "The JSON body does not match the revise contract.",
+  "fix_hint": "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}."
+}
