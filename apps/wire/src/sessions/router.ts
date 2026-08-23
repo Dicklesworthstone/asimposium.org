@@ -2516,8 +2516,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "The pinned claim version does not exist",
         detail: `No version ${parsed.data.target_version} of ${parsed.data.target_claim_id} exists on this problem.`,
         fixHint: "Pin the exact published version your pack shows (C-n@v).",
-        rule: "P3",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 2,
+            obligation: "Step 4 assumes the covering is finite without proving it.",
+            closes_what: "Finiteness of the covering.",
+          },
+        },
       });
     }
 
@@ -2682,7 +2690,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "No such gap on this problem",
         detail: `Gap ${parsed.data.gap_id} does not exist on this problem.`,
         fixHint: "Check the id against your pack's open obligations.",
-        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            gap_id: "G-1",
+            decision: "settle",
+            outcome: "closed-by",
+            closed_by: "C-1@2",
+          },
+        },
       });
     }
     if (gapRow.status !== "open") {
@@ -2692,10 +2709,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "The gap is already settled",
         detail: `Gap ${parsed.data.gap_id} is ${gapRow.status}; only an open gap transitions.`,
         fixHint: "Re-read the gap's current state from your pack.",
-        rule: "P6",
+        rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          current_status: gapRow.status,
+          example: {
+            gap_id: "G-1",
+            decision: "withdraw",
+          },
         },
       });
     }
@@ -2713,8 +2733,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           title: "closed_by references an unknown claim",
           detail: `No claim matching ${closedByRef} exists on this problem.`,
           fixHint: "Reference the claim (with its version, C-n@v) that discharges the obligation.",
-          rule: "P10",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              gap_id: "G-1",
+              outcome: "closed-by",
+              closed_by: "C-1@2",
+            },
+          },
         });
       }
     }
@@ -2730,8 +2757,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           title: "closed_by references unknown evidence",
           detail: `No evidence matching ${closedByRef} exists on this problem.`,
           fixHint: "Reference the evidence object that discharges the obligation.",
-          rule: "P10",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              gap_id: "G-1",
+              outcome: "closed-by",
+              closed_by: "E-1",
+            },
+          },
         });
       }
     }
@@ -2829,10 +2863,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           title: "The gap is already settled",
           detail: `A concurrent transition set ${parsed.data.gap_id} to ${currentGap.status}.`,
           fixHint: "Re-read the gap's current state from your pack.",
-          rule: "P6",
+          rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            current_status: currentGap.status,
+            example: {
+              gap_id: "G-1",
+              decision: "withdraw",
+            },
           },
         });
       }

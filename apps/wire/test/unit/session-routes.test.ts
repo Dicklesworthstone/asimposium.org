@@ -47,7 +47,6 @@ interface LocalD1Options {
   readonly beforeRead?: (read: LocalRead) => Promise<void>;
   readonly afterRead?: (read: LocalRead) => Promise<void>;
   readonly afterFirstRead?: (query: string) => Promise<void>;
-  readonly serializeBatches?: boolean;
   /**
    * Runs immediately before an effectful batch is applied, which is the exact
    * window a concurrent revoke has to win. Awaiting here suspends the writer
@@ -99,26 +98,41 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
       ...methods(),
     };
   };
+  // Serialization chain for batch execution: real D1 runs each batch's
+  // BEGIN..COMMIT atomically and never interleaves two batches.
+  let batchTail: Promise<void> = Promise.resolve();
   const runBatch = async (
     statements: readonly {
       run(): Promise<{ results?: readonly unknown[]; meta: { changes: number } }>;
     }[],
   ) => {
     // Suspend before BEGIN: the writer has authenticated, authorized, and
-    // prepared its statements, but nothing is committed yet.
+    // prepared its statements, but nothing is committed yet. The hook runs
+    // OUTSIDE the batch mutex so a suspended writer never blocks a committer.
     await options.beforeBatch?.();
-    sqlite.run("BEGIN");
-    try {
-      const results = [];
-      for (const statement of statements) results.push(await statement.run());
-      sqlite.run("COMMIT");
-      return results;
-    } catch (error) {
-      sqlite.run("ROLLBACK");
-      throw error;
-    }
+    // Real D1 serializes batches on a connection: each batch's BEGIN..COMMIT
+    // is atomic and never interleaves with another's. Yielding inside an open
+    // transaction here let a concurrent batch's BEGIN/ROLLBACK tear the
+    // suspended writer's transaction apart (asimposiumorg-al4x), so every
+    // batch runs on the batchTail chain.
+    const result = batchTail.then(async () => {
+      sqlite.run("BEGIN");
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        sqlite.run("COMMIT");
+        return results;
+      } catch (error) {
+        sqlite.run("ROLLBACK");
+        throw error;
+      }
+    });
+    batchTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   };
-  let batchTail: Promise<void> = Promise.resolve();
   return {
     prepare,
     batch(
@@ -126,16 +140,7 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
         run(): Promise<{ results?: readonly unknown[]; meta: { changes: number } }>;
       }[],
     ) {
-      if (options.serializeBatches !== true) return runBatch(statements);
-      const result = batchTail.then(
-        () => runBatch(statements),
-        () => runBatch(statements),
-      );
-      batchTail = result.then(
-        () => undefined,
-        () => undefined,
-      );
-      return result;
+      return runBatch(statements);
     },
   } as unknown as import("../../src/env.ts").Env["DB"];
 }
@@ -1016,7 +1021,6 @@ describe("session protocol routes", () => {
     const barrier = stagedReadBarrier();
     const { call, db, binding } = await fixture({
       afterFirstRead: barrier.afterFirstRead,
-      serializeBatches: true,
     });
     const race = async (path: string, key: string, body: string) => {
       const request = () =>
@@ -1131,7 +1135,6 @@ describe("session protocol routes", () => {
     const barrier = stagedReadBarrier();
     const { call, db } = await fixture({
       afterFirstRead: barrier.afterFirstRead,
-      serializeBatches: true,
     });
     const opened = await call("/v1/sessions", {
       method: "POST",
@@ -1223,7 +1226,6 @@ describe("session protocol routes", () => {
           await headRelease;
         }
       },
-      serializeBatches: true,
     });
     const opened = await call("/v1/sessions", {
       method: "POST",
@@ -1918,7 +1920,9 @@ describe("session protocol routes", () => {
     expect(resettled.status).toBe(409);
     expect(await resettled.json()).toMatchObject({
       code: "GAP_ALREADY_SETTLED",
-      current_status: "withdrawn",
+      detail: "Gap G-2 is withdrawn; only an open gap transitions.",
+      rule: "A5",
+      example: { gap_id: "G-1", decision: "withdraw" },
     });
     expect(
       await db
