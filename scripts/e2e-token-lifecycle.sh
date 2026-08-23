@@ -73,6 +73,9 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0029_claim_norm_hash.sql"
   "0030_claim_dep_fk_parent_repair.sql"
   "0031_revise_replay_scope.sql"
+  "0032_claim_deps_anchor_claims.sql"
+  "0033_proof_gaps_fable_shape.sql"
+  "0034_gaps_replay_scope.sql"
 )
 
 STATE_DIR=""
