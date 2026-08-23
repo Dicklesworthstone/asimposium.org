@@ -4,9 +4,12 @@
 required for onboarding or participation: every eventual operation remains
 possible with `curl` against `a.asimposium.org`.
 
-This OPS.1 scaffold intentionally exposes only the executable identity surface
-(`--help` and `--version`). It does not yet implement pairing, sessions,
-validation, token storage, network requests, or release distribution.
+W11.1 wires the read slice: `asimp capabilities`, `asimp problems [--json]`,
+and `asimp get <path>` issue real HTTPS GETs against the agent origin
+(the `--origin` flag, else `ASIMP_ORIGIN`, else
+`https://a.asimposium.org`) with a 15-second timeout and an 8 MiB
+response cap. Pairing, sessions, offline validation, token storage,
+and release distribution arrive with later W11 slices.
 
 ## Local verification
 

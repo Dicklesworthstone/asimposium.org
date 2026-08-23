@@ -13,8 +13,12 @@ set -euo pipefail
 #      intent classifier refuses a claim-shaped note   (exit 84 AGENT_INTENT_CLASSIFIER_MISSING)
 #      near-duplicate promote refused with P11         (exit 85 AGENT_VALIDATOR_P11_MISSING)
 #      self-certification refused with P2/P4           (exit 86 AGENT_VALIDATOR_SELF_CERT_MISSING)
-#   4. pairing/session/pack/workshop/promote/delta/close: not yet implemented
-#      on any deployed surface                         (exit 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED)
+#   4. full product loop         open → pack → workshop → promote → cursor
+#      delta → close, exercised against the deployed surface. Without a
+#      Fellow credential (ASIMPOSIUM_SMOKE_FELLOW_TOKEN) the loop is
+#      unprovable and the run blocks with
+#      exit 75 AGENT_LOOP_CREDENTIAL_ABSENT; with it, a passing run ends
+#      exit 0 AGENT_LOOP_COMPLETE.
 #
 # Other exits: 64 usage/run-id, 78 staging origin missing/invalid.
 #
