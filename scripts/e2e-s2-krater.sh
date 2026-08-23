@@ -122,6 +122,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0030_claim_dep_fk_parent_repair.sql
   db/migrations/0031_revise_replay_scope.sql
   db/migrations/0032_claim_deps_anchor_claims.sql
+  db/migrations/0033_proof_gaps_fable_shape.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -268,6 +269,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0030_claim_dep_fk_parent_repair.sql
   0031_revise_replay_scope.sql
   0032_claim_deps_anchor_claims.sql
+  0033_proof_gaps_fable_shape.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
