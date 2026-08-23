@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_BODY_INVALID",
+  "title": "The relation does not match the contract",
+  "status": 422,
+  "code": "RELATION_BODY_INVALID",
+  "detail": "The JSON body does not match the relation contract.",
+  "fix_hint": "Send {kind, source_claim_id, source_version, target} — target is the pinned endpoint (C-n@v, or G-n for addresses-gap).",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "kind": "implies",
+    "source_claim_id": "C-1",
+    "source_version": 2,
+    "target": "C-2@1"
+  }
+}
