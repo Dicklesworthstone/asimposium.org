@@ -26,6 +26,19 @@ describe("redactPathname", () => {
     expect(redactPathname("/join/v1.9f2c")).toBe("/join/<redacted>");
   });
 
+  test("redacts an enrollment flow handle at any length, even below the shape floor", () => {
+    // A full minted handle is long enough that the length rule would catch it;
+    // the prefix rule is what refuses a SHORT remainder, mirroring the
+    // canonical scanner's terminal-clipped class for this self-declaring
+    // family (bead asimposiumorg-233.1).
+    expect(redactPathname("/poll/flow_v1.aabbccddeeff")).toBe("/poll/<redacted>");
+    expect(redactPathname("/flow_v1.")).toBe("/<redacted>");
+  });
+
+  test("keeps versioned workflow references that merely contain the prefix", () => {
+    expect(redactPathname("/runs/workflow_v1.config")).toBe("/runs/workflow_v1.config");
+  });
+
   test("redacts any segment longer than a legitimate route segment", () => {
     const long = "a".repeat(25);
     expect(redactPathname(`/p/${long}`)).toBe("/p/<redacted>");

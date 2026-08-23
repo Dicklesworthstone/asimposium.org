@@ -28,6 +28,16 @@ const MAX_SEGMENTS = 8;
 const CREDENTIAL_PREFIXES = [
   "asimp_", // Fellow bearer tokens (`asimp_ag_…`) and any future prefixed grant
   "v1.", // the enrollment fragment secret, `#v1.<secret>`
+  // The enrollment flow handle / device code (`flow_v1.<43 base64url>`,
+  // EnrollmentFlowHandleSchema). The canonical never-log scanner refuses this
+  // family by shape at ANY length — including capture-clipped remainders,
+  // because the minted prefix is self-declaring — so the path redactor's
+  // prefix list must name it too, or a short handle wedged into a path by a
+  // confused client prints while every diagnostic of the same bytes is
+  // rewritten. That divergence is exactly the union drift bead 233 exists to
+  // end. `workflow_v1.` does not start with this prefix, so ordinary
+  // versioned workflow references stay printable.
+  "flow_v1.",
 ];
 
 const REDACTED = "<redacted>";
