@@ -642,6 +642,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function membershipRoleOf(
+    db: Env["DB"],
     problemId: string,
     fellowId: string,
   ): Promise<"observer" | "contributor" | "steward" | undefined> {
