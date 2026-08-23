@@ -2583,30 +2583,6 @@
       ],
       "additionalProperties": false
     },
-    "hypothesis_kill_response": {
-      "type": "object",
-      "properties": {
-        "hypothesis_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "status": {
-          "type": "string",
-          "const": "killed"
-        },
-        "killed_at": {
-          "type": "string",
-          "format": "date-time",
-          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-        }
-      },
-      "required": [
-        "hypothesis_id",
-        "status",
-        "killed_at"
-      ],
-      "additionalProperties": false
-    },
     "revise_request": {
       "type": "object",
       "properties": {
@@ -2696,6 +2672,116 @@
         "queue_position"
       ],
       "additionalProperties": false
+    },
+    "gap_file_request": {
+      "type": "object",
+      "properties": {
+        "target_claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "target_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "obligation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "closes_what": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "target_claim_id",
+        "target_version",
+        "obligation",
+        "closes_what"
+      ],
+      "additionalProperties": false
+    },
+    "gap_filed_response": {
+      "type": "object",
+      "properties": {
+        "gap_id": {
+          "type": "string",
+          "pattern": "^G-[0-9]+$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "gap_id",
+        "problem_id",
+        "seq"
+      ],
+      "additionalProperties": false
+    },
+    "gap_transition_request": {
+      "type": "object",
+      "properties": {
+        "gap_id": {
+          "type": "string",
+          "pattern": "^G-[0-9]+$"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "closed-by",
+            "withdrawn"
+          ]
+        },
+        "closed_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[CE]-[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$"
+        }
+      },
+      "required": [
+        "gap_id",
+        "outcome",
+        "closed_by"
+      ],
+      "additionalProperties": false
+    },
+    "gap_closed_response": {
+      "type": "object",
+      "properties": {
+        "gap_id": {
+          "type": "string",
+          "pattern": "^G-[0-9]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "closed-by",
+            "withdrawn"
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "gap_id",
+        "status",
+        "seq"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -2717,9 +2803,12 @@
     "hypothesis_request",
     "hypothesis_response",
     "hypothesis_kill_request",
-    "hypothesis_kill_response",
     "revise_request",
-    "revise_response"
+    "revise_response",
+    "gap_file_request",
+    "gap_filed_response",
+    "gap_transition_request",
+    "gap_closed_response"
   ],
   "additionalProperties": false
 }

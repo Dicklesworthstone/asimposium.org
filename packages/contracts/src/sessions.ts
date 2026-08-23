@@ -575,39 +575,6 @@ export const CursorResponseSchema = z.number().int().nonnegative();
 export type CursorResponse = z.infer<typeof CursorResponseSchema>;
 
 /**
- * The session-protocol contract set as one document, so the published JSON
- * Schema shows every route shape at once and drift is one regenerated file.
- */
-export const SessionsContractsSchema = z
-  .object({
-    session_open_request: SessionOpenRequestSchema,
-    session_open_response: SessionOpenResponseSchema,
-    pack_response: PackResponseSchema,
-    workshop_push_request: WorkshopPushRequestSchema,
-    workshop_push_response: WorkshopPushResponseSchema,
-    sponsor_workshop_request: SponsorWorkshopRequestSchema,
-    sponsor_workshop_view: SponsorWorkshopViewSchema,
-    promote_request: PromoteRequestSchema,
-    promote_response: PromoteResponseSchema,
-    session_close_request: SessionCloseRequestSchema,
-    session_close_response: SessionCloseResponseSchema,
-    review_request: ReviewRequestSchema,
-    review_response: ReviewResponseSchema,
-    evidence_request: EvidenceRequestSchema,
-    evidence_response: EvidenceResponseSchema,
-    hypothesis_request: HypothesisRequestSchema,
-    hypothesis_response: HypothesisResponseSchema,
-    hypothesis_kill_request: HypothesisKillRequestSchema,
-    revise_request: ReviseRequestSchema,
-    revise_response: ReviseResponseSchema,
-    gap_file_request: GapFileRequestSchema,
-    gap_filed_response: GapFiledResponseSchema,
-    gap_transition_request: GapTransitionRequestSchema,
-    gap_closed_response: GapClosedResponseSchema,
-  })
-  .strict();
-export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;
-/**
  * W5.5 proof gaps (G-n): a named unresolved obligation in a proof — no
  * hiding behind "standard" or "it follows". The gap pins the exact claim
  * version it obligates, so a silent strengthening cannot retroactively close
@@ -678,3 +645,36 @@ export const GapClosedResponseSchema = z
   })
   .strict();
 export type GapClosedResponse = z.infer<typeof GapClosedResponseSchema>;
+/**
+ * The session-protocol contract set as one document, so the published JSON
+ * Schema shows every route shape at once and drift is one regenerated file.
+ */
+export const SessionsContractsSchema = z
+  .object({
+    session_open_request: SessionOpenRequestSchema,
+    session_open_response: SessionOpenResponseSchema,
+    pack_response: PackResponseSchema,
+    workshop_push_request: WorkshopPushRequestSchema,
+    workshop_push_response: WorkshopPushResponseSchema,
+    sponsor_workshop_request: SponsorWorkshopRequestSchema,
+    sponsor_workshop_view: SponsorWorkshopViewSchema,
+    promote_request: PromoteRequestSchema,
+    promote_response: PromoteResponseSchema,
+    session_close_request: SessionCloseRequestSchema,
+    session_close_response: SessionCloseResponseSchema,
+    review_request: ReviewRequestSchema,
+    review_response: ReviewResponseSchema,
+    evidence_request: EvidenceRequestSchema,
+    evidence_response: EvidenceResponseSchema,
+    hypothesis_request: HypothesisRequestSchema,
+    hypothesis_response: HypothesisResponseSchema,
+    hypothesis_kill_request: HypothesisKillRequestSchema,
+    revise_request: ReviseRequestSchema,
+    revise_response: ReviseResponseSchema,
+    gap_file_request: GapFileRequestSchema,
+    gap_filed_response: GapFiledResponseSchema,
+    gap_transition_request: GapTransitionRequestSchema,
+    gap_closed_response: GapClosedResponseSchema,
+  })
+  .strict();
+export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

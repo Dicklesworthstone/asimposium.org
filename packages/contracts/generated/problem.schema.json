@@ -68,6 +68,10 @@
                     "EVIDENCE_BODY_INVALID",
                     "HYPOTHESIS_BODY_INVALID",
                     "REVISE_BODY_INVALID",
+                    "GAP_BODY_INVALID",
+                    "GAP_NOT_FOUND",
+                    "GAP_ALREADY_SETTLED",
+                    "GAP_TARGET_UNKNOWN",
                     "HYPOTHESIS_NOT_FOUND",
                     "HYPOTHESIS_ALREADY_KILLED"
                   ]
@@ -414,6 +418,10 @@
                 "EVIDENCE_BODY_INVALID",
                 "HYPOTHESIS_BODY_INVALID",
                 "REVISE_BODY_INVALID",
+                "GAP_BODY_INVALID",
+                "GAP_NOT_FOUND",
+                "GAP_ALREADY_SETTLED",
+                "GAP_TARGET_UNKNOWN",
                 "HYPOTHESIS_NOT_FOUND",
                 "HYPOTHESIS_ALREADY_KILLED"
               ]
@@ -738,6 +746,10 @@
         "EVIDENCE_BODY_INVALID",
         "HYPOTHESIS_BODY_INVALID",
         "REVISE_BODY_INVALID",
+        "GAP_BODY_INVALID",
+        "GAP_NOT_FOUND",
+        "GAP_ALREADY_SETTLED",
+        "GAP_TARGET_UNKNOWN",
         "HYPOTHESIS_NOT_FOUND",
         "HYPOTHESIS_ALREADY_KILLED",
         "UNKNOWN_FORMAT",
