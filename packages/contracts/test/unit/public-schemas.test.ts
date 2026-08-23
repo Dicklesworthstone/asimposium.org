@@ -15,6 +15,7 @@ const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "enrollment",
   "enrollment-capsule",
+  "internal-health",
   "ledger",
   "problem",
   "screening",
