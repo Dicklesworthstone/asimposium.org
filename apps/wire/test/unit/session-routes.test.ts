@@ -1137,7 +1137,9 @@ describe("session protocol routes", () => {
     const now = new Date().toISOString();
     for (const id of ["P-OTHER", "P-THIRD", "P-FOURTH"]) {
       await db
-        .prepare("INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, ?, ?)")
+        .prepare(
+          "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, ?, ?)",
+        )
         .bind(id, now, now)
         .run();
     }
@@ -1178,11 +1180,12 @@ describe("session protocol routes", () => {
     expect(first.status).toBe(201);
     const second = await callAs(unbound, "/v1/sessions", "cap-open-2", { problem_id: "P-OTHER" });
     expect(second.status).toBe(201);
-    const openedIds = (
-      await db
-        .prepare("SELECT session_id FROM sessions WHERE closed_at IS NULL ORDER BY session_id")
-        .all<{ session_id: string }>()
-    ).results?.map((row) => row.session_id) ?? [];
+    const openedIds =
+      (
+        await db
+          .prepare("SELECT session_id FROM sessions WHERE closed_at IS NULL ORDER BY session_id")
+          .all<{ session_id: string }>()
+      ).results?.map((row) => row.session_id) ?? [];
     expect(openedIds).toHaveLength(2);
 
     // Boundary: a third open is refused with the teaching cap face naming both slots.
@@ -1193,7 +1196,9 @@ describe("session protocol routes", () => {
     if (capDocument.code !== "SESSION_CAP_REACHED") return;
     expect([...(capDocument.open_session_ids ?? [])].sort()).toEqual([...openedIds].sort());
     expect(
-      await db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE closed_at IS NULL").first<{ n: number }>(),
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM sessions WHERE closed_at IS NULL")
+        .first<{ n: number }>(),
     ).toEqual({ n: 2 });
 
     // Commit-time race: with one slot free, two concurrent opens on distinct
@@ -1213,7 +1218,9 @@ describe("session protocol routes", () => {
       expect(loserDocument.code).toBe("SESSION_CAP_REACHED");
     }
     expect(
-      await db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE closed_at IS NULL").first<{ n: number }>(),
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM sessions WHERE closed_at IS NULL")
+        .first<{ n: number }>(),
     ).toEqual({ n: 2 });
   });
 
@@ -6279,6 +6286,89 @@ describe("committed promotion outbox nudge", () => {
     expect(recorder.scheduled).toHaveLength(0);
     expect(nudgePaths).toEqual([]);
     expect(await outboxRows()).toEqual({ count: 1 });
+  });
+
+  // asimposiumorg-phg.1.1: the root-face contract only demanded a non-404 from
+  // a throwing D1 stub, and the session-router-only cursor check stopped at the
+  // pre-write ETag — a constant ETag could keep serving cached 0 forever while
+  // every test stayed green. This plant drives the REAL createApp mount over
+  // real local D1: anonymous GET /cursor serves body 0 with a strong ETag, the
+  // own-ETag poll is an empty 304, a genuinely mounted promotion advances the
+  // public cursor to 1, the OLD ETag then misses (200, body 1, DISTINCT ETag),
+  // and the fresh ETag settles back to an empty 304.
+  test("the mounted anonymous cursor invalidates its strong ETag after a real promotion", async () => {
+    const { recorder, env, enrollmentStore, token } = await mountedHarness();
+    const app = createApp({ createEnrollmentStore: () => enrollmentStore });
+    const call = (path: string, init: RequestInit & { auth?: boolean } = {}): Promise<Response> => {
+      const { auth = true, ...rest } = init;
+      const headers = new Headers(rest.headers);
+      if (auth) headers.set("authorization", `Bearer ${token}`);
+      return app.fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, { ...rest, headers }),
+        env,
+        recorder.ctx,
+      ) as Promise<Response>;
+    };
+
+    // Baseline public face: exact anonymous 200 with a strong validator.
+    const initial = await call("/cursor", { auth: false });
+    expect(initial.status).toBe(200);
+    expect(initial.headers.get("cache-control")).toBe("public, max-age=5");
+    expect(initial.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await initial.text()).toBe("0");
+    const staleEtag = initial.headers.get("etag");
+    expect(staleEtag).not.toBeNull();
+    expect(staleEtag?.startsWith("W/")).toBe(false);
+
+    // Own ETag: empty 304.
+    const unchanged = await call("/cursor", {
+      auth: false,
+      headers: { "if-none-match": staleEtag ?? "" },
+    });
+    expect(unchanged.status).toBe(304);
+    expect(await unchanged.text()).toBe("");
+
+    // Durable private writes on the SAME mount: open and workshop push must not
+    // invalidate the public cursor (workshop bytes never move the ledger).
+    const prepared = await preparedPromotion((path, init) => call(path, init), "mounted-cursor");
+    const stillFresh = await call("/cursor", {
+      auth: false,
+      headers: { "if-none-match": staleEtag ?? "" },
+    });
+    expect(stillFresh.status).toBe(304);
+    expect(await stillFresh.text()).toBe("");
+
+    // The mounted promotion advances the public cursor to 1.
+    const promoted = await call(`/v1/sessions/${prepared.sessionId}/promote`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "mounted-cursor-promote",
+      },
+      body: promoteBody(prepared.workshopId, "The mounted promote moves the public cursor."),
+    });
+    expect(promoted.status).toBe(201);
+
+    // The STALE ETag now misses: 200, body advanced to 1, and a DISTINCT strong
+    // ETag - this is the assertion a constant-ETag regression cannot survive.
+    const advanced = await call("/cursor", {
+      auth: false,
+      headers: { "if-none-match": staleEtag ?? "" },
+    });
+    expect(advanced.status).toBe(200);
+    expect(await advanced.text()).toBe("1");
+    const freshEtag = advanced.headers.get("etag");
+    expect(freshEtag).not.toBeNull();
+    expect(freshEtag).not.toBe(staleEtag);
+    expect(freshEtag?.startsWith("W/")).toBe(false);
+
+    // The fresh ETag settles the poll back to an empty 304.
+    const settled = await call("/cursor", {
+      auth: false,
+      headers: { "if-none-match": freshEtag ?? "" },
+    });
+    expect(settled.status).toBe(304);
+    expect(await settled.text()).toBe("");
   });
 
   test("a mounted refused promotion schedules no wake", async () => {

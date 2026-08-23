@@ -30,6 +30,8 @@ export interface KraterWriteInput {
     readonly sessionId: string;
     readonly modelSelfDeclared: string;
     readonly harness: string;
+    /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
+    readonly credentialId?: string;
   };
 }
 
@@ -1180,9 +1182,9 @@ export async function writeClaim(
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
               row_digest, chain_digest, created_at,
               actor_fellow_id, actor_sponsor_id, actor_session_id,
-              model_string_self_declared, harness)
+              model_string_self_declared, harness, writer_credential_id)
            SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
@@ -1197,6 +1199,7 @@ export async function writeClaim(
           input.attribution?.sessionId ?? null,
           input.attribution?.modelSelfDeclared ?? null,
           input.attribution?.harness ?? null,
+          input.attribution?.credentialId ?? null,
           input.idempotencyKey,
           input.problemId,
         ),
@@ -1409,6 +1412,8 @@ export interface KraterRevisionInput {
     readonly sessionId: string;
     readonly modelSelfDeclared: string;
     readonly harness: string;
+    /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
+    readonly credentialId?: string;
   };
   createdAt: string;
 }
@@ -1644,9 +1649,9 @@ export async function writeClaimRevision(
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
               row_digest, chain_digest, created_at,
               actor_fellow_id, actor_sponsor_id, actor_session_id,
-              model_string_self_declared, harness)
+              model_string_self_declared, harness, writer_credential_id)
            SELECT ?, p.id, p.public_seq, 'claim.revised', 'claim', ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
@@ -1662,6 +1667,7 @@ export async function writeClaimRevision(
           input.attribution?.sessionId ?? null,
           input.attribution?.modelSelfDeclared ?? null,
           input.attribution?.harness ?? null,
+          input.attribution?.credentialId ?? null,
           input.idempotencyKey,
           input.problemId,
         ),
@@ -1836,6 +1842,8 @@ export type KraterGapInput =
       readonly targetClaimId: string;
       readonly targetVersion: number;
       readonly authorFellowId: string;
+      /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
+      readonly writerCredentialId?: string;
       readonly createdAt: string;
     }
   | {
@@ -1843,8 +1851,9 @@ export type KraterGapInput =
       readonly problemId: string;
       readonly eventId: string;
       readonly idempotencyKey: string;
-      readonly gapId: string;
-      readonly closedBy: string | null;
+      readonly actorFellowId: string;
+      /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
+      readonly writerCredentialId?: string;
       readonly actorFellowId: string;
       readonly createdAt: string;
     };
@@ -2004,9 +2013,9 @@ export async function writeGapEvent(
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
               row_digest, chain_digest, created_at,
               actor_fellow_id, actor_sponsor_id, actor_session_id,
-              model_string_self_declared, harness)
+              model_string_self_declared, harness, writer_credential_id)
            SELECT ?, p.id, p.public_seq, 'gap.${input.mode}', 'gap', ?, 1, ?, ?, ?, ?,
-                  ?, NULL, NULL, NULL, NULL
+                  ?, NULL, NULL, NULL, NULL, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL${settleGuardSql}`,
@@ -2017,7 +2026,7 @@ export async function writeGapEvent(
           nextChainDigest,
           input.createdAt,
           input.mode === "filed" ? input.authorFellowId : input.actorFellowId,
-          input.idempotencyKey,
+          input.writerCredentialId ?? null,
           input.problemId,
           ...settleGuardBinds,
         ),
@@ -2151,8 +2160,9 @@ export interface KraterRelationInput {
   readonly assertedByFellow: string;
   readonly createdAt: string;
 }
-
-export async function writeRelationEvent(
+  readonly assertedByFellow: string;
+  /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
+  readonly writerCredentialId?: string;
   db: D1Database,
   input: KraterRelationInput,
   companion?: KraterAtomicCompanion,
@@ -2268,9 +2278,9 @@ export async function writeRelationEvent(
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
               row_digest, chain_digest, created_at,
               actor_fellow_id, actor_sponsor_id, actor_session_id,
-              model_string_self_declared, harness)
+              model_string_self_declared, harness, writer_credential_id)
            SELECT ?, p.id, p.public_seq, 'relation.asserted', 'relation', ?, 1, ?, ?, ?, ?,
-                  ?, NULL, NULL, NULL, NULL
+                  ?, NULL, NULL, NULL, NULL, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
@@ -2281,7 +2291,7 @@ export async function writeRelationEvent(
           nextChainDigest,
           input.createdAt,
           input.assertedByFellow,
-          input.idempotencyKey,
+          input.writerCredentialId ?? null,
           input.problemId,
         ),
         statement(

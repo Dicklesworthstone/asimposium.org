@@ -79,6 +79,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0035_claim_relations.sql"
   "0036_relations_replay_scope.sql"
   "0037_session_open_cap.sql"
+  "0038_events_writer_credential.sql"
 )
 
 STATE_DIR=""
