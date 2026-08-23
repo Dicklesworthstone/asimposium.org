@@ -31,7 +31,6 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
-import { parseRelationTarget, relationPinState } from "../../src/ledger/relations.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 

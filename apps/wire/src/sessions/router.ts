@@ -1595,7 +1595,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P2/P4",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { workshop_id: "W-4DSP-01JXYZ", kind: "conjecture", statement: "<claim text>" },
+            example: {
+              workshop_id: "W-4DSP-01JXYZ",
+              kind: "conjecture",
+              statement: "<claim text>",
+            },
           },
         });
       }
@@ -2085,7 +2089,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P2/P4",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "<claim text>" },
+            example: {
+              claim_id: "C-1",
+              base_version: 1,
+              kind: "conjecture",
+              statement: "<claim text>",
+            },
           },
         });
       }
@@ -2199,7 +2208,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "<claim text>" },
+          example: {
+            claim_id: "C-1",
+            base_version: 1,
+            kind: "conjecture",
+            statement: "<claim text>",
+          },
         },
       });
     }
@@ -2228,7 +2242,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           head_version: claimHead.head_version,
-          example: { claim_id: "C-1", base_version: 2, kind: "conjecture", statement: "<new text>" },
+          example: {
+            claim_id: "C-1",
+            base_version: 2,
+            kind: "conjecture",
+            statement: "<new text>",
+          },
         },
       });
     }
@@ -2476,7 +2495,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P9",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { claim_id: "C-1", base_version: 2, kind: "conjecture", statement: "<new text>" },
+            example: {
+              claim_id: "C-1",
+              base_version: 2,
+              kind: "conjecture",
+              statement: "<new text>",
+            },
           },
         });
       }
@@ -3105,7 +3129,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P10",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { kind: "implies", source_claim_id: "C-1", source_version: 2, target: "C-2@1" },
+            example: {
+              kind: "implies",
+              source_claim_id: "C-1",
+              source_version: 2,
+              target: "C-2@1",
+            },
           },
         });
       }
@@ -3224,7 +3253,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           rule: "P11",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { kind: "implies", source_claim_id: "C-1", source_version: 2, target: "C-2@1" },
+            example: {
+              kind: "implies",
+              source_claim_id: "C-1",
+              source_version: 2,
+              target: "C-2@1",
+            },
           },
         });
       }

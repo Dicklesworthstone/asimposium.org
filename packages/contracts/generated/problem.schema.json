@@ -412,14 +412,7 @@
               "maxLength": 400
             }
           },
-          "required": [
-            "type",
-            "title",
-            "status",
-            "code",
-            "detail",
-            "fix_hint"
-          ],
+          "required": ["type", "title", "status", "code", "detail", "fix_hint"],
           "additionalProperties": false
         }
       ]
@@ -829,14 +822,7 @@
           "maxLength": 400
         }
       },
-      "required": [
-        "type",
-        "title",
-        "status",
-        "code",
-        "detail",
-        "fix_hint"
-      ],
+      "required": ["type", "title", "status", "code", "detail", "fix_hint"],
       "additionalProperties": false
     },
     "problem_code": {
@@ -936,11 +922,6 @@
       ]
     }
   },
-  "required": [
-    "problem_document",
-    "contract_problem",
-    "opaque_problem",
-    "problem_code"
-  ],
+  "required": ["problem_document", "contract_problem", "opaque_problem", "problem_code"],
   "additionalProperties": false
 }
