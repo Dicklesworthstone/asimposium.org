@@ -1224,6 +1224,153 @@ describe("session protocol routes", () => {
     ).toEqual({ n: 2 });
   });
 
+  test("grant-wide event budgets gate writes atomically and never leak counters (wqlf)", async () => {
+    const { call, db, env, replayProtector, router, service } = await fixture();
+    const sponsor = { type: "sponsor", sponsorId: "usr_wqlfsponsor1" } as const;
+    const enrollmentRouter = createEnrollmentRouter({ service });
+    const minted = await service.mint(sponsor, {
+      requested_scopes: ["promote"],
+      problem_binding: "P-4DSP",
+      event_budget: 2,
+    });
+    const registration = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/fellows", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "wqlf-claim" },
+        body: JSON.stringify({
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name: "budget-runner",
+          model: "test-model",
+          harness: "test-harness",
+        }),
+      }),
+    );
+    expect(registration.status).toBe(202);
+    const { flow_handle: flowHandle } = (await registration.json()) as { flow_handle: string };
+    await service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+    });
+    const issued = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/device-token", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "wqlf-token" },
+        body: JSON.stringify({ flow_handle: flowHandle }),
+      }),
+    );
+    expect(issued.status).toBe(200);
+    const issuedBody = (await issued.json()) as { token?: string };
+    if (issuedBody.token === undefined) throw new Error("wqlf fixture token was not issued");
+    const budgeted = await service.credentialBinding(issuedBody.token);
+    if (budgeted === undefined) throw new Error("wqlf fixture binding missing");
+    await seedCredentialRow(db, budgeted);
+    const callAs = (
+      path: string,
+      key: string,
+      body: Record<string, unknown>,
+      method: "POST" | "GET" = "POST",
+    ): Promise<Response> =>
+      createSessionRouter({
+        service: { credentialBinding: async () => budgeted } as unknown as EnrollmentService,
+        replayProtector,
+      }).fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${issuedBody.token}`,
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
+        }),
+        env,
+      );
+
+    const opened = await callAs("/v1/sessions", "wqlf-open", { problem_id: "P-4DSP" });
+    expect(opened.status).toBe(201);
+    const openedSession = SessionOpenResponseSchema.parse(await opened.json());
+    const sessionId = openedSession.session_id;
+
+    let statementIndex = 0;
+    console.error("DBG membership", await db
+      .prepare("SELECT * FROM problem_memberships WHERE fellow_id = ?")
+      .bind(budgeted.fellowId)
+      .all());
+    console.error("DBG tokenrow", await db
+      .prepare("SELECT credential_id, granted_resources_json FROM fellow_tokens WHERE credential_id = ?")
+      .bind(budgeted.credentialId)
+      .all());
+    const promoteWithinBudget = async (): Promise<Response> => {
+      statementIndex += 1;
+      const pushed = await call(`/v1/sessions/${sessionId}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `wqlf-push-${statementIndex}` },
+        body: JSON.stringify({
+          type: "draft",
+          title: `Budget witness ${statementIndex}`,
+          body_md: "Each promotion records one grant-wide event.",
+          relates_to: [],
+        }),
+      });
+      expect(pushed.status).toBe(201);
+      const pushedWorkshop = WorkshopPushResponseSchema.parse(await pushed.json());
+      const workshopId = pushedWorkshop.workshop_id;
+      return callAs(`/v1/sessions/${sessionId}/promote`, `wqlf-promote-${statementIndex}`, {
+        workshop_id: workshopId,
+        kind: "conjecture",
+        statement: `Budget witness statement ${statementIndex} is falsifiable by observation ${statementIndex}.`,
+        falsifier: `Observation ${statementIndex} refutes it.`,
+        relates_to: [],
+      });
+    };
+
+    // Boundary: exactly budget-many ledger events commit; each promotion's
+    // usage pre-check reads the durable per-credential count.
+    expect((await promoteWithinBudget()).status).toBe(201);
+    expect((await promoteWithinBudget()).status).toBe(201);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE writer_credential_id = ?")
+        .bind(budgeted.credentialId)
+        .first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+
+    // The next write is refused pre-batch with the one coarse policy face;
+    // the refusal carries no counter or budget fields to probe with.
+    const refused = await promoteWithinBudget();
+    expect(refused.status).toBe(403);
+    const refusedDocument = OpaqueProblemSchema.parse(await refused.json());
+    expect(refusedDocument.code).toBe("WRITE_REFUSED");
+    expect(Object.keys(refusedDocument).sort()).not.toContain("events_recorded");
+
+    // Atomicity race: with one slot left, two concurrent promotions both pass
+    // the evaluator pre-check; the 0038 trigger elects exactly one winner.
+    const raced = await Promise.all([promoteWithinBudget(), promoteWithinBudget()]);
+    expect(raced.map((response) => response.status).sort()).toEqual([201, 403]);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE writer_credential_id = ?")
+        .bind(budgeted.credentialId)
+        .first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+
+    // An exhausted pack must not advertise writes it cannot accept.
+    const pack = await callAs(
+      `/v1/sessions/${sessionId}/pack?profile=working`,
+      "wqlf-pack-get",
+      {},
+      "GET",
+    );
+    expect(pack.status).toBe(200);
+    const packBody = PackResponseSchema.parse(await pack.json());
+    const advertisedWrites = (packBody.data.next_actions ?? []).filter((action) =>
+      action.url?.includes("/workshop") || action.url?.includes("/promote"),
+    );
+    expect(advertisedWrites).toEqual([]);
+  });
+
   test("concurrent same-key promotions with different bodies return a typed conflict", async () => {
     const barrier = stagedReadBarrier();
     const { call, db } = await fixture({

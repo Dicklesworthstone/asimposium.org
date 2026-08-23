@@ -1851,10 +1851,11 @@ export type KraterGapInput =
       readonly problemId: string;
       readonly eventId: string;
       readonly idempotencyKey: string;
+      readonly gapId: string;
+      readonly closedBy: string | null;
       readonly actorFellowId: string;
       /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
       readonly writerCredentialId?: string;
-      readonly actorFellowId: string;
       readonly createdAt: string;
     };
 
@@ -2158,11 +2159,11 @@ export interface KraterRelationInput {
   readonly sourceVersion: number;
   readonly targetRef: string;
   readonly assertedByFellow: string;
-  readonly createdAt: string;
-}
-  readonly assertedByFellow: string;
   /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
   readonly writerCredentialId?: string;
+  readonly createdAt: string;
+}
+export async function writeRelationEvent(
   db: D1Database,
   input: KraterRelationInput,
   companion?: KraterAtomicCompanion,

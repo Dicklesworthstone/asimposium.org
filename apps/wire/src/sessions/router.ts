@@ -553,6 +553,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   const isSessionCapAbort = (error: unknown): boolean =>
     error instanceof Error && error.message.includes("SESSION_OPEN_CAP_EXCEEDED");
 
+  /**
+   * Durable grant-wide usage for the calling credential (wqlf). The count is
+   * the pre-check input to authorizeFellowWrite; the 0038 trigger makes the
+   * final check atomic with each event append.
+   */
+  async function credentialEventsRecorded(db: Env["DB"], credentialId: string): Promise<number> {
+    const row = await db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE writer_credential_id = ?")
+      .bind(credentialId)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
+  /** The 0038 trigger aborts the batch with this message at commit time. */
+  const isEventBudgetAbort = (error: unknown): boolean =>
+    error instanceof Error && error.message.includes("EVENT_BUDGET_EXHAUSTED");
+
   const fellowTokenInvalidProblem = (): Response =>
     problem({
       status: 401,
@@ -771,7 +788,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         target: { kind: "session-admission", problemId: parsed.data.problem_id },
         // Durable credential-attributed accounting belongs to wqlf. This
         // route only supplies the existing synthetic evaluator input.
-        usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+        usage: {
+          eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+          artifactBytesRecorded: 0,
+        },
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
@@ -981,6 +1001,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // the one coarse policy face, never a cause the caller could probe.
         return writeRefusedProblem();
       }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -1366,7 +1387,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       unlisted: false,
       membershipRole: membership,
     };
-    const authorizationUsage = { eventsRecorded: 0, artifactBytesRecorded: 0 };
+    const authorizationEventsRecorded = await credentialEventsRecorded(
+      db,
+      auth.binding.credentialId,
+    );
+    const authorizationUsage = {
+      eventsRecorded: authorizationEventsRecorded,
+      artifactBytesRecorded: 0,
+    };
     const authorizationObservedAt = Date.now();
     if (
       authorizeFellowWrite({
@@ -1403,23 +1431,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         effective_permissions: actionPermissions,
       },
       candidates,
-      action_candidates: [
-        {
-          method: "POST",
-          url: `/v1/sessions/${session.session_id}/workshop`,
-          why: "push a note or draft to your private workshop as you work",
-          public_read: false,
-          requires: ["workshop:write"],
-        },
-        {
-          method: "POST",
-          url: `/v1/sessions/${session.session_id}/promote`,
-          why: "promote a finished object to the public ledger (runs the validator)",
-          public_read: false,
-          requires: ["promote:write"],
-        },
-      ],
+      // wqlf: an exhausted grant-wide event budget makes both write
+      // affordances unusable, so the pack must not advertise them.
+      action_candidates:
+        auth.binding.grantedResources.eventBudget !== undefined &&
+        authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
+          ? []
+          : [
+              {
+                method: "POST",
+                url: `/v1/sessions/${session.session_id}/workshop`,
+                why: "push a note or draft to your private workshop as you work",
+                public_read: false,
+                requires: ["workshop:write"],
+              },
+              {
+                method: "POST",
+                url: `/v1/sessions/${session.session_id}/promote`,
+                why: "promote a finished object to the public ledger (runs the validator)",
+                public_read: false,
+                requires: ["promote:write"],
+              },
+            ],
       omitted: [
+        ...(auth.binding.grantedResources.eventBudget !== undefined &&
+        authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
+          ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
+          : []),
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
         ...(profile === "working"
           ? []
@@ -1495,6 +1533,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (replay !== undefined) return replay;
     } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -1511,7 +1550,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         unlisted: false,
         membershipRole,
       },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
@@ -1723,6 +1765,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (replay !== undefined) return replay;
     } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -1756,7 +1799,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         unlisted: false,
         membershipRole,
       },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
@@ -1891,6 +1937,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sessionId: session.session_id,
             modelSelfDeclared: auth.binding.model,
             harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
           },
         },
         {},
@@ -2219,6 +2266,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (replay !== undefined) return replay;
     } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -2239,7 +2287,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         unlisted: false,
         membershipRole,
       },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
@@ -2421,6 +2472,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sessionId: session.session_id,
             modelSelfDeclared: auth.binding.model,
             harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
           },
         },
         {},
@@ -2666,6 +2718,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (replay !== undefined) return replay;
     } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -2683,7 +2736,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         unlisted: false,
         membershipRole,
       },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
@@ -2737,6 +2793,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           targetClaimId: parsed.data.target_claim_id,
           targetVersion: parsed.data.target_version,
           authorFellowId: auth.binding.fellowId,
+          writerCredentialId: auth.binding.credentialId,
           createdAt: filedAt,
         },
         {},
@@ -2849,6 +2906,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (replay !== undefined) return replay;
     } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -2866,7 +2924,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         unlisted: false,
         membershipRole,
       },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
@@ -2975,6 +3036,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           gapId: parsed.data.gap_id,
           closedBy: parsed.data.outcome === "closed-by" ? (parsed.data.closed_by ?? null) : null,
           actorFellowId: auth.binding.fellowId,
+          writerCredentialId: auth.binding.credentialId,
           createdAt: new Date().toISOString(),
         },
         {},
@@ -3115,6 +3177,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       if (replay !== undefined) return replay;
     } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
@@ -3132,7 +3195,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         unlisted: false,
         membershipRole,
       },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
@@ -3236,6 +3302,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           sourceVersion: parsed.data.source_version,
           targetRef: parsed.data.target,
           assertedByFellow: auth.binding.fellowId,
+          writerCredentialId: auth.binding.credentialId,
           createdAt: new Date().toISOString(),
         },
         {
@@ -3839,7 +3906,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         // Durable credential-attributed accounting belongs to wqlf. This
         // route only supplies the existing synthetic evaluator input.
-        usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+        usage: {
+          eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+          artifactBytesRecorded: 0,
+        },
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
