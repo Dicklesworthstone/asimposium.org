@@ -20,8 +20,8 @@
 import { describe, expect, test } from "bun:test";
 
 import { createApp } from "../../src/app.ts";
-import type { Env } from "../../src/env.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
+import type { Env } from "../../src/env.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
 interface RawRoute {
@@ -143,7 +143,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
   };
 
-  function mountedCensus(): { readonly all: ReadonlySet<string>; readonly counts: Record<string, number> } {
+  function mountedCensus(): {
+    readonly all: ReadonlySet<string>;
+    readonly counts: Record<string, number>;
+  } {
     // Ledger-face routes are mounted at "/" into createApp's own table; prove
     // that assumption against the unfiltered root table instead of trusting it.
     const rootGetPaths = new Set(
@@ -222,7 +225,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     const advertised = new Set<string>(["GET /"]);
     const candidate = "POST /v1/future-thing";
     const reason = UNDISCLOSED_REASON_BY_ROUTE[candidate];
-    const unclassified = !advertised.has(candidate) && (reason === undefined || reason.length === 0);
+    const unclassified =
+      !advertised.has(candidate) && (reason === undefined || reason.length === 0);
     expect(unclassified).toBe(true);
   });
 });
