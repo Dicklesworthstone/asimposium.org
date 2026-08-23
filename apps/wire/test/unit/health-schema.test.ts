@@ -4,6 +4,8 @@ import {
   HealthBindingName,
   INTERNAL_HEALTH_SCHEMA_ID,
 } from "@asimposium/contracts";
+import { createApp } from "../../src/app";
+import { boundEnv } from "../support/bindings";
 import { REQUIRED_BINDINGS } from "../../src/env";
 import { HEALTH_SCHEMA } from "../../src/http/health";
 
@@ -15,6 +17,34 @@ import { HEALTH_SCHEMA } from "../../src/http/health";
  */
 
 const SCHEMA_PATH = new URL(INTERNAL_HEALTH_SCHEMA_ID).pathname;
+
+type WorkerReply = {
+  status: number;
+  contentType: string;
+  bodyText: string;
+  body: unknown;
+};
+
+async function callWorker(path: string): Promise<WorkerReply> {
+  const { createApp } = await import("../../src/app");
+  const { boundEnv } = await import("../support/bindings");
+  const app = createApp();
+  const response = await app.fetch(new Request(`https://a.asimposium.org${path}`), boundEnv());
+  const bodyText = await response.text();
+  let body: unknown = bodyText;
+  try {
+    body = JSON.parse(bodyText) as unknown;
+  } catch {
+    // non-JSON replies stay text
+  }
+  return { status: response.status, contentType: response.headers.get("content-type") ?? "", bodyText, body };
+}
+
+function stripKey(object: Record<string, unknown>, key: string): Record<string, unknown> {
+  const clone = structuredClone(object);
+  delete clone[key];
+  return clone;
+}
 
 describe("GET /schemas/internal.health.v1.json", () => {
   test("is served by the mounted Worker as application/schema+json", async () => {
@@ -43,10 +73,11 @@ describe("GET /schemas/internal.health.v1.json", () => {
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validate = ajv.compile(JSON.parse(schemaRes.bodyText));
 
-    const goodBody = (await callWorker("/internal/health")).body;
+    const goodBody = (await callWorker("/internal/health")).body as Record<string, unknown>;
+    const goodData = structuredClone(goodBody.data) as Record<string, unknown>;
     const negatives: Array<Record<string, unknown>> = [
       // missing field
-      stripKey(structuredClone(goodBody), "ok"),
+      stripKey(goodBody, "ok"),
       // extra field
       { ...structuredClone(goodBody), surprise: true },
       // wrong type
@@ -54,7 +85,7 @@ describe("GET /schemas/internal.health.v1.json", () => {
       // wrong binding state
       {
         ...structuredClone(goodBody),
-        data: { ...goodBody.data, bindings: { ...goodBody.data.bindings, DB: "maybe" } },
+        data: { ...goodData, bindings: { ...goodData.bindings, DB: "maybe" } },
       },
       // self-referential constant drift: advertised id no longer matches
       {
@@ -73,40 +104,6 @@ describe("GET /schemas/internal.health.v1.json", () => {
     expect(HEALTH_SCHEMA.endsWith("/schemas/internal.health.v1.json")).toBe(true);
     // Producer/registry drift guard: the contracts binding enum must equal the
     // Worker's REQUIRED_BINDINGS exactly, in order.
-    expect(HealthBindingName.options).toEqual([...REQUIRED_BINDINGS]);
+    expect([...HealthBindingName.options]).toEqual([...REQUIRED_BINDINGS]);
   });
 });
-
-// --- helpers ---
-
-function stripKey(object: Record<string, unknown>, key: string): Record<string, unknown> {
-  const clone = structuredClone(object);
-  delete clone[key];
-  return clone;
-}
-
-async function callWorker(path: string): Promise<{
-  status: number;
-  contentType: string;
-  bodyText: string;
-  body: any;
-}> {
-  const { createApp } = await import("../../src/app");
-  const { boundEnv } = await import("../support/bindings");
-  const app = createApp();
-  const response = await app.fetch(new Request(`https://a.asimposium.org${path}`), boundEnv());
-  const bodyText = await response.text();
-  let body: unknown = bodyText;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    // schema documents are also JSON; keep text on parse failure
-    body = bodyText;
-  }
-  return {
-    status: response.status,
-    contentType: response.headers.get("content-type") ?? "",
-    bodyText,
-    body,
-  };
-}
