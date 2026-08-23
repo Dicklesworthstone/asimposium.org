@@ -1117,3 +1117,84 @@ describe("hostile and malformed composer inputs", () => {
     ).toBe("MANDATORY_OVERHEAD_EXCEEDS_BUDGET");
   });
 });
+
+// asimposiumorg-render-composer-grammar: every defect prepareProjection
+// refuses must already leave composePack as PackComposerError, so the mounted
+// pack face can answer with one typed problem instead of an untyped 500 from
+// RenderContractError escaping the token-accounting fixed point.
+describe("the composer surfaces renderer grammar defects as its own typed error", () => {
+  test("refuses a body that fits raw but exceeds the ceiling after neutralization", () => {
+    // '<!--asimp-->' is 12 raw code points and neutralizes to 15 (the `<`
+    // becomes the 4-character `&lt;` replacement), so 6,900 repetitions sit
+    // just under the raw ceiling while expanding past it once prepared.
+    const opener = "<!--asimp-->";
+    const body = opener.repeat(1_500);
+    expect(Array.from(body).length).toBeLessThanOrEqual(MAX_BODY_CODE_POINTS);
+    expect(
+      errorCode(() => composePack(input({ candidates: [candidate("C-1", 0, 1, { body })] }))),
+    ).toBe("INVALID_CANDIDATE");
+    let message: string | undefined;
+    try {
+      composePack(input({ candidates: [candidate("C-1", 0, 1, { body })] }));
+    } catch (error) {
+      if (error instanceof Error) message = error.message;
+    }
+    expect(message).toContain("after renderer neutralization");
+  });
+
+  test("refuses U+0000 in interpolated prose fields", () => {
+    expect(
+      errorCode(() =>
+        composePack(
+          input({ candidates: [candidate("C-1", 0, 1, { why_included: "bad\0reason" })] }),
+        ),
+      ),
+    ).toBe("INVALID_INPUT");
+  });
+
+  test("refuses a backtick in why_included before it can break the item heading", () => {
+    expect(
+      errorCode(() =>
+        composePack(
+          input({ candidates: [candidate("C-1", 0, 1, { why_included: "has`backtick" })] }),
+        ),
+      ),
+    ).toBe("INVALID_CANDIDATE");
+  });
+
+  test("refuses a control comment inside a trusted system body", () => {
+    const systemItem = (bodyText: string) =>
+      candidate("S-1", 0, 1, {
+        kind: "statement",
+        scope: "system",
+        untrusted: false,
+        body: bodyText,
+      });
+    expect(
+      errorCode(() => composePack(input({ candidates: [systemItem("<!-- asimp:item id=X -->")] }))),
+    ).toBe("INVALID_CANDIDATE");
+    // The parallel backtick question — raw trusted interpolation can corrupt
+    // the markdown face — is owned by asimposiumorg-render-trusted-fence; the
+    // composer admits it today, so pin THAT contract here until the owner
+    // decides between a prepare-side ban and fencing system bodies.
+    expect(errorCode(() => composePack(input({ candidates: [systemItem("```text")] })))).toBe(
+      undefined,
+    );
+  });
+
+  test("an ordinary trusted system body still composes", () => {
+    const composed = composePack(
+      input({
+        candidates: [
+          candidate("S-1", 0, 1, {
+            kind: "statement",
+            scope: "system",
+            untrusted: false,
+            body: "**Move: add-refuter.** Attack the k = 3 boundary case.",
+          }),
+        ],
+      }),
+    );
+    expect(composed.items).toHaveLength(1);
+  });
+});

@@ -217,6 +217,12 @@ function assertScalarText(value: unknown, field: string): string {
   if (offset !== undefined) {
     return refuse("INVALID_INPUT", `${field} contains an unpaired UTF-16 surrogate at ${offset}`);
   }
+  // prepareProjection refuses U+0000 on every projection string; surface the
+  // same defect here as PackComposerError so no caller-visible failure depends
+  // on which validator fires first.
+  if (value.includes("\0")) {
+    return refuse("INVALID_INPUT", `${field} contains U+0000`);
+  }
   return value;
 }
 
@@ -251,6 +257,19 @@ function assertCandidateBody(value: unknown, field: string): string {
   // depend on which rule happens to trip first inside prepareProjection.
   if (value.includes("\0")) {
     return refuse("INVALID_CANDIDATE", `${field} contains U+0000`);
+  }
+  // prepareProjection re-checks the ceiling AFTER neutralization: a forged
+  // control comment expands `<` to the 4-character `&lt;` replacement (+3 per
+  // opener), so a raw body inside the raw limit can still exceed it once
+  // prepared. Run the same bounded scan here and refuse as PackComposerError;
+  // otherwise the fixed-point estimator dies on RenderContractError mid-compose
+  // and the mounted pack face answers with an untyped 500.
+  const neutralized = neutralizeUntrustedBody(value);
+  if (codePointCountThroughLimit(neutralized.text, MAX_BODY_CODE_POINTS) > MAX_BODY_CODE_POINTS) {
+    return refuse(
+      "INVALID_CANDIDATE",
+      `candidate body exceeds the renderer's ${MAX_BODY_CODE_POINTS}-code-point limit after renderer neutralization`,
+    );
   }
   return value;
 }
@@ -388,13 +407,36 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
         `candidates[${index}].why_included contains an ASImposium control comment; only the renderer may author <!-- asimp … --> delimiters`,
       );
     }
+    // prepareProjection refuses backticks in every markdown-interpolated
+    // server-authored field, and `.why_included` is interpolated into the item
+    // heading of the canonical agent face. Refuse here so the defect leaves as
+    // PackComposerError rather than RenderContractError mid-compose.
+    if (whyIncluded.includes("`")) {
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidates[${index}].why_included contains a backtick; write the inclusion reason as ordinary prose`,
+      );
+    }
+    const body = assertCandidateBody(candidate.body, `candidates[${index}].body`);
+    if (!candidate.untrusted && hasAsimpControlComment(body)) {
+      // Mirrors prepareProjection's TRUSTED_BODY_CONTAINS_CONTROL_MARKER: a
+      // control comment in a trusted body is renderer-identity forgery. The
+      // parallel BACKTICK ban is deliberately absent here — the property
+      // generator mints system bodies containing backticks, so that question
+      // (raw interpolation can corrupt the face) is owned by
+      // asimposiumorg-render-trusted-fence, not by this admission gate.
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidate ${id} trusted body contains an ASImposium control comment; only the renderer may author <!-- asimp … --> delimiters`,
+      );
+    }
     const validated: PackCandidate = {
       kind,
       id,
       scope,
       tokens: assertTokenEstimate(candidate.tokens, `candidates[${index}].tokens`),
       untrusted: candidate.untrusted,
-      body: assertCandidateBody(candidate.body, `candidates[${index}].body`),
+      body,
       why_included: whyIncluded,
       stable_prefix: assertStablePrefix(
         candidate.stable_prefix,
