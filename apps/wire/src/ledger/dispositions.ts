@@ -280,7 +280,7 @@ export function evaluateClaimTransition(
     // The malformed exit rule: a statement defect cannot be cured in place by
     // any volume of review or evidence — proof evidence cannot cure a
     // statement defect — so the only exit is a new claim version.
-    if (event.kind === "new-version") return allow("superseded");
+    if (event.kind === "new-version") return allow("open");
     return refuse("malformed exits only via a new claim version");
   }
 
@@ -288,7 +288,12 @@ export function evaluateClaimTransition(
     if (current === "draft") {
       return refuse("drafts are edited in place; only a published claim mints a new version");
     }
-    return allow("superseded");
+    // P9 (Fable section 6.3): editing mints @n+1 and RESETS the disposition to
+    // open. The new head version is fresh, unreviewed content — reviews pin
+    // versions, so every prior verdict stays attached to the version it
+    // judged while this identity re-enters the machine at open. "superseded"
+    // is for replaced identities, not a new version of the same one.
+    return allow("open");
   }
 
   switch (event.kind) {

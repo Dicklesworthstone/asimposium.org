@@ -8,6 +8,7 @@ import {
   PackResponseSchema,
   ProblemDocumentSchema,
   PromoteResponseSchema,
+  ReviseResponseSchema,
   SessionOpenResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
@@ -1572,6 +1573,237 @@ describe("session protocol routes", () => {
     ).toEqual({ count: 1 });
     expect(
       await db.prepare("SELECT COUNT(*) AS count FROM claim_versions").first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+  });
+
+  test("a revision mints @n+1 with a fresh digest and updates the claims head", async () => {
+    const { call, db, binding } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "revise-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "revise-promote" },
+      body: JSON.stringify({
+        workshop_id: await push("revise-push", "Revision witness"),
+        kind: "conjecture",
+        statement: "The original statement stands.",
+        falsifier: "A counterexample to the original.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+
+    // A self-reference is refused before any write (P10).
+    const selfDep = await call(`/v1/sessions/${session.session_id}/revise`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "revise-selfdep" },
+      body: JSON.stringify({
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "conjecture",
+        statement: "A revised statement.",
+        falsifier: "Still refutable.",
+        depends_on: ["C-1"],
+      }),
+    });
+    expect(selfDep.status).toBe(422);
+    expect(await selfDep.json()).toMatchObject({ code: "CYCLE_IN_DEPENDENCIES", rule: "P10" });
+
+    const reviseContent = {
+      kind: "conjecture",
+      statement: "The strengthened revision, scoped to odd toggles.",
+      falsifier: "An even-toggle sequence that changes the orbit count.",
+    } as const;
+    const revised = await call(`/v1/sessions/${session.session_id}/revise`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "revise-mint" },
+      body: JSON.stringify({
+        claim_id: "C-1",
+        base_version: 1,
+        ...reviseContent,
+      }),
+    });
+    expect(revised.status).toBe(201);
+    if (revised.status !== 201) console.error("T1-BODY", await revised.text());
+    expect(revised.headers.get("cache-control")).toBe("private, no-store");
+    const revision = ReviseResponseSchema.parse(await revised.json());
+    expect(revision).toMatchObject({ claim_id: "C-1", seq: 2, version: 2 });
+
+    const versions = await db
+      .prepare(
+        `SELECT version, kind, statement, falsifier, content_digest, editor_fellow_id
+         FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = 'C-1' ORDER BY version`,
+      )
+      .all<{
+        version: number;
+        kind: string;
+        statement: string;
+        falsifier: string | null;
+        content_digest: string;
+        editor_fellow_id: string;
+      }>();
+    expect(versions.results ?? []).toHaveLength(2);
+    const head = (versions.results ?? []).at(-1);
+    expect(head).toEqual({
+      version: 2,
+      kind: reviseContent.kind,
+      statement: reviseContent.statement,
+      falsifier: reviseContent.falsifier,
+      content_digest: await claimContentDigest(reviseContent, sha256Hex),
+      editor_fellow_id: binding.fellowId,
+    });
+    // The v1 row is immutable history; the claims head carries the revision.
+    const claimsRow = await db
+      .prepare(
+        "SELECT statement, source_seq FROM claims WHERE problem_id = 'P-4DSP' AND id = 'C-1'",
+      )
+      .first<{ statement: string; source_seq: number }>();
+    expect(claimsRow).toEqual({ statement: reviseContent.statement, source_seq: 2 });
+    const revisedEvent = await db
+      .prepare(
+        "SELECT type, object_version FROM events WHERE object_id = 'C-1' AND type != 'claim.created'",
+      )
+      .first<{ type: string; object_version: number }>();
+    expect(revisedEvent).toEqual({ type: "claim.revised", object_version: 2 });
+  });
+
+  test("a stale base version refuses with OBJECT_VERSION_CONFLICT and mints nothing", async () => {
+    const { call, db } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "stale-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "stale-promote" },
+      body: JSON.stringify({
+        workshop_id: await push("stale-push", "First."),
+        kind: "lemma",
+        statement: "First.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+    const revised = await call(`/v1/sessions/${session.session_id}/revise`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "stale-revise" },
+      body: JSON.stringify({
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "lemma",
+        statement: "Second.",
+      }),
+    });
+    expect(revised.status).toBe(201);
+
+    const stale = await call(`/v1/sessions/${session.session_id}/revise`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "stale-base" },
+      body: JSON.stringify({
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "lemma",
+        statement: "Based on the wrong head.",
+      }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      code: "OBJECT_VERSION_CONFLICT",
+      rule: "P9",
+      head_version: 2,
+    });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claim_versions").first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+  });
+
+  test("a revision that collides with another claim's statement mints nothing (P11)", async () => {
+    const { call, db } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "collide-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const first = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "collide-a" },
+      body: JSON.stringify({
+        workshop_id: await push("collide-push-a", "Alpha"),
+        kind: "lemma",
+        statement: "The alpha statement owns this normalized form.",
+        relates_to: [],
+      }),
+    });
+    expect(first.status).toBe(201);
+    const second = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "collide-b" },
+      body: JSON.stringify({
+        workshop_id: await push("collide-push-b", "Beta"),
+        kind: "lemma",
+        statement: "The beta statement is distinct.",
+        relates_to: [],
+      }),
+    });
+    expect(second.status).toBe(201);
+
+    const collided = await call(`/v1/sessions/${session.session_id}/revise`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "collide-revise" },
+      body: JSON.stringify({
+        claim_id: "C-2",
+        base_version: 1,
+        kind: "lemma",
+        // Whitespace differs from C-1's statement; the norm hash does not.
+        statement: "The   alpha statement owns this   normalized form.",
+      }),
+    });
+    expect(collided.status).toBe(409);
+    const collidedBody: unknown = await collided.json();
+    if (
+      typeof collidedBody !== "object" ||
+      collidedBody === null ||
+      !("existing_claim_id" in collidedBody)
+    ) {
+      throw new Error("the duplicate refusal must name the existing claim");
+    }
+    expect(collidedBody.existing_claim_id).toBe("C-1");
+    // P11 fires WITHOUT minting: C-2 stays at exactly one version.
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM claim_versions WHERE claim_id = 'C-2'")
+        .first<{ count: number }>(),
     ).toEqual({ count: 1 });
   });
 

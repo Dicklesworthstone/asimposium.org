@@ -111,7 +111,7 @@ export interface KraterEvent {
   eventId: string;
   problemId: string;
   seq: number;
-  type: "claim.created";
+  type: "claim.created" | "claim.revised";
   objectId: string;
   payloadSha256: string;
   rowDigest: string;
@@ -206,7 +206,7 @@ interface EventRow {
   id: string;
   problem_id: string;
   seq: number;
-  type: "claim.created";
+  type: "claim.created" | "claim.revised";
   object_kind: "claim";
   object_id: string;
   object_version: number;
@@ -1353,6 +1353,456 @@ export async function writeClaim(
       chainDigest: event.chain_digest,
       checkpointDigest: checkpoint.checkpoint_digest,
       writePhaseMs,
+      successfulBatchRowsRead: metricSum(results, "rows_read"),
+      successfulBatchRowsWritten: metricSum(results, "rows_written"),
+      successfulBatchSqlMs: sqlDuration(results),
+      preflight,
+      writeClaimWallMs: Math.round((performance.now() - writeClaimStartedAt) * 1_000) / 1_000,
+      lockWaitMs: null,
+      retryCount,
+    };
+  }
+
+  throw new Error("Krater chain retry budget exhausted.");
+}
+
+/**
+ * W5.3 (P9): the revision write. Mints version @n+1 for an EXISTING claim in
+ * one atomic batch: the immutable claim_versions row, the claims head update
+ * (statement, norm_hash, payload digest, source sequence), the rebuilt
+ * projection, the claim.revised event, its content, the outbox row and the
+ * integrity checkpoint.
+ *
+ * The stale-base guard IS the primary key: inserting version base_version + 1
+ * collides with claim_versions(claim_id, version) exactly when a concurrent
+ * revision already minted it or the caller's base is behind the durable head,
+ * so a stale replacement aborts its own whole batch instead of silently
+ * strengthening or weakening a reviewed object. Callers map that constraint
+ * error to OBJECT_VERSION_CONFLICT.
+ *
+ * Deliberately a sibling of writeClaim rather than a parameterization: the
+ * promote path is under concurrent reshaping (session replay atomicity), and
+ * consolidating the two writers mid-flight would couple their retries. The
+ * shared pieces (head read, digest helpers, verification readers) are reused;
+ * only the batch skeleton is mirrored.
+ */
+export interface KraterRevisionInput {
+  problemId: string;
+  /** The real, existing claim id ("C-12") — no placeholder dance here. */
+  claimId: string;
+  eventId: string;
+  idempotencyKey: string;
+  baseVersion: number;
+  newVersion: number;
+  kind: string;
+  statement: string;
+  falsifier: string | null;
+  /** The claim-version content digest from mintClaimVersion. */
+  contentDigest: string;
+  editorFellowId: string;
+  /** The split/policy.ts normHash of the NEW statement. */
+  normHash: string;
+  /** Rule A3: the full attribution snapshot, recorded on the claim.revised event. */
+  readonly attribution?: {
+    readonly fellowId: string;
+    readonly sponsorId: string;
+    readonly sessionId: string;
+    readonly modelSelfDeclared: string;
+    readonly harness: string;
+  };
+  createdAt: string;
+}
+
+export function canonicalRevisionPayload(input: {
+  readonly baseVersion: number;
+  readonly claimId: string;
+  readonly falsifier: string | null;
+  readonly kind: string;
+  readonly statement: string;
+}): string {
+  return canonicalJson({
+    base_version: input.baseVersion,
+    claim_id: input.claimId,
+    falsifier: input.falsifier,
+    kind: input.kind,
+    statement: input.statement,
+  });
+}
+
+function validateRevisionInput(input: KraterRevisionInput, serverNowMs: number): void {
+  requireIdentifier("problemId", input.problemId);
+  requireIdentifier("claimId", input.claimId);
+  requireIdentifier("eventId", input.eventId);
+  requireIdentifier("idempotencyKey", input.idempotencyKey);
+  if (!Number.isSafeInteger(input.baseVersion) || input.baseVersion < 1) {
+    inputError("baseVersion must be a positive safe integer.");
+  }
+  if (input.newVersion !== input.baseVersion + 1) {
+    inputError("newVersion must be exactly baseVersion + 1 (P9 mints @n+1).");
+  }
+  if (
+    input.statement.trim().length === 0 ||
+    new TextEncoder().encode(input.statement).byteLength > MAX_STATEMENT_BYTES
+  ) {
+    inputError("statement must be non-empty and within the Krater v0 byte limit.");
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(input.contentDigest)) {
+    inputError("contentDigest must be a sha256-prefixed lowercase hex digest.");
+  }
+  if (!/^[0-9a-f]{64}$/.test(input.normHash)) {
+    inputError("normHash must be lowercase SHA-256 hex.");
+  }
+  validateKraterIngressTimestamp(input.createdAt, serverNowMs);
+}
+
+export async function writeClaimRevision(
+  db: D1Database,
+  input: KraterRevisionInput,
+  hooks: KraterWriteHooks = {},
+  companion?: KraterAtomicCompanion,
+): Promise<KraterWriteResult> {
+  const writeClaimStartedAt = performance.now();
+  const serverNowMs = Date.now();
+  validateRevisionInput(input, serverNowMs);
+  const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
+  const preflight = await backfillKraterIntegrity(
+    db,
+    input.problemId,
+    input.createdAt,
+    serverNowMs,
+  );
+  const companionRequestDigest = companion?.requestDigest;
+  if (companionRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(companionRequestDigest)) {
+    inputError("an atomic companion request digest must be lowercase SHA-256 hex.");
+  }
+  const writePhaseStartedAt = performance.now();
+  let retryCount = 0;
+
+  while (retryCount <= MAX_CHAIN_RETRIES) {
+    const before = await readProblemHead(db, input.problemId);
+    await hooks.afterReadHead?.({ publicSeq: before.public_seq, chainDigest: before.chain_digest });
+    if (
+      !Number.isSafeInteger(before.public_seq) ||
+      before.public_seq < 0 ||
+      before.public_seq >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new KraterSequenceExhaustedError(
+        "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+      );
+    }
+    const candidateSeq = before.public_seq + 1;
+    const payloadJson = canonicalRevisionPayload({
+      baseVersion: input.baseVersion,
+      claimId: input.claimId,
+      falsifier: input.falsifier,
+      kind: input.kind,
+      statement: input.statement,
+    });
+    const [payloadSha256, requestDigest] = await Promise.all([
+      sha256Hex(payloadJson),
+      companionRequestDigest === undefined
+        ? sha256Hex(
+            canonicalJson({
+              base_version: input.baseVersion,
+              claim_id: input.claimId,
+              statement: input.statement,
+            }),
+          )
+        : Promise.resolve(companionRequestDigest),
+    ]);
+    const [nextChainDigest, nextRowDigest] = await Promise.all([
+      eventChainDigest(input.problemId, candidateSeq, payloadSha256, before.chain_digest),
+      eventEnvelopeRowDigest({
+        eventId: input.eventId,
+        problemId: input.problemId,
+        seq: candidateSeq,
+        type: "claim.revised",
+        objectKind: "claim",
+        objectId: input.claimId,
+        objectVersion: input.newVersion,
+        payloadSha256,
+        createdAt: input.createdAt,
+      }),
+    ]);
+    const nextBuildDigest = claimProjectionBuildDigestV1(nextRowDigest);
+    const nextCheckpointDigest = await checkpointDigest(
+      input.problemId,
+      candidateSeq,
+      nextChainDigest,
+    );
+
+    const companionStatements =
+      (await companion?.statementsForAttempt({
+        sequence: candidateSeq,
+        claimId: input.claimId,
+        eventId: input.eventId,
+      })) ?? [];
+    let results: D1Result<SequenceRow>[];
+    try {
+      results = await db.batch<SequenceRow>([
+        statement(
+          db,
+          `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
+           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+           ON CONFLICT(problem_id, idempotency_key) DO NOTHING`,
+          input.problemId,
+          input.idempotencyKey,
+          requestDigest,
+          input.createdAt,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+             SELECT 1 FROM idempotency
+             WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+           )
+           RETURNING public_seq`,
+          nextChainDigest,
+          input.createdAt,
+          input.problemId,
+          before.public_seq,
+          before.chain_digest,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        // The stale-base / double-mint guard: this INSERT collides with the
+        // claim_versions primary key exactly when the durable head is not at
+        // base_version, aborting the whole batch.
+        statement(
+          db,
+          `INSERT INTO claim_versions
+             (claim_id, problem_id, version, kind, statement, falsifier,
+              content_digest, editor_fellow_id, created_at)
+           SELECT ?, p.id, ?, ?, ?, ?, ?, ?, ?
+           FROM problems p
+           JOIN claims c ON c.problem_id = p.id AND c.id = ?
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
+          input.claimId,
+          input.newVersion,
+          input.kind,
+          input.statement,
+          input.falsifier,
+          input.contentDigest,
+          input.editorFellowId,
+          input.createdAt,
+          input.claimId,
+          input.idempotencyKey,
+          input.problemId,
+        ),
+        // claim_projections carries a triple FK into claims(problem_id, id,
+        // source_seq), so the old derived projection row must be dropped
+        // BEFORE the claims head moves to the new sequence (Rule A6: the log
+        // is the truth; projections are rebuildable). The new row lands two
+        // statements below against the moved head.
+        statement(
+          db,
+          `DELETE FROM claim_projections
+           WHERE problem_id = ? AND claim_id = ?`,
+          input.problemId,
+          input.claimId,
+        ),
+        statement(
+          db,
+          `UPDATE claims SET statement = ?, payload_sha256 = ?, norm_hash = ?, source_seq = p.public_seq
+           FROM problems p
+           WHERE p.id = ? AND claims.problem_id = p.id AND claims.id = ?
+             AND EXISTS (
+               SELECT 1 FROM idempotency i
+               WHERE i.problem_id = p.id AND i.idempotency_key = ? AND i.event_id IS NULL
+             )`,
+          input.statement,
+          payloadSha256,
+          input.normHash,
+          input.problemId,
+          input.claimId,
+          input.idempotencyKey,
+        ),
+        statement(
+          db,
+          `INSERT INTO claim_projections
+             (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+           SELECT ?, p.id, p.public_seq, 1, ?, 0, ?
+           FROM problems p
+           WHERE p.id = ?
+           ON CONFLICT(problem_id, claim_id) DO UPDATE SET
+             source_seq = excluded.source_seq,
+             projection_version = projection_version + 1,
+             build_digest = excluded.build_digest,
+             stale = 0,
+             updated_at = excluded.updated_at`,
+          input.claimId,
+          nextBuildDigest,
+          input.createdAt,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+              row_digest, chain_digest, created_at,
+              actor_fellow_id, actor_sponsor_id, actor_session_id,
+              model_string_self_declared, harness)
+           SELECT ?, p.id, p.public_seq, 'claim.revised', 'claim', ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
+          input.eventId,
+          input.claimId,
+          input.newVersion,
+          payloadSha256,
+          nextRowDigest,
+          nextChainDigest,
+          input.createdAt,
+          input.attribution?.fellowId ?? null,
+          input.attribution?.sponsorId ?? null,
+          input.attribution?.sessionId ?? null,
+          input.attribution?.modelSelfDeclared ?? null,
+          input.attribution?.harness ?? null,
+          input.idempotencyKey,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+           SELECT ?, ?, ?
+           FROM idempotency i
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
+          input.eventId,
+          payloadSha256,
+          payloadJson,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        statement(
+          db,
+          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+           SELECT ?, ?, 'search.index', ?, ?, ?
+           FROM idempotency i
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
+          input.eventId,
+          input.problemId,
+          `search.index:${input.eventId}`,
+          payloadSha256,
+          outboxCreatedAt,
+          input.problemId,
+          input.idempotencyKey,
+        ),
+        statement(
+          db,
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
+              checkpoint_mode, created_at)
+           SELECT p.id, p.public_seq, p.chain_digest, ?, 1, 'unsigned-v0', ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
+          nextCheckpointDigest,
+          input.createdAt,
+          input.idempotencyKey,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `UPDATE idempotency
+           SET event_id = ?, event_seq = (SELECT seq FROM events WHERE id = ?)
+           WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+             AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+          input.eventId,
+          input.eventId,
+          input.problemId,
+          input.idempotencyKey,
+          input.eventId,
+        ),
+        ...companionStatements,
+      ]);
+    } catch (error) {
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (
+        retryCount < MAX_CHAIN_RETRIES &&
+        (isRetryableChainConflict(error) || latestHead.chain_digest !== before.chain_digest)
+      ) {
+        retryCount += 1;
+        continue;
+      }
+      throw error;
+    }
+
+    const settled = await statement(
+      db,
+      `SELECT request_digest, event_id, event_seq
+       FROM idempotency WHERE problem_id = ? AND idempotency_key = ?`,
+      input.problemId,
+      input.idempotencyKey,
+    ).first<IdempotencyRow>();
+    if (settled === null) {
+      throw new KraterProblemNotFoundError("problem must exist before a Krater revision write.");
+    }
+    if (settled.request_digest !== requestDigest) {
+      throw new KraterIdempotencyConflictError(
+        "an idempotency key cannot represent two request digests.",
+      );
+    }
+    if (settled.event_id === null || settled.event_seq === null) {
+      throw new Error("Krater revision did not settle an event envelope.");
+    }
+    const settledEventSeq = requireStoredSequence(
+      settled.event_seq,
+      "idempotency event sequence",
+      false,
+    );
+    const event = await readEventById(db, settled.event_id);
+    const [projection, checkpoint, claim] = await Promise.all([
+      readProjectionByEvent(db, event),
+      readCheckpointByEvent(db, event),
+      readClaimByEvent(db, event),
+    ]);
+    const observedPayloadSha256 = await sha256Hex(
+      canonicalRevisionPayload({
+        baseVersion: input.baseVersion,
+        claimId: input.claimId,
+        falsifier: input.falsifier,
+        kind: input.kind,
+        statement: claim.statement,
+      }),
+    );
+    if (
+      event.problem_id !== input.problemId ||
+      event.type !== "claim.revised" ||
+      event.object_kind !== "claim" ||
+      event.object_version !== input.newVersion ||
+      claim.id !== event.object_id ||
+      claim.problem_id !== event.problem_id ||
+      claim.source_seq !== event.seq ||
+      observedPayloadSha256 !== event.payload_sha256 ||
+      projection.source_seq !== event.seq
+    ) {
+      throw new Error("Krater persisted revision bindings disagree.");
+    }
+    if (event.seq !== settledEventSeq || checkpoint.root_chain_digest !== event.chain_digest) {
+      throw new Error("Krater persisted integrity records disagree.");
+    }
+    if (event.row_digest === null || event.chain_digest === null) {
+      throw new Error("Krater revision did not persist integrity digests.");
+    }
+
+    const after = await readProblemHead(db, input.problemId);
+    return {
+      eventId: settled.event_id,
+      claimId: event.object_id,
+      seq: settledEventSeq,
+      idempotent: false,
+      preCursor: before.public_seq,
+      postCursor: after.public_seq,
+      payloadSha256: event.payload_sha256,
+      rowDigest: event.row_digest,
+      buildDigest: projection.build_digest,
+      chainDigest: event.chain_digest,
+      checkpointDigest: checkpoint.checkpoint_digest,
+      writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
       successfulBatchRowsRead: metricSum(results, "rows_read"),
       successfulBatchRowsWritten: metricSum(results, "rows_written"),
       successfulBatchSqlMs: sqlDuration(results),

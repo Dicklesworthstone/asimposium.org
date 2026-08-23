@@ -255,17 +255,21 @@ describe("claim machine: the full legal transition table", () => {
         EMPTY_CLAIM_CONTEXT,
         "open",
       ],
-      // new-version supersedes every published non-terminal state.
-      ["open", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "superseded"],
-      ["malformed", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "superseded"],
-      ["disputed", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "superseded"],
+      // P9 (Fable section 6.3): a revision mints @n+1 and RESETS the
+      // disposition to open — the head version is fresh, unreviewed content.
+      // Reviews pin versions, so prior verdicts stay attached to the version
+      // they judged; "superseded" is for replaced identities, not a new
+      // version of the same one. This also gives malformed its only exit.
+      ["open", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "open"],
+      ["malformed", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "open"],
+      ["disputed", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "open"],
       [
         "corroborated",
         { kind: "new-version", new_version: 2 },
         context({ verified_reviews: [T2_REVIEW], recorded_refutation_attempts: 1 }),
-        "superseded",
+        "open",
       ],
-      ["reduced-to", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "superseded"],
+      ["reduced-to", { kind: "new-version", new_version: 2 }, EMPTY_CLAIM_CONTEXT, "open"],
       // operator repair reaches any state, reason mandatory.
       [
         "superseded",
@@ -665,12 +669,12 @@ describe("malformed exits only via a new claim version", () => {
     }
   });
 
-  test("the sole exit supersedes the malformed version", () => {
+  test("the sole exit re-opens the claim at its new version (P9)", () => {
     expectAllowed(
       "malformed",
       { kind: "new-version", new_version: 2 },
       EMPTY_CLAIM_CONTEXT,
-      "superseded",
+      "open",
     );
   });
 });

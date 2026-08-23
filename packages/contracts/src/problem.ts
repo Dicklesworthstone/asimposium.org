@@ -83,6 +83,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "EVIDENCE_BODY_INVALID",
   // W5.6: the hypothesis write joins the same teaching family.
   "HYPOTHESIS_BODY_INVALID",
+  // W5.3: the revision write joins the same teaching family — a malformed
+  // revision body names its contract so the caller can repair it.
+  "REVISE_BODY_INVALID",
   // W5.6: the hypothesis kill's teaching refusals (a missing target, a
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",

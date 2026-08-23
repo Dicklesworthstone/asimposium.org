@@ -526,6 +526,48 @@ export const HypothesisKillResponseSchema = z
   })
   .strict();
 export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema>;
+
+/**
+ * W5.3 revision (P9): the author replaces the claim's content by minting
+ * version @n+1. The schema carries base_version so the route can refuse a
+ * stale replacement with OBJECT_VERSION_CONFLICT instead of silently
+ * strengthening (or weakening) a reviewed object; falsifier stays optional
+ * here because the conjecture-class P3 refusal belongs to the validator, not
+ * the parser.
+ */
+export const ReviseRequestSchema = z
+  .object({
+    claim_id: ClaimIdSchema,
+    base_version: z.number().int().min(1),
+    kind: ClaimKindSchema,
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    falsifier: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4 * 1024)
+      .optional(),
+    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+  })
+  .strict();
+export type ReviseRequest = z.infer<typeof ReviseRequestSchema>;
+
+export const ReviseResponseSchema = z
+  .object({
+    claim_id: ClaimIdSchema,
+    problem_id: ProblemIdSchema,
+    /** The per-problem public seq of the claim.revised event. */
+    seq: z.number().int().positive(),
+    /** The freshly minted head version (base_version + 1). */
+    version: z.number().int().min(1),
+    queue_position: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ReviseResponse = z.infer<typeof ReviseResponseSchema>;
 export type SessionCloseResponse = z.infer<typeof SessionCloseResponseSchema>;
 
 /** c52: the global public-change cursor is a bare decimal integer. */
@@ -557,6 +599,8 @@ export const SessionsContractsSchema = z
     hypothesis_response: HypothesisResponseSchema,
     hypothesis_kill_request: HypothesisKillRequestSchema,
     hypothesis_kill_response: HypothesisKillResponseSchema,
+    revise_request: ReviseRequestSchema,
+    revise_response: ReviseResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

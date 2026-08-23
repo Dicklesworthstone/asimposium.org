@@ -12,6 +12,8 @@ import {
   PromoteResponseSchema,
   ReviewRequestSchema,
   ReviewResponseSchema,
+  ReviseRequestSchema,
+  ReviseResponseSchema,
   SessionCloseRequestSchema,
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
@@ -48,6 +50,7 @@ import {
   KraterProblemNotFoundError,
   readCursor,
   writeClaim,
+  writeClaimRevision,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { computeClaimDisposition } from "../ledger/disposition-read";
@@ -341,7 +344,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
   };
 
-  type ReplayScope = "session_open" | "workshop_push" | "promote" | "session_close";
+  type ReplayScope = "session_open" | "workshop_push" | "promote" | "revise" | "session_close";
 
   type SessionPreparedStatement = ReturnType<Env["DB"]["prepare"]>;
 
@@ -990,12 +993,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         for (const [index, claim] of claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT).entries()) {
           const claimEvents = await db
             .prepare(
-              `SELECT type FROM events
+              `SELECT type, object_version FROM events
                WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ? AND seq <= ?
                ORDER BY seq ASC`,
             )
             .bind(session.problem_id, claim.id, cursor)
-            .all<{ type: string }>();
+            .all<{ type: string; object_version: number }>();
           const reviewRows = await db
             .prepare(
               `SELECT review_id, reviewer_fellow_id, tier, verdict FROM reviews
@@ -1008,9 +1011,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               tier: "T0" | "T1" | "T2" | "T3";
               verdict: string;
             }>();
-          const claimEventList: ClaimEvent[] = (claimEvents.results ?? [])
-            .map((row) => (row.type === "claim.created" ? ({ kind: "promote" } as const) : null))
-            .filter((event): event is { readonly kind: "promote" } => event !== null);
+          const claimEventList: ClaimEvent[] = (claimEvents.results ?? []).flatMap(
+            (row): ClaimEvent[] => {
+              if (row.type === "claim.created") return [{ kind: "promote" }];
+              // A revision re-enters the machine at open (P9): the fold sees
+              // the new-version event with the version it minted.
+              if (row.type === "claim.revised") {
+                return [{ kind: "new-version", new_version: row.object_version }];
+              }
+              return [];
+            },
+          );
           // The reviews fold as review-verified events (the disposition machine
           // counts the landing review itself).
           const reviewEvents: ClaimEvent[] = (reviewRows.results ?? []).map((review) => ({
@@ -1953,6 +1964,457 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // helper's empty-settlement error. Re-read only the coarse liveness
         // predicate: a still-live credential preserves unrelated failures,
         // while an absent/revoked row receives the shared policy face.
+        return writeRefusedProblem();
+      }
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/revise (W5.3 P9: mint @n+1, reset to open) ----
+  app.post("/v1/sessions/:id/revise", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    // P2/P4 first, exactly like promote: a revision carrying author-writable
+    // disposition/proof fields is a self-certification attempt.
+    if (rawBody !== undefined && typeof rawBody === "object" && rawBody !== null) {
+      const authoritative = rejectAuthoritativeFields(rawBody as Record<string, unknown>);
+      if (authoritative !== null) {
+        return problem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "Authoritative fields are not author-writable",
+          detail:
+            "The revision carried a disposition, proof, confidence, certification, or status-upgrade field.",
+          fixHint: authoritative.fixHint,
+          rule: "P2/P4",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+    }
+    const parsed = ReviseRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "REVISE_BODY_INVALID",
+        title: "The revision does not match the contract",
+        detail: "The JSON body does not match the revise contract.",
+        fixHint: "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: "C-1",
+            base_version: 1,
+            kind: "conjecture",
+            statement: "The orbit count is invariant under all eight toggles.",
+            falsifier: "A toggle sequence that changes the orbit count.",
+            depends_on: [],
+          },
+        },
+      });
+    }
+    if (parsed.data.kind === "conjecture" && parsed.data.falsifier === undefined) {
+      return problem({
+        status: 422,
+        code: "MISSING_FALSIFIER",
+        title: "Conjecture-class claims require a falsifier",
+        detail:
+          "claim kind 'conjecture' requires payload.falsifier: what observation or construction would refute this revised statement?",
+        fixHint:
+          "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.claim_id,
+            base_version: parsed.data.base_version,
+            kind: parsed.data.kind,
+            statement: parsed.data.statement,
+            falsifier: "<what would refute this>",
+            depends_on: parsed.data.depends_on,
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/revise`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "revise",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    // Authorization runs before every existence oracle below (the same
+    // ordering promote fixed in yn9p): membership + scopes need only the
+    // binding and problem id.
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    // Revision authority (W5.3): only the claim's author mints a replacement;
+    // a sponsor may promote that Fellow's drafts but never authors, retargets,
+    // or edits content. Head-version staleness is refused with the exact head
+    // so the caller can re-apply; the batch-level primary-key guard remains
+    // the atomic backstop for concurrent revisions of the same base.
+    const claimHead = await db
+      .prepare(
+        `SELECT
+           (SELECT MAX(v.version) FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id) AS head_version,
+           (SELECT v.editor_fellow_id FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id AND v.version = 1
+           ) AS author_fellow_id
+         FROM claims c WHERE c.problem_id = ? AND c.id = ?`,
+      )
+      .bind(session.problem_id, parsed.data.claim_id)
+      .first<{ head_version: number; author_fellow_id: string }>();
+    if (claimHead === null || claimHead === undefined) {
+      return problem({
+        status: 404,
+        code: "CLAIM_NOT_FOUND",
+        title: "No such claim on this problem",
+        detail: `Claim ${parsed.data.claim_id} does not exist on this problem.`,
+        fixHint: "Check the id against your pack's claims board.",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    if (claimHead.author_fellow_id !== auth.binding.fellowId) {
+      return problem({
+        status: 403,
+        code: "NOT_CLAIM_AUTHOR",
+        title: "Only the claim author may revise it",
+        detail: `Claim ${parsed.data.claim_id} was authored by another Fellow.`,
+        fixHint: "Review it instead, or ask its author to mint a new version.",
+        rule: "P9",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    if (claimHead.head_version !== parsed.data.base_version) {
+      return problem({
+        status: 409,
+        code: "OBJECT_VERSION_CONFLICT",
+        title: "The base version is stale",
+        detail: `Claim ${parsed.data.claim_id} is at head version ${claimHead.head_version}; the replacement was based on ${parsed.data.base_version}.`,
+        fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          head_version: claimHead.head_version,
+        },
+      });
+    }
+
+    // P11: same normalized statement as ANOTHER claim refuses; the claim under
+    // revision is excluded from its own gate. The unique index stays the
+    // commit-time guard — a revision that introduces a duplicate aborts its
+    // own batch WITHOUT minting a version (mapped in the catch below).
+    const candidateHash = await normHash(parsed.data.statement);
+    const existingDuplicate = await db
+      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? AND id != ? LIMIT 1")
+      .bind(session.problem_id, candidateHash, parsed.data.claim_id)
+      .first<{ id: string }>();
+    if (existingDuplicate !== null && existingDuplicate !== undefined) {
+      const refusal = duplicateClaimRefusal(existingDuplicate.id);
+      return problem({
+        status: 409,
+        code: refusal.code,
+        title: "A near-duplicate claim already exists",
+        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+        fixHint: refusal.fixHint,
+        rule: refusal.rule,
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          existing_claim_id: refusal.existingId,
+        },
+      });
+    }
+
+    const resolvedDeps = [...new Set(parsed.data.depends_on)];
+    if (resolvedDeps.includes(parsed.data.claim_id)) {
+      return problem({
+        status: 422,
+        code: "CYCLE_IN_DEPENDENCIES",
+        title: "A claim cannot depend on itself",
+        detail: `${parsed.data.claim_id} lists itself in depends_on.`,
+        fixHint: "Remove the self-reference from depends_on.",
+        rule: "P10",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    if (resolvedDeps.length > 0) {
+      const found = await db
+        .prepare(
+          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
+        )
+        .bind(session.problem_id, ...resolvedDeps)
+        .all<{ id: string }>();
+      const known = new Set((found.results ?? []).map((row) => row.id));
+      const missing = resolvedDeps.filter((dep) => !known.has(dep));
+      if (missing.length > 0) {
+        return problem({
+          status: 422,
+          code: "DEPENDENCY_NOT_FOUND",
+          title: "depends_on references unknown claims",
+          detail: `No claim ${missing.join(", ")} exists on this problem.`,
+          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
+          rule: "P10",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            missing_dependency_ids: missing,
+          },
+        });
+      }
+    }
+
+    try {
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const promotedAt = new Date().toISOString();
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
+      // P9: the content is fixed by the request, so mint the @n+1 decision
+      // before the batch; the route commits what mintClaimVersion decided.
+      const versionMint = await mintClaimVersion({
+        currentVersion: parsed.data.base_version,
+        newContent: {
+          kind: parsed.data.kind,
+          statement: parsed.data.statement,
+          falsifier: parsed.data.falsifier ?? null,
+        },
+        editorFellowId: auth.binding.fellowId,
+        sha256Hex,
+      });
+      const write = await writeClaimRevision(
+        db,
+        {
+          problemId: session.problem_id,
+          claimId: parsed.data.claim_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          baseVersion: parsed.data.base_version,
+          newVersion: versionMint.version,
+          kind: parsed.data.kind,
+          statement: parsed.data.statement,
+          falsifier: parsed.data.falsifier ?? null,
+          contentDigest: versionMint.contentDigest,
+          editorFellowId: auth.binding.fellowId,
+          normHash: candidateHash,
+          createdAt: promotedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+          },
+        },
+        {},
+        {
+          requestDigest: digest,
+          statementsForAttempt: async (attempt) => {
+            const value = ReviseResponseSchema.parse({
+              claim_id: attempt.claimId,
+              problem_id: session.problem_id,
+              seq: attempt.sequence,
+              version: versionMint.version,
+              queue_position: 0,
+            });
+            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'revise', ?, ?,
+                     CASE WHEN EXISTS (
+                       SELECT 1 FROM sessions
+                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                     ) THEN ? ELSE NULL END,
+                     ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                     AND EXISTS (
+                       SELECT 1 FROM fellow_tokens
+                       WHERE credential_id = ? AND revoked_at IS NULL
+                     )
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  session.session_id,
+                  auth.binding.fellowId,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  attempt.eventId,
+                  attempt.sequence,
+                  auth.binding.credentialId,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'revise' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest, claimToken),
+              db
+                .prepare(
+                  `UPDATE idempotency
+                   SET request_digest = CASE WHEN EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'revise' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   ) THEN request_digest ELSE NULL END
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  attempt.eventId,
+                  attempt.sequence,
+                ),
+              ...resolvedDeps.map((dep) =>
+                db
+                  .prepare(
+                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+                     SELECT p.id, ?, ?, ?
+                     FROM problems p
+                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
+                  )
+                  .bind(
+                    attempt.claimId,
+                    dep,
+                    promotedAt,
+                    kraterIdempotencyKey,
+                    session.problem_id,
+                    attempt.eventId,
+                    attempt.sequence,
+                  ),
+              ),
+            ];
+          },
+        },
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(db, "revise", auth.binding.fellowId, key, digest);
+      if (replay === undefined) {
+        throw new Error("Krater revision committed without its atomic replay");
+      }
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(db, "revise", auth.binding.fellowId, key, digest);
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (error instanceof Error && /claim_versions/.test(error.message)) {
+        // The stale-base backstop: a concurrent revision minted @base+1 first,
+        // so this batch died on the claim_versions primary key without
+        // minting anything.
+        return problem({
+          status: 409,
+          code: "OBJECT_VERSION_CONFLICT",
+          title: "The base version is stale",
+          detail: `A concurrent revision of ${parsed.data.claim_id} won the race to version ${parsed.data.base_version + 1}; nothing was minted.`,
+          fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
+          rule: "P9",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+      if (
+        error instanceof Error &&
+        /claims_problem_norm_hash_idx|UNIQUE constraint failed: claims\./.test(error.message)
+      ) {
+        // P11 commit-time guard: the revision introduced a statement that
+        // collides with another OPEN claim. No version was minted (the whole
+        // batch rolled back).
+        const winnerClaim = await db
+          .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+          .bind(session.problem_id, candidateHash)
+          .first<{ id: string }>();
+        const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
+        return problem({
+          status: 409,
+          code: refusal.code,
+          title: "A near-duplicate claim already exists",
+          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+          fixHint: refusal.fixHint,
+          rule: refusal.rule,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            existing_claim_id: refusal.existingId,
+          },
+        });
+      }
+      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
+        return idempotencyConflictProblem();
+      }
+      if (error instanceof KraterProblemNotFoundError) {
+        return problem({
+          status: 404,
+          code: "PROBLEM_NOT_FOUND",
+          title: "No such problem",
+          detail: "The session's problem is missing from the ledger.",
+          fixHint: "Check the problem id against GET /problems.json.",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+      const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
+      if (current instanceof Response) return current;
+      if (
+        error instanceof ReplayClaimNotCommittedError ||
+        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+      ) {
         return writeRefusedProblem();
       }
       throw error;

@@ -67,6 +67,7 @@
                     "REVIEW_BODY_INVALID",
                     "EVIDENCE_BODY_INVALID",
                     "HYPOTHESIS_BODY_INVALID",
+                    "REVISE_BODY_INVALID",
                     "HYPOTHESIS_NOT_FOUND",
                     "HYPOTHESIS_ALREADY_KILLED"
                   ]
@@ -412,6 +413,7 @@
                 "REVIEW_BODY_INVALID",
                 "EVIDENCE_BODY_INVALID",
                 "HYPOTHESIS_BODY_INVALID",
+                "REVISE_BODY_INVALID",
                 "HYPOTHESIS_NOT_FOUND",
                 "HYPOTHESIS_ALREADY_KILLED"
               ]
@@ -735,6 +737,7 @@
         "REVIEW_BODY_INVALID",
         "EVIDENCE_BODY_INVALID",
         "HYPOTHESIS_BODY_INVALID",
+        "REVISE_BODY_INVALID",
         "HYPOTHESIS_NOT_FOUND",
         "HYPOTHESIS_ALREADY_KILLED",
         "UNKNOWN_FORMAT",
