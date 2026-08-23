@@ -61,6 +61,9 @@ if [[ "$WANT_STATIC" == 1 ]]; then
   # db/migrations/00NN without pinning it in both harnesses) before any
   # install or suite spends minutes discovering it.
   phase "migration-pin parity" scripts/check-migration-pins.sh
+  # Same class, contracts side: a peer slice adds refusal codes to problem.ts
+  # without golden fixtures (bit the fleet twice on 2026-08-22/23).
+  phase "problem-corpus parity" scripts/check-problem-corpus-parity.sh
   phase "install (frozen lockfile)" bun install --frozen-lockfile
   phase "typecheck (8 packages)" bun run typecheck
   phase "lint (8 packages)" bun run lint
