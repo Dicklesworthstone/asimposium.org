@@ -49,6 +49,7 @@
         "@biomejs/biome": "2.5.8",
         "@cloudflare/workers-types": "5.20260814.1",
         "@types/bun": "1.3.14",
+        "ajv": "8.17.1",
         "typescript": "5.9.3",
         "wrangler": "4.123.0",
         "wrangler-s1-local": "https://pkg.pr.new/cloudflare/workers-sdk/wrangler@5fc41f0",
