@@ -1,3 +1,8 @@
+import {
+  projectionReplayMatches,
+  transactionBoundaryMatches,
+  type KraterOutboxRecord,
+} from "../../src/krater/krater.ts";
 import { describe, expect, test } from "bun:test";
 
 import {
@@ -316,5 +321,54 @@ describe("doctor-projections (W2.6)", () => {
         expect(error.code).toBe("PROJECTION_DOCTOR_INPUT_INVALID");
       }
     }
+  });
+});
+
+describe("replay and transaction boundary matchers pin buildDigest (asimposiumorg-z4ai)", () => {
+  // The mounted POST /__s2/replay verdict is the conjunction of these matchers
+  // (krater/worker.ts), so a stored projection whose build_digest drifted from
+  // the replayed event rowDigest must never read as integrity=true. The plants
+  // below mutate exactly one field on an otherwise-exact persistence, so each
+  // refusal is attributable to that field alone.
+  const events = [event(1, "C-1"), event(2, "C-2")];
+  const exactProjections = [projection("C-1", 1), projection("C-2", 2)];
+  const exactOutbox: KraterOutboxRecord[] = [
+    { eventId: "E-1", state: "pending", kind: "search.index" },
+    { eventId: "E-2", state: "delivered", kind: "search.index" },
+  ];
+
+  test("an exact replay with a consistent cursor and outbox boundary matches positively", () => {
+    expect(projectionReplayMatches(events, exactProjections)).toBe(true);
+    expect(transactionBoundaryMatches(2, events, exactProjections, exactOutbox)).toBe(true);
+  });
+
+  test("a one-field buildDigest mutation is refused by both matchers", () => {
+    const corrupted = [projection("C-1", 1), projection("C-2", 2, { buildDigest: "wrong" })];
+    expect(projectionReplayMatches(events, corrupted)).toBe(false);
+    expect(transactionBoundaryMatches(2, events, corrupted, exactOutbox)).toBe(false);
+  });
+
+  test("every other compared field still carries its own refusal", () => {
+    for (const [label, override] of [
+      ["claimId", { claimId: "C-other" }],
+      ["problemId", { problemId: "P-other" }],
+      ["sourceSeq", { sourceSeq: 9 }],
+      ["projectionVersion", { projectionVersion: 7 }],
+      ["stale", { stale: true }],
+    ] as const) {
+      const mutated = [projection("C-1", 1), projection("C-2", 2, { ...override })];
+      expect(projectionReplayMatches(events, mutated), label).toBe(false);
+      expect(transactionBoundaryMatches(2, events, mutated, exactOutbox), label).toBe(false);
+    }
+  });
+
+  test("the cursor and outbox conjuncts refuse their own corruption", () => {
+    expect(transactionBoundaryMatches(1, events, exactProjections, exactOutbox)).toBe(false);
+    expect(
+      transactionBoundaryMatches(2, events, exactProjections, [
+        { eventId: "E-1", state: "pending", kind: "search.index" },
+      ]),
+    ).toBe(false);
+    expect(transactionBoundaryMatches(2, events, [projection("C-1", 1)], exactOutbox)).toBe(false);
   });
 });

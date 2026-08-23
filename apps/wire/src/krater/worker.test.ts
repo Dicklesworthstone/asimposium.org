@@ -563,6 +563,66 @@ describe("S2 local harness boundary", () => {
     ).toBe(before);
   });
 
+  test("PLANTED: a one-field build_digest drift alone flips the mounted replay to false", async () => {
+    // z4ai's exact corruption class: the persisted projection keeps its V1
+    // version and every other field, and ONLY build_digest leaves the replayed
+    // event rowDigest. The mount must answer matches:false — never true —
+    // through the same read-only path as the positive control above.
+    const fixture = await changedBuilderReplayFixture();
+    const drifted: ChangedBuilderReplayFixture = {
+      ...fixture,
+      projectionRows: [
+        {
+          claim_id: "C-v2-builder",
+          problem_id: "P-v2-builder",
+          source_seq: 1,
+          projection_version: 1,
+          build_digest: "c".repeat(64),
+          stale: 0,
+        },
+      ],
+    };
+    const readonlyDb = replayReadOnlyDatabase(drifted);
+    const before = JSON.stringify({
+      request: drifted.body,
+      eventBody: drifted.eventBody,
+      events: drifted.eventRows,
+      projections: drifted.projectionRows,
+      outbox: drifted.outboxRows,
+      cursor: drifted.cursor,
+    });
+
+    const env = harnessEnv({
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    });
+    env.DB = readonlyDb.db;
+    const response = await worker.fetch(
+      harnessRequest("/__s2/replay", HARNESS_CAPABILITY, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(drifted.body),
+      }),
+      env,
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ matches: false, cursor: 1, event_count: 1 });
+    expect(readonlyDb.writeAttempts()).toBe(0);
+    expect(
+      JSON.stringify({
+        request: drifted.body,
+        eventBody: drifted.eventBody,
+        events: drifted.eventRows,
+        projections: drifted.projectionRows,
+        outbox: drifted.outboxRows,
+        cursor: drifted.cursor,
+      }),
+    ).toBe(before);
+  });
+
   test("the harness capability is declared only by local S2 Wrangler configurations", () => {
     const configs = [
       ...wranglerConfigs(join(REPOSITORY_ROOT, "apps", "wire")),
