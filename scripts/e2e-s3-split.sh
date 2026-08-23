@@ -41,12 +41,12 @@ is_retained_signal_status() {
 mint_hex_token() {
   local byte_count="$1"
   [[ "${byte_count}" =~ ^([1-9]|[1-9][0-9]|1[0-2][0-8])$ ]] || return 1
-  S3_TOKEN_BYTE_COUNT="${byte_count}" bun --eval '
-    const byteCount = Number(process.env.S3_TOKEN_BYTE_COUNT);
-    if (!Number.isSafeInteger(byteCount) || byteCount < 1 || byteCount > 128) process.exit(1);
-    const bytes = crypto.getRandomValues(new Uint8Array(byteCount));
-    console.log(Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(""));
-  '
+  # /dev/urandom through od avoids a Bun process boot per token. Under load a
+  # bun --eval spawn cost more wall time than every verification ps combined,
+  # and these two tokens sit on every self-test plant's critical path ahead of
+  # its semantic deadline. Entropy source and output format are unchanged:
+  # byte_count cryptographic bytes as lowercase hex, no separators.
+  od -An -N"${byte_count}" -tx1 /dev/urandom | tr -d ' \n'
 }
 
 allocate_port() {
@@ -101,17 +101,6 @@ if (( S3_PORT != 0 )) && port_is_busy "${S3_PORT}"; then
   exit 1
 fi
 
-if [[ ! -x "${WRANGLER}" ]]; then
-  emit '{"tool":"wrangler","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"bash scripts/e2e-s3-split.sh"}'
-  exit 1
-fi
-WRANGLER_VERSION="$("${WRANGLER}" --version)"
-readonly WRANGLER_VERSION
-WRANGLER_VERSION_JSON="$(json_string "${WRANGLER_VERSION}")" || {
-  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"WRANGLER_VERSION_ENCODING_FAILED","reproduce":"bash scripts/e2e-s3-split.sh"}'
-  exit 1
-}
-readonly WRANGLER_VERSION_JSON
 
 STATE_DIR="$(mktemp -d -t asimposium-s3-local)"
 readonly STATE_DIR
@@ -189,6 +178,62 @@ readonly CLEANUP_TERM_ATTEMPTS=30
 readonly CLEANUP_KILL_ATTEMPTS=20
 readonly CLEANUP_RETRY_ATTEMPTS=2
 readonly DIRECT_IDENTITY_ATTEMPTS=20
+term_mode="${S3_SELF_TEST_TERM_RESISTANT_CHILD:-0}"
+identity_mode="${S3_SELF_TEST_IDENTITY_MISMATCH:-0}"
+second_signal_mode="${S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP:-0}"
+post_reap_inspection_mode="${S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE:-0}"
+provisional_exact_mode="${S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE:-0}"
+pid_reuse_mode="${S3_SELF_TEST_PID_REUSE:-0}"
+checker_timeout_mode="${S3_SELF_TEST_CHECKER_TIMEOUT:-0}"
+checker_containment_mode="${S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE:-0}"
+checker_exit_one_mode="${S3_SELF_TEST_CHECKER_EXIT_1:-0}"
+state_holder_recheck_mode="${S3_SELF_TEST_STATE_HOLDER_RECHECK:-0}"
+TEST_DISPATCH_STARTUP_SIGNAL_OWNER="${S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL:-}"
+TEST_STARTUP_SIGNAL_WINDOW="${S3_SELF_TEST_STARTUP_SIGNAL_WINDOW:-}"
+if [[ ! "${term_mode}" =~ ^[01]$ || ! "${identity_mode}" =~ ^[01]$ || \
+  ! "${second_signal_mode}" =~ ^[01]$ || ! "${post_reap_inspection_mode}" =~ ^[01]$ || \
+  ! "${provisional_exact_mode}" =~ ^[01]$ || \
+  ! "${pid_reuse_mode}" =~ ^[01]$ || ! "${checker_timeout_mode}" =~ ^[01]$ || \
+  ! "${checker_containment_mode}" =~ ^[01]$ || ! "${checker_exit_one_mode}" =~ ^[01]$ || \
+  ! "${state_holder_recheck_mode}" =~ ^[01]$ ]] || \
+  { [[ -n "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" ]] && [[ ! "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" =~ ^(server|checker)$ ]]; } || \
+  { [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]] && [[ ! "${TEST_STARTUP_SIGNAL_WINDOW}" =~ ^(background_spawn|scratch_assignment|stop_proof|adoption|cont_release|return)$ ]]; } || \
+  (( term_mode + identity_mode + second_signal_mode + post_reap_inspection_mode + provisional_exact_mode + \
+    pid_reuse_mode + checker_timeout_mode + checker_containment_mode + checker_exit_one_mode + \
+    state_holder_recheck_mode + \
+    (${#TEST_STARTUP_SIGNAL_WINDOW} > 0) + (${#TEST_DISPATCH_STARTUP_SIGNAL_OWNER} > 0) > 1 )); then
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_SELF_TEST_MODE_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  exit 1
+fi
+if [[ ! -x "${WRANGLER}" ]]; then
+  emit '{"tool":"wrangler","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  exit 1
+fi
+# The seven shell-only self-test modes run bash/sleep/lsof fixtures and exit
+# before any Worker launch or checker phase; their transcripts never embed
+# WRANGLER_VERSION_JSON. The version probe is a full Node/Wrangler boot
+# (2-3.5s under load) on every such plant's critical path ahead of its
+# semantic deadline, so it runs only where a transcript can consume it.
+shell_only_selftest=0
+if (( term_mode == 1 || identity_mode == 1 || second_signal_mode == 1 || \
+  post_reap_inspection_mode == 1 || provisional_exact_mode == 1 || \
+  pid_reuse_mode == 1 || state_holder_recheck_mode == 1 )); then
+  shell_only_selftest=1
+fi
+readonly SHELL_ONLY_SELFTEST="${shell_only_selftest}"
+if (( SHELL_ONLY_SELFTEST == 1 )); then
+  # Never emitted on this path; the placeholder keeps downstream JSON valid.
+  WRANGLER_VERSION="unavailable"
+  WRANGLER_VERSION_JSON='"unavailable"'
+else
+  WRANGLER_VERSION="$("${WRANGLER}" --version)"
+  WRANGLER_VERSION_JSON="$(json_string "${WRANGLER_VERSION}")" || {
+    emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"WRANGLER_VERSION_ENCODING_FAILED","reproduce":"bash scripts/e2e-s3-split.sh"}'
+    exit 1
+  }
+fi
+readonly WRANGLER_VERSION
+readonly WRANGLER_VERSION_JSON
 
 process_group_of() {
   local pid="$1" pgid status
@@ -202,24 +247,31 @@ process_group_of() {
 }
 
 mint_supervisor_token() {
-  bun --eval 'console.log(crypto.randomUUID().replace(/-/g, ""));'
+  # Same rationale as mint_hex_token: 16 urandom bytes as 32 hex chars, no Bun
+  # boot. Satisfies the same ^[A-Za-z0-9]{32}$ authority format.
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
 }
 
 supervisor_identity_is_exact() {
   local pid="$1" pgid="$2" started_at="$3" token="$4"
-  local observed_pid observed_pgid observed_started observed_command status
+  local observation observed_pid observed_pgid l1 l2 l3 l4 l5
+  local observed_started observed_command status
   [[ "${pid}" =~ ^[0-9]+$ && "${pgid}" =~ ^[0-9]+$ ]] || return 1
   [[ -n "${started_at}" && "${token}" =~ ^[A-Za-z0-9]{32}$ ]] || return 1
-  observed_pid="$(ps -o pid= -p "${pid}" 2>/dev/null)"; status=$?
+  # One ps snapshot yields every field from the same kernel sample. Four
+  # separate spawns sampled the process at four different instants (weaker
+  # evidence) and their accumulated fork/exec latency under load pushed the
+  # bounded self-test plants past their semantic deadlines. command= is last,
+  # so -ww cannot truncate it into the parsed fields; LC_ALL=C pins the
+  # lstart token count. Trailing lstart padding is rebuilt away on BOTH the
+  # capture side (pin_provisional_supervisor_identity) and this comparison
+  # side, so exact equality semantics are unchanged.
+  observation="$(LC_ALL=C ps -ww -o pid=,pgid=,lstart=,command= -p "${pid}" 2>/dev/null)"; status=$?
   (( status == 0 )) || return 1
-  observed_pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_started="$(ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_command="$(ps -ww -o command= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_pid="${observed_pid//[[:space:]]/}"
-  observed_pgid="${observed_pgid//[[:space:]]/}"
+  read -r observed_pid observed_pgid l1 l2 l3 l4 l5 observed_command <<< "${observation}"
+  [[ "${observed_pid}" =~ ^[0-9]+$ && "${observed_pgid}" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "${l5}" && -n "${observed_command}" ]] || return 1
+  observed_started="${l1} ${l2} ${l3} ${l4} ${l5}"
   [[ "${observed_pid}" == "${pid}" && "${observed_pgid}" == "${pgid}" ]] || return 1
   [[ "${observed_started}" == "${started_at}" ]] || return 1
   [[ "${observed_command}" == *"s3-pinned-supervisor:${token}"* ]]
@@ -227,35 +279,40 @@ supervisor_identity_is_exact() {
 
 supervisor_direct_child_is_exact() {
   local pid="$1" started_at="$2" token="$3"
-  local observed_pid observed_started observed_command status
+  local observation observed_pid l1 l2 l3 l4 l5
+  local observed_started observed_command status
   [[ "${pid}" =~ ^[0-9]+$ && -n "${started_at}" ]] || return 1
   [[ "${token}" =~ ^[A-Za-z0-9]{32}$ ]] || return 1
   if (( TEST_EXACT_CHECK_FAILURES_REMAINING > 0 )); then
     TEST_EXACT_CHECK_FAILURES_REMAINING=$((TEST_EXACT_CHECK_FAILURES_REMAINING - 1))
     return 1
   fi
-  observed_pid="$(ps -o pid= -p "${pid}" 2>/dev/null)"; status=$?
+  # Single atomic snapshot: same fields, one kernel sample, one spawn. See the
+  # snapshot note in supervisor_identity_is_exact for the deadline rationale.
+  observation="$(LC_ALL=C ps -ww -o pid=,lstart=,command= -p "${pid}" 2>/dev/null)"; status=$?
   (( status == 0 )) || return 1
-  observed_started="$(ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_command="$(ps -ww -o command= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_pid="${observed_pid//[[:space:]]/}"
+  read -r observed_pid l1 l2 l3 l4 l5 observed_command <<< "${observation}"
+  [[ "${observed_pid}" =~ ^[0-9]+$ && -n "${l5}" && -n "${observed_command}" ]] || return 1
+  observed_started="${l1} ${l2} ${l3} ${l4} ${l5}"
   [[ "${observed_pid}" == "${pid}" ]] || return 1
   [[ "${observed_started}" == "${started_at}" ]] || return 1
   [[ "${observed_command}" == *"s3-pinned-supervisor:${token}"* ]]
 }
 
 pin_provisional_supervisor_identity() {
+  local observation l1 l2 l3 l4 l5
   local observed_started observed_command status
   (( SUPERVISOR_DIRECT_CHILD == 1 )) || return 1
   [[ "${SUPERVISOR_PID}" =~ ^[0-9]+$ ]] || return 1
   [[ "${SUPERVISOR_TOKEN}" =~ ^[A-Za-z0-9]{32}$ ]] || return 1
   for _attempt in $(seq 1 "${DIRECT_IDENTITY_ATTEMPTS}"); do
-    observed_started="$(ps -o lstart= -p "${SUPERVISOR_PID}" 2>/dev/null)"; status=$?
+    # One atomic snapshot feeds both the initial marker probe and the stored
+    # lstart anchor; the rebuilt started_at drops only ps column padding.
+    observation="$(LC_ALL=C ps -ww -o lstart=,command= -p "${SUPERVISOR_PID}" 2>/dev/null)"; status=$?
     (( status == 0 )) || { sleep 0.05; continue; }
-    observed_command="$(ps -ww -o command= -p "${SUPERVISOR_PID}" 2>/dev/null)"; status=$?
-    (( status == 0 )) || { sleep 0.05; continue; }
+    read -r l1 l2 l3 l4 l5 observed_command <<< "${observation}"
+    [[ -n "${l5}" ]] || { sleep 0.05; continue; }
+    observed_started="${l1} ${l2} ${l3} ${l4} ${l5}"
     if [[ -n "${observed_started}" && \
       "${observed_command}" == *"s3-pinned-supervisor:${SUPERVISOR_TOKEN}"* ]]; then
       if [[ -z "${SUPERVISOR_STARTED_AT}" ]]; then
@@ -1666,33 +1723,6 @@ run_state_holder_recheck_self_test() {
   emit '{"tool":"bash+lsof","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"recursive_lsof_warning_and_malformed_output_fail_closed","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
 }
 
-term_mode="${S3_SELF_TEST_TERM_RESISTANT_CHILD:-0}"
-identity_mode="${S3_SELF_TEST_IDENTITY_MISMATCH:-0}"
-second_signal_mode="${S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP:-0}"
-post_reap_inspection_mode="${S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE:-0}"
-provisional_exact_mode="${S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE:-0}"
-pid_reuse_mode="${S3_SELF_TEST_PID_REUSE:-0}"
-checker_timeout_mode="${S3_SELF_TEST_CHECKER_TIMEOUT:-0}"
-checker_containment_mode="${S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE:-0}"
-checker_exit_one_mode="${S3_SELF_TEST_CHECKER_EXIT_1:-0}"
-state_holder_recheck_mode="${S3_SELF_TEST_STATE_HOLDER_RECHECK:-0}"
-TEST_DISPATCH_STARTUP_SIGNAL_OWNER="${S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL:-}"
-TEST_STARTUP_SIGNAL_WINDOW="${S3_SELF_TEST_STARTUP_SIGNAL_WINDOW:-}"
-if [[ ! "${term_mode}" =~ ^[01]$ || ! "${identity_mode}" =~ ^[01]$ || \
-  ! "${second_signal_mode}" =~ ^[01]$ || ! "${post_reap_inspection_mode}" =~ ^[01]$ || \
-  ! "${provisional_exact_mode}" =~ ^[01]$ || \
-  ! "${pid_reuse_mode}" =~ ^[01]$ || ! "${checker_timeout_mode}" =~ ^[01]$ || \
-  ! "${checker_containment_mode}" =~ ^[01]$ || ! "${checker_exit_one_mode}" =~ ^[01]$ || \
-  ! "${state_holder_recheck_mode}" =~ ^[01]$ ]] || \
-  { [[ -n "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" ]] && [[ ! "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" =~ ^(server|checker)$ ]]; } || \
-  { [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]] && [[ ! "${TEST_STARTUP_SIGNAL_WINDOW}" =~ ^(background_spawn|scratch_assignment|stop_proof|adoption|cont_release|return)$ ]]; } || \
-  (( term_mode + identity_mode + second_signal_mode + post_reap_inspection_mode + provisional_exact_mode + \
-    pid_reuse_mode + checker_timeout_mode + checker_containment_mode + checker_exit_one_mode + \
-    state_holder_recheck_mode + \
-    (${#TEST_STARTUP_SIGNAL_WINDOW} > 0) + (${#TEST_DISPATCH_STARTUP_SIGNAL_OWNER} > 0) > 1 )); then
-  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_SELF_TEST_MODE_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
-  exit 1
-fi
 if (( term_mode == 1 )); then
   if ! run_term_resistant_descendant_self_test; then
     emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_cleanup","status":"fail","reproduce":"bash scripts/e2e-s3-split.sh"}'

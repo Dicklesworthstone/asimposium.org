@@ -4103,7 +4103,11 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE");
   expect(script).toContain("S3_SELF_TEST_PID_REUSE");
   expect(script).toContain("s3-pinned-supervisor:");
-  expect(script).toContain("ps -o lstart=");
+  // 7pfg.10: the identity anchor still observes lstart through ps, but the
+  // fields arrive as one atomic snapshot (pid=,pgid=,lstart=,command=) rather
+  // than four staggered spawns, so the pin is the field, not the old flag
+  // layout.
+  expect(script).toContain("lstart=");
   expect(script).toContain("supervisor_identity_is_exact");
   expect(script).toContain("listener_pids_are_in_group");
   expect(script).toContain("assert_no_survivors");
