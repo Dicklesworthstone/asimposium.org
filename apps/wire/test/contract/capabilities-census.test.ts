@@ -5,17 +5,17 @@
  * session routers are dispatched through wildcard middleware, so their route
  * tables never enter the root Hono instance. This census unions the runtime
  * `.routes` arrays of all four constructed routers (root app including the
- * ledger-face mount, enrollment router, session router) and requires every
- * mounted method+path to be either advertised in the served capabilities
+ * ledger-face mount at "/", enrollment router, session router) and requires
+ * every mounted method+path to be either advertised in the served capabilities
  * document or explicitly classified as intentionally undisclosed with a
  * nonblank reason below.
  *
  * Adding a mounted route without one of those two outcomes fails this contract
  * lane; an advertisement naming a route nothing mounts also fails (phantom
- * check). Templates are normalized one way — mounted `:param{regex}` becomes
- * advertised `<param>` form, and a trailing `?query` on an advertised entry is
- * ignored — so the comparison can never be satisfied by editing the mounted
- * path to chase the advertisement text.
+ * check). Templates normalize one way — mounted `:param{regex}` becomes
+ * advertised `<param>` form; advertised rows lose their `?query` suffixes and
+ * `(bearer)` prose annotations — so the comparison can never be satisfied by
+ * editing mounted paths to chase advertisement text.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -34,17 +34,25 @@ function normalizeMountedPath(path: string): string {
   return path.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/g, "<$1>");
 }
 
-/** Strip a prose query suffix (`/pack?profile=…`) so only the path template compares. */
+/**
+ * Normalize an advertised capability row to its method+path template. Fellow-tier
+ * rows carry a trailing "(bearer)" prose annotation, pack rows a "?profile=…"
+ * suffix; neither is part of the mounted template.
+ */
 function normalizeAdvertisedEntry(entry: string): `${string} ${string}` {
   const separator = entry.indexOf(" ");
-  if (separator !== -1) {
-    const method = entry.slice(0, separator);
-    const rest = entry.slice(separator + 1);
-    const query = rest.indexOf("?");
-    return `${method} ${query === -1 ? rest : rest.slice(0, query)}` as `${string} ${string}`;
-  }
-  return `GET ${entry.trim()}` as `${string} ${string}`;
+  const method = separator !== -1 ? entry.slice(0, separator) : "GET";
+  let path = separator !== -1 ? entry.slice(separator + 1) : entry;
+  const query = path.indexOf("?");
+  if (query !== -1) path = path.slice(0, query);
+  path = path.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  return `${method} ${path}` as `${string} ${string}`;
 }
+
+/** Advertised rows whose parameter spelling differs from the mounted template, pinned explicitly. */
+const ADVERTISED_EQUIVALENT_MOUNTED_ROUTE: Record<string, string> = {
+  "GET /join/<enrollment-id>": "GET /join/<enrollmentId>",
+};
 
 const STUB_SERVICE = {} as never;
 
@@ -79,18 +87,14 @@ async function servedCapabilities(): Promise<{
 
 describe("capabilities disclosure census over every mounted router (asimposiumorg-phg.1.2)", () => {
   // Intentionally undisclosed classes. Each reason is the declaration-site
-  // answer to "why is this reachable route absent from discovery". A new
-  // mounted route that lands here neither advertised nor classified turns the
-  // main assertion red with the exact key listed.
+  // answer to "why is this reachable route absent from discovery". A newly
+  // mounted route that lands neither here nor in the advertisement turns the
+  // main assertion red listing the exact key.
   const UNDISCLOSED_REASON_BY_ROUTE: Record<string, string> = {
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
-    "GET /p/<id>{.+\\.events\\.json$}":
-      "per-problem event tails are quarantined fail-closed placeholders until the W6.4 face contract mounts",
-    "GET /p/<id>{.+\\.json$}":
-      "per-problem JSON faces are quarantined fail-closed placeholders until their Diptych contract mounts",
-    "GET /p/<id>{.+\\.md$}":
-      "per-problem markdown faces are quarantined fail-closed placeholders until their Diptych contract mounts",
+    "GET /p/<id>":
+      "per-problem face shapes are quarantined fail-closed placeholders (.events.json/.json/.md) until their W6.4 Diptych contract mounts",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/enrollments/proposals":
@@ -139,32 +143,25 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
   };
 
-  function mountedCensus(): {
-    readonly all: ReadonlySet<string>;
-    readonly counts: Record<string, number>;
-  } {
-  function mountedCensus(): {
-    readonly all: ReadonlySet<string>;
-    readonly counts: Record<string, number>;
-  } {
+  function mountedCensus(): { readonly all: ReadonlySet<string>; readonly counts: Record<string, number> } {
     // Ledger-face routes are mounted at "/" into createApp's own table; prove
     // that assumption against the unfiltered root table instead of trusting it.
     const rootGetPaths = new Set(
       rootApp.routes.filter((route) => route.method === "GET").map((route) => route.path),
     );
+    // Each /problems.* row counts once under ledgerFace, so the root bucket
+    // excludes exactly those paths.
     const sources: Record<string, readonly RawRoute[]> = {
-      // The census counts each /problems.* row once under ledgerFace, so the
-      // root bucket excludes exactly those paths.
       createApp: rootApp.routes.filter(
-        (route) => !route.method.startsWith("HEAD") && !route.path.startsWith("/problems."),
+        (route) => route.method !== "HEAD" && !route.path.startsWith("/problems."),
       ),
       ledgerFace: rootApp.routes.filter((route) => route.path.startsWith("/problems.")),
       enrollmentRouter: enrollmentRouter.routes,
       sessionRouter: sessionRouter.routes,
     };
-    expect(
-      [...sources.ledgerFace].every((route) => rootGetPaths.has(route.path)),
-    ).toBe(true);
+    const ledgerRows = sources.ledgerFace ?? [];
+    expect(ledgerRows.length).toBeGreaterThan(0);
+    expect(ledgerRows.every((route) => rootGetPaths.has(route.path))).toBe(true);
     const counts: Record<string, number> = {};
     const all = new Set<string>();
     for (const [source, routes] of Object.entries(sources)) {
@@ -190,9 +187,14 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
 
   test("every mounted route is advertised, or classified undisclosed with a reason", async () => {
     const body = await servedCapabilities();
-    const advertised = new Set<string>(
+    const advertisedDirectly = new Set<string>(
       [...body.reads, ...body.agent_writes, ...body.fellow_reads].map(normalizeAdvertisedEntry),
     );
+    // Expand the pinned param-spelling equivalences into the advertised set.
+    const advertised = new Set<string>(advertisedDirectly);
+    for (const [advertisedKey, mountedKey] of Object.entries(ADVERTISED_EQUIVALENT_MOUNTED_ROUTE)) {
+      if (advertisedDirectly.has(advertisedKey)) advertised.add(mountedKey);
+    }
 
     const { all } = mountedCensus();
     const unclassified: string[] = [];
@@ -207,8 +209,9 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     expect(unclassified).toEqual([]);
 
     // Phantom direction: no advertisement may name a route nothing mounts.
-    for (const key of advertised) {
-      expect(all.has(key), key).toBe(true);
+    for (const key of advertisedDirectly) {
+      const mountedForm = ADVERTISED_EQUIVALENT_MOUNTED_ROUTE[key] ?? key;
+      expect(all.has(mountedForm), key).toBe(true);
     }
   });
 
@@ -219,8 +222,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     const advertised = new Set<string>(["GET /"]);
     const candidate = "POST /v1/future-thing";
     const reason = UNDISCLOSED_REASON_BY_ROUTE[candidate];
-    const unclassified =
-      !advertised.has(candidate) && (reason === undefined || reason.length === 0);
+    const unclassified = !advertised.has(candidate) && (reason === undefined || reason.length === 0);
     expect(unclassified).toBe(true);
   });
 });
