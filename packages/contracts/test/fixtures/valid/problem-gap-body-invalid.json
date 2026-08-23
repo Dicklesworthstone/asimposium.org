@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/GAP_BODY_INVALID",
+  "title": "The gap does not match the contract",
+  "status": 422,
+  "code": "GAP_BODY_INVALID",
+  "detail": "The JSON body does not match the gap-filing contract.",
+  "fix_hint": "Send {target_claim_id, target_version, obligation, closes_what} — the obligation is the exact missing step, never 'it follows'.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_claim_id": "C-1",
+    "target_version": 2,
+    "obligation": "Step 4 assumes the covering is finite without proving it; supply the finiteness argument.",
+    "closes_what": "The orbit-count invariance for infinite toggle groups."
+  }
+}

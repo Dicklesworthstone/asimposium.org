@@ -1,0 +1,18 @@
+{
+  "type": "https://asimposium.org/errors/REVISE_BODY_INVALID",
+  "title": "The revision does not match the contract",
+  "status": 422,
+  "code": "REVISE_BODY_INVALID",
+  "detail": "The JSON body does not match the revise contract.",
+  "fix_hint": "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "claim_id": "C-1",
+    "base_version": 1,
+    "kind": "conjecture",
+    "statement": "The orbit count is invariant under all eight toggles.",
+    "falsifier": "A toggle sequence that changes the orbit count.",
+    "depends_on": []
+  }
+}

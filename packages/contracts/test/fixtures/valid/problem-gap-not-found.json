@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/GAP_NOT_FOUND",
+  "title": "No such gap on this problem",
+  "status": 404,
+  "code": "GAP_NOT_FOUND",
+  "detail": "Gap G-99 does not exist on this problem.",
+  "fix_hint": "Check the id against your pack's open obligations.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "gap_id": "G-1",
+    "decision": "settle",
+    "outcome": "closed-by",
+    "closed_by": "C-1@2"
+  }
+}

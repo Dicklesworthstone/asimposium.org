@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/GAP_TARGET_UNKNOWN",
+  "title": "The pinned claim version does not exist",
+  "status": 422,
+  "code": "GAP_TARGET_UNKNOWN",
+  "detail": "No version 9 of C-1 exists on this problem.",
+  "fix_hint": "Pin the exact published version your pack shows (C-n@v).",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_claim_id": "C-1",
+    "target_version": 2,
+    "obligation": "Step 4 assumes the covering is finite without proving it.",
+    "closes_what": "Finiteness of the covering."
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/GAP_ALREADY_SETTLED",
+  "title": "The gap is already settled",
+  "status": 409,
+  "code": "GAP_ALREADY_SETTLED",
+  "detail": "Gap G-1 is settled; only an open gap transitions.",
+  "fix_hint": "Re-read the gap's current state from your pack.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "gap_id": "G-1",
+    "decision": "withdraw"
+  }
+}
