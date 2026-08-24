@@ -94,15 +94,21 @@ export interface KraterWriteHooks {
 /**
  * Statements a higher-level write needs committed with the Krater envelope.
  *
- * The callback runs after the durable head has supplied the candidate sequence
- * and before the single D1 batch. It may prepare statements only; it must not
- * execute them. Session promotion uses this seam to persist its sealed exact
- * response in the same transaction as the claim, projection, event and outbox.
+ * The callback prepares statements after the durable head has supplied the
+ * candidate identity but before the single D1 batch. The returned statements
+ * execute immediately after that batch settles `idempotency.event_id` and
+ * `idempotency.event_seq`. Every companion must therefore bind the supplied
+ * event ID and sequence as its exact settled-owner predicate; an
+ * `event_id IS NULL` predicate cannot match in this phase. The callback may
+ * prepare statements only and must not execute them.
+ *
+ * Session writes use this seam to persist their sealed exact response in the
+ * same transaction as the ledger object, projection, event and outbox.
  */
 export interface KraterAtomicCompanion {
   readonly requestDigest?: string;
   readonly claimIdForSequence?: (sequence: number) => string;
-  readonly statementsForAttempt: (attempt: {
+  readonly statementsAfterIdempotencySettlement: (settlement: {
     readonly sequence: number;
     readonly claimId: string;
     readonly eventId: string;
@@ -1112,7 +1118,7 @@ export async function writeClaim(
     );
 
     const companionStatements =
-      (await companion?.statementsForAttempt({
+      (await companion?.statementsAfterIdempotencySettlement({
         sequence: candidateSeq,
         claimId: attemptInput.claimId,
         eventId: input.eventId,
@@ -1537,7 +1543,7 @@ export async function writeClaimRevision(
     );
 
     const companionStatements =
-      (await companion?.statementsForAttempt({
+      (await companion?.statementsAfterIdempotencySettlement({
         sequence: candidateSeq,
         claimId: input.claimId,
         eventId: input.eventId,
@@ -2088,7 +2094,7 @@ export async function writeGapEvent(
           input.eventId,
           ...settleGuardBinds,
         ),
-        ...((await companion?.statementsForAttempt({
+        ...((await companion?.statementsAfterIdempotencySettlement({
           sequence: candidateSeq,
           claimId: gapId,
           eventId: input.eventId,
@@ -2349,7 +2355,7 @@ export async function writeRelationEvent(
           input.idempotencyKey,
           input.eventId,
         ),
-        ...((await companion?.statementsForAttempt({
+        ...((await companion?.statementsAfterIdempotencySettlement({
           sequence: candidateSeq,
           claimId: objectId,
           eventId: input.eventId,

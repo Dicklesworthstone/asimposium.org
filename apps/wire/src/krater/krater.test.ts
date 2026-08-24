@@ -84,14 +84,17 @@ const OUTBOX_READ_SQL = normalizeSql(`SELECT event_id, problem_id, kind, dedupe_
   payload_sha256, state FROM outbox
   WHERE event_id = ? AND problem_id = ? AND kind = 'search.index'`);
 const CLAIM_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO claims
-  (id, problem_id, statement, payload_sha256, source_seq, created_at)
-  SELECT ?, p.id, ?, ?, p.public_seq, ? FROM problems p
+  (id, problem_id, statement, payload_sha256, norm_hash, source_seq, created_at)
+  SELECT ?, p.id, ?, ?, ?, p.public_seq, ? FROM problems p
   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
   WHERE p.id = ? AND i.event_id IS NULL`);
 const EVENT_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO events
   (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
-  row_digest, chain_digest, created_at)
-  SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ? FROM problems p
+  row_digest, chain_digest, created_at,
+  actor_fellow_id, actor_sponsor_id, actor_session_id,
+  model_string_self_declared, harness, writer_credential_id)
+  SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ? FROM problems p
   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
   WHERE p.id = ? AND i.event_id IS NULL`);
 const OUTBOX_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO outbox
@@ -158,6 +161,7 @@ function retryingWriteHarness(
 ): {
   readonly db: Parameters<typeof writeClaim>[0];
   readonly armConflict: () => void;
+  readonly companionPhaseWrites: () => Readonly<{ pending: number; settled: number }>;
   readonly persistedOutboxCreatedAt: () => string | null;
   readonly synchronousFtsStatements: () => number;
   readonly persistedWrite: () =>
@@ -172,6 +176,7 @@ function retryingWriteHarness(
   let chainDigest = "a".repeat(64);
   let conflictArmed = false;
   let outboxCreatedAt: string | null = null;
+  let companionPhaseWrites = { pending: 0, settled: 0 };
   let synchronousFtsStatements = 0;
   let idempotency: {
     request_digest: string;
@@ -385,7 +390,7 @@ function retryingWriteHarness(
       const eventExecutionBindings = [...eventBindings] as (string | number | null)[];
       const outboxExecutionBindings = [...outboxBindings] as (string | number | null)[];
       if (options.forceClaimPredicateMiss) {
-        claimExecutionBindings[4] = `${idempotencyKey}:missing`;
+        claimExecutionBindings[5] = `${idempotencyKey}:missing`;
       }
       if (options.forceOutboxPredicateMiss) {
         outboxExecutionBindings[6] = `${idempotencyKey}:missing`;
@@ -398,13 +403,19 @@ function retryingWriteHarness(
             problem_id TEXT NOT NULL,
             idempotency_key TEXT NOT NULL,
             event_id TEXT,
+            event_seq INTEGER,
             PRIMARY KEY (problem_id, idempotency_key)
+          );
+          CREATE TABLE companion_effects (
+            phase TEXT PRIMARY KEY,
+            writes INTEGER NOT NULL DEFAULT 0
           );
           CREATE TABLE claims (
             id TEXT PRIMARY KEY,
             problem_id TEXT NOT NULL,
             statement TEXT NOT NULL,
             payload_sha256 TEXT NOT NULL,
+            norm_hash TEXT,
             source_seq INTEGER NOT NULL,
             created_at TEXT NOT NULL
           );
@@ -419,7 +430,13 @@ function retryingWriteHarness(
             payload_sha256 TEXT NOT NULL,
             row_digest TEXT,
             chain_digest TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            actor_fellow_id TEXT,
+            actor_sponsor_id TEXT,
+            actor_session_id TEXT,
+            model_string_self_declared TEXT,
+            harness TEXT,
+            writer_credential_id TEXT
           );
           CREATE TABLE outbox (
             id INTEGER PRIMARY KEY,
@@ -437,12 +454,34 @@ function retryingWriteHarness(
           .run(problemId, nextSeq);
         scratch
           .query(
-            "INSERT INTO idempotency (problem_id, idempotency_key, event_id) VALUES (?, ?, NULL)",
+            "INSERT INTO idempotency (problem_id, idempotency_key, event_id, event_seq) VALUES (?, ?, NULL, NULL)",
           )
           .run(problemId, idempotencyKey);
+        scratch.run("INSERT INTO companion_effects (phase) VALUES ('pending'), ('settled')");
         scratch.query(claimInsert.sql).run(...claimExecutionBindings);
         scratch.query(eventInsert.sql).run(...eventExecutionBindings);
         scratch.query(outboxInsert.sql).run(...outboxExecutionBindings);
+        for (const current of observed) {
+          if (
+            current.sql.includes("UPDATE idempotency") &&
+            current.sql.includes("SET event_id = ?")
+          ) {
+            scratch
+              .query(current.sql)
+              .run(...(current.bindings as readonly (string | number | null)[]));
+          } else if (current.sql.includes("UPDATE companion_effects")) {
+            scratch
+              .query(current.sql)
+              .run(...(current.bindings as readonly (string | number | null)[]));
+          }
+        }
+        const companionRows = scratch
+          .query("SELECT phase, writes FROM companion_effects ORDER BY phase")
+          .all() as { phase: "pending" | "settled"; writes: number }[];
+        companionPhaseWrites = {
+          pending: companionRows.find((row) => row.phase === "pending")?.writes ?? 0,
+          settled: companionRows.find((row) => row.phase === "settled")?.writes ?? 0,
+        };
         persistedClaim = scratch
           .query("SELECT id, problem_id, statement, payload_sha256, source_seq FROM claims LIMIT 1")
           .get() as Record<string, unknown> | null;
@@ -507,6 +546,7 @@ function retryingWriteHarness(
     armConflict: () => {
       conflictArmed = true;
     },
+    companionPhaseWrites: () => companionPhaseWrites,
     persistedOutboxCreatedAt: () => outboxCreatedAt,
     synchronousFtsStatements: () => synchronousFtsStatements,
     persistedWrite: () => {
@@ -748,6 +788,65 @@ describe("Krater deterministic contracts", () => {
     }
   });
 
+  test("PLANTED: atomic companions execute only against the exact settled idempotency owner", async () => {
+    const harness = retryingWriteHarness();
+    let suppliedSettlement:
+      | Readonly<{ sequence: number; claimId: string; eventId: string }>
+      | undefined;
+
+    const result = await writeClaim(
+      harness.db,
+      {
+        problemId: "P-companion-settlement",
+        claimId: "C-companion-settlement",
+        eventId: "E-companion-settlement",
+        idempotencyKey: "IK-companion-settlement",
+        statement: "A companion owns the event only after idempotency settlement.",
+        createdAt: "2026-08-19T00:00:00.000Z",
+      },
+      {},
+      {
+        statementsAfterIdempotencySettlement: (settlement) => {
+          suppliedSettlement = settlement;
+          return [
+            harness.db
+              .prepare(
+                `UPDATE companion_effects SET writes = writes + 1
+                 WHERE phase = 'pending' AND EXISTS (
+                   SELECT 1 FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+                 )`,
+              )
+              .bind("P-companion-settlement", "IK-companion-settlement"),
+            harness.db
+              .prepare(
+                `UPDATE companion_effects SET writes = writes + 1
+                 WHERE phase = 'settled' AND EXISTS (
+                   SELECT 1 FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                 )`,
+              )
+              .bind(
+                "P-companion-settlement",
+                "IK-companion-settlement",
+                settlement.eventId,
+                settlement.sequence,
+              ),
+          ];
+        },
+      },
+    );
+
+    expect(suppliedSettlement).toEqual({
+      sequence: 1,
+      claimId: "C-companion-settlement",
+      eventId: "E-companion-settlement",
+    });
+    expect(result).toMatchObject({ eventId: "E-companion-settlement", seq: 1 });
+    expect(harness.companionPhaseWrites()).toEqual({ pending: 0, settled: 1 });
+  });
+
   test("PLANTED: writeClaim persists the v1 projection digest from its authoritative event row", async () => {
     const harness = retryingWriteHarness();
     const result = await writeClaim(harness.db, {
@@ -961,6 +1060,52 @@ describe("Krater deterministic contracts", () => {
     expect(() => deterministicWorkload("seed with spaces", 1, "2026-08-14T00:00:00.000Z")).toThrow(
       KraterValidationError,
     );
+  });
+});
+
+describe("migration 0001 event sequence ownership", () => {
+  test("PLANTED: duplicate problem sequence fails while the same sequence in another problem succeeds", () => {
+    const db = new Database(":memory:");
+    try {
+      const migration = resolve(
+        import.meta.dir,
+        "..",
+        "..",
+        "..",
+        "..",
+        "db",
+        "migrations",
+        "0001_krater_v0.sql",
+      );
+      db.run(readFileSync(migration, "utf8"));
+      const createdAt = "2026-08-19T00:00:00.000Z";
+      const insertProblem = db.query(
+        "INSERT INTO problems (id, created_at, updated_at) VALUES (?, ?, ?)",
+      );
+      insertProblem.run("P-sequence-alpha", createdAt, createdAt);
+      insertProblem.run("P-sequence-beta", createdAt, createdAt);
+
+      const insertEvent = (eventId: string, problemId: string, sequence: number): void => {
+        db.query(
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version,
+              payload_sha256, created_at)
+           VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, ?, ?)`,
+        ).run(eventId, problemId, sequence, `C-${eventId}`, "a".repeat(64), createdAt);
+      };
+
+      insertEvent("E-sequence-alpha-1", "P-sequence-alpha", 1);
+      expect(() => insertEvent("E-sequence-alpha-duplicate", "P-sequence-alpha", 1)).toThrow(
+        /UNIQUE constraint failed: events\.problem_id, events\.seq/,
+      );
+      expect(() => insertEvent("E-sequence-beta-1", "P-sequence-beta", 1)).not.toThrow();
+      expect(db.query("SELECT problem_id, seq FROM events ORDER BY problem_id").all()).toEqual([
+        { problem_id: "P-sequence-alpha", seq: 1 },
+        { problem_id: "P-sequence-beta", seq: 1 },
+      ]);
+    } finally {
+      db.close();
+    }
   });
 });
 

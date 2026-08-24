@@ -1978,11 +1978,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {
           requestDigest: digest,
           claimIdForSequence: (sequence) => `C-${sequence}`,
-          statementsForAttempt: async (attempt) => {
+          statementsAfterIdempotencySettlement: async (settlement) => {
             const value = PromoteResponseSchema.parse({
-              claim_id: attempt.claimId,
+              claim_id: settlement.claimId,
               problem_id: session.problem_id,
-              seq: attempt.sequence,
+              seq: settlement.sequence,
               version: versionMint.version,
               queue_position: 0,
             });
@@ -2026,8 +2026,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   claimToken,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                   auth.binding.credentialId,
                 ),
               // The anonymous cursor is a projection of the same winning
@@ -2064,8 +2064,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   claimToken,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                 ),
               // W5.3 (Rule A6): the v1 content version commits in the same
               // batch as the claim row. kind/falsifier/statement/digest become
@@ -2081,7 +2081,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
                 )
                 .bind(
-                  attempt.claimId,
+                  settlement.claimId,
                   versionMint.version,
                   parsed.data.kind,
                   parsed.data.statement,
@@ -2091,8 +2091,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   promotedAt,
                   kraterIdempotencyKey,
                   session.problem_id,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                 ),
               // The depends_on edges (P10). Each insert re-checks ownership of
               // the winning event and refuses a self-edge (`? != ?`): a client
@@ -2107,14 +2107,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ? AND ? != ?`,
                   )
                   .bind(
-                    attempt.claimId,
+                    settlement.claimId,
                     dep,
                     promotedAt,
                     kraterIdempotencyKey,
                     session.problem_id,
-                    attempt.eventId,
-                    attempt.sequence,
-                    attempt.claimId,
+                    settlement.eventId,
+                    settlement.sequence,
+                    settlement.claimId,
                     dep,
                   ),
               ),
@@ -2512,11 +2512,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {},
         {
           requestDigest: digest,
-          statementsForAttempt: async (attempt) => {
+          statementsAfterIdempotencySettlement: async (settlement) => {
             const value = ReviseResponseSchema.parse({
-              claim_id: attempt.claimId,
+              claim_id: settlement.claimId,
               problem_id: session.problem_id,
-              seq: attempt.sequence,
+              seq: settlement.sequence,
               version: versionMint.version,
               queue_position: 0,
             });
@@ -2555,8 +2555,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   claimToken,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                   auth.binding.credentialId,
                 ),
               db
@@ -2587,8 +2587,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   claimToken,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                 ),
               ...resolvedDeps.map((dep) =>
                 db
@@ -2600,13 +2600,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
                   )
                   .bind(
-                    attempt.claimId,
+                    settlement.claimId,
                     dep,
                     promotedAt,
                     kraterIdempotencyKey,
                     session.problem_id,
-                    attempt.eventId,
-                    attempt.sequence,
+                    settlement.eventId,
+                    settlement.sequence,
                   ),
               ),
             ];
@@ -2833,11 +2833,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {},
         {
           requestDigest: digest,
-          statementsForAttempt: async (attempt) => {
+          statementsAfterIdempotencySettlement: async (settlement) => {
             const value = GapFiledResponseSchema.parse({
-              gap_id: `G-${attempt.sequence}`,
+              gap_id: `G-${settlement.sequence}`,
               problem_id: session.problem_id,
-              seq: attempt.sequence,
+              seq: settlement.sequence,
             });
             const sealed = await options.replayProtector.seal(JSON.stringify(value));
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
@@ -2862,8 +2862,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   expiresAt,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                 ),
               db
                 .prepare(
@@ -3076,11 +3076,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {},
         {
           requestDigest: digest,
-          statementsForAttempt: async (attempt) => {
+          statementsAfterIdempotencySettlement: async (settlement) => {
             const value = GapClosedResponseSchema.parse({
               gap_id: parsed.data.gap_id,
               status: parsed.data.outcome,
-              seq: attempt.sequence,
+              seq: settlement.sequence,
             });
             const sealed = await options.replayProtector.seal(JSON.stringify(value));
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
@@ -3105,8 +3105,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   expiresAt,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                 ),
               db
                 .prepare(
@@ -3341,13 +3341,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           requestDigest: digest,
-          statementsForAttempt: async (attempt) => {
+          statementsAfterIdempotencySettlement: async (settlement) => {
             const value = RelationFiledResponseSchema.parse({
               problem_id: session.problem_id,
               kind: parsed.data.kind,
               source: `${parsed.data.source_claim_id}@${parsed.data.source_version}`,
               target: parsed.data.target,
-              seq: attempt.sequence,
+              seq: settlement.sequence,
             });
             const sealed = await options.replayProtector.seal(JSON.stringify(value));
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
@@ -3372,8 +3372,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   expiresAt,
                   session.problem_id,
                   kraterIdempotencyKey,
-                  attempt.eventId,
-                  attempt.sequence,
+                  settlement.eventId,
+                  settlement.sequence,
                 ),
               db
                 .prepare(
