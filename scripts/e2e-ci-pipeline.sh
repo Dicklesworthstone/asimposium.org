@@ -713,7 +713,7 @@ require_stage_prefix() {
   local expected_csv="$1"
   local evidence="$ARTIFACT_DIRECTORY/ci-pipeline.jsonl"
   [[ -f "$evidence" && ! -L "$evidence" ]] || return 64
-  python3 - "$evidence" "$RUN_ID" "$REVISION" "$expected_csv" <<'PY'
+  python3 - "$evidence" "$RUN_ID" "$REVISION" "$expected_csv" "$RUNNER" <<'PY'
 import json
 import sys
 
@@ -724,7 +724,13 @@ with open(sys.argv[1], encoding="utf-8") as stream:
         if value.get("run_id") == sys.argv[2] and value.get("revision") == sys.argv[3]:
             records.append(value)
 runner_records = [value for value in records if value.get("record") == "runner"]
-if len(runner_records) != 1 or runner_records[0].get("status") != "observed":
+if any(value.get("suite") != "ci-pipeline" for value in records):
+    sys.exit(64)
+if (
+    len(runner_records) != 1
+    or runner_records[0].get("status") != "observed"
+    or runner_records[0].get("runner") != sys.argv[5]
+):
     sys.exit(64)
 observed = [
     value.get("stage")

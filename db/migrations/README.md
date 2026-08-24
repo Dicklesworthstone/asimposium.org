@@ -12,6 +12,13 @@ Public ledger identifiers are scoped by problem (Fable Rev 3 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global
 claim primary keys without changing the public `C-n` grammar.
 
+Migration `0039_krater_chain_v2.sql` makes the canonical event-envelope row
+digest an input to every Krater chain link and binds `chain_version: 2` into
+links and checkpoints. Existing immutable v1 bytes remain as legacy audit
+material; additive `event_chain_v2` and `checkpoint_chain_v2` rows are the sole
+runtime integrity authority after bounded replay. An absent or mixed v2 stream
+is refused, never verified under a fallback formula.
+
 When W2 begins, each migration must use the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
 agent-reviewable deployment script. The Worker remains the only process that

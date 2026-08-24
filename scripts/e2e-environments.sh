@@ -373,8 +373,9 @@ fi
 # The remote migration CLI's receipt contract is frozen and test-pinned
 # (infra/migrate.test.mjs): a plan/apply run prints one compact JSON receipt
 # with phase/status, and a second apply against a fully-migrated target reports
-# an empty applied set plus an idempotent second plan. The remote bootstrap completed on
-# 2026-08-17 (operator-authorized); what follows exercises that contract.
+# an empty applied set plus an idempotent second plan. The remote bootstrap
+# completed on 2026-08-17 (operator-authorized); what follows exercises that
+# contract.
 
 # ---------------------------------------------------------------------------
 # Phase 7 (staging) — resolve the deployable staging config.
@@ -469,6 +470,29 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 9 (staging) — deployed health and origin coherence over HTTP.
 # ---------------------------------------------------------------------------
+endpoint_document_matches() {
+  local mode="$1" document="$2"
+  printf '%s' "$document" | python3 -c '
+import json
+import sys
+
+try:
+    document = json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    sys.exit(1)
+if not isinstance(document, dict):
+    sys.exit(1)
+if sys.argv[1] == "health":
+    if document.get("ok") is not True:
+        sys.exit(1)
+elif sys.argv[1] == "capabilities":
+    if document.get("origin") != "https://a-staging.asimposium.org":
+        sys.exit(1)
+else:
+    sys.exit(1)
+' "$mode"
+}
+
 STAGING_WORKER_ORIGIN="$(printf '%s' "$TOPOLOGY_JSON" | grep -o '"worker_origin":"https://a-staging\.asimposium\.org"' | head -1 | cut -d'"' -f4)"
 if [ -z "$STAGING_WORKER_ORIGIN" ]; then
   fail_phase "health-and-smoke" "STAGING_ORIGIN_NOT_IN_TOPOLOGY" \
@@ -483,8 +507,8 @@ CAPABILITIES_BODY="$(curl --fail --silent --show-error --location \
   --user-agent "$WEB_USER_AGENT" --connect-timeout 5 --max-time 20 \
   "$STAGING_WORKER_ORIGIN/capabilities" 2>/dev/null)" || CAPABILITIES_STATUS=$?
 if [ "$HEALTH_STATUS" -eq 0 ] && [ "$CAPABILITIES_STATUS" -eq 0 ] && \
-  [ "$HEALTH_BODY" != "${HEALTH_BODY#*'"ok":true'}" ] && \
-  [ "$CAPABILITIES_BODY" != "${CAPABILITIES_BODY#*'"origin":"https://a-staging.asimposium.org"'}" ]; then
+  endpoint_document_matches health "$HEALTH_BODY" && \
+  endpoint_document_matches capabilities "$CAPABILITIES_BODY"; then
   emit "health-and-smoke" "pass" "OK" "staging worker health ok and capabilities origin matches the topology"
 else
   fail_phase "health-and-smoke" "STAGING_HEALTH_FAILED" \

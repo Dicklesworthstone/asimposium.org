@@ -8,6 +8,9 @@ const MAX_INTEGRITY_BACKFILL_EVENTS = 512;
 const REDACTION_REASONS = new Set(["legal", "privacy", "severe-safety"]);
 const CANONICAL_UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
+/** The sole chain formula accepted by current writes, reads, replay, and exports. */
+export const KRATER_CHAIN_VERSION = 2 as const;
+
 export interface KraterWriteInput {
   problemId: string;
   claimId: string;
@@ -46,6 +49,7 @@ export interface KraterWriteResult {
   rowDigest: string;
   buildDigest: string;
   chainDigest: string;
+  chainVersion: typeof KRATER_CHAIN_VERSION;
   checkpointDigest: string;
   /**
    * Time from the first head read through the post-write verification reads, across every
@@ -88,7 +92,13 @@ export interface KraterWriteResult {
  * value. Production callers omit this argument.
  */
 export interface KraterWriteHooks {
-  afterReadHead?: (head: Readonly<{ publicSeq: number; chainDigest: string }>) => Promise<void>;
+  afterReadHead?: (
+    head: Readonly<{
+      publicSeq: number;
+      chainDigest: string;
+      chainVersion: typeof KRATER_CHAIN_VERSION;
+    }>,
+  ) => Promise<void>;
 }
 
 /**
@@ -119,11 +129,14 @@ export interface KraterEvent {
   eventId: string;
   problemId: string;
   seq: number;
-  type: "claim.created" | "claim.revised";
+  type: string;
+  objectKind: string;
   objectId: string;
+  objectVersion: number;
   payloadSha256: string;
   rowDigest: string;
   chainDigest: string;
+  chainVersion: typeof KRATER_CHAIN_VERSION;
   createdAt: string;
 }
 
@@ -142,12 +155,14 @@ export interface KraterCheckpoint {
   rootChainDigest: string;
   checkpointDigest: string;
   checkpointVersion: 1;
+  chainVersion: typeof KRATER_CHAIN_VERSION;
   /** ADR-23 signatures are not implemented; this foundation is explicitly unsigned. */
   checkpointMode: "unsigned-v0";
 }
 
 export interface KraterIntegrityState {
   chainDigest: string;
+  chainVersion: typeof KRATER_CHAIN_VERSION;
   checkpointDigest: string | null;
 }
 
@@ -203,24 +218,44 @@ interface SequenceRow {
 interface ProblemHeadRow {
   public_seq: number;
   chain_digest: string | null;
+  chain_version: number | null;
 }
 
 interface IntegrityProblemHeadRow {
   public_seq: number;
   chain_digest: string;
+  chain_version: typeof KRATER_CHAIN_VERSION;
 }
 
 interface EventRow {
   id: string;
   problem_id: string;
   seq: number;
-  type: "claim.created" | "claim.revised";
-  object_kind: "claim";
+  type: string;
+  object_kind: string;
   object_id: string;
   object_version: number;
   payload_sha256: string;
   row_digest: string | null;
   chain_digest: string | null;
+  chain_version: number | null;
+  created_at: string;
+}
+
+interface BackfillEventRow {
+  id: string;
+  problem_id: string;
+  seq: number;
+  type: string;
+  object_kind: string;
+  object_id: string;
+  object_version: number;
+  payload_sha256: string;
+  stored_row_digest: string | null;
+  stored_chain_digest: string | null;
+  v2_row_digest: string | null;
+  v2_chain_digest: string | null;
+  v2_chain_version: number | null;
   created_at: string;
 }
 
@@ -239,6 +274,7 @@ interface CheckpointRow {
   root_chain_digest: string;
   checkpoint_digest: string;
   checkpoint_version: 1;
+  chain_version: number;
   checkpoint_mode: "unsigned-v0";
 }
 
@@ -262,6 +298,7 @@ interface OutboxRow {
 interface IntegrityBackfillRow {
   state: "required" | "complete";
   legacy_event_count: number;
+  chain_version: number | null;
 }
 
 interface CursorRow {
@@ -412,22 +449,31 @@ function requestFor(input: KraterWriteInput): string {
 
 export async function genesisChainDigest(problemId: string): Promise<string> {
   requireIdentifier("problemId", problemId);
-  return sha256Hex(canonicalJson({ kind: "krater.v0.genesis", problem_id: problemId }));
+  return sha256Hex(
+    canonicalJson({
+      chain_version: KRATER_CHAIN_VERSION,
+      kind: "krater.genesis",
+      problem_id: problemId,
+    }),
+  );
 }
 
 export async function eventChainDigest(
   problemId: string,
   seq: number,
   payloadSha256: string,
+  rowDigest: string,
   previousChainDigest: string,
 ): Promise<string> {
   requireIdentifier("problemId", problemId);
   requireInputSequence(seq, "chain sequence", false);
   return sha256Hex(
     canonicalJson({
+      chain_version: KRATER_CHAIN_VERSION,
       payload_sha256: payloadSha256,
       previous_chain_digest: previousChainDigest,
       problem_id: problemId,
+      row_digest: rowDigest,
       seq,
     }),
   );
@@ -464,7 +510,7 @@ interface EventEnvelopeForDigest {
   createdAt: string;
 }
 
-async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): Promise<string> {
+export async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): Promise<string> {
   requireInputSequence(envelope.seq, "event envelope sequence", false);
   return sha256Hex(
     canonicalJson({
@@ -498,6 +544,7 @@ export async function checkpointDigest(
   requireInputSequence(seq, "checkpoint sequence", false);
   return sha256Hex(
     canonicalJson({
+      chain_version: KRATER_CHAIN_VERSION,
       checkpoint_version: 1,
       problem_id: problemId,
       root_chain_digest: rootChainDigest,
@@ -616,12 +663,12 @@ async function readProblemHead(
 ): Promise<IntegrityProblemHeadRow> {
   const row = await statement(
     db,
-    "SELECT public_seq, chain_digest FROM problems WHERE id = ?",
+    "SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?",
     problemId,
   ).first<ProblemHeadRow>();
   if (row === null)
     throw new KraterProblemNotFoundError("problem must exist before a Krater claim write.");
-  if (row.chain_digest === null) {
+  if (row.chain_digest === null || row.chain_version !== KRATER_CHAIN_VERSION) {
     throw new KraterIntegrityBackfillRequiredError(
       "Krater integrity digests must be replayed from the immutable legacy envelopes first.",
     );
@@ -629,15 +676,18 @@ async function readProblemHead(
   return {
     public_seq: requireStoredSequence(row.public_seq, "problem cursor", true),
     chain_digest: row.chain_digest,
+    chain_version: KRATER_CHAIN_VERSION,
   };
 }
 
 async function readEventById(db: D1Database, eventId: string): Promise<EventRow> {
   const row = await statement(
     db,
-    `SELECT id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
-            row_digest, chain_digest, created_at
-     FROM events WHERE id = ?`,
+    `SELECT e.id, e.problem_id, e.seq, e.type, e.object_kind, e.object_id, e.object_version,
+            e.payload_sha256, c.row_digest, c.chain_digest, c.chain_version, e.created_at
+     FROM events e
+     LEFT JOIN event_chain_v2 c ON c.event_id = e.id
+     WHERE e.id = ?`,
     eventId,
   ).first<EventRow>();
   if (row === null) throw new Error("Krater write did not persist an event envelope.");
@@ -663,9 +713,12 @@ async function readProjectionByEvent(db: D1Database, event: EventRow): Promise<P
 async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<CheckpointRow> {
   const row = await statement(
     db,
-    `SELECT problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
-            checkpoint_mode
-     FROM integrity_checkpoints WHERE problem_id = ? AND checkpoint_seq = ?`,
+    `SELECT i.problem_id, i.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest,
+            i.checkpoint_version, c.chain_version, i.checkpoint_mode
+     FROM integrity_checkpoints i
+     LEFT JOIN checkpoint_chain_v2 c
+       ON c.problem_id = i.problem_id AND c.checkpoint_seq = i.checkpoint_seq
+     WHERE i.problem_id = ? AND i.checkpoint_seq = ?`,
     event.problem_id,
     event.seq,
   ).first<CheckpointRow>();
@@ -708,6 +761,14 @@ function backfillRequired(message: string): never {
   throw new KraterIntegrityBackfillRequiredError(message);
 }
 
+function requireCurrentChainVersion(
+  value: unknown,
+  message = "Krater integrity requires one complete v2 chain.",
+): typeof KRATER_CHAIN_VERSION {
+  if (value !== KRATER_CHAIN_VERSION) backfillRequired(message);
+  return KRATER_CHAIN_VERSION;
+}
+
 async function readIntegrityBackfill(
   db: D1Database,
   problemId: string,
@@ -717,7 +778,8 @@ async function readIntegrityBackfill(
     cost,
     statement(
       db,
-      "SELECT state, legacy_event_count FROM krater_integrity_backfill WHERE problem_id = ?",
+      `SELECT state, legacy_event_count, chain_version
+       FROM krater_integrity_backfill WHERE problem_id = ?`,
       problemId,
     ),
   );
