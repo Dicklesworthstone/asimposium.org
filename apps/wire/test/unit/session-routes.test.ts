@@ -6977,4 +6977,118 @@ describe("committed promotion outbox nudge", () => {
     ]);
     expect(packSixText).not.toContain("J9HW Title 1");
   });
+
+  test("PLANTED: session replay ciphertext is bound to its route context (zdz.8)", async () => {
+    // A ciphertext/IV pair copied between replay rows must fail GCM
+    // authentication under the destination row's versioned context — scope,
+    // principal, target route, idempotency key, request digest — instead of
+    // replaying cross-purpose from the wrong route.
+    const { call, db, binding } = await fixture();
+    const openSession = async (key: string) => {
+      const opened = await call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `zdz8-open-${key}` },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      expect(opened.status).toBe(201);
+      return SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    };
+    const pushDraft = async (sessionId: string, key: string, title: string) =>
+      call(`/v1/sessions/${sessionId}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `zdz8-push-${key}` },
+        body: JSON.stringify({
+          type: "draft",
+          title,
+          body_md: `${title} body.`,
+          relates_to: [],
+        }),
+      });
+
+    const sessionA = await openSession("a");
+    const firstPush = await pushDraft(sessionA, "one", "ZDZ8 first push");
+    expect(firstPush.status).toBe(201);
+    const exactReplay = await pushDraft(sessionA, "one", "ZDZ8 first push");
+    expect(exactReplay.status).toBe(200);
+    // Exact same-row replay is byte-identical to the fresh receipt.
+    expect(await exactReplay.text()).toBe(await firstPush.text());
+
+    const closeSession = async (sessionId: string, key: string) => {
+      const closed = await call(`/v1/sessions/${sessionId}/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `zdz8-close-${key}` },
+        body: JSON.stringify({ handback: "zdz8 close", promote: [] }),
+      });
+      expect(closed.status).toBe(201);
+    };
+
+    // Cross-route move: the session_open receipt's ciphertext cannot answer a
+    // workshop_push replay — the AEAD context (scope + target + digest)
+    // differs, so authentication fails closed as a coarse opaque refusal.
+    await db
+      .prepare(
+        `UPDATE session_write_replays
+           SET response_ciphertext =
+               (SELECT response_ciphertext FROM session_write_replays
+                 WHERE scope = 'session_open' AND idempotency_key = 'zdz8-open-a'),
+               response_initialization_vector =
+               (SELECT response_initialization_vector FROM session_write_replays
+                 WHERE scope = 'session_open' AND idempotency_key = 'zdz8-open-a')
+         WHERE scope = 'workshop_push' AND idempotency_key = 'zdz8-push-one'`,
+      )
+      .run();
+    const movedRouteReplay = await pushDraft(sessionA, "one", "ZDZ8 first push");
+    expect(movedRouteReplay.status).toBe(500);
+    const movedRouteBody = await movedRouteReplay.text();
+    // The bare router surfaces the platform's coarse 500 face; it carries no
+    // foreign-route bytes and no session/workshop identifiers.
+    expect(movedRouteBody).not.toContain("ZDZ8");
+    expect(movedRouteBody).not.toContain("workshop_id");
+    expect(movedRouteBody).not.toContain("session_id");
+
+    // The one-open-session-per-problem cap requires closing A before B opens.
+    await closeSession(sessionA, "a");
+    const sessionB = await openSession("b");
+    await pushDraft(sessionB, "two", "ZDZ8 second push");
+    await db
+      .prepare(
+        `UPDATE session_write_replays
+           SET response_ciphertext =
+               (SELECT response_ciphertext FROM session_write_replays
+                  WHERE scope = 'workshop_push' AND idempotency_key = 'zdz8-push-two'),
+               response_initialization_vector =
+               (SELECT response_initialization_vector FROM session_write_replays
+                  WHERE scope = 'workshop_push' AND idempotency_key = 'zdz8-push-two')
+         WHERE scope = 'workshop_push' AND idempotency_key = 'zdz8-push-one'`,
+      )
+      .run();
+    const movedSessionReplay = await pushDraft(sessionA, "one", "ZDZ8 first push");
+    expect(movedSessionReplay.status).toBe(500);
+    const movedSessionBody = await movedSessionReplay.text();
+    expect(movedSessionBody).not.toContain("ZDZ8 second push");
+    expect(movedSessionBody).not.toContain("workshop_id");
+
+    // Malformed ciphertext is refused through the same coarse face.
+    await db
+      .prepare(
+        "UPDATE session_write_replays SET response_ciphertext = 'AAAA' WHERE scope = 'workshop_push' AND idempotency_key = 'zdz8-push-one'",
+      )
+      .run();
+    const malformedReplay = await pushDraft(sessionA, "one", "ZDZ8 first push");
+    expect(malformedReplay.status).toBe(500);
+    const malformedBody = await malformedReplay.text();
+    expect(malformedBody).not.toContain("ZDZ8");
+    expect(malformedBody).not.toContain("workshop_id");
+
+    // No refused replay executed its mutation: still exactly one object.
+    expect(
+      (
+        await db
+          .prepare("SELECT COUNT(*) AS n FROM workshop_objects WHERE fellow_id = ?")
+          .bind(binding.fellowId)
+          .first<{ n: number }>()
+      )?.n,
+    ).toBe(2);
+    expect(binding.fellowId.length).toBeGreaterThan(0);
+  });
 });

@@ -440,13 +440,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return undefined;
     }
     if (existing.request_digest !== requestDigest) throw new ReplayConflictError();
+    const openContext = sessionReplayContext(scope, principal, target, key, requestDigest);
     return {
       plaintext: await options.replayProtector.open(
         {
           ciphertext: existing.response_ciphertext,
           initializationVector: existing.response_initialization_vector,
         },
-        sessionReplayContext(scope, principal, target, key, requestDigest),
+        openContext,
       ),
       claimToken: existing.claim_token,
     };
@@ -1840,6 +1841,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => PromoteResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -2030,7 +2033,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               version: versionMint.version,
               queue_position: 0,
             });
-            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("promote", auth.binding.fellowId, c.req.path, key, digest),
+            );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
               // If this event won Krater's idempotency row but the session
@@ -2172,7 +2178,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // error. Nothing before this line reaches it, so a refusal, a conflict and
       // a failed commit all leave the drainer untouched.
       scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
+      const replay = await readReplayRecord(
+        db,
+        "promote",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
       if (replay === undefined) {
         throw new Error("Krater promotion committed without its atomic replay");
       }
@@ -2181,7 +2194,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     } catch (error) {
       try {
-        const winner = await readReplayRecord(db, "promote", auth.binding.fellowId, key, digest);
+        const winner = await readReplayRecord(
+          db,
+          "promote",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
         if (winner !== undefined) {
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
@@ -2341,6 +2361,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => ReviseResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -2564,7 +2586,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               version: versionMint.version,
               queue_position: 0,
             });
-            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("revise", auth.binding.fellowId, c.req.path, key, digest),
+            );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
               db
@@ -2658,7 +2683,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       );
       scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(db, "revise", auth.binding.fellowId, key, digest);
+      const replay = await readReplayRecord(
+        db,
+        "revise",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
       if (replay === undefined) {
         throw new Error("Krater revision committed without its atomic replay");
       }
@@ -2667,7 +2699,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     } catch (error) {
       try {
-        const winner = await readReplayRecord(db, "revise", auth.binding.fellowId, key, digest);
+        const winner = await readReplayRecord(
+          db,
+          "revise",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
         if (winner !== undefined) {
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
@@ -2793,6 +2832,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => GapFiledResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -2883,7 +2924,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               problem_id: session.problem_id,
               seq: settlement.sequence,
             });
-            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("gaps", auth.binding.fellowId, c.req.path, key, digest),
+            );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
               db
@@ -2924,14 +2968,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       );
       scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+      const replay = await readReplayRecord(
+        db,
+        "gaps",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
       if (replay === undefined) {
         throw new Error("Krater gap filing committed without its atomic replay");
       }
       return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
     } catch (error) {
       try {
-        const winner = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+        const winner = await readReplayRecord(
+          db,
+          "gaps",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
         if (winner !== undefined) {
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
@@ -2981,6 +3039,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => GapClosedResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -3126,7 +3186,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               status: parsed.data.outcome,
               seq: settlement.sequence,
             });
-            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("gaps", auth.binding.fellowId, c.req.path, key, digest),
+            );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
               db
@@ -3167,14 +3230,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       );
       scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+      const replay = await readReplayRecord(
+        db,
+        "gaps",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
       if (replay === undefined) {
         throw new Error("Krater gap close committed without its atomic replay");
       }
       return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
     } catch (error) {
       try {
-        const winner = await readReplayRecord(db, "gaps", auth.binding.fellowId, key, digest);
+        const winner = await readReplayRecord(
+          db,
+          "gaps",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
         if (winner !== undefined) {
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
@@ -3252,6 +3329,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => RelationFiledResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -3393,7 +3472,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               target: parsed.data.target,
               seq: settlement.sequence,
             });
-            const sealed = await options.replayProtector.seal(JSON.stringify(value));
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("relations", auth.binding.fellowId, c.req.path, key, digest),
+            );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
               db
@@ -3434,14 +3516,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       );
       scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(db, "relations", auth.binding.fellowId, key, digest);
+      const replay = await readReplayRecord(
+        db,
+        "relations",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
       if (replay === undefined) {
         throw new Error("Krater relation committed without its atomic replay");
       }
       return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
     } catch (error) {
       try {
-        const winner = await readReplayRecord(db, "relations", auth.binding.fellowId, key, digest);
+        const winner = await readReplayRecord(
+          db,
+          "relations",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
         if (winner !== undefined) {
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
@@ -3961,6 +4057,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => SessionCloseResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
       const authorizationSession = await openSessionOf(
@@ -3997,6 +4095,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => SessionCloseResponseSchema.parse(JSON.parse(raw)),
         async () => {
           // Replay lookup must happen before this mutable precondition. The
           // first successful close makes the session closed; an exact retry
