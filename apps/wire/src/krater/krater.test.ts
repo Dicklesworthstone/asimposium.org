@@ -241,7 +241,12 @@ function retryingWriteHarness(
       all: async () => {
         if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
           return fakeD1Result([
-            { public_seq: publicSeq, chain_digest: chainDigest, chain_version: 2 },
+            {
+              public_seq: publicSeq,
+              chain_digest: chainDigest,
+              chain_version: 2,
+              terminal_v2_complete: 1,
+            },
           ]);
         }
         if (sql.includes("FROM krater_integrity_backfill")) {

@@ -189,7 +189,7 @@ checkout was deployed. Worker deployment, readiness, and web deployment bind
 `subject_revision` to the current checkout only after their provider receipts
 establish that relationship.
 
-Every stage child starts from an explicit operational environment allowlist.
+Every real stage command executes from an explicit operational environment allowlist.
 The Fellow smoke token is passed only to the agent smoke; Cloudflare authority
 is passed only to Worker deployment/readiness and the final active-deployment
 re-attestation; Vercel authority is passed only to web deployment. Root gates

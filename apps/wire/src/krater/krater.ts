@@ -227,6 +227,10 @@ interface ProblemHeadRow {
   chain_version: number | null;
 }
 
+interface BackfillProblemHeadRow extends ProblemHeadRow {
+  terminal_v2_complete: number;
+}
+
 interface IntegrityProblemHeadRow {
   public_seq: number;
   chain_digest: string;
@@ -677,23 +681,30 @@ async function validateCurrentCheckpoint(
 ): Promise<ValidatedCheckpointRow> {
   const checkpointSeq = requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false);
   requireCurrentChainVersion(row.chain_version, detail);
+  const rootChainDigest = row.root_chain_digest;
+  const storedCheckpointDigest = row.checkpoint_digest;
   if (
     row.problem_id !== expected.problemId ||
     checkpointSeq !== expected.seq ||
     row.checkpoint_version !== 1 ||
     row.checkpoint_mode !== "unsigned-v0" ||
-    row.root_chain_digest !== expected.rootChainDigest ||
-    row.checkpoint_digest === null ||
-    row.checkpoint_digest !==
-      (await checkpointDigest(row.problem_id, checkpointSeq, row.root_chain_digest))
+    rootChainDigest === null ||
+    rootChainDigest !== expected.rootChainDigest ||
+    storedCheckpointDigest === null
+  ) {
+    backfillRequired(detail);
+  }
+  if (
+    storedCheckpointDigest !==
+    (await checkpointDigest(row.problem_id, checkpointSeq, rootChainDigest))
   ) {
     backfillRequired(detail);
   }
   return {
     problem_id: row.problem_id,
     checkpoint_seq: checkpointSeq,
-    root_chain_digest: row.root_chain_digest,
-    checkpoint_digest: row.checkpoint_digest,
+    root_chain_digest: rootChainDigest,
+    checkpoint_digest: storedCheckpointDigest,
     checkpoint_version: 1,
     chain_version: KRATER_CHAIN_VERSION,
     checkpoint_mode: "unsigned-v0",
@@ -1118,11 +1129,29 @@ export async function backfillKraterIntegrity(
   const preflightStartedAt = performance.now();
   const cost = newCostAccumulator();
 
-  const rawHead = await firstRowMeasured<ProblemHeadRow>(
+  const rawHead = await firstRowMeasured<BackfillProblemHeadRow>(
     cost,
     statement(
       db,
-      "SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?",
+      `SELECT public_seq, chain_digest, chain_version,
+              CASE
+                WHEN public_seq = 0 THEN 1
+                WHEN EXISTS (
+                  SELECT 1 FROM event_chain_v2 e
+                  WHERE e.problem_id = problems.id
+                    AND e.seq = problems.public_seq
+                    AND e.chain_version = 2
+                    AND e.chain_digest = problems.chain_digest
+                ) AND EXISTS (
+                  SELECT 1 FROM checkpoint_chain_v2 c
+                  WHERE c.problem_id = problems.id
+                    AND c.checkpoint_seq = problems.public_seq
+                    AND c.chain_version = 2
+                    AND c.root_chain_digest = problems.chain_digest
+                ) THEN 1
+                ELSE 0
+              END AS terminal_v2_complete
+       FROM problems WHERE id = ?`,
       problemId,
     ),
   );
@@ -1150,7 +1179,8 @@ export async function backfillKraterIntegrity(
     storedBackfill?.state === "complete" &&
     storedBackfill.chain_version === KRATER_CHAIN_VERSION &&
     rawHead.chain_digest !== null &&
-    rawHead.chain_version === KRATER_CHAIN_VERSION
+    rawHead.chain_version === KRATER_CHAIN_VERSION &&
+    rawHead.terminal_v2_complete === 1
   ) {
     const probe = await firstUndigestedEvent(db, problemId);
     cost.rows_read += probe.rows_read;
