@@ -33,13 +33,18 @@ mkdirSync(BIN, { mode: 0o700 });
 function installShim(name: "bun" | "cargo"): void {
   const path = join(BIN, name);
   const body = `#!/usr/bin/env bash
-set -eu
-printf '${name}' >> "$ASIMPOSIUM_GATES_TEST_LOG"
-printf '\\t%s' "$@" >> "$ASIMPOSIUM_GATES_TEST_LOG"
-printf '\\n' >> "$ASIMPOSIUM_GATES_TEST_LOG"
-if [[ '${name}' == 'bun' && "\${1:-}" == 'run' && "\${2:-}" == 'typecheck' ]]; then
+set -e
+if [ -n "\${ASIMPOSIUM_GATES_TEST_LOG:-}" ]; then
+  printf '${name}' >> "$ASIMPOSIUM_GATES_TEST_LOG"
+  for arg in "$@"; do
+    printf '\\t%s' "$arg" >> "$ASIMPOSIUM_GATES_TEST_LOG"
+  done
+  printf '\\n' >> "$ASIMPOSIUM_GATES_TEST_LOG"
+fi
+if [ '${name}' = 'bun' ] && [ "\${1:-}" = 'run' ] && [ "\${2:-}" = 'typecheck' ]; then
   exit "\${ASIMPOSIUM_GATES_TEST_CHECK_STATUS:-0}"
 fi
+exit 0
 `;
   writeFileSync(path, body, { mode: 0o700 });
   chmodSync(path, 0o700);
@@ -73,23 +78,31 @@ function runAll(checkStatus: number): GateRun {
   if (child.error) {
     console.log("child.error:", child.error);
   }
-  return {
+  const result = {
     status: child.status,
     signal: child.signal,
     stdout: child.stdout ?? "",
     stderr: child.stderr ?? "",
     commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean),
   };
+  if (result.status !== 0) {
+    console.error("DEBUG runAll failed:", {
+      status: result.status,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      commands: result.commands,
+    });
+  }
+  return result;
 }
 
 describe("provider-neutral full gate", () => {
   test("--all invokes the canonical complete dispatcher before the Rust gate", () => {
     const run = runAll(0);
 
-    console.log("commands:", run.commands);
-    console.log("stdout:", run.stdout);
-    console.log("stderr:", run.stderr);
-    console.log("status:", run.status);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
     expect(run.stderr).toBe("");
     expect(run.commands).toEqual([
       "bun\tinstall\t--frozen-lockfile",

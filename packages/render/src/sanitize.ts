@@ -905,7 +905,7 @@ function markdownReferenceDefinitionEnd(
 
   const nextLineStart = markdownNextLineStart(text, destinationLineEnd);
   const nextLineEnd = markdownLineEnd(text, nextLineStart);
-  const nextContentStart = markdownContainerPrefixEnd(text, nextLineStart, nextLineEnd);
+  const nextContentStart = markdownContainerContinuationStart(text, nextLineStart, nextLineEnd);
   if (nextContentStart !== undefined) {
     cursor = nextContentStart;
     if (
@@ -1000,7 +1000,13 @@ function markdownContainerContentStart(
   return cursor;
 }
 
-function markdownContainerPrefixEnd(
+/**
+ * Locate reference-definition continuation content after repeated block-quote
+ * markers and the ordinary 0..3-space definition indentation. A list marker
+ * is not a continuation prefix: it starts a new block. List-item continuation
+ * is represented by its indentation after the marker from the preceding line.
+ */
+function markdownContainerContinuationStart(
   text: string,
   lineStart: number,
   lineEnd: number,
@@ -1020,33 +1026,8 @@ function markdownContainerPrefixEnd(
       if (cursor < lineEnd && (text[cursor] === " " || text[cursor] === "\t")) cursor += 1;
       continue;
     }
-
-    const markerEnd = markdownListMarkerEnd(text, cursor, lineEnd);
-    if (markerEnd === undefined || markerEnd >= lineEnd) break;
-    cursor = markerEnd;
-    let padding = 0;
-    while (
-      cursor < lineEnd &&
-      padding < 4 &&
-      (text[cursor] === " " || text[cursor] === "\t")
-    ) {
-      cursor += 1;
-      padding += 1;
-    }
-    if (
-      padding === 0 ||
-      (cursor < lineEnd && (text[cursor] === " " || text[cursor] === "\t"))
-    ) {
-      return undefined;
-    }
+    return cursor;
   }
-
-  let contentIndentation = 0;
-  while (cursor < lineEnd && text[cursor] === " " && contentIndentation < 4) {
-    cursor += 1;
-    contentIndentation += 1;
-  }
-  if (contentIndentation > 3) return undefined;
   return cursor;
 }
 
@@ -1067,7 +1048,7 @@ function markdownReferenceDefinitionAt(
   if (cursor === lineEnd && lineEnd < text.length) {
     const nextLineStart = markdownNextLineStart(text, lineEnd);
     const nextLineEnd = markdownLineEnd(text, nextLineStart);
-    const nextContentStart = markdownContainerPrefixEnd(text, nextLineStart, nextLineEnd);
+    const nextContentStart = markdownContainerContinuationStart(text, nextLineStart, nextLineEnd);
     if (nextContentStart === undefined) return undefined;
     cursor = nextContentStart;
     lineEnd = nextLineEnd;

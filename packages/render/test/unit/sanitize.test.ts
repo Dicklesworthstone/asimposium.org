@@ -473,6 +473,8 @@ describe("neutralizeUntrustedBody", () => {
       "> paragraph\n> [target]: javascript:not-a-definition()\n\n[target]",
       "- paragraph\n  [target]: data:text/html,not-a-definition()\n\n[target]",
       "[target]\n\n-     [target]: vbscript:over-padded-code()",
+      "[separate list]\n\n[separate list]:\n- javascript:not-a-continuation()",
+      "[quoted list]\n\n> [quoted list]:\n> - data:text/html,not-a-continuation()",
     ];
 
     for (const body of inert) {
