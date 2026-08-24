@@ -40,6 +40,10 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
  */
 export const PUBLIC_SCHEMA_EXCLUSIONS = Object.freeze([
   Object.freeze({
+    id: "batch",
+    reason: "Batch planning contract; it has no separate public read face.",
+  }),
+  Object.freeze({
     id: "contracts-scaffold",
     reason: "Generator metadata; it is not a product protocol schema.",
   }),

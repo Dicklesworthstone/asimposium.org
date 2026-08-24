@@ -351,8 +351,14 @@ export interface DeviceStartOptions extends EnrollmentWriteOptions {
 }
 
 export interface EnrollmentReplayProtector {
-  seal(plaintext: string): Promise<EncryptedEnrollmentReplay>;
-  open(encrypted: EncryptedEnrollmentReplay): Promise<string>;
+  /**
+   * `context` (asimposiumorg-zdz.8): optional AEAD additional data binding
+   * the sealed bytes to one exact replay identity — scope, principal, target
+   * route, idempotency key, request digest. A ciphertext moved to any other
+   * row then fails authentication instead of replaying cross-purpose.
+   */
+  seal(plaintext: string, context?: string): Promise<EncryptedEnrollmentReplay>;
+  open(encrypted: EncryptedEnrollmentReplay, context?: string): Promise<string>;
   /** Stable keyed bucket; a D1 read alone must not reveal an enumerable IPv4 source. */
   sourceBucket(trustedClientAddress: string): Promise<string>;
 }
@@ -1163,12 +1169,18 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
     this.#random = random;
   }
 
-  async seal(plaintext: string): Promise<EncryptedEnrollmentReplay> {
+  async seal(plaintext: string, context?: string): Promise<EncryptedEnrollmentReplay> {
     const initializationVector = randomBytes(this.#random, 12);
     const key = await this.#replayKey;
     const encoded = new TextEncoder().encode(plaintext);
+    const additionalData =
+      context === undefined ? undefined : new TextEncoder().encode(context).buffer;
     const ciphertext = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: initializationVector.slice().buffer },
+      {
+        name: "AES-GCM",
+        iv: initializationVector.slice().buffer,
+        ...(additionalData === undefined ? {} : { additionalData }),
+      },
       key,
       encoded.buffer,
     );

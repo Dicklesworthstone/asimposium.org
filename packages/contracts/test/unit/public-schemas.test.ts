@@ -24,6 +24,10 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
 
 const EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS = [
   {
+    id: "batch",
+    reason: "Batch planning contract; it has no separate public read face.",
+  },
+  {
     id: "contracts-scaffold",
     reason: "Generator metadata; it is not a product protocol schema.",
   },

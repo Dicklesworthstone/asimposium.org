@@ -1,0 +1,145 @@
+{
+  "$id": "https://a.asimposium.org/schemas/batch.v1.json",
+  "title": "ASImposium batch planning contracts",
+  "description": "W2.2 / W1.2 batch commit planning contract. Validates batch members, causal DAG, bounds, and topological order.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "member": {
+      "type": "object",
+      "properties": {
+        "tempId": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 128,
+          "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+        },
+        "causedBy": {
+          "default": [],
+          "maxItems": 15,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 128,
+            "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+          }
+        }
+      },
+      "required": [
+        "tempId",
+        "causedBy"
+      ],
+      "additionalProperties": false
+    },
+    "plan_request": {
+      "type": "object",
+      "properties": {
+        "members": {
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tempId": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 128,
+                "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+              },
+              "causedBy": {
+                "default": [],
+                "maxItems": 15,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 5,
+                  "maxLength": 128,
+                  "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+                }
+              }
+            },
+            "required": [
+              "tempId",
+              "causedBy"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "members"
+      ],
+      "additionalProperties": false
+    },
+    "plan_result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "commitOrder": {
+              "minItems": 1,
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 128,
+                "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "commitOrder"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "code": {
+              "type": "string",
+              "enum": [
+                "BATCH_EMPTY",
+                "BATCH_TOO_LARGE",
+                "BATCH_INVALID_TEMP_ID",
+                "BATCH_DUPLICATE_TEMP_ID",
+                "BATCH_SELF_CAUSAL_REF",
+                "BATCH_DUPLICATE_CAUSAL_REF",
+                "BATCH_DANGLING_CAUSAL_REF",
+                "BATCH_CAUSAL_CYCLE"
+              ]
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "ok",
+            "code",
+            "detail"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "member",
+    "plan_request",
+    "plan_result"
+  ],
+  "additionalProperties": false
+}

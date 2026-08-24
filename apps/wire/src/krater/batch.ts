@@ -3,7 +3,7 @@
  * is a bounded set of causally related writes committed atomically in one
  * transaction — each validated member is one logical write and therefore one
  * event, with NO batch-wrapper event and no several-objects-in-one-event
- * shortcut. Client-local temporary IDs are resolved server-side.
+ * shortcut. Client-local temporary IDs (`tmp:…`) are resolved server-side.
  *
  * This module is the pure planner: given the batch members, it validates the
  * bound, the causal references, and the acyclicity, and resolves the canonical
@@ -11,34 +11,38 @@
  * plan, so the ordering is reproducible offline and the refusal teaches.
  */
 
-/** The batch is bounded so one request cannot hold the write transaction open. */
-export const MAX_BATCH_MEMBERS = 16;
+import {
+  BATCH_PLAN_REFUSAL_CODES,
+  BATCH_TEMP_ID_PATTERN,
+  type BatchMember,
+  type BatchPlan,
+  type BatchPlanFailure,
+  type BatchPlanRefusalCode,
+  type BatchPlanSuccess,
+  type BatchTempId,
+  MAX_BATCH_MEMBERS,
+  MAX_CAUSED_BY_PER_MEMBER,
+} from "@asimposium/contracts";
 
-/** A client-local temporary id (`tmp:…`) a later member's caused_by may name. */
-export interface BatchMember {
-  /** The member's client-local temporary id. */
-  readonly tempId: string;
-  /** Temp ids this member causally follows (its caused_by parents). */
-  readonly causedBy: readonly string[];
-}
-
-export type BatchPlanRefusalCode =
-  | "BATCH_EMPTY"
-  | "BATCH_TOO_LARGE"
-  | "BATCH_DUPLICATE_TEMP_ID"
-  | "BATCH_DANGLING_CAUSAL_REF"
-  | "BATCH_CAUSAL_CYCLE";
-
-export type BatchPlan =
-  | { readonly ok: true; readonly commitOrder: readonly string[] }
-  | { readonly ok: false; readonly code: BatchPlanRefusalCode; readonly detail: string };
+export {
+  BATCH_PLAN_REFUSAL_CODES,
+  BATCH_TEMP_ID_PATTERN,
+  MAX_BATCH_MEMBERS,
+  MAX_CAUSED_BY_PER_MEMBER,
+  type BatchMember,
+  type BatchPlan,
+  type BatchPlanFailure,
+  type BatchPlanRefusalCode,
+  type BatchPlanSuccess,
+  type BatchTempId,
+};
 
 /**
  * Plan a batch commit. Returns the members' temp ids in causal (topological)
  * commit order — parents before dependents — or a teaching refusal. Pure.
  */
 export function planBatchCommit(members: readonly BatchMember[]): BatchPlan {
-  if (members.length === 0) {
+  if (!Array.isArray(members) || members.length === 0) {
     return { ok: false, code: "BATCH_EMPTY", detail: "a batch must carry at least one member" };
   }
   if (members.length > MAX_BATCH_MEMBERS) {
@@ -47,6 +51,22 @@ export function planBatchCommit(members: readonly BatchMember[]): BatchPlan {
       code: "BATCH_TOO_LARGE",
       detail: `${members.length} members exceeds the ${MAX_BATCH_MEMBERS}-member bound`,
     };
+  }
+
+  for (let i = 0; i < members.length; i++) {
+    const member = members[i];
+    if (
+      typeof member?.tempId !== "string" ||
+      member.tempId.length < 5 ||
+      member.tempId.length > 128 ||
+      !BATCH_TEMP_ID_PATTERN.test(member.tempId)
+    ) {
+      return {
+        ok: false,
+        code: "BATCH_INVALID_TEMP_ID",
+        detail: `member at index ${i} has invalid temporary id (must match tmp:<identifier>, 5-128 chars)`,
+      };
+    }
   }
 
   const byTempId = new Map<string, BatchMember>();
@@ -61,10 +81,53 @@ export function planBatchCommit(members: readonly BatchMember[]): BatchPlan {
     byTempId.set(member.tempId, member);
   }
 
-  // Every caused_by reference must name a member of this batch — a batch is
-  // self-contained; a dangling reference would order against a phantom.
   for (const member of members) {
-    for (const parent of member.causedBy) {
+    const causedBy = member.causedBy ?? [];
+    if (!Array.isArray(causedBy)) {
+      return {
+        ok: false,
+        code: "BATCH_DANGLING_CAUSAL_REF",
+        detail: `member ${member.tempId} caused_by must be an array`,
+      };
+    }
+    if (causedBy.length > MAX_CAUSED_BY_PER_MEMBER) {
+      return {
+        ok: false,
+        code: "BATCH_TOO_LARGE",
+        detail: `member ${member.tempId} caused_by length ${causedBy.length} exceeds ${MAX_CAUSED_BY_PER_MEMBER} bound`,
+      };
+    }
+
+    const seenParents = new Set<string>();
+    for (const parent of causedBy) {
+      if (
+        typeof parent !== "string" ||
+        parent.length < 5 ||
+        parent.length > 128 ||
+        !BATCH_TEMP_ID_PATTERN.test(parent)
+      ) {
+        return {
+          ok: false,
+          code: "BATCH_INVALID_TEMP_ID",
+          detail: `member ${member.tempId} references invalid caused_by temporary id format`,
+        };
+      }
+      if (parent === member.tempId) {
+        return {
+          ok: false,
+          code: "BATCH_SELF_CAUSAL_REF",
+          detail: `member ${member.tempId} cannot list itself in caused_by`,
+        };
+      }
+      if (seenParents.has(parent)) {
+        return {
+          ok: false,
+          code: "BATCH_DUPLICATE_CAUSAL_REF",
+          detail: `member ${member.tempId} carries duplicate caused_by reference ${parent}`,
+        };
+      }
+      seenParents.add(parent);
+
       if (!byTempId.has(parent)) {
         return {
           ok: false,
@@ -79,8 +142,9 @@ export function planBatchCommit(members: readonly BatchMember[]): BatchPlan {
   const inDegree = new Map<string, number>();
   const dependents = new Map<string, string[]>();
   for (const member of members) {
-    inDegree.set(member.tempId, member.causedBy.length);
-    for (const parent of member.causedBy) {
+    const parents = member.causedBy ?? [];
+    inDegree.set(member.tempId, parents.length);
+    for (const parent of parents) {
       const list = dependents.get(parent) ?? [];
       list.push(member.tempId);
       dependents.set(parent, list);
@@ -90,7 +154,7 @@ export function planBatchCommit(members: readonly BatchMember[]): BatchPlan {
   // Deterministic: process ready members in declaration order so the plan is
   // reproducible regardless of map iteration order.
   const declarationOrder = members.map((m) => m.tempId);
-  const ready = declarationOrder.filter((id) => inDegree.get(id) === 0);
+  const ready = declarationOrder.filter((id) => (inDegree.get(id) ?? 0) === 0);
   const commitOrder: string[] = [];
   const inFlight = [...ready];
 

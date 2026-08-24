@@ -4,6 +4,17 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import {
+  type BatchCommitPlanRequest,
+  type BatchContracts,
+  BatchContractsSchema,
+  type BatchMember,
+  type BatchPlan,
+  type BatchPlanFailure,
+  type BatchPlanRefusalCode,
+  type BatchPlanSuccess,
+  type BatchTempId,
+} from "./batch.ts";
+import {
   type DeviceCodeStartRequest,
   type DeviceCodeStartResponse,
   type DeviceLookupRequest,
@@ -161,6 +172,9 @@ const INTERNAL_HEALTH_SCHEMA_ID = "https://a.asimposium.org/schemas/internal.hea
 const SESSIONS_TYPES_ARTIFACT = "generated/sessions.types.ts";
 const SESSIONS_JSON_SCHEMA_ARTIFACT = "generated/sessions.schema.json";
 const SESSIONS_SCHEMA_ID = "https://a.asimposium.org/schemas/sessions.v1.json";
+const BATCH_TYPES_ARTIFACT = "generated/batch.types.ts";
+const BATCH_JSON_SCHEMA_ARTIFACT = "generated/batch.schema.json";
+const BATCH_SCHEMA_ID = "https://a.asimposium.org/schemas/batch.v1.json";
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -570,10 +584,50 @@ function generatedInternalHealthTypes(): string {
   ].join("\n");
 }
 
+function generatedBatchJsonSchema(): string {
+  const document = {
+    $id: BATCH_SCHEMA_ID,
+    title: "ASImposium batch planning contracts",
+    description:
+      "W2.2 / W1.2 batch commit planning contract. Validates batch members, causal DAG, bounds, and topological order.",
+    ...z.toJSONSchema(BatchContractsSchema),
+  };
+  return formatJson(document);
+}
+
+function generatedBatchTypes(): string {
+  const typeNames = [
+    "BatchCommitPlanRequest",
+    "BatchContracts",
+    "BatchMember",
+    "BatchPlan",
+    "BatchPlanFailure",
+    "BatchPlanRefusalCode",
+    "BatchPlanSuccess",
+    "BatchTempId",
+  ] as const satisfies readonly (keyof {
+    BatchCommitPlanRequest: import("./batch.ts").BatchCommitPlanRequest;
+    BatchContracts: import("./batch.ts").BatchContracts;
+    BatchMember: import("./batch.ts").BatchMember;
+    BatchPlan: import("./batch.ts").BatchPlan;
+    BatchPlanFailure: import("./batch.ts").BatchPlanFailure;
+    BatchPlanRefusalCode: import("./batch.ts").BatchPlanRefusalCode;
+    BatchPlanSuccess: import("./batch.ts").BatchPlanSuccess;
+    BatchTempId: import("./batch.ts").BatchTempId;
+  })[];
+  return [
+    "// Generated from src/batch.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/batch.ts";`,
+    "",
+  ].join("\n");
+}
+
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
+    { relativePath: BATCH_JSON_SCHEMA_ARTIFACT, content: generatedBatchJsonSchema() },
+    { relativePath: BATCH_TYPES_ARTIFACT, content: generatedBatchTypes() },
     { relativePath: ENROLLMENT_JSON_SCHEMA_ARTIFACT, content: generatedEnrollmentJsonSchema() },
     {
       relativePath: INTERNAL_HEALTH_JSON_SCHEMA_ARTIFACT,
