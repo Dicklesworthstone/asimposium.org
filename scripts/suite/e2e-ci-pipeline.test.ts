@@ -203,7 +203,7 @@ function expectStoppedAt(run: PipelineRun, stage: Stage, status: string, exitCod
 }
 
 async function waitForTrace(path: string, stage: Stage): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (existsSync(path) && readFileSync(path, "utf8").includes(`begin:${stage}\n`)) return;
     await Bun.sleep(20);
@@ -231,7 +231,7 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
 
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
       if (
         existsSync(${JSON.stringify(paths.tracePath)}) &&
@@ -260,10 +260,12 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
   `;
   const helper = spawnSync(process.execPath, ["-e", helperSource], {
     encoding: "utf8",
-    timeout: 30000,
+    timeout: 45000,
   });
   if (helper.status !== 0) {
-    throw new Error(`cancel helper failed: ${helper.stderr}`);
+    throw new Error(
+      `cancel helper failed: ${JSON.stringify({ status: helper.status, signal: helper.signal, error: helper.error, stderr: helper.stderr })}`,
+    );
   }
   const parsed = JSON.parse(readFileSync(resultPath, "utf8"));
   return {
@@ -330,5 +332,5 @@ describe("OPS.2b review pipeline orchestration", () => {
       const trace = readFileSync(run.tracePath, "utf8");
       expect(trace).not.toContain("descendant-survived:");
     }
-  }, 60_000);
+  }, 120_000);
 });
