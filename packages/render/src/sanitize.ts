@@ -1126,12 +1126,7 @@ function markdownReferenceDefinitionAt(
     destinationEnd = cursor;
   }
 
-  const endOffset = markdownReferenceDefinitionEnd(
-    text,
-    cursor,
-    lineEnd,
-    containerPrefix.markers,
-  );
+  const endOffset = markdownReferenceDefinitionEnd(text, cursor, lineEnd, containerPrefix.markers);
   if (endOffset === undefined) return undefined;
   return {
     label,

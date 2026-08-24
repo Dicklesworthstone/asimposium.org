@@ -241,10 +241,7 @@ describe("pack composition properties (seeded, reproducible)", () => {
     // forces the later budget_exceeded phase to use its own mandatory envelope
     // floor. Either shortcut drifting from the served JSON changes one outcome.
     for (let tokens = 1; tokens <= 800; tokens += 1) {
-      for (const omitted of [
-        [],
-        [{ reason: "candidate_limit", detail: "claims" }],
-      ] as const) {
+      for (const omitted of [[], [{ reason: "candidate_limit", detail: "claims" }]] as const) {
         const boundary = boundaryAccountingInput(tokens, omitted);
         expect(
           differentialOutcome(composePack, boundary),

@@ -934,10 +934,7 @@ function composePackWithSelectionEstimator(
       "json",
     ).bytes;
   };
-  const envelopeFloorTokens = (
-    signature: string,
-    omitted: readonly OmittedEntry[],
-  ): number => {
+  const envelopeFloorTokens = (signature: string, omitted: readonly OmittedEntry[]): number => {
     const cached = envelopeFloorTokensBySignature.get(signature);
     if (cached !== undefined) return cached;
     const measured = estimatePackTokens({

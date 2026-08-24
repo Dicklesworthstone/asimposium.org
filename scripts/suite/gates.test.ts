@@ -133,10 +133,7 @@ describe("provider-neutral full gate", () => {
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(status);
-    expect(run.commands).toEqual([
-      "bun\tinstall\t--frozen-lockfile",
-      "bun\trun\tcheck",
-    ]);
+    expect(run.commands).toEqual(["bun\tinstall\t--frozen-lockfile", "bun\trun\tcheck"]);
     expect(run.stdout).not.toContain("=== all selected gates passed ===");
   });
 });

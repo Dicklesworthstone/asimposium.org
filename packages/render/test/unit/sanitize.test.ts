@@ -456,8 +456,8 @@ describe("neutralizeUntrustedBody", () => {
       "[split quote]\n\n> [split quote]:\n> javascript:from-split-quote()",
       "[split quote angle]\n\n> [split quote angle]:\n> <javascript:from-split-quote-angle()>",
       "[split bullet]\n\n- [split bullet]:\n  data:text/html,from-split-bullet()",
-      "[titled quote]\n\n> [titled quote]: javascript:from-quote-title()\n> \"a title\"",
-      "[split titled quote]\n\n> [split titled quote]:\n> javascript:from-split-quote-title()\n> \"a title\"",
+      '[titled quote]\n\n> [titled quote]: javascript:from-quote-title()\n> "a title"',
+      '[split titled quote]\n\n> [split titled quote]:\n> javascript:from-split-quote-title()\n> "a title"',
     ];
 
     for (const body of controls) {
