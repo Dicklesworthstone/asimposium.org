@@ -348,6 +348,10 @@ PY
 plant_stage() {
   local stage="$1" planted_stage outcome
   [[ "$PIPELINE_TEST_MODE" == "1" ]] || return 64
+  # The parent test process supplies this canary only to prove stage_command's
+  # clean-environment boundary. Seeing it here means an ambient value crossed
+  # that boundary and the plant must fail closed.
+  [[ -z "${ASIMP_CI_PROCESS_AMBIENT_CANARY:-}" ]] || return 97
   planted_stage="${ASIMP_CI_PROCESS_PLANT_STAGE:-}"
   outcome="${ASIMP_CI_PROCESS_PLANT_OUTCOME:-pass}"
   if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
@@ -814,10 +818,37 @@ if any(
 PY
 }
 
+stage_environment_prefix() {
+  # Stages run third-party tools and remote probes. Start each one from a small
+  # operational allowlist so a root gate or smoke cannot inherit unrelated
+  # provider credentials from the hosted runner. Stage-specific authority is
+  # appended below only where it is actually needed.
+  printf '%s\0' env -i \
+    "PATH=${PATH:-/usr/bin:/bin}" \
+    "HOME=${HOME:-}" \
+    "TMPDIR=${TMPDIR:-/tmp}" \
+    "LANG=${LANG:-C}" \
+    "LC_ALL=${LC_ALL:-C}" \
+    "TZ=${TZ:-UTC}" \
+    "CURL_HOME=${CURL_HOME:-}" \
+    "BUN_VERSION=${BUN_VERSION:-}" \
+    "CI=${CI:-}" \
+    "WORKERS_CI=${WORKERS_CI:-}" \
+    "WORKERS_CI_BUILD_UUID=${WORKERS_CI_BUILD_UUID:-}" \
+    "WORKERS_CI_COMMIT_SHA=${WORKERS_CI_COMMIT_SHA:-}"
+}
+
 stage_command() {
   local stage="$1"
+  stage_environment_prefix
   if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
-    printf '%s\0' bash "$repository_root/scripts/e2e-ci-pipeline.sh" __plant "$stage"
+    printf '%s\0' \
+      "ASIMP_CI_PROCESS_TEST=1" \
+      "ASIMP_CI_PROCESS_PLANT_STAGE=${ASIMP_CI_PROCESS_PLANT_STAGE:-}" \
+      "ASIMP_CI_PROCESS_PLANT_OUTCOME=${ASIMP_CI_PROCESS_PLANT_OUTCOME:-}" \
+      "ASIMP_CI_PROCESS_TRACE=${ASIMP_CI_PROCESS_TRACE:-}" \
+      "ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY=${ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY:-}" \
+      bash "$repository_root/scripts/e2e-ci-pipeline.sh" __plant "$stage"
     return 0
   fi
   case "$stage" in
@@ -825,25 +856,48 @@ stage_command() {
       printf '%s\0' bash "$repository_root/scripts/gates.sh" --all
       ;;
     worker-deploy)
-      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+      printf '%s\0' \
+        "ASIMP_CI_INTERNAL=1" \
+        "ASIMP_CI_INTERNAL_RUN_ID=$RUN_ID" \
+        "ASIMP_CI_RUNNER=$RUNNER" \
+        "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}" \
+        "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}" \
+        "ASIMP_D1_DATABASE_ID_STAGING=${ASIMP_D1_DATABASE_ID_STAGING:-}" \
+        "ASIMP_STAGING_SERVICE_ENVELOPE_KEYS=${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS:-}" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_deploy
       ;;
     worker-readiness)
-      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+      printf '%s\0' \
+        "ASIMP_CI_INTERNAL=1" \
+        "ASIMP_CI_INTERNAL_RUN_ID=$RUN_ID" \
+        "ASIMP_CI_RUNNER=$RUNNER" \
+        "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}" \
+        "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}" \
+        "ASIMP_D1_DATABASE_ID_STAGING=${ASIMP_D1_DATABASE_ID_STAGING:-}" \
+        "ASIMP_STAGING_SERVICE_ENVELOPE_KEYS=${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS:-}" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_readiness
       ;;
     web-deploy)
-      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+      printf '%s\0' \
+        "ASIMP_CI_INTERNAL=1" \
+        "ASIMP_CI_INTERNAL_RUN_ID=$RUN_ID" \
+        "ASIMP_CI_RUNNER=$RUNNER" \
+        "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}" \
+        "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}" \
+        "VERCEL_TOKEN=${VERCEL_TOKEN:-}" \
+        "VERCEL_ORG_ID=${VERCEL_ORG_ID:-}" \
+        "VERCEL_PROJECT_ID=${VERCEL_PROJECT_ID:-}" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __web_deploy
       ;;
     smoke-agent)
-      printf '%s\0' env \
-        ASIMPOSIUM_STAGING_AGENT_BASE_URL="$STAGING_WORKER_ORIGIN" \
+      printf '%s\0' \
+        "ASIMPOSIUM_STAGING_AGENT_BASE_URL=$STAGING_WORKER_ORIGIN" \
+        "ASIMPOSIUM_SMOKE_FELLOW_TOKEN=${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}" \
         bash "$repository_root/scripts/smoke-agent.sh" --write-artifacts --run-id "smoke-agent-${REVISION:0:12}-$$"
       ;;
     smoke-gallery)
-      printf '%s\0' env \
-        ASIMPOSIUM_STAGING_AGORA_BASE_URL="$STAGING_AGORA_ORIGIN" \
+      printf '%s\0' \
+        "ASIMPOSIUM_STAGING_AGORA_BASE_URL=$STAGING_AGORA_ORIGIN" \
         bash "$repository_root/scripts/smoke-gallery.sh" --write-artifacts --run-id "smoke-gallery-${REVISION:0:12}-$$"
       ;;
     *) return 64 ;;

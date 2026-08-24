@@ -189,6 +189,12 @@ checkout was deployed. Worker deployment, readiness, and web deployment bind
 `subject_revision` to the current checkout only after their provider receipts
 establish that relationship.
 
+Every stage child starts from an explicit operational environment allowlist.
+The Fellow smoke token is passed only to the agent smoke; Cloudflare authority
+is passed only to Worker deployment/readiness and the final active-deployment
+re-attestation; Vercel authority is passed only to web deployment. Root gates
+and gallery smoke receive none of those credentials.
+
 Configure these Workers Builds variables. Provider credentials and the Fellow
 token are secrets; resource/project identifiers, the runner label, and public
 verification-key records are not credentials but should still be scoped to

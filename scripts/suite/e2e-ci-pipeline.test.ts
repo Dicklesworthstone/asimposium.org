@@ -404,6 +404,14 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(run.stderr).toContain("ASIMP_CI_PROCESS_TEST must be 0 or 1");
   });
 
+  test("stage subprocesses do not inherit an unrelated ambient value", () => {
+    const run = runPipeline("smoke-gallery", "pass", false, {
+      ASIMP_CI_PROCESS_AMBIENT_CANARY: "must-not-cross-stage-boundary",
+    });
+    expect(run.status).toBe(0);
+    expect(begunStages(run)).toEqual([...STAGES]);
+  });
+
   test("the all-pass process control runs each stage in doctrine order", () => {
     const run = runPipeline("smoke-gallery", "pass");
 

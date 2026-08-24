@@ -531,14 +531,22 @@ export interface ProblemExportCheckpointPin {
   readonly rootChainDigest: string;
 }
 
+export interface ProblemRestoreCheckpointPin extends ProblemExportCheckpointPin {
+  readonly checkpointDigest: string;
+  readonly checkpointVersion: 1;
+  readonly chainVersion: typeof KRATER_CHAIN_VERSION;
+  readonly checkpointMode: "unsigned-v0";
+}
+
+export type ProblemExportVerification =
+  | { readonly intact: true; readonly eventCount: number; readonly finalChainDigest: string }
+  | { readonly intact: false; readonly brokenAtSeq: number; readonly detail: string }
+  | { readonly intact: false; readonly brokenAtSeq: null; readonly detail: string };
+
 export async function verifyProblemExportChain(
   ndjson: string,
   pin?: ProblemExportCheckpointPin,
-): Promise<
-  | { readonly intact: true; readonly eventCount: number; readonly finalChainDigest: string }
-  | { readonly intact: false; readonly brokenAtSeq: number; readonly detail: string }
-  | { readonly intact: false; readonly brokenAtSeq: null; readonly detail: string }
-> {
+): Promise<ProblemExportVerification> {
   const parsed = parseProblemExportV2(ndjson);
   if (!parsed.ok) {
     return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
@@ -677,4 +685,61 @@ export async function verifyProblemExportChain(
   }
 
   return { intact: true, eventCount: parsed.events.length, finalChainDigest: previous };
+}
+
+/**
+ * Restore/import preflight is intentionally stricter than generic export
+ * verification: an operator must supply the complete independently held
+ * terminal checkpoint tuple. An intermediate pin authenticates only a prefix
+ * and therefore cannot authorize importing a later self-consistent suffix.
+ */
+export async function verifyProblemRestorePreflight(
+  ndjson: string,
+  pin: ProblemRestoreCheckpointPin,
+): Promise<ProblemExportVerification> {
+  const parsed = parseProblemExportV2(ndjson);
+  if (!parsed.ok) {
+    return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
+  }
+  if (
+    pin.problemId !== parsed.header.problem ||
+    !positiveInteger(pin.checkpointSeq) ||
+    !isSha256Hex(pin.rootChainDigest) ||
+    !isSha256Hex(pin.checkpointDigest) ||
+    pin.checkpointVersion !== 1 ||
+    pin.chainVersion !== KRATER_CHAIN_VERSION ||
+    pin.checkpointMode !== "unsigned-v0"
+  ) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the restore checkpoint pin is malformed or names another problem",
+    };
+  }
+  const embeddedTerminal = parsed.header.checkpoints.at(-1);
+  if (
+    pin.checkpointSeq !== parsed.trailer.finalCursor ||
+    parsed.trailer.eventCount === 0 ||
+    embeddedTerminal === undefined ||
+    embeddedTerminal.checkpointSeq !== pin.checkpointSeq ||
+    embeddedTerminal.rootChainDigest !== pin.rootChainDigest ||
+    embeddedTerminal.checkpointDigest !== pin.checkpointDigest
+  ) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the restore checkpoint pin is not the exact terminal embedded checkpoint",
+    };
+  }
+  if (
+    pin.checkpointDigest !==
+    (await checkpointDigest(pin.problemId, pin.checkpointSeq, pin.rootChainDigest))
+  ) {
+    return {
+      intact: false,
+      brokenAtSeq: pin.checkpointSeq,
+      detail: "the restore checkpoint pin digest does not recompute",
+    };
+  }
+  return verifyProblemExportChain(ndjson, pin);
 }

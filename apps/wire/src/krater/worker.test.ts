@@ -198,16 +198,19 @@ function replayReadOnlyDatabase(fixture: ChangedBuilderReplayFixture): {
               }),
             };
           }
-          if (sql.includes("FROM checkpoint_chain_v2 c")) {
+          if (sql.includes("LEFT JOIN checkpoint_chain_v2 c")) {
             if (bindings[0] !== fixture.body.problem_id) {
               throw new Error("S2_TEST_REPLAY_CHECKPOINT_QUERY_MISMATCH");
             }
             return {
               first: async () => ({
+                problem_id: fixture.body.problem_id,
                 checkpoint_digest: fixture.checkpointDigest,
                 chain_version: 2,
                 checkpoint_seq: fixture.cursor,
                 root_chain_digest: fixture.event.chainDigest,
+                checkpoint_version: 1,
+                checkpoint_mode: "unsigned-v0",
               }),
             };
           }

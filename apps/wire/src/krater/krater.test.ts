@@ -683,15 +683,11 @@ describe("Krater deterministic contracts", () => {
     });
     const persistedEvents: readonly KraterEvent[] = [
       {
+        ...event("P-v2-builder", 1, "a".repeat(64)),
         eventId: "E-v2-builder",
-        problemId: "P-v2-builder",
-        seq: 1,
-        type: "claim.created",
         objectId: "C-v2-builder",
-        payloadSha256: "a".repeat(64),
         rowDigest: "b".repeat(64),
         chainDigest: "c".repeat(64),
-        createdAt: "2026-08-20T00:00:00.000Z",
       },
     ];
     // This V2 row is deliberately hand-specified, not derived through

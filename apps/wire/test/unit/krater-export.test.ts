@@ -6,6 +6,7 @@ import {
   parseExportHeader,
   serializeProblemExport,
   verifyProblemExportChain,
+  verifyProblemRestorePreflight,
 } from "../../src/krater/export.ts";
 import {
   canonicalJson,
@@ -427,6 +428,59 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
       brokenAtSeq: 2,
       detail: "external checkpoint root mismatch at seq 2",
     });
+  });
+
+  test("restore preflight requires the exact full terminal checkpoint, not a valid prefix pin", async () => {
+    const ndjson = await buildExport(3, [1, 3]);
+    const lines = ndjson.trim().split("\n");
+    const header = JSON.parse(lines[0] ?? "{}") as {
+      checkpoints: Array<{
+        checkpoint_seq: number;
+        root_chain_digest: string;
+        checkpoint_digest: string;
+      }>;
+    };
+    const prefix = header.checkpoints[0];
+    const terminal = header.checkpoints[1];
+    if (prefix === undefined || terminal === undefined) throw new Error("checkpoint fixture missing");
+
+    expect(
+      (
+        await verifyProblemExportChain(ndjson, {
+          problemId: "P-4DSP",
+          checkpointSeq: prefix.checkpoint_seq,
+          rootChainDigest: prefix.root_chain_digest,
+        })
+      ).intact,
+    ).toBe(true);
+    await expect(
+      verifyProblemRestorePreflight(ndjson, {
+        problemId: "P-4DSP",
+        checkpointSeq: prefix.checkpoint_seq,
+        rootChainDigest: prefix.root_chain_digest,
+        checkpointDigest: prefix.checkpoint_digest,
+        checkpointVersion: 1,
+        chainVersion: 2,
+        checkpointMode: "unsigned-v0",
+      }),
+    ).resolves.toEqual({
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the restore checkpoint pin is not the exact terminal embedded checkpoint",
+    });
+    expect(
+      (
+        await verifyProblemRestorePreflight(ndjson, {
+          problemId: "P-4DSP",
+          checkpointSeq: terminal.checkpoint_seq,
+          rootChainDigest: terminal.root_chain_digest,
+          checkpointDigest: terminal.checkpoint_digest,
+          checkpointVersion: 1,
+          chainVersion: 2,
+          checkpointMode: "unsigned-v0",
+        })
+      ).intact,
+    ).toBe(true);
   });
 
   test("PLANTED: v1 links and missing or downgraded version markers never fall back", async () => {

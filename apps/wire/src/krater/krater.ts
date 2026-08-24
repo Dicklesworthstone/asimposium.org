@@ -289,11 +289,31 @@ interface ProjectionRow {
 interface CheckpointRow {
   problem_id: string;
   checkpoint_seq: number;
+  root_chain_digest: string | null;
+  checkpoint_digest: string | null;
+  checkpoint_version: number;
+  chain_version: number | null;
+  checkpoint_mode: string;
+}
+
+interface ValidatedCheckpointRow {
+  problem_id: string;
+  checkpoint_seq: number;
   root_chain_digest: string;
   checkpoint_digest: string;
   checkpoint_version: 1;
-  chain_version: number;
+  chain_version: typeof KRATER_CHAIN_VERSION;
   checkpoint_mode: "unsigned-v0";
+}
+
+interface LegacyCheckpointRow {
+  problem_id: string;
+  checkpoint_seq: number;
+  root_chain_digest: string;
+  checkpoint_digest: string;
+  checkpoint_version: number;
+  checkpoint_mode: string;
+  created_at: string;
 }
 
 interface ClaimRow {
@@ -633,6 +653,53 @@ export async function checkpointDigest(
   );
 }
 
+/** Frozen v1 checkpoint derivation used only to validate retained pre-0039 bytes. */
+async function legacyCheckpointDigestV1(
+  problemId: string,
+  seq: number,
+  rootChainDigest: string,
+): Promise<string> {
+  requireInputSequence(seq, "legacy checkpoint sequence", false);
+  return sha256Hex(
+    canonicalJson({
+      checkpoint_version: 1,
+      problem_id: problemId,
+      root_chain_digest: rootChainDigest,
+      seq,
+    }),
+  );
+}
+
+async function validateCurrentCheckpoint(
+  row: CheckpointRow,
+  expected: { readonly problemId: string; readonly seq: number; readonly rootChainDigest: string },
+  detail: string,
+): Promise<ValidatedCheckpointRow> {
+  const checkpointSeq = requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false);
+  requireCurrentChainVersion(row.chain_version, detail);
+  if (
+    row.problem_id !== expected.problemId ||
+    checkpointSeq !== expected.seq ||
+    row.checkpoint_version !== 1 ||
+    row.checkpoint_mode !== "unsigned-v0" ||
+    row.root_chain_digest !== expected.rootChainDigest ||
+    row.checkpoint_digest === null ||
+    row.checkpoint_digest !==
+      (await checkpointDigest(row.problem_id, checkpointSeq, row.root_chain_digest))
+  ) {
+    backfillRequired(detail);
+  }
+  return {
+    problem_id: row.problem_id,
+    checkpoint_seq: checkpointSeq,
+    root_chain_digest: row.root_chain_digest,
+    checkpoint_digest: row.checkpoint_digest,
+    checkpoint_version: 1,
+    chain_version: KRATER_CHAIN_VERSION,
+    checkpoint_mode: "unsigned-v0",
+  };
+}
+
 function statement(db: D1Database, sql: string, ...values: unknown[]): D1PreparedStatement {
   return db.prepare(sql).bind(...values);
 }
@@ -820,7 +887,10 @@ async function readProjectionByEvent(db: D1Database, event: EventRow): Promise<P
   };
 }
 
-async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<CheckpointRow> {
+async function readCheckpointByEvent(
+  db: D1Database,
+  event: EventRow,
+): Promise<ValidatedCheckpointRow> {
   const row = await statement(
     db,
     `SELECT i.problem_id, i.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest,
@@ -833,21 +903,14 @@ async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<C
     event.seq,
   ).first<CheckpointRow>();
   if (row === null) throw new Error("Krater write did not persist an integrity checkpoint.");
-  requireCurrentChainVersion(
-    row.chain_version,
-    "Krater write did not persist one current-version checkpoint chain.",
-  );
-  if (
-    row.root_chain_digest !== event.chain_digest ||
-    row.checkpoint_digest !==
-      (await checkpointDigest(row.problem_id, row.checkpoint_seq, row.root_chain_digest))
-  ) {
-    backfillRequired("the stored v2 checkpoint digest disagrees with its event chain root.");
+  if (event.chain_digest === null) {
+    backfillRequired("the stored event has no v2 chain root for its checkpoint.");
   }
-  return {
-    ...row,
-    checkpoint_seq: requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false),
-  };
+  return validateCurrentCheckpoint(
+    row,
+    { problemId: event.problem_id, seq: event.seq, rootChainDigest: event.chain_digest },
+    "the stored v2 checkpoint disagrees with its event chain root or metadata.",
+  );
 }
 
 async function readClaimByEvent(db: D1Database, event: EventRow): Promise<ClaimRow> {
@@ -1162,6 +1225,21 @@ export async function backfillKraterIntegrity(
   if (publicSeq !== legacyEvents.length) {
     backfillRequired("the legacy cursor does not match a complete contiguous envelope history.");
   }
+  const legacyCheckpointResult = await statement(
+    db,
+    `SELECT problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
+            checkpoint_version, checkpoint_mode, created_at
+     FROM integrity_checkpoints WHERE problem_id = ? ORDER BY checkpoint_seq ASC`,
+    problemId,
+  ).all<LegacyCheckpointRow>();
+  recordD1Result(cost, legacyCheckpointResult);
+  const legacyCheckpoints = legacyCheckpointResult.results;
+  if (
+    (legacyWasComplete && legacyCheckpoints.length !== legacyEvents.length) ||
+    (legacyWasUndigested && legacyCheckpoints.length !== 0)
+  ) {
+    backfillRequired("the legacy checkpoint stream is absent, partial, or ambiguous.");
+  }
 
   let priorChainDigest = await genesisChainDigest(problemId);
   let priorLegacyChainDigest = await legacyGenesisChainDigestV1(problemId);
@@ -1219,6 +1297,28 @@ export async function backfillKraterIntegrity(
         event.stored_chain_digest !== legacyChainDigest)
     ) {
       backfillRequired("the stored v1 integrity bytes disagree with their immutable event history.");
+    }
+    if (legacyWasComplete) {
+      const legacyCheckpoint = legacyCheckpoints[index];
+      if (
+        legacyCheckpoint === undefined ||
+        legacyCheckpoint.problem_id !== event.problem_id ||
+        legacyCheckpoint.checkpoint_seq !== event.seq ||
+        legacyCheckpoint.root_chain_digest !== legacyChainDigest ||
+        legacyCheckpoint.checkpoint_version !== 1 ||
+        legacyCheckpoint.checkpoint_mode !== "unsigned-v0" ||
+        legacyCheckpoint.created_at !== event.created_at ||
+        legacyCheckpoint.checkpoint_digest !==
+          (await legacyCheckpointDigestV1(
+            event.problem_id,
+            event.seq,
+            legacyCheckpoint.root_chain_digest,
+          ))
+      ) {
+        backfillRequired(
+          "the stored v1 checkpoint bytes disagree with their verified event chain.",
+        );
+      }
     }
     const chainDigest = await eventChainDigest(
       event.problem_id,
@@ -2918,34 +3018,34 @@ export async function readIntegrityState(
       readProblemHead(db, problemId),
       statement(
         db,
-        `SELECT c.checkpoint_digest, c.chain_version, c.checkpoint_seq, c.root_chain_digest
-         FROM checkpoint_chain_v2 c
-         WHERE c.problem_id = ? ORDER BY c.checkpoint_seq DESC LIMIT 1`,
+        `SELECT i.problem_id, i.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest,
+                i.checkpoint_version, c.chain_version, i.checkpoint_mode
+         FROM integrity_checkpoints i
+         LEFT JOIN checkpoint_chain_v2 c
+           ON c.problem_id = i.problem_id AND c.checkpoint_seq = i.checkpoint_seq
+         WHERE i.problem_id = ? ORDER BY i.checkpoint_seq DESC LIMIT 1`,
         problemId,
-      ).first<{
-        checkpoint_digest: string;
-        chain_version: number;
-        checkpoint_seq: number;
-        root_chain_digest: string;
-      }>(),
+      ).first<CheckpointRow>(),
     ]);
     if (head.public_seq > 0 && checkpoint === null) {
       backfillRequired("a nonempty v2 chain must have a current-version checkpoint.");
     }
-    if (checkpoint !== null) {
-      requireCurrentChainVersion(checkpoint.chain_version);
-      if (
-        requireStoredSequence(checkpoint.checkpoint_seq, "checkpoint sequence", false) !==
-          head.public_seq ||
-        checkpoint.root_chain_digest !== head.chain_digest
-      ) {
-        backfillRequired("the v2 checkpoint does not bind the durable problem head.");
-      }
-    }
+    const validatedCheckpoint =
+      checkpoint === null
+        ? null
+        : await validateCurrentCheckpoint(
+            checkpoint,
+            {
+              problemId,
+              seq: head.public_seq,
+              rootChainDigest: head.chain_digest,
+            },
+            "the v2 checkpoint does not bind the durable problem head and exact digest.",
+          );
     return {
       chainDigest: head.chain_digest,
       chainVersion: KRATER_CHAIN_VERSION,
-      checkpointDigest: checkpoint?.checkpoint_digest ?? null,
+      checkpointDigest: validatedCheckpoint?.checkpoint_digest ?? null,
     };
   } catch (error) {
     if (
@@ -2969,41 +3069,44 @@ export async function readCheckpoints(
     const result = await statement(
       db,
       `SELECT i.problem_id, i.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest,
-              i.checkpoint_version, c.chain_version, i.checkpoint_mode
+              i.checkpoint_version, c.chain_version, i.checkpoint_mode,
+              e.chain_digest AS event_chain_digest
        FROM integrity_checkpoints i
        LEFT JOIN checkpoint_chain_v2 c
          ON c.problem_id = i.problem_id AND c.checkpoint_seq = i.checkpoint_seq
+       LEFT JOIN event_chain_v2 e
+         ON e.problem_id = i.problem_id AND e.seq = i.checkpoint_seq
        WHERE i.problem_id = ? ORDER BY i.checkpoint_seq ASC`,
       problemId,
-    ).all<CheckpointRow>();
+    ).all<CheckpointRow & { event_chain_digest: string | null }>();
     if (result.results.length !== head.public_seq) {
       backfillRequired("the v2 checkpoint stream is incomplete for the durable problem cursor.");
     }
-    return result.results.map((row, index) => {
-      const checkpointSeq = requireStoredSequence(
-        row.checkpoint_seq,
-        "checkpoint sequence",
-        false,
-      );
-      if (
-        checkpointSeq !== index + 1 ||
-        row.problem_id !== problemId ||
-        row.checkpoint_version !== 1 ||
-        row.checkpoint_mode !== "unsigned-v0" ||
-        requireCurrentChainVersion(row.chain_version) !== KRATER_CHAIN_VERSION
-      ) {
-        backfillRequired("the checkpoint stream mixes identities or chain versions.");
-      }
-      return {
-        problemId: row.problem_id,
-        checkpointSeq,
-        rootChainDigest: row.root_chain_digest,
-        checkpointDigest: row.checkpoint_digest,
-        checkpointVersion: 1,
-        chainVersion: KRATER_CHAIN_VERSION,
-        checkpointMode: "unsigned-v0",
-      };
-    });
+    return Promise.all(
+      result.results.map(async (row, index) => {
+        if (row.event_chain_digest === null) {
+          backfillRequired("the checkpoint stream is missing its exact v2 event-chain root.");
+        }
+        const validated = await validateCurrentCheckpoint(
+          row,
+          {
+            problemId,
+            seq: index + 1,
+            rootChainDigest: row.event_chain_digest,
+          },
+          "the checkpoint stream mixes identities, versions, roots, or digests.",
+        );
+        return {
+          problemId: validated.problem_id,
+          checkpointSeq: validated.checkpoint_seq,
+          rootChainDigest: validated.root_chain_digest,
+          checkpointDigest: validated.checkpoint_digest,
+          checkpointVersion: 1,
+          chainVersion: KRATER_CHAIN_VERSION,
+          checkpointMode: "unsigned-v0",
+        };
+      }),
+    );
   } catch (error) {
     if (
       error instanceof KraterProblemNotFoundError ||
