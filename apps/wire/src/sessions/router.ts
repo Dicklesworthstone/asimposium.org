@@ -748,7 +748,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row?.role;
   }
 
-
   // ebts: one exact-path response policy for the four mounted Fellow POST
   // routes. Every response class they can emit — fresh success, exact replay,
   // auth refusal, contract refusal, policy refusal, idempotency conflict,
@@ -763,12 +762,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/promote",
     "/v1/sessions/:id/close",
   ] as const;
-  app.use(FELLOW_WRITE_RECEIPT_PATHS, async (c, next) => {
-    await next();
-    if (c.req.method === "POST") {
-      c.res.headers.set("cache-control", "private, no-store");
-    }
-  });
+  for (const path of FELLOW_WRITE_RECEIPT_PATHS) {
+    app.use(path, async (c, next) => {
+      await next();
+      if (c.req.method === "POST") {
+        c.res.headers.set("cache-control", "private, no-store");
+      }
+    });
+  }
   // --- POST /v1/sessions -------------------------------------------------
   app.post("/v1/sessions", async (c) => {
     const auth = await authenticate(c.req.raw);

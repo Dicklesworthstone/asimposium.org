@@ -8,7 +8,7 @@
 //! this CLI is a convenience, never a requirement (Fable §1).
 
 use clap::Parser;
-use std::io::BufRead;
+use std::io::Read;
 use ureq::{Agent, AgentBuilder};
 
 /// Parsed command line for the optional `asimp` companion.
@@ -104,13 +104,13 @@ fn agent() -> Agent {
         .build()
 }
 
-fn read_capped(reader: impl BufRead) -> Result<String, String> {
+fn read_capped(reader: impl Read) -> Result<String, String> {
+    let mut bytes = Vec::new();
     reader
         .take(MAX_BODY_BYTES)
-        .lines()
-        .collect::<Result<Vec<_>, _>>()
-        .map(|lines| lines.join("\n"))
-        .map_err(|error| error.to_string())
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 /// GET one full URL, bounding the response body. Redirects fail by default in
@@ -142,7 +142,8 @@ pub fn problems_path(json: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, ErrorKind};
+    use clap::error::ErrorKind;
+    use clap::CommandFactory;
 
     #[test]
     fn help_describes_asimp_as_optional() {

@@ -780,10 +780,7 @@ describe("structural trust rules (Fable §7.3, §14.4 layer 2)", () => {
       },
     ]);
 
-    const error = expectRefusal(
-      () => prepareProjection(projection),
-      "TRUSTED_BODY_UNCLOSED_FENCE",
-    );
+    const error = expectRefusal(() => prepareProjection(projection), "TRUSTED_BODY_UNCLOSED_FENCE");
     expect(error.rule).toBe("A1");
   });
 

@@ -6784,17 +6784,16 @@ describe("committed promotion outbox nudge", () => {
       });
 
     const openBody = JSON.stringify({ problem_id: "P-4DSP", intent: "prove" });
+    // Refusals run while no session exists yet: the route answers an
+    // existing-open-session conflict before body validity, so a later
+    // contract-refusal probe would read as 409 instead of its teaching 422.
+    const authRefusal = await sessionOpen("ebts-open-2", openBody, "not-a-real-token");
+    const contractRefusal = await sessionOpen("ebts-open-3", JSON.stringify({}), token);
     const fresh = await sessionOpen("ebts-open-1", openBody, token);
     const replay = await sessionOpen("ebts-open-1", openBody, token);
     const conflict = await sessionOpen(
       "ebts-open-1",
       JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
-      token,
-    );
-    const authRefusal = await sessionOpen("ebts-open-2", openBody, "not-a-real-token");
-    const contractRefusal = await sessionOpen(
-      "ebts-open-3",
-      JSON.stringify({ problem_id: "P-4DSP" }),
       token,
     );
     for (const [label, response] of [
@@ -6808,7 +6807,7 @@ describe("committed promotion outbox nudge", () => {
       expect(response.headers.get("cache-control"), `sessions ${label}`).toBe(NO_STORE);
     }
     expect(fresh.status).toBe(201);
-    expect(replay.status).toBe(201);
+    expect(replay.status).toBe(200);
     expect(conflict.status).toBe(409);
     expect(authRefusal.status).toBe(401);
     expect(contractRefusal.status).toBe(422);
@@ -6843,7 +6842,7 @@ describe("committed promotion outbox nudge", () => {
       expect(response.headers.get("cache-control"), `workshop ${label}`).toBe(NO_STORE);
     }
     expect(pushFresh.status).toBe(201);
-    expect(pushReplay.status).toBe(201);
+    expect(pushReplay.status).toBe(200);
     expect(pushAuth.status).toBe(401);
     expect(pushContract.status).toBe(422);
 
@@ -6857,8 +6856,11 @@ describe("committed promotion outbox nudge", () => {
         },
         body,
       });
+    // Promote the draft the workshop push created above; the route refuses a
+    // fabricated workshop id before any receipt is minted.
+    const pushedWorkshopId = WorkshopPushResponseSchema.parse(await pushFresh.json()).workshop_id;
     const promoteBody = JSON.stringify({
-      workshop_id: "W-4DSP-EBTS01",
+      workshop_id: pushedWorkshopId,
       kind: "conjecture",
       statement: "Receipt retention is prohibited on every write path.",
       falsifier: "A promoted receipt that a shared cache retains and serves stale.",
@@ -6870,7 +6872,7 @@ describe("committed promotion outbox nudge", () => {
       expect(response.headers.get("cache-control")).toBe(NO_STORE);
     }
     expect(promoteFresh.status).toBe(201);
-    expect(promoteReplay.status).toBe(201);
+    expect(promoteReplay.status).toBe(200);
 
     const close = async (key: string) =>
       call(`/v1/sessions/${sessionId}/close`, {
@@ -6888,7 +6890,6 @@ describe("committed promotion outbox nudge", () => {
       expect(response.headers.get("cache-control")).toBe(NO_STORE);
     }
     expect(closeFresh.status).toBe(201);
-    expect(closeReplay.status).toBe(201);
+    expect(closeReplay.status).toBe(200);
   });
 });
-

@@ -1,0 +1,1 @@
+{"tool":"bun","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_INCOMPLETE","unlisted":"apps/wire/src/ledger/relations.ts","reproduce":"scripts/e2e-s2-krater.sh"}

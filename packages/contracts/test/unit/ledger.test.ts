@@ -88,9 +88,9 @@ test("every contract-valid entry has an unambiguous bounded markdown row", () =>
   ];
   for (const field of ["created_at", "updated_at"] as const) {
     for (const value of hostileTimestamps) {
-      expect(
-        ProblemIndexEntrySchema.safeParse({ ...canonical, [field]: value }).success,
-      ).toBe(false);
+      expect(ProblemIndexEntrySchema.safeParse({ ...canonical, [field]: value }).success).toBe(
+        false,
+      );
     }
   }
 });

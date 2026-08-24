@@ -49,6 +49,9 @@ function arbitraryCandidate(rand: () => number, index: number): PackCandidate {
     body += String.fromCharCode(codeUnit);
   }
   const kind = KINDS[Math.floor(rand() * KINDS.length)];
+  if (kind === undefined) {
+    throw new Error("non-empty property-test vocabularies must yield a candidate value");
+  }
   return {
     kind,
     id: `X-${index}-${Math.floor(rand() * 1000)}`,
