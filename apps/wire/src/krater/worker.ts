@@ -22,6 +22,7 @@ import {
   explainUndigestedEventProbe,
   inspectEventContentByEventId,
   inspectProblem,
+  KRATER_CHAIN_VERSION,
   KraterIdempotencyConflictError,
   KraterIntegrityBackfillRequiredError,
   KraterProblemNotFoundError,
@@ -971,6 +972,7 @@ async function handleHarnessRequest(
         row_digest: result.rowDigest,
         build_digest: result.buildDigest,
         chain_digest: result.chainDigest,
+        chain_version: result.chainVersion,
         checkpoint_digest: result.checkpointDigest,
         write_phase_ms: result.writePhaseMs,
         // D1 exposes metadata only for the settled batch result. Rejected retry attempts have
@@ -1019,18 +1021,23 @@ async function handleHarnessRequest(
 
     if (request.method === "POST" && url.pathname === "/__s2/replay") {
       const problemId = requiredString(await readBody(request), "problem_id");
-      const [events, projections, cursor] = await Promise.all([
+      const [events, projections, cursor, integrity] = await Promise.all([
         readAllEvents(env.DB, problemId),
         readClaimProjections(env.DB, problemId),
         readCursor(env.DB, problemId),
+        readIntegrityState(env.DB, problemId),
       ]);
+      const terminal = events[events.length - 1];
       return response({
         matches:
           projectionReplayMatches(events, projections) &&
           cursorMatchesEvents(cursor, events) &&
-          (await eventChainMatches(events)),
+          (await eventChainMatches(events)) &&
+          (terminal?.chainDigest ?? integrity.chainDigest) === integrity.chainDigest,
         cursor,
         event_count: events.length,
+        chain_version: integrity.chainVersion,
+        checkpoint_digest: integrity.checkpointDigest,
       });
     }
 
@@ -1044,6 +1051,7 @@ async function handleHarnessRequest(
       );
       return response({
         status: "complete",
+        chain_version: KRATER_CHAIN_VERSION,
         checkpoint_mode: "unsigned-v0",
         backfill_rows_read: backfill.rows_read,
         backfill_rows_written: backfill.rows_written,
@@ -1150,6 +1158,7 @@ async function handleHarnessRequest(
         cursor,
         counts,
         chain_digest: integrity.chainDigest,
+        chain_version: integrity.chainVersion,
         checkpoint_digest: integrity.checkpointDigest,
         checkpoint_mode: "unsigned-v0",
         ...(eventContentForEvent === undefined

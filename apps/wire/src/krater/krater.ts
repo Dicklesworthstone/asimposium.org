@@ -2910,6 +2910,63 @@ export async function readIntegrityState(
   }
 }
 
+/** Read the exact current-version checkpoint stream used by exports/backups. */
+export async function readCheckpoints(
+  db: D1Database,
+  problemId: string,
+): Promise<KraterCheckpoint[]> {
+  requireIdentifier("problemId", problemId);
+  try {
+    const head = await readProblemHead(db, problemId);
+    const result = await statement(
+      db,
+      `SELECT i.problem_id, i.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest,
+              i.checkpoint_version, c.chain_version, i.checkpoint_mode
+       FROM integrity_checkpoints i
+       LEFT JOIN checkpoint_chain_v2 c
+         ON c.problem_id = i.problem_id AND c.checkpoint_seq = i.checkpoint_seq
+       WHERE i.problem_id = ? ORDER BY i.checkpoint_seq ASC`,
+      problemId,
+    ).all<CheckpointRow>();
+    if (result.results.length !== head.public_seq) {
+      backfillRequired("the v2 checkpoint stream is incomplete for the durable problem cursor.");
+    }
+    return result.results.map((row, index) => {
+      const checkpointSeq = requireStoredSequence(
+        row.checkpoint_seq,
+        "checkpoint sequence",
+        false,
+      );
+      if (
+        checkpointSeq !== index + 1 ||
+        row.problem_id !== problemId ||
+        row.checkpoint_version !== 1 ||
+        row.checkpoint_mode !== "unsigned-v0" ||
+        requireCurrentChainVersion(row.chain_version) !== KRATER_CHAIN_VERSION
+      ) {
+        backfillRequired("the checkpoint stream mixes identities or chain versions.");
+      }
+      return {
+        problemId: row.problem_id,
+        checkpointSeq,
+        rootChainDigest: row.root_chain_digest,
+        checkpointDigest: row.checkpoint_digest,
+        checkpointVersion: 1,
+        chainVersion: KRATER_CHAIN_VERSION,
+        checkpointMode: "unsigned-v0",
+      };
+    });
+  } catch (error) {
+    if (
+      error instanceof KraterProblemNotFoundError ||
+      error instanceof KraterIntegrityBackfillRequiredError
+    ) {
+      throw error;
+    }
+    readError("checkpoint stream could not be read.");
+  }
+}
+
 export function replayClaimProjections(events: readonly KraterEvent[]): ClaimProjection[] {
   const projections: ClaimProjection[] = [];
   let priorSeq = 0;
@@ -3170,6 +3227,11 @@ export async function inspectProblem(
       statement(db, "SELECT COUNT(*) AS count FROM events WHERE problem_id = ?", problemId),
       statement(
         db,
+        "SELECT COUNT(*) AS count FROM event_chain_v2 WHERE problem_id = ?",
+        problemId,
+      ),
+      statement(
+        db,
         `SELECT COUNT(*) AS count
          FROM event_content c JOIN events e ON e.id = c.event_id
          WHERE e.problem_id = ?`,
@@ -3187,16 +3249,23 @@ export async function inspectProblem(
         "SELECT COUNT(*) AS count FROM integrity_checkpoints WHERE problem_id = ?",
         problemId,
       ),
+      statement(
+        db,
+        "SELECT COUNT(*) AS count FROM checkpoint_chain_v2 WHERE problem_id = ?",
+        problemId,
+      ),
     ]);
     const names = [
       "claims",
       "claim_projections",
       "events",
+      "event_chain_v2",
       "event_content",
       "public_claim_fts",
       "idempotency",
       "outbox",
       "integrity_checkpoints",
+      "checkpoint_chain_v2",
     ] as const;
     return Object.fromEntries(
       names.map((name, index) => [name, results[index]?.results[0]?.count ?? 0]),

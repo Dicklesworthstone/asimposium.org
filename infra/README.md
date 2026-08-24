@@ -228,16 +228,18 @@ Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment
 IDs and UTC observations, and explicit delegated-suite status. Wrangler's own
 NDJSON receipt is captured with its supported output-file interface. The live
-suite owners may supply only `pass`, `blocked`, `not-run`, or `stale`, plus a UTC
-observation for every non-`not-run` value, through these pairs:
+suite owners may supply only `pass`, `blocked`, `not-run`, or `stale`. Every
+non-`not-run` value requires a real UTC observation and the exact Git revision
+it describes; `pass` and `blocked` must name the current pipeline revision.
+Supply these triples:
 
 ```text
-ASIMP_CI_GAUNTLET_STATUS / ASIMP_CI_GAUNTLET_OBSERVED_AT
-ASIMP_CI_PLAYWRIGHT_STATUS / ASIMP_CI_PLAYWRIGHT_OBSERVED_AT
-ASIMP_CI_LOAD_STATUS / ASIMP_CI_LOAD_OBSERVED_AT
-ASIMP_CI_RESTORE_STATUS / ASIMP_CI_RESTORE_OBSERVED_AT
-ASIMP_CI_LAUNCH_STATUS / ASIMP_CI_LAUNCH_OBSERVED_AT
-ASIMP_CI_RELEASE_STATUS / ASIMP_CI_RELEASE_OBSERVED_AT
+ASIMP_CI_GAUNTLET_STATUS / ASIMP_CI_GAUNTLET_OBSERVED_AT / ASIMP_CI_GAUNTLET_REVISION
+ASIMP_CI_PLAYWRIGHT_STATUS / ASIMP_CI_PLAYWRIGHT_OBSERVED_AT / ASIMP_CI_PLAYWRIGHT_REVISION
+ASIMP_CI_LOAD_STATUS / ASIMP_CI_LOAD_OBSERVED_AT / ASIMP_CI_LOAD_REVISION
+ASIMP_CI_RESTORE_STATUS / ASIMP_CI_RESTORE_OBSERVED_AT / ASIMP_CI_RESTORE_REVISION
+ASIMP_CI_LAUNCH_STATUS / ASIMP_CI_LAUNCH_OBSERVED_AT / ASIMP_CI_LAUNCH_REVISION
+ASIMP_CI_RELEASE_STATUS / ASIMP_CI_RELEASE_OBSERVED_AT / ASIMP_CI_RELEASE_REVISION
 ```
 
 Their default is `not-run`; the pipeline never converts absence into green.

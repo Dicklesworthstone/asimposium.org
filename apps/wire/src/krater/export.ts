@@ -517,30 +517,49 @@ function parseProblemExportV2(ndjson: string): ExportParseResult {
 
 /**
  * Verify an export's integrity chain (Fable §10.2 tamper-evidence). The strict
- * parser first proves complete v1 framing and record shapes; this then
+ * parser first proves complete v2 framing and record shapes; this then
  * recomputes every row digest, chain link, and checkpoint digest/root.
  *
- * This is self-consistency evidence, not cryptographic authenticity: v1
- * checkpoints are `unsigned-v0`, and 5il1 remains open because the chain
- * preimage does not yet bind `row_digest`. ds62's row-digest verification is
- * intentionally retained here; no parser result may be described as signed or
- * authentic until that separate repair exists.
+ * This is self-consistency evidence, not cryptographic authenticity: v2
+ * checkpoints are still `unsigned-v0`. A caller may supply an independently
+ * held root pin to detect a fully recomputed suffix, but no parser result may
+ * be described as signed or authentic until ADR-23's signing path exists.
  */
+export interface ProblemExportCheckpointPin {
+  readonly problemId: string;
+  readonly checkpointSeq: number;
+  readonly rootChainDigest: string;
+}
+
 export async function verifyProblemExportChain(
   ndjson: string,
+  pin?: ProblemExportCheckpointPin,
 ): Promise<
   | { readonly intact: true; readonly eventCount: number; readonly finalChainDigest: string }
   | { readonly intact: false; readonly brokenAtSeq: number; readonly detail: string }
   | { readonly intact: false; readonly brokenAtSeq: null; readonly detail: string }
 > {
-  const parsed = parseProblemExportV1(ndjson);
+  const parsed = parseProblemExportV2(ndjson);
   if (!parsed.ok) {
     return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
+  }
+  if (
+    pin !== undefined &&
+    (pin.problemId !== parsed.header.problem ||
+      !positiveInteger(pin.checkpointSeq) ||
+      !isSha256Hex(pin.rootChainDigest))
+  ) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the external checkpoint pin is invalid or names another problem",
+    };
   }
 
   let previous = await genesisChainDigest(parsed.header.problem);
   let expectedSeq = 1;
   let nextCheckpoint = 0;
+  let matchedExternalPin = pin === undefined;
 
   for (const event of parsed.events) {
     if (event.seq !== expectedSeq) {
@@ -550,19 +569,23 @@ export async function verifyProblemExportChain(
         detail: `sequence gap: expected seq ${expectedSeq}, found ${event.seq}`,
       };
     }
-    const recomputedRow = await eventRowDigest(
-      {
-        eventId: event.eventId,
-        problemId: parsed.header.problem,
-        claimId: event.objectId,
-        // These request-only fields do not participate in eventRowDigest.
-        idempotencyKey: "export-verifier",
-        statement: "",
-        createdAt: event.createdAt,
-      },
-      event.seq,
-      event.payloadSha256,
-    );
+    const recomputedRow = await eventEnvelopeRowDigest({
+      eventId: event.eventId,
+      problemId: parsed.header.problem,
+      seq: event.seq,
+      type: event.type,
+      objectKind: event.objectKind,
+      objectId: event.objectId,
+      objectVersion: event.objectVersion,
+      payloadSha256: event.payloadSha256,
+      createdAt: event.createdAt,
+      actorFellowId: event.actorFellowId,
+      actorSponsorId: event.actorSponsorId,
+      actorSessionId: event.actorSessionId,
+      modelStringSelfDeclared: event.modelStringSelfDeclared,
+      harness: event.harness,
+      writerCredentialId: event.writerCredentialId,
+    });
     if (recomputedRow !== event.rowDigest) {
       return {
         intact: false,
@@ -574,6 +597,7 @@ export async function verifyProblemExportChain(
       parsed.header.problem,
       event.seq,
       event.payloadSha256,
+      recomputedRow,
       previous,
     );
     if (recomputedChain !== event.chainDigest) {
@@ -584,6 +608,17 @@ export async function verifyProblemExportChain(
       };
     }
     previous = event.chainDigest;
+
+    if (pin?.checkpointSeq === event.seq) {
+      if (pin.rootChainDigest !== previous) {
+        return {
+          intact: false,
+          brokenAtSeq: event.seq,
+          detail: `external checkpoint root mismatch at seq ${event.seq}`,
+        };
+      }
+      matchedExternalPin = true;
+    }
 
     const checkpoint = parsed.header.checkpoints[nextCheckpoint];
     if (checkpoint?.checkpointSeq === event.seq) {
@@ -631,6 +666,13 @@ export async function verifyProblemExportChain(
       intact: false,
       brokenAtSeq: null,
       detail: "header checkpoint references an event absent from the verified chain",
+    };
+  }
+  if (!matchedExternalPin) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the external checkpoint pin names an event absent from the verified export",
     };
   }
 

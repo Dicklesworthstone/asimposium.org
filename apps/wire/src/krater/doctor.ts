@@ -11,7 +11,7 @@
  */
 
 import type { ClaimProjection, KraterEvent } from "./krater.ts";
-import { replayClaimProjections } from "./krater.ts";
+import { eventChainMatches, KRATER_CHAIN_VERSION, replayClaimProjections } from "./krater.ts";
 
 /**
  * The doctor is a whole-problem, dry-run comparison. Refuse a larger request
@@ -86,6 +86,72 @@ export interface ProjectionDoctorReport {
   readonly drift: readonly ProjectionDrift[];
   /** The claim ids a rebuild would rewrite (dry-run output). */
   readonly rebuildSet: readonly string[];
+}
+
+export interface IntegrityDoctorPin {
+  readonly problemId: string;
+  readonly checkpointSeq: number;
+  readonly rootChainDigest: string;
+}
+
+export interface IntegrityDoctorReport {
+  readonly problemId: string;
+  readonly chainVersion: typeof KRATER_CHAIN_VERSION;
+  readonly eventCount: number;
+  readonly sound: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Verify the exact v2 event stream against a checkpoint root held outside the
+ * supplied rows. This proves structural consistency with that pin; unsigned
+ * roots are not authentication and must not be described as signatures.
+ */
+export async function doctorIntegrity(
+  problemId: string,
+  events: readonly KraterEvent[],
+  pin: IntegrityDoctorPin,
+): Promise<IntegrityDoctorReport> {
+  if (
+    events.length > MAX_PROJECTION_DOCTOR_INPUT_ROWS ||
+    pin.problemId !== problemId ||
+    !Number.isSafeInteger(pin.checkpointSeq) ||
+    pin.checkpointSeq < 1 ||
+    !/^[a-f0-9]{64}$/.test(pin.rootChainDigest) ||
+    events.some((event) => event.problemId !== problemId)
+  ) {
+    throw new ProjectionDoctorInputError("integrity doctor input or checkpoint pin is invalid");
+  }
+  if (!(await eventChainMatches(events))) {
+    return {
+      problemId,
+      chainVersion: KRATER_CHAIN_VERSION,
+      eventCount: events.length,
+      sound: false,
+      detail: "the event stream is not one complete canonical v2 chain",
+    };
+  }
+  const terminal = events[events.length - 1];
+  if (
+    terminal === undefined ||
+    terminal.seq !== pin.checkpointSeq ||
+    terminal.chainDigest !== pin.rootChainDigest
+  ) {
+    return {
+      problemId,
+      chainVersion: KRATER_CHAIN_VERSION,
+      eventCount: events.length,
+      sound: false,
+      detail: "the verified stream does not end at the independently supplied checkpoint root",
+    };
+  }
+  return {
+    problemId,
+    chainVersion: KRATER_CHAIN_VERSION,
+    eventCount: events.length,
+    sound: true,
+    detail: "the canonical v2 stream matches the supplied unsigned checkpoint root",
+  };
 }
 
 /**

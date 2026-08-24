@@ -85,31 +85,59 @@ delegated_value() {
   case "$1:$2" in
     cold-agent-gauntlet:status) printf '%s\n' "${ASIMP_CI_GAUNTLET_STATUS:-not-run}" ;;
     cold-agent-gauntlet:observed) printf '%s\n' "${ASIMP_CI_GAUNTLET_OBSERVED_AT:-}" ;;
+    cold-agent-gauntlet:revision) printf '%s\n' "${ASIMP_CI_GAUNTLET_REVISION:-}" ;;
     human-playwright:status) printf '%s\n' "${ASIMP_CI_PLAYWRIGHT_STATUS:-not-run}" ;;
     human-playwright:observed) printf '%s\n' "${ASIMP_CI_PLAYWRIGHT_OBSERVED_AT:-}" ;;
+    human-playwright:revision) printf '%s\n' "${ASIMP_CI_PLAYWRIGHT_REVISION:-}" ;;
     load:status) printf '%s\n' "${ASIMP_CI_LOAD_STATUS:-not-run}" ;;
     load:observed) printf '%s\n' "${ASIMP_CI_LOAD_OBSERVED_AT:-}" ;;
+    load:revision) printf '%s\n' "${ASIMP_CI_LOAD_REVISION:-}" ;;
     restore:status) printf '%s\n' "${ASIMP_CI_RESTORE_STATUS:-not-run}" ;;
     restore:observed) printf '%s\n' "${ASIMP_CI_RESTORE_OBSERVED_AT:-}" ;;
+    restore:revision) printf '%s\n' "${ASIMP_CI_RESTORE_REVISION:-}" ;;
     launch:status) printf '%s\n' "${ASIMP_CI_LAUNCH_STATUS:-not-run}" ;;
     launch:observed) printf '%s\n' "${ASIMP_CI_LAUNCH_OBSERVED_AT:-}" ;;
+    launch:revision) printf '%s\n' "${ASIMP_CI_LAUNCH_REVISION:-}" ;;
     release:status) printf '%s\n' "${ASIMP_CI_RELEASE_STATUS:-not-run}" ;;
     release:observed) printf '%s\n' "${ASIMP_CI_RELEASE_OBSERVED_AT:-}" ;;
+    release:revision) printf '%s\n' "${ASIMP_CI_RELEASE_REVISION:-}" ;;
     *) return 64 ;;
   esac
 }
 
+validate_utc_timestamp() {
+  python3 - "$1" <<'PY'
+import datetime
+import sys
+
+try:
+    parsed = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=datetime.timezone.utc
+    )
+except ValueError:
+    sys.exit(1)
+if parsed > datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5):
+    sys.exit(1)
+PY
+}
+
 validate_delegated_statuses() {
-  local name status observed
+  local name status observed revision
   for name in cold-agent-gauntlet human-playwright load restore launch release; do
     status="$(delegated_value "$name" status)" || return 64
     observed="$(delegated_value "$name" observed)" || return 64
+    revision="$(delegated_value "$name" revision)" || return 64
     case "$status" in
       not-run)
-        [[ -z "$observed" ]] || return 64
+        [[ -z "$observed" && -z "$revision" ]] || return 64
         ;;
-      pass | blocked | stale)
-        [[ "$observed" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 64
+      pass | blocked)
+        validate_utc_timestamp "$observed" || return 64
+        [[ "$revision" == "$REVISION" ]] || return 64
+        ;;
+      stale)
+        validate_utc_timestamp "$observed" || return 64
+        [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 64
         ;;
       *) return 64 ;;
     esac
@@ -117,20 +145,26 @@ validate_delegated_statuses() {
 }
 
 record_delegated_statuses() {
-  local force_not_run="${1:-0}" name status observed observed_json record
+  local force_not_run="${1:-0}" name status observed revision observed_json revision_json record
   for name in cold-agent-gauntlet human-playwright load restore launch release; do
     if [[ "$force_not_run" == "1" ]]; then
       status="not-run"
       observed=""
+      revision=""
     else
       status="$(delegated_value "$name" status)" || return 64
       observed="$(delegated_value "$name" observed)" || return 64
+      revision="$(delegated_value "$name" revision)" || return 64
     fi
     observed_json="null"
+    revision_json="null"
     if [[ -n "$observed" ]]; then
       observed_json="\"$observed\""
     fi
-    record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"record\":\"delegated-suite\",\"delegated_suite\":\"$name\",\"status\":\"$status\",\"observed_at\":$observed_json}"
+    if [[ -n "$revision" ]]; then
+      revision_json="\"$revision\""
+    fi
+    record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"record\":\"delegated-suite\",\"delegated_suite\":\"$name\",\"status\":\"$status\",\"delegated_revision\":$revision_json,\"observed_at\":$observed_json}"
     append_evidence "$record" || return 1
     printf '%s\n' "$record"
   done

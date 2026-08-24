@@ -99,11 +99,17 @@ function plantedEnvironment(
   };
   for (const name of [
     "ASIMP_CI_GAUNTLET_OBSERVED_AT",
+    "ASIMP_CI_GAUNTLET_REVISION",
     "ASIMP_CI_PLAYWRIGHT_OBSERVED_AT",
+    "ASIMP_CI_PLAYWRIGHT_REVISION",
     "ASIMP_CI_LOAD_OBSERVED_AT",
+    "ASIMP_CI_LOAD_REVISION",
     "ASIMP_CI_RESTORE_OBSERVED_AT",
+    "ASIMP_CI_RESTORE_REVISION",
     "ASIMP_CI_LAUNCH_OBSERVED_AT",
+    "ASIMP_CI_LAUNCH_REVISION",
     "ASIMP_CI_RELEASE_OBSERVED_AT",
+    "ASIMP_CI_RELEASE_REVISION",
   ]) {
     delete environment[name];
   }
@@ -127,9 +133,15 @@ function timeoutVariable(stage: Stage): string {
   }
 }
 
-function runPipeline(stage: Stage, outcome: string, timeout = false): PipelineRun {
+function runPipeline(
+  stage: Stage,
+  outcome: string,
+  timeout = false,
+  overrides: NodeJS.ProcessEnv = {},
+): PipelineRun {
   const paths = fixture(`${stage}-${outcome}`);
   const environment = plantedEnvironment(stage, outcome, paths);
+  Object.assign(environment, overrides);
   if (timeout) environment[timeoutVariable(stage)] = "1";
   const resultPath = join(paths.artifactDirectory, "result.json");
   const helperSource = `
@@ -328,11 +340,17 @@ describe("OPS.2b review pipeline orchestration", () => {
       "ASIMP_CI_SMOKE_AGENT_TIMEOUT_SECONDS",
       "ASIMP_CI_SMOKE_GALLERY_TIMEOUT_SECONDS",
       "ASIMP_CI_GAUNTLET_STATUS",
+      "ASIMP_CI_GAUNTLET_REVISION",
       "ASIMP_CI_PLAYWRIGHT_STATUS",
+      "ASIMP_CI_PLAYWRIGHT_REVISION",
       "ASIMP_CI_LOAD_STATUS",
+      "ASIMP_CI_LOAD_REVISION",
       "ASIMP_CI_RESTORE_STATUS",
+      "ASIMP_CI_RESTORE_REVISION",
       "ASIMP_CI_LAUNCH_STATUS",
+      "ASIMP_CI_LAUNCH_REVISION",
       "ASIMP_CI_RELEASE_STATUS",
+      "ASIMP_CI_RELEASE_REVISION",
     ]);
 
     expect(Object.keys(environment).every((name) => allowedNames.has(name))).toBe(true);
@@ -347,6 +365,23 @@ describe("OPS.2b review pipeline orchestration", () => {
       expect(result.signal).toBeNull();
       expect(result.status).toBe(64);
     }
+  });
+
+  test("delegated pass evidence without the current revision is refused", () => {
+    const unbound = runPipeline("smoke-gallery", "pass", false, {
+      ASIMP_CI_GAUNTLET_STATUS: "pass",
+      ASIMP_CI_GAUNTLET_OBSERVED_AT: "2026-08-24T00:00:00Z",
+    });
+    expect(unbound.status).toBe(64);
+    expect(begunStages(unbound)).toEqual([]);
+
+    const wrongRevision = runPipeline("smoke-gallery", "pass", false, {
+      ASIMP_CI_GAUNTLET_STATUS: "pass",
+      ASIMP_CI_GAUNTLET_OBSERVED_AT: "2026-08-24T00:00:00Z",
+      ASIMP_CI_GAUNTLET_REVISION: "0".repeat(40),
+    });
+    expect(wrongRevision.status).toBe(64);
+    expect(begunStages(wrongRevision)).toEqual([]);
   });
 
   test("the all-pass process control runs each stage in doctrine order", () => {

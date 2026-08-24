@@ -13,8 +13,13 @@
 
 import type { D1Database } from "@cloudflare/workers-types";
 
-import { serializeProblemExport, verifyProblemExportChain } from "./export.ts";
-import { type KraterEvent, readEvents } from "./krater.ts";
+import { EXPORT_FORMAT, serializeProblemExport, verifyProblemExportChain } from "./export.ts";
+import {
+  type KraterEvent,
+  readCheckpoints,
+  readEvents,
+  readIntegrityState,
+} from "./krater.ts";
 
 /** The minimal bucket surface the backup writer needs. */
 export interface BackupBucket {
@@ -77,16 +82,25 @@ export async function backupProblem(
   }
   if (events.length === 0) return null;
 
+  const [checkpoints, integrity] = await Promise.all([
+    readCheckpoints(db, problemId),
+    readIntegrityState(db, problemId),
+  ]);
+
   const ndjson = serializeProblemExport({
     problemId,
     problemTitle,
     events,
-    checkpoints: [],
+    checkpoints,
     generatedAt: `${datePrefix}T00:00:00Z`,
   });
 
   // Never write a backup that fails its own chain verification.
-  const verification = await verifyProblemExportChain(ndjson);
+  const verification = await verifyProblemExportChain(ndjson, {
+    problemId,
+    checkpointSeq: events[events.length - 1]?.seq ?? 0,
+    rootChainDigest: integrity.chainDigest,
+  });
   if (!verification.intact) {
     throw new Error(`backup chain verification failed for ${problemId}: ${verification.detail}`);
   }
@@ -97,7 +111,7 @@ export async function backupProblem(
       problem: problemId,
       event_count: String(verification.eventCount),
       final_chain_digest: verification.finalChainDigest,
-      format: "asimposium.problem-export.v1",
+      format: EXPORT_FORMAT,
       license: "CC BY 4.0",
     },
   });
