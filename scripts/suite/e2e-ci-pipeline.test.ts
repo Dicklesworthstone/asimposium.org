@@ -377,7 +377,7 @@ describe("OPS.2b review pipeline orchestration", () => {
   test("provider parsers require explicit safe Vercel states", () => {
     const source = readFileSync(PIPELINE, "utf8");
 
-    expect(source).toContain('if "link" not in document or document["link"] is not None:');
+    expect(source).toContain('if "link" in document:');
     expect(source).not.toContain('document.get("link") is not None');
     expect(source).toContain(
       'if state != "READY" or document.get("target") != "preview":',
