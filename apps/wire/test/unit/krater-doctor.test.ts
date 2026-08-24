@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+  doctorIntegrity,
   doctorProjections,
   MAX_PROJECTION_DOCTOR_INPUT_ROWS,
   ProjectionDoctorInputError,
 } from "../../src/krater/doctor.ts";
 import type { ClaimProjection, KraterEvent } from "../../src/krater/krater.ts";
 import {
+  eventChainDigest,
+  eventEnvelopeRowDigest,
+  genesisChainDigest,
   type KraterOutboxRecord,
   projectionReplayMatches,
   transactionBoundaryMatches,
@@ -17,11 +21,20 @@ function event(seq: number, claimId: string): KraterEvent {
     problemId: "P-DOC",
     seq,
     type: "claim.created",
+    objectKind: "claim",
     objectId: claimId,
+    objectVersion: 1,
     payloadSha256: `sha256:${seq}`,
     rowDigest: `rd-${seq}`,
     chainDigest: `cd-${seq}`,
+    chainVersion: 2,
     createdAt: "2026-08-18T00:00:00Z",
+    actorFellowId: null,
+    actorSponsorId: null,
+    actorSessionId: null,
+    modelStringSelfDeclared: null,
+    harness: null,
+    writerCredentialId: null,
   };
 }
 
@@ -369,5 +382,65 @@ describe("replay and transaction boundary matchers pin buildDigest (asimposiumor
       ]),
     ).toBe(false);
     expect(transactionBoundaryMatches(2, events, [projection("C-1", 1)], exactOutbox)).toBe(false);
+  });
+});
+
+describe("integrity doctor v2 checkpoint pin", () => {
+  test("a recomputed envelope mutation fails the independently supplied root", async () => {
+    const draft: KraterEvent = {
+      ...event(1, "C-1"),
+      payloadSha256: "a".repeat(64),
+      rowDigest: "0".repeat(64),
+      chainDigest: "0".repeat(64),
+      actorFellowId: "F-alpha",
+    };
+    const rowDigest = await eventEnvelopeRowDigest({
+      eventId: draft.eventId,
+      problemId: draft.problemId,
+      seq: draft.seq,
+      type: draft.type,
+      objectKind: draft.objectKind,
+      objectId: draft.objectId,
+      objectVersion: draft.objectVersion,
+      payloadSha256: draft.payloadSha256,
+      createdAt: draft.createdAt,
+      actorFellowId: draft.actorFellowId,
+      actorSponsorId: draft.actorSponsorId,
+      actorSessionId: draft.actorSessionId,
+      modelStringSelfDeclared: draft.modelStringSelfDeclared,
+      harness: draft.harness,
+      writerCredentialId: draft.writerCredentialId,
+    });
+    const chainDigest = await eventChainDigest(
+      draft.problemId,
+      draft.seq,
+      draft.payloadSha256,
+      rowDigest,
+      await genesisChainDigest(draft.problemId),
+    );
+    const canonical = { ...draft, rowDigest, chainDigest };
+    const pin = { problemId: "P-DOC", checkpointSeq: 1, rootChainDigest: chainDigest };
+    expect((await doctorIntegrity("P-DOC", [canonical], pin)).sound).toBe(true);
+
+    const forgedDraft = { ...canonical, actorFellowId: "F-forged" };
+    const forgedRow = await eventEnvelopeRowDigest({
+      eventId: forgedDraft.eventId,
+      problemId: forgedDraft.problemId,
+      seq: forgedDraft.seq,
+      type: forgedDraft.type,
+      objectKind: forgedDraft.objectKind,
+      objectId: forgedDraft.objectId,
+      objectVersion: forgedDraft.objectVersion,
+      payloadSha256: forgedDraft.payloadSha256,
+      createdAt: forgedDraft.createdAt,
+      actorFellowId: forgedDraft.actorFellowId,
+      actorSponsorId: forgedDraft.actorSponsorId,
+      actorSessionId: forgedDraft.actorSessionId,
+      modelStringSelfDeclared: forgedDraft.modelStringSelfDeclared,
+      harness: forgedDraft.harness,
+      writerCredentialId: forgedDraft.writerCredentialId,
+    });
+    const forged = { ...forgedDraft, rowDigest: forgedRow };
+    expect((await doctorIntegrity("P-DOC", [forged], pin)).sound).toBe(false);
   });
 });

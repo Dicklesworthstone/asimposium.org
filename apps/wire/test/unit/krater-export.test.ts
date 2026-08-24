@@ -8,6 +8,7 @@ import {
   verifyProblemExportChain,
 } from "../../src/krater/export.ts";
 import {
+  canonicalJson,
   checkpointDigest,
   eventChainDigest,
   eventEnvelopeRowDigest,
@@ -235,6 +236,33 @@ async function buildExport(
   });
 }
 
+async function exportedRowDigest(
+  event: Record<string, unknown>,
+  problemId = "P-4DSP",
+): Promise<string> {
+  return eventEnvelopeRowDigest({
+    eventId: String(event.event_id),
+    problemId,
+    seq: Number(event.seq),
+    type: String(event.type),
+    objectKind: String(event.object_kind),
+    objectId: String(event.object_id),
+    objectVersion: Number(event.object_version),
+    payloadSha256: String(event.payload_sha256),
+    createdAt: String(event.created_at),
+    actorFellowId: typeof event.actor_fellow_id === "string" ? event.actor_fellow_id : null,
+    actorSponsorId: typeof event.actor_sponsor_id === "string" ? event.actor_sponsor_id : null,
+    actorSessionId: typeof event.actor_session_id === "string" ? event.actor_session_id : null,
+    modelStringSelfDeclared:
+      typeof event.model_string_self_declared === "string"
+        ? event.model_string_self_declared
+        : null,
+    harness: typeof event.harness === "string" ? event.harness : null,
+    writerCredentialId:
+      typeof event.writer_credential_id === "string" ? event.writer_credential_id : null,
+  });
+}
+
 describe("export chain verification (W2.8 tamper-evidence)", () => {
   test("an intact export verifies end to end", async () => {
     const ndjson = await buildExport(3);
@@ -268,36 +296,170 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     expect(verdict.intact).toBe(false);
   });
 
-  test("PLANTED: every row-digest-bound envelope field is verified", async () => {
+  test("PLANTED: every v2 envelope authority field remains bound after row recomputation", async () => {
     const mutations: readonly (readonly [string, unknown])[] = [
       ["event_id", "E-forged"],
+      ["seq", 2],
+      ["type", "claim.revised"],
+      ["object_kind", "evidence"],
       ["object_id", "C-forged"],
+      ["object_version", 2],
+      ["payload_sha256", await sha256Hex("forged-payload")],
       ["created_at", "2026-08-19T00:00:00Z"],
-      ["row_digest", await sha256Hex("forged-row-digest")],
+      ["actor_fellow_id", "F-forged"],
+      ["actor_sponsor_id", "U-forged"],
+      ["actor_session_id", "S-forged"],
+      ["model_string_self_declared", "forged-model"],
+      ["harness", "forged-harness"],
+      ["writer_credential_id", "CRD-forged"],
     ];
     for (const [field, value] of mutations) {
-      const lines = (await buildExport(2)).trim().split("\n");
+      const intact = await buildExport(2, [2]);
+      const lines = intact.trim().split("\n");
+      const terminal = JSON.parse(lines[2] ?? "{}") as Record<string, unknown>;
+      const pin = {
+        problemId: "P-4DSP",
+        checkpointSeq: 2,
+        rootChainDigest: String(terminal.chain_digest),
+      };
+      expect((await verifyProblemExportChain(intact, pin)).intact).toBe(true);
       const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
-      lines[1] = JSON.stringify({ ...first, [field]: value });
-      const verdict = await verifyProblemExportChain(`${lines.join("\n")}\n`);
-      expect(verdict).toEqual({
-        intact: false,
-        brokenAtSeq: 1,
-        detail: "row digest mismatch at seq 1 — the event envelope is tampered",
-      });
+      const forged = { ...first, [field]: value };
+      forged.row_digest = await exportedRowDigest(forged);
+      lines[1] = JSON.stringify(forged);
+      const verdict = await verifyProblemExportChain(`${lines.join("\n")}\n`, pin);
+      expect(verdict.intact).toBe(false);
+      if (!verdict.intact) expect(verdict.brokenAtSeq).toBe(1);
     }
   });
 
-  test("PLANTED: the fixed export event type cannot be widened", async () => {
+  test("PLANTED: an invalid empty event type is refused before digest work", async () => {
     const lines = (await buildExport(1)).trim().split("\n");
     const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
-    lines[1] = JSON.stringify({ ...first, type: "claim.updated" });
+    lines[1] = JSON.stringify({ ...first, type: "" });
     const verdict = await verifyProblemExportChain(`${lines.join("\n")}\n`);
     expect(verdict).toEqual({
       intact: false,
       brokenAtSeq: 1,
-      detail: "event line carries invalid field types or an unsupported event type",
+      detail: "event line carries invalid v2 envelope fields",
     });
+  });
+
+  test("PLANTED: the header problem authority remains bound after every row is recomputed", async () => {
+    const intact = await buildExport(2, [2]);
+    const lines = intact.trim().split("\n");
+    const originalTerminal = JSON.parse(lines[2] ?? "{}") as Record<string, unknown>;
+    const pin = {
+      problemId: "P-4DSP",
+      checkpointSeq: 2,
+      rootChainDigest: String(originalTerminal.chain_digest),
+    };
+    expect((await verifyProblemExportChain(intact, pin)).intact).toBe(true);
+
+    const header = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    const trailer = JSON.parse(lines[lines.length - 1] ?? "{}") as Record<string, unknown>;
+    lines[0] = JSON.stringify({ ...header, problem: "P-OTHER" });
+    lines[lines.length - 1] = JSON.stringify({ ...trailer, problem: "P-OTHER" });
+    for (let index = 1; index < lines.length - 1; index += 1) {
+      const row = JSON.parse(lines[index] ?? "{}") as Record<string, unknown>;
+      row.row_digest = await exportedRowDigest(row, "P-OTHER");
+      lines[index] = JSON.stringify(row);
+    }
+    await expect(
+      verifyProblemExportChain(`${lines.join("\n")}\n`, pin),
+    ).resolves.toEqual({
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the external checkpoint pin is invalid or names another problem",
+    });
+  });
+
+  test("PLANTED: a full suffix rewrite is self-consistent but fails the prior external root", async () => {
+    const intact = await buildExport(2, [2]);
+    const lines = intact.trim().split("\n");
+    const originalSecond = JSON.parse(lines[2] ?? "{}") as Record<string, unknown>;
+    const priorPin = {
+      problemId: "P-4DSP",
+      checkpointSeq: 2,
+      rootChainDigest: String(originalSecond.chain_digest),
+    };
+    expect((await verifyProblemExportChain(intact, priorPin)).intact).toBe(true);
+
+    const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    first.event_id = "E-rewritten";
+    first.row_digest = await exportedRowDigest(first);
+    first.chain_digest = await eventChainDigest(
+      "P-4DSP",
+      1,
+      String(first.payload_sha256),
+      String(first.row_digest),
+      await genesisChainDigest("P-4DSP"),
+    );
+    lines[1] = JSON.stringify(first);
+
+    const second = JSON.parse(lines[2] ?? "{}") as Record<string, unknown>;
+    second.chain_digest = await eventChainDigest(
+      "P-4DSP",
+      2,
+      String(second.payload_sha256),
+      String(second.row_digest),
+      String(first.chain_digest),
+    );
+    lines[2] = JSON.stringify(second);
+
+    const header = JSON.parse(lines[0] ?? "{}") as {
+      checkpoints: Record<string, unknown>[];
+    } & Record<string, unknown>;
+    const rewrittenRoot = String(second.chain_digest);
+    header.checkpoints = [
+      {
+        ...(header.checkpoints[0] ?? {}),
+        root_chain_digest: rewrittenRoot,
+        checkpoint_digest: await checkpointDigest("P-4DSP", 2, rewrittenRoot),
+      },
+    ];
+    lines[0] = JSON.stringify(header);
+    const rewritten = `${lines.join("\n")}\n`;
+
+    expect((await verifyProblemExportChain(rewritten)).intact).toBe(true);
+    await expect(verifyProblemExportChain(rewritten, priorPin)).resolves.toEqual({
+      intact: false,
+      brokenAtSeq: 2,
+      detail: "external checkpoint root mismatch at seq 2",
+    });
+  });
+
+  test("PLANTED: v1 links and missing or downgraded version markers never fall back", async () => {
+    const intact = await buildExport(1, [1]);
+    const lines = intact.trim().split("\n");
+    const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+
+    for (const downgraded of [
+      { ...first, chain_version: 1 },
+      Object.fromEntries(Object.entries(first).filter(([key]) => key !== "chain_version")),
+    ]) {
+      const candidate = [...lines];
+      candidate[1] = JSON.stringify(downgraded);
+      const verdict = await verifyProblemExportChain(`${candidate.join("\n")}\n`);
+      expect(verdict.intact).toBe(false);
+      if (!verdict.intact) expect(verdict.brokenAtSeq).toBe(1);
+    }
+
+    const v1Link = await sha256Hex(
+      canonicalJson({
+        payload_sha256: first.payload_sha256,
+        previous_chain_digest: await sha256Hex(
+          canonicalJson({ kind: "krater.v0.genesis", problem_id: "P-4DSP" }),
+        ),
+        problem_id: "P-4DSP",
+        seq: 1,
+      }),
+    );
+    const relabeled = [...lines];
+    relabeled[1] = JSON.stringify({ ...first, chain_digest: v1Link, chain_version: 2 });
+    const verdict = await verifyProblemExportChain(`${relabeled.join("\n")}\n`);
+    expect(verdict.intact).toBe(false);
+    if (!verdict.intact) expect(verdict.brokenAtSeq).toBe(1);
   });
 
   test("PLANTED: an extra unbound event field is refused", async () => {
@@ -343,7 +505,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     expect(verdict.intact).toBe(false);
     if (!verdict.intact) {
       expect(verdict.brokenAtSeq).toBeNull();
-      expect(verdict.detail).toBe("terminal record does not have the exact v1 shape");
+      expect(verdict.detail).toBe("terminal record does not have the exact v2 shape");
     }
   });
 
@@ -406,7 +568,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     const verdict = await verifyProblemExportChain(`${appended}\n`);
     expect(verdict.intact).toBe(false);
     if (!verdict.intact) {
-      expect(verdict.detail).toBe("terminal record does not have the exact v1 shape");
+      expect(verdict.detail).toBe("terminal record does not have the exact v2 shape");
     }
   });
 
@@ -428,7 +590,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "header checkpoint 1 carries invalid v1 fields",
+      detail: "header checkpoint 1 carries invalid v2 fields",
     });
   });
 
@@ -445,7 +607,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "header checkpoint 1 does not have the exact v1 shape",
+      detail: "header checkpoint 1 does not have the exact v2 shape",
     });
   });
 
@@ -520,7 +682,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "header does not have the exact v1 shape",
+      detail: "header does not have the exact v2 shape",
     });
   });
 
@@ -533,7 +695,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "terminal record does not have the exact v1 shape",
+      detail: "terminal record does not have the exact v2 shape",
     });
   });
 
@@ -549,7 +711,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     });
   });
 
-  test("PLANTED: CRLF framing cannot be silently accepted as v1 LF", async () => {
+  test("PLANTED: CRLF framing cannot be silently accepted as v2 LF", async () => {
     const intact = await buildExport(1);
     expect((await verifyProblemExportChain(intact)).intact).toBe(true);
     await expect(verifyProblemExportChain(intact.replaceAll("\n", "\r\n"))).resolves.toEqual({
