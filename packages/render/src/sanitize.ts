@@ -930,16 +930,86 @@ interface MarkdownReferenceDefinition {
   readonly endOffset: number;
 }
 
+function markdownListMarkerEnd(
+  text: string,
+  markerStart: number,
+  contentOffset: number,
+): number | undefined {
+  const marker = text[markerStart];
+  if (marker === "-" || marker === "+" || marker === "*") return markerStart + 1;
+
+  let cursor = markerStart;
+  let digits = 0;
+  while (
+    cursor < contentOffset &&
+    digits < 10 &&
+    (text[cursor] as string) >= "0" &&
+    (text[cursor] as string) <= "9"
+  ) {
+    cursor += 1;
+    digits += 1;
+  }
+  return digits >= 1 && digits <= 9 && (text[cursor] === "." || text[cursor] === ")")
+    ? cursor + 1
+    : undefined;
+}
+
+/**
+ * Validate the physical prefix before block content. CommonMark removes block
+ * quote and list-item markers before applying the ordinary three-space rule to
+ * a link-reference definition, so `> [a]: …` and `- [a]: …` are definitions
+ * even though `[` is more than three source columns from the line start.
+ */
+function markdownContainerContentStart(
+  text: string,
+  lineStart: number,
+  contentOffset: number,
+): number | undefined {
+  let cursor = lineStart;
+  while (cursor < contentOffset) {
+    let indentation = 0;
+    while (cursor < contentOffset && text[cursor] === " " && indentation < 4) {
+      cursor += 1;
+      indentation += 1;
+    }
+    if (indentation > 3) return undefined;
+    if (cursor === contentOffset) return cursor;
+
+    if (text[cursor] === ">") {
+      cursor += 1;
+      if (cursor < contentOffset && (text[cursor] === " " || text[cursor] === "\t")) cursor += 1;
+      continue;
+    }
+
+    const markerEnd = markdownListMarkerEnd(text, cursor, contentOffset);
+    if (markerEnd === undefined || markerEnd >= contentOffset) return undefined;
+    cursor = markerEnd;
+    let padding = 0;
+    while (
+      cursor < contentOffset &&
+      padding < 4 &&
+      (text[cursor] === " " || text[cursor] === "\t")
+    ) {
+      cursor += 1;
+      padding += 1;
+    }
+    if (
+      padding === 0 ||
+      (cursor < contentOffset && (text[cursor] === " " || text[cursor] === "\t"))
+    ) {
+      return undefined;
+    }
+  }
+  return cursor;
+}
+
 function markdownReferenceDefinitionAt(
   text: string,
   openOffset: number,
   labelEnd: number,
 ): MarkdownReferenceDefinition | undefined {
   const lineStart = markdownLineStart(text, openOffset);
-  const indentation = text.slice(lineStart, openOffset);
-  if (indentation.length > 3 || ![...indentation].every((character) => character === " ")) {
-    return undefined;
-  }
+  if (markdownContainerContentStart(text, lineStart, openOffset) === undefined) return undefined;
   if (text[labelEnd + 1] !== ":") return undefined;
   const label = normalizedMarkdownReferenceLabel(text, openOffset, labelEnd);
   if (label === undefined) return undefined;
@@ -1007,7 +1077,9 @@ function markdownPreviousLineIsBlank(text: string, lineStart: number): boolean {
   let previousLineEnd = lineStart - 1;
   if (text[previousLineEnd] === "\n" && text[previousLineEnd - 1] === "\r") previousLineEnd -= 1;
   const previousLineStart = markdownLineStart(text, previousLineEnd);
-  for (let cursor = previousLineStart; cursor < previousLineEnd; cursor += 1) {
+  const contentStart =
+    markdownContainerContentStart(text, previousLineStart, previousLineEnd) ?? previousLineStart;
+  for (let cursor = contentStart; cursor < previousLineEnd; cursor += 1) {
     if (text[cursor] !== " " && text[cursor] !== "\t") return false;
   }
   return true;

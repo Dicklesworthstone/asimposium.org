@@ -445,6 +445,36 @@ describe("neutralizeUntrustedBody", () => {
     }
   });
 
+  test("resolves dangerous reference definitions inside block containers", () => {
+    const controls = [
+      "[quote]\n\n> [quote]: javascript:from-quote()",
+      "[bullet]\n\n- [bullet]: data:text/html,from-bullet()",
+      "[ordered]\n\n1. [ordered]: vbscript:from-ordered-list()",
+      "[nested]\n\n> - [nested]: javascript:from-nested-list()",
+      "[after blank]\n\n> context\n>\n> [after blank]: data:text/html,after-quote-blank()",
+      "[second]\n\n> [first]: https://example.test/\n> [second]: javascript:consecutive()",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("does not let container-prefixed definition text interrupt a paragraph", () => {
+    const inert = [
+      "> paragraph\n> [target]: javascript:not-a-definition()\n\n[target]",
+      "- paragraph\n  [target]: data:text/html,not-a-definition()\n\n[target]",
+      "[target]\n\n-     [target]: vbscript:over-padded-code()",
+    ];
+
+    for (const body of inert) {
+      expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    }
+  });
+
   test("does not report unused, shadowed, escaped, or code-only reference definitions", () => {
     const inert = [
       "[unused]: javascript:not-rendered()",
