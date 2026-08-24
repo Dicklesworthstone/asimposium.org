@@ -1190,7 +1190,7 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
     };
   }
 
-  async open(encrypted: EncryptedEnrollmentReplay): Promise<string> {
+  async open(encrypted: EncryptedEnrollmentReplay, context?: string): Promise<string> {
     let initializationVector: Uint8Array;
     let ciphertext: Uint8Array;
     try {
@@ -1203,10 +1203,16 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
       throw new EnrollmentReplayConfigurationError();
     }
 
+    const additionalData =
+      context === undefined ? undefined : new TextEncoder().encode(context).buffer;
     for (const keyPromise of [this.#replayKey, this.#legacyReplayKey]) {
       try {
         const plaintext = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: initializationVector.slice().buffer },
+          {
+            name: "AES-GCM",
+            iv: initializationVector.slice().buffer,
+            ...(additionalData === undefined ? {} : { additionalData }),
+          },
           await keyPromise,
           ciphertext.slice().buffer,
         );
@@ -1214,7 +1220,8 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
       } catch {
         // AES-GCM authentication selects the current or predecessor key. The
         // caller receives one coarse configuration failure only after both
-        // authenticated decryptions fail.
+        // authenticated decryptions fail — including a context mismatch from
+        // ciphertext moved between replay rows (asimposiumorg-zdz.8).
       }
     }
     throw new EnrollmentReplayConfigurationError();
