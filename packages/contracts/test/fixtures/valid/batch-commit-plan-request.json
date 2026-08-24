@@ -6,22 +6,15 @@
     },
     {
       "tempId": "tmp:child-1",
-      "causedBy": [
-        "tmp:root"
-      ]
+      "causedBy": ["tmp:root"]
     },
     {
       "tempId": "tmp:child-2",
-      "causedBy": [
-        "tmp:root"
-      ]
+      "causedBy": ["tmp:root"]
     },
     {
       "tempId": "tmp:join",
-      "causedBy": [
-        "tmp:child-1",
-        "tmp:child-2"
-      ]
+      "causedBy": ["tmp:child-1", "tmp:child-2"]
     }
   ]
 }

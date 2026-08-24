@@ -1,9 +1,4 @@
 {
   "ok": true,
-  "commitOrder": [
-    "tmp:root",
-    "tmp:child-1",
-    "tmp:child-2",
-    "tmp:join"
-  ]
+  "commitOrder": ["tmp:root", "tmp:child-1", "tmp:child-2", "tmp:join"]
 }

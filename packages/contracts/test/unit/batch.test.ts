@@ -156,6 +156,12 @@ describe("batch contracts (W1.2)", () => {
       });
       expect(parsed.ok).toBe(true);
       if (parsed.ok) expect(parsed.commitOrder).toEqual(["tmp:p1", "tmp:p2"]);
+
+      const direct = BatchPlanSuccessSchema.parse({
+        ok: true,
+        commitOrder: ["tmp:p1"],
+      });
+      expect(direct.commitOrder).toEqual(["tmp:p1"]);
     });
 
     test("validates failure result for every refusal code", () => {
@@ -170,6 +176,13 @@ describe("batch contracts (W1.2)", () => {
           expect(parsed.code).toBe(code);
           expect(parsed.detail).toContain(code);
         }
+
+        const direct = BatchPlanFailureSchema.parse({
+          ok: false,
+          code,
+          detail: `Direct detail for ${code}`,
+        });
+        expect(direct.code).toBe(code);
       }
     });
 
