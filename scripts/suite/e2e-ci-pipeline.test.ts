@@ -512,6 +512,13 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(readFileSync(run.tracePath, "utf8")).not.toContain("descendant-survived:");
   }, 30_000);
 
+  test("PLANTED: ordinary failure kills an ignoring descendant after the leader exits", async () => {
+    const run = runPipeline("worker-deploy", "fail-orphan");
+    expectStoppedAt(run, "worker-deploy", "fail", 17);
+    await Bun.sleep(3_500);
+    expect(readFileSync(run.tracePath, "utf8")).not.toContain("descendant-survived:");
+  }, 30_000);
+
   test("PLANTED: TERM cancellation at every stage returns 143, cleans descendants, and stops", async () => {
     const runs: PipelineRun[] = [];
     for (const stage of STAGES) {

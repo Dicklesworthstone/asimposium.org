@@ -350,6 +350,10 @@ if child.poll() is None:
     sys.exit(124)
 
 status = child.returncode
+# A terminal group leader does not prove its stage is quiescent: failed tools
+# can leave background descendants behind. Retire any surviving process-group
+# members on every outcome before returning the leader's exact status.
+terminate_group(signal.SIGTERM)
 sys.exit(128 - status if status < 0 else status)
 PY
   CURRENT_WRAPPER_PID=$!
@@ -436,6 +440,16 @@ plant_stage() {
         ) &
       fi
       sleep 30
+      ;;
+    fail-orphan)
+      if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
+        (
+          trap '' INT TERM HUP
+          sleep 3
+          printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE"
+        ) &
+      fi
+      return 17
       ;;
     *)
       [[ "$outcome" =~ ^[0-9]+$ ]] || return 64
