@@ -61,30 +61,26 @@ interface GateRun {
   readonly commands: readonly string[];
 }
 
-async function runAll(checkStatus: number): Promise<GateRun> {
+function runAll(checkStatus: number): GateRun {
   closeSync(openSync(LOG, "w", 0o600));
-  const child = Bun.spawn(["bash", GATES, "--all"], {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.PATH = `${BIN}${delimiter}${process.env.PATH ?? "/bin:/usr/bin"}`;
+  env.ASIMPOSIUM_GATES_TEST_LOG = LOG;
+  env.ASIMPOSIUM_GATES_TEST_CHECK_STATUS = String(checkStatus);
+
+  const child = Bun.spawnSync({
+    cmd: ["bash", GATES, "--all"],
     cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      PATH: `${BIN}${delimiter}${process.env.PATH ?? ""}`,
-      ASIMPOSIUM_GATES_TEST_LOG: LOG,
-      ASIMPOSIUM_GATES_TEST_CHECK_STATUS: String(checkStatus),
-    },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
-  await child.exited;
-  const stdout = await new Response(child.stdout).text();
-  const stderr = await new Response(child.stderr).text();
-  if (child.exitCode !== checkStatus) {
-    console.error("DEBUG runAll failed:", {
-      status: child.exitCode,
-      signal: child.signalCode,
-      stdout,
-      stderr,
-    });
-  }
+  const stdout = new TextDecoder().decode(child.stdout);
+  const stderr = new TextDecoder().decode(child.stderr);
+  console.log("SPAWN RESULT:", { exitCode: child.exitCode, stdout, stderr, commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean) });
   return {
     status: child.exitCode,
     signal: child.signalCode ?? null,
@@ -95,8 +91,8 @@ async function runAll(checkStatus: number): Promise<GateRun> {
 }
 
 describe("provider-neutral full gate", () => {
-  test("--all invokes the canonical complete dispatcher before the Rust gate", async () => {
-    const run = await runAll(0);
+  test("--all invokes the canonical complete dispatcher before the Rust gate", () => {
+    const run = runAll(0);
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
@@ -115,8 +111,8 @@ describe("provider-neutral full gate", () => {
   test.each([
     ["ordinary failure", 23],
     ["blocked proof", 78],
-  ] as const)("PLANTED: canonical %s stays non-green and stops later work", async (_label, status) => {
-    const run = await runAll(status);
+  ] as const)("PLANTED: canonical %s stays non-green and stops later work", (_label, status) => {
+    const run = runAll(status);
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(status);

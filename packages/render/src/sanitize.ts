@@ -893,6 +893,7 @@ function markdownReferenceDefinitionEnd(
   text: string,
   destinationEnd: number,
   destinationLineEnd: number,
+  containerMarkers: readonly MarkdownContainerMarker[],
 ): number | undefined {
   let cursor = destinationEnd;
   while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
@@ -905,7 +906,12 @@ function markdownReferenceDefinitionEnd(
 
   const nextLineStart = markdownNextLineStart(text, destinationLineEnd);
   const nextLineEnd = markdownLineEnd(text, nextLineStart);
-  const nextContentStart = markdownContainerContinuationStart(text, nextLineStart, nextLineEnd);
+  const nextContentStart = markdownContainerContinuationStart(
+    text,
+    nextLineStart,
+    nextLineEnd,
+    containerMarkers,
+  );
   if (nextContentStart !== undefined) {
     cursor = nextContentStart;
     if (
@@ -925,6 +931,15 @@ interface MarkdownReferenceDefinition {
   readonly label: string;
   readonly dangerousOffset: number | null;
   readonly endOffset: number;
+}
+
+type MarkdownContainerMarker =
+  | { readonly kind: "quote" }
+  | { readonly kind: "list"; readonly continuationWidth: number };
+
+interface MarkdownContainerPrefix {
+  readonly contentStart: number;
+  readonly markers: readonly MarkdownContainerMarker[];
 }
 
 function markdownListMarkerEnd(
@@ -957,22 +972,25 @@ function markdownListMarkerEnd(
  * a link-reference definition, so `> [a]: …` and `- [a]: …` are definitions
  * even though `[` is more than three source columns from the line start.
  */
-function markdownContainerContentStart(
+function markdownContainerPrefixAt(
   text: string,
   lineStart: number,
   contentOffset: number,
-): number | undefined {
+): MarkdownContainerPrefix | undefined {
   let cursor = lineStart;
+  const markers: MarkdownContainerMarker[] = [];
   while (cursor < contentOffset) {
+    const indentationStart = cursor;
     let indentation = 0;
     while (cursor < contentOffset && text[cursor] === " " && indentation < 4) {
       cursor += 1;
       indentation += 1;
     }
     if (indentation > 3) return undefined;
-    if (cursor === contentOffset) return cursor;
+    if (cursor === contentOffset) return { contentStart: cursor, markers };
 
     if (text[cursor] === ">") {
+      markers.push({ kind: "quote" });
       cursor += 1;
       if (cursor < contentOffset && (text[cursor] === " " || text[cursor] === "\t")) cursor += 1;
       continue;
@@ -996,8 +1014,12 @@ function markdownContainerContentStart(
     ) {
       return undefined;
     }
+    markers.push({
+      kind: "list",
+      continuationWidth: cursor - indentationStart,
+    });
   }
-  return cursor;
+  return { contentStart: cursor, markers };
 }
 
 /**
@@ -1010,24 +1032,34 @@ function markdownContainerContinuationStart(
   text: string,
   lineStart: number,
   lineEnd: number,
+  markers: readonly MarkdownContainerMarker[],
 ): number | undefined {
   let cursor = lineStart;
-  while (cursor < lineEnd) {
-    let indentation = 0;
-    while (cursor < lineEnd && text[cursor] === " " && indentation < 4) {
-      cursor += 1;
-      indentation += 1;
-    }
-    if (indentation > 3) return undefined;
-    if (cursor === lineEnd) return cursor;
-
-    if (text[cursor] === ">") {
+  for (const marker of markers) {
+    if (marker.kind === "quote") {
+      let indentation = 0;
+      while (cursor < lineEnd && text[cursor] === " " && indentation < 4) {
+        cursor += 1;
+        indentation += 1;
+      }
+      if (indentation > 3 || text[cursor] !== ">") return undefined;
       cursor += 1;
       if (cursor < lineEnd && (text[cursor] === " " || text[cursor] === "\t")) cursor += 1;
       continue;
     }
-    return cursor;
+
+    for (let width = 0; width < marker.continuationWidth; width += 1) {
+      if (text[cursor] !== " " && text[cursor] !== "\t") return undefined;
+      cursor += 1;
+    }
   }
+
+  let indentation = 0;
+  while (cursor < lineEnd && text[cursor] === " " && indentation < 4) {
+    cursor += 1;
+    indentation += 1;
+  }
+  if (indentation > 3) return undefined;
   return cursor;
 }
 
@@ -1037,7 +1069,8 @@ function markdownReferenceDefinitionAt(
   labelEnd: number,
 ): MarkdownReferenceDefinition | undefined {
   const lineStart = markdownLineStart(text, openOffset);
-  if (markdownContainerContentStart(text, lineStart, openOffset) === undefined) return undefined;
+  const containerPrefix = markdownContainerPrefixAt(text, lineStart, openOffset);
+  if (containerPrefix === undefined) return undefined;
   if (text[labelEnd + 1] !== ":") return undefined;
   const label = normalizedMarkdownReferenceLabel(text, openOffset, labelEnd);
   if (label === undefined) return undefined;
@@ -1048,7 +1081,12 @@ function markdownReferenceDefinitionAt(
   if (cursor === lineEnd && lineEnd < text.length) {
     const nextLineStart = markdownNextLineStart(text, lineEnd);
     const nextLineEnd = markdownLineEnd(text, nextLineStart);
-    const nextContentStart = markdownContainerContinuationStart(text, nextLineStart, nextLineEnd);
+    const nextContentStart = markdownContainerContinuationStart(
+      text,
+      nextLineStart,
+      nextLineEnd,
+      containerPrefix.markers,
+    );
     if (nextContentStart === undefined) return undefined;
     cursor = nextContentStart;
     lineEnd = nextLineEnd;
@@ -1088,7 +1126,12 @@ function markdownReferenceDefinitionAt(
     destinationEnd = cursor;
   }
 
-  const endOffset = markdownReferenceDefinitionEnd(text, cursor, lineEnd);
+  const endOffset = markdownReferenceDefinitionEnd(
+    text,
+    cursor,
+    lineEnd,
+    containerPrefix.markers,
+  );
   if (endOffset === undefined) return undefined;
   return {
     label,
@@ -1104,7 +1147,8 @@ function markdownPreviousLineIsBlank(text: string, lineStart: number): boolean {
   if (text[previousLineEnd] === "\n" && text[previousLineEnd - 1] === "\r") previousLineEnd -= 1;
   const previousLineStart = markdownLineStart(text, previousLineEnd);
   const contentStart =
-    markdownContainerContentStart(text, previousLineStart, previousLineEnd) ?? previousLineStart;
+    markdownContainerPrefixAt(text, previousLineStart, previousLineEnd)?.contentStart ??
+    previousLineStart;
   for (let cursor = contentStart; cursor < previousLineEnd; cursor += 1) {
     if (text[cursor] !== " " && text[cursor] !== "\t") return false;
   }

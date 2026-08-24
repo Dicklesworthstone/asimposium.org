@@ -475,11 +475,29 @@ describe("neutralizeUntrustedBody", () => {
       "[target]\n\n-     [target]: vbscript:over-padded-code()",
       "[separate list]\n\n[separate list]:\n- javascript:not-a-continuation()",
       "[quoted list]\n\n> [quoted list]:\n> - data:text/html,not-a-continuation()",
+      "[root then quote]\n\n[root then quote]:\n> javascript:not-a-root-continuation()",
     ];
 
     for (const body of inert) {
       expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
     }
+  });
+
+  test("does not absorb a new block quote as root reference-title metadata", () => {
+    const body =
+      '[safe root]\n\n[safe root]: https://example.test/\n> "<javascript:active-quoted-autolink()>"';
+
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: body,
+      findings: [{ marker: "active-html", count: 1 }],
+    });
+  });
+
+  test("keeps a title inside the definition's existing quote container as metadata", () => {
+    const body =
+      '[safe quote]\n\n> [safe quote]: https://example.test/\n> "<javascript:title-data()>"';
+
+    expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
   });
 
   test("does not report unused, shadowed, escaped, or code-only reference definitions", () => {
