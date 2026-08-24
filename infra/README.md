@@ -182,7 +182,12 @@ reads; and a same-checkout Vercel preview tagged with the Git revision. A
 failure, blocked exit, timeout, or cancellation stops the sequence and records
 every later stage as `not-run`. Preview smoke therefore gates all deployment,
 and web deployment cannot start before the Worker receipt and readiness checks
-pass.
+pass. Those two pre-deployment smokes observe the revisions already serving on
+the canonical staging origins; their stage records therefore carry a null
+`subject_revision`. They are regression gates, not evidence that the current
+checkout was deployed. Worker deployment, readiness, and web deployment bind
+`subject_revision` to the current checkout only after their provider receipts
+establish that relationship.
 
 Configure these Workers Builds variables. Provider credentials and the Fellow
 token are secrets; resource/project identifiers, the runner label, and public
@@ -273,17 +278,20 @@ cannot close on the strength of what is here.**
   already be exported, and a deferred class must not be. Deferral applies to
   every environment identically, so parity holds by uniform absence. Retire the
   entry on the same change that adds the export.
-- **Remote apply does not exist.** `--apply` works only against local D1.
-  Staging and production refuse, by design, until provisioned.
+- **Remote apply is staging-only and provisioning-dependent.** The runner has a
+  bounded, exact-target staging apply path and refuses production. It cannot run
+  until the ignored staging config has been resolved against an authorized,
+  provisioned D1 target; source inspection is not evidence that this happened.
 - **Vercel wiring is declared, not applied.** `[vercel]` records which
   environment each deployment target must call, and the validator enforces that
   previews never reach production — but no Vercel project setting has been read
   or written.
-- **No remote resource has ever been created, read, or written.** No D1 database,
-  R2 bucket, Durable Object namespace, custom domain, deployment, or console
-  change. The private-canary requirement — that a private-only object is
-  unreachable through every public hostname while its authenticated owner
-  retrieves it — is **unproven** and needs real buckets.
+- **Current remote resource state is not proven by this repository.** Source
+  does not establish that any D1 database, R2 bucket, Durable Object namespace,
+  custom domain, deployment, or console wiring currently exists or matches the
+  checkout. The private-canary requirement is proven only by a successful live
+  staging receipt that reads the object through the owner binding while the
+  public probe is absent, then removes it; no such receipt is present here.
 
 Validating the topology proves the *contract* is coherent, and generation proves
 the deployable artifact matches it. Neither proves that any named resource

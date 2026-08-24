@@ -157,15 +157,17 @@ interface CapturedRun {
  * deletes (Rule 1), so the fix is to stop creating rather than to start
  * removing: `capturePath` already owns a single private root for this process,
  * and distinct result names inside it are truncated by the `w` open flag when
- * they recur. The shell self-test is lent a subdirectory of that same root, so
- * a focused run adds no directory at all.
+ * they recur. Each shell self-test receives one new empty child because the
+ * script deliberately refuses to overwrite prior retained evidence.
  */
 let captureSequence = 0;
+let shellScratchSequence = 0;
 
 /** A lent, private 0700 scratch directory for the shell self-test. */
 function shellScratchDirectory(): string {
-  const scratch = capturePath("shell-scratch");
-  mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  shellScratchSequence += 1;
+  const scratch = capturePath(`shell-scratch-${shellScratchSequence}`);
+  mkdirSync(scratch, { mode: 0o700 });
   chmodSync(scratch, 0o700);
   return scratch;
 }
@@ -258,6 +260,30 @@ describe("provider-free environment interface gate registration", () => {
     expect(run.output).toContain('"code":"REMOTE_INTERFACE_GATE_PLANT_PASSED"');
     // The lent directory was used, so this run made none of its own.
     expect(run.output).toContain('"retained_evidence_dir":""');
+  });
+
+  test("PLANTED: a lent non-empty scratch directory is refused without overwriting it", () => {
+    const bash = Bun.which("bash");
+    if (bash === null) throw new Error("bash is required for the environment self-test");
+    const scratch = shellScratchDirectory();
+    const sentinel = join(scratch, "caller-evidence.txt");
+    writeFileSync(sentinel, "preserve-these-bytes\n", { mode: 0o600 });
+
+    const run = capturedRun(
+      [bash, join(REPO_ROOT, "scripts", "e2e-environments.sh"), "--self-test-remote-interface"],
+      REPO_ROOT,
+      30_000,
+      { ASIMPOSIUM_ENVIRONMENT_E2E_SCRATCH_DIR: scratch },
+    );
+
+    expect(run.error).toBeNull();
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(1);
+    expect(run.output).toContain('"code":"SELF_TEST_SCRATCH_REFUSED"');
+    expect(readFileSync(sentinel, "utf8")).toBe("preserve-these-bytes\n");
+    expect(existsSync(join(scratch, "bun"))).toBe(false);
+    expect(existsSync(join(scratch, "curl"))).toBe(false);
+    expect(existsSync(join(scratch, "commands.log"))).toBe(false);
   });
 
   test("PLANTED: mentioning the interface script is not invoking it", () => {

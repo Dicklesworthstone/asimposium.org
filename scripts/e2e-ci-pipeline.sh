@@ -72,8 +72,16 @@ append_evidence() {
 
 record_stage() {
   local stage="$1" status="$2" exit_code="$3" started_at="$4" finished_at="$5"
-  local record
-  record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"stage\":\"$stage\",\"status\":\"$status\",\"exit_code\":$exit_code,\"started_at\":\"$started_at\",\"finished_at\":\"$finished_at\"}"
+  local record subject_revision_json="\"$REVISION\""
+  # The two preview smokes run before publication and therefore observe the
+  # revision already serving on the canonical staging origins, not this
+  # checkout. Process plants execute no product revision at all. Keep those
+  # distinctions machine-readable instead of letting the run revision imply a
+  # causal claim the stage did not establish.
+  if [[ "$PIPELINE_TEST_MODE" == "1" || "$status" != "pass" || "$stage" == smoke-agent || "$stage" == smoke-gallery ]]; then
+    subject_revision_json="null"
+  fi
+  record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"subject_revision\":$subject_revision_json,\"runner\":\"$RUNNER\",\"stage\":\"$stage\",\"status\":\"$status\",\"exit_code\":$exit_code,\"started_at\":\"$started_at\",\"finished_at\":\"$finished_at\"}"
   append_evidence "$record" || return 1
   printf '%s\n' "$record"
 }
@@ -242,10 +250,15 @@ on_signal() {
     kill -s "$signal_name" "$CURRENT_WRAPPER_PID" 2>/dev/null || true
     wait "$CURRENT_WRAPPER_PID" 2>/dev/null || true
   fi
-  if [[ -n "$CURRENT_STAGE" && "$CURRENT_STAGE_RECORDED" == "0" ]]; then
-    finished_at="$(now_iso)"
-    record_stage "$CURRENT_STAGE" "cancelled" "$exit_code" "$CURRENT_STAGE_STARTED" "$finished_at" || true
-    CURRENT_STAGE_RECORDED=1
+  if [[ -n "$CURRENT_STAGE" ]]; then
+    if [[ "$CURRENT_STAGE_RECORDED" == "0" ]]; then
+      finished_at="$(now_iso)"
+      record_stage "$CURRENT_STAGE" "cancelled" "$exit_code" "$CURRENT_STAGE_STARTED" "$finished_at" || true
+      CURRENT_STAGE_RECORDED=1
+    fi
+    # A signal can arrive after the current stage record is durable but before
+    # run_stage clears its bookkeeping. The prior shape skipped these records
+    # in that window and left downstream state ambiguous.
     record_remaining_not_run "$CURRENT_STAGE" || true
     record_delegated_statuses 1 || true
   fi

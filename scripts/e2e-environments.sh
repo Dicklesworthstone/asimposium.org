@@ -67,14 +67,14 @@ block_phase() {
 # available, the planted command refuses and this self-test cannot return green.
 self_test_remote_interface_gate() {
   local scratch fake_bun fake_curl command_log nested_output nested_status
-  local supplied scratch_mode scratch_owner retained_scratch
+  local supplied scratch_mode scratch_owner retained_scratch retained_scratch_json
   local planted_token="asimp_ag_remote_e2e_canary_1234567890abcdefghijklmnop"
 
-  # A caller that already owns a private directory may lend it, so a repeated
-  # focused test run creates no additional directory. It is accepted only when
-  # it is an absolute, existing, self-owned 0700 directory: a world-readable or
-  # someone else's directory would put the planted credential canary and the
-  # fake command shims somewhere another user can read or replace.
+  # A caller may lend a new empty private directory to control where the
+  # retained evidence lands. It is accepted only when it is an absolute,
+  # existing, self-owned 0700 directory: a world-readable or someone else's
+  # directory would put the planted credential canary and the fake command
+  # shims somewhere another user can read or replace.
   #
   # Nothing here deletes: the lent directory is the caller's to manage, and a
   # self-made one is retained and named in the record below.
@@ -96,6 +96,10 @@ self_test_remote_interface_gate() {
     fi
     scratch="$supplied"
     retained_scratch=""
+    if [ -n "$(find "$scratch" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+      printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"SELF_TEST_SCRATCH_REFUSED","detail":"the supplied scratch directory must be empty so no existing file is overwritten"}'
+      return 1
+    fi
   else
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-environment-e2e.XXXXXX")" || {
       printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"SELF_TEST_SCRATCH_UNAVAILABLE","detail":"could not create bounded scratch"}'
@@ -109,9 +113,8 @@ self_test_remote_interface_gate() {
   fake_curl="$scratch/curl"
   command_log="$scratch/commands.log"
 
-  # The log is appended to by the fake commands, so a lent directory must start
-  # this run empty or the exact-sequence comparison below would see the previous
-  # run's entries. Truncation is not deletion: the file stays, at zero length.
+  # The directory was proved empty above, so this creates a new log rather than
+  # truncating caller-owned evidence.
   : >"$command_log"
   chmod 600 "$command_log"
 
@@ -154,8 +157,9 @@ self_test_remote_interface_gate() {
 
   # A standalone run keeps the one directory it made and says so, rather than
   # deleting evidence. A lent directory is reported as retained by nobody here.
-  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present nested run with inert commands stopped exactly at the resolver; migration, wrangler, and curl were never reached","retained_evidence_dir":"%s"}\n' \
-    "$retained_scratch"
+  retained_scratch_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$retained_scratch")" || return 1
+  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present nested run with inert commands stopped exactly at the resolver; migration, wrangler, and curl were never reached","retained_evidence_dir":%s}\n' \
+    "$retained_scratch_json"
 }
 
 if [ "$SELF_TEST_REMOTE_INTERFACE" -eq 1 ]; then
@@ -221,6 +225,7 @@ TOPOLOGY_STATUS=0
 TOPOLOGY_JSON="$(bun infra/validate-environments.mjs)" || TOPOLOGY_STATUS=$?
 STAGING_WORKER_ORIGIN="$(printf '%s' "$TOPOLOGY_JSON" | python3 -c '
 import json
+import re
 import sys
 
 try:
@@ -294,12 +299,41 @@ if not isinstance(document, dict):
 if document.get("status") != "pass" or document.get("environment") != sys.argv[2]:
     sys.exit(1)
 if sys.argv[1] == "plan":
-    if document.get("phase") != "plan":
+    if (
+        document.get("phase") != "plan"
+        or not isinstance(document.get("to_apply"), list)
+        or not isinstance(document.get("skipped"), list)
+        or not isinstance(document.get("idempotent"), bool)
+    ):
         sys.exit(1)
 elif sys.argv[1] in ("pass", "idempotent"):
-    if document.get("phase") != "apply" or document.get("second_plan_idempotent") is not True:
+    applied = document.get("applied")
+    if (
+        document.get("phase") != "apply"
+        or document.get("second_plan_idempotent") is not True
+        or not isinstance(applied, list)
+        or not isinstance(document.get("skipped"), list)
+        or not isinstance(document.get("head_before"), int)
+        or isinstance(document.get("head_before"), bool)
+        or document.get("head_before") < 0
+    ):
         sys.exit(1)
-    if sys.argv[1] == "idempotent" and document.get("applied") != []:
+    ids = set()
+    for item in applied:
+        if not isinstance(item, dict) or set(item) != {"id", "digest"}:
+            sys.exit(1)
+        migration_id = item.get("id")
+        digest = item.get("digest")
+        if (
+            not isinstance(migration_id, str)
+            or not re.fullmatch(r"\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*\.sql", migration_id)
+            or migration_id in ids
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            sys.exit(1)
+        ids.add(migration_id)
+    if sys.argv[1] == "idempotent" and applied != []:
         sys.exit(1)
 else:
     sys.exit(1)
@@ -410,6 +444,7 @@ fi
 # gate checks the same account under its Cloudflare name. Bridge with explicit
 # precedence so an operator-set ASIMP_ACCOUNT_ID always wins.
 export ASIMP_ACCOUNT_ID="${ASIMP_ACCOUNT_ID:-$CLOUDFLARE_ACCOUNT_ID}"
+RESOLVE_STATUS=0
 RESOLVE_OUTPUT="$(bun infra/resolve-wrangler-deploy.mjs --env staging --write 2>&1)" || RESOLVE_STATUS=$?
 if [ "${RESOLVE_STATUS:-0}" -eq 0 ] && printf '%s' "$RESOLVE_OUTPUT" | python3 -c '
 import json

@@ -478,6 +478,26 @@ export interface S2EventPageResult {
   readonly hasMore: boolean;
 }
 
+function parseS2Counts(body: Record<string, unknown>): Record<string, number> {
+  const counts = asRecord(body.counts);
+  const typedCounts: Record<string, number> = {};
+  for (const [key, value] of Object.entries(counts)) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      fail("S2_RESPONSE_INVALID");
+    }
+    typedCounts[key] = value;
+  }
+  for (const table of [
+    "events",
+    "event_chain_v2",
+    "integrity_checkpoints",
+    "checkpoint_chain_v2",
+  ]) {
+    safeNonnegativeIntegerAt(counts, table);
+  }
+  return typedCounts;
+}
+
 interface RequestResult {
   status: number;
   body: Record<string, unknown>;
@@ -910,15 +930,9 @@ function receiptMetrics(result?: WriteResult): Record<string, number | boolean |
 }
 
 export function parseS2StateResult(body: Record<string, unknown>): S2StateResult {
-  const counts = asRecord(body.counts);
-  const typedCounts: Record<string, number> = {};
-  for (const [key, value] of Object.entries(counts)) {
-    if (typeof value !== "number" || !Number.isFinite(value)) fail("S2_RESPONSE_INVALID");
-    typedCounts[key] = value as number;
-  }
   return {
     cursor: safeNonnegativeIntegerAt(body, "cursor"),
-    counts: typedCounts,
+    counts: parseS2Counts(body),
     chain_digest: stringAt(body, "chain_digest"),
     chain_version: (() => {
       if (safePositiveIntegerAt(body, "chain_version") !== 2) fail("S2_CHAIN_VERSION_INVALID");
@@ -990,6 +1004,12 @@ async function state(problemId: string, scenario: string): Promise<S2StateResult
   return parseS2StateResult(response.body);
 }
 
+async function counts(problemId: string, scenario: string): Promise<Record<string, number>> {
+  const response = await request("GET", `/__s2/counts?problem_id=${problemId}`, scenario);
+  assertEqual(response.status, 200, "S2_COUNTS_READ_FAILED");
+  return parseS2Counts(response.body);
+}
+
 async function write(
   body: Record<string, unknown>,
   scenario: string,
@@ -1029,9 +1049,11 @@ async function deterministicAllocationAndRollback(): Promise<void> {
     "claims",
     "claim_projections",
     "events",
+    "event_chain_v2",
     "idempotency",
     "outbox",
     "integrity_checkpoints",
+    "checkpoint_chain_v2",
   ]) {
     assertEqual(allocationState.counts[table], 2, "S2_DATABASE_ALLOCATION_ROW_COUNT_INVALID");
   }
@@ -1075,10 +1097,12 @@ async function deterministicAllocationAndRollback(): Promise<void> {
     "claims",
     "claim_projections",
     "events",
+    "event_chain_v2",
     "event_content",
     "idempotency",
     "outbox",
     "integrity_checkpoints",
+    "checkpoint_chain_v2",
   ]) {
     assertEqual(rollbackState.counts[table], 1, "S2_ROLLBACK_PARTIAL_BATCH_COMMIT");
   }
@@ -1326,11 +1350,13 @@ async function deterministicAllocationAndRollback(): Promise<void> {
     "claims",
     "claim_projections",
     "events",
+    "event_chain_v2",
     "event_content",
     "public_claim_fts",
     "idempotency",
     "outbox",
     "integrity_checkpoints",
+    "checkpoint_chain_v2",
   ]) {
     assertEqual(sequenceBoundaryState.counts[table], 0, "S2_SEQUENCE_BOUNDARY_PARTIAL_BATCH");
   }
@@ -1686,7 +1712,15 @@ async function exerciseOutboxDrainer(): Promise<void> {
   );
   assertEqual(afterAuto.max_active, 1, "S2_OUTBOX_AUTO_SINGLE_OWNER_INVALID");
   const autoState = await state(OUTBOX_PROBLEM, "outbox-auto-visible-state");
-  for (const table of ["claims", "claim_projections", "events", "outbox"] as const) {
+  for (const table of [
+    "claims",
+    "claim_projections",
+    "events",
+    "event_chain_v2",
+    "outbox",
+    "integrity_checkpoints",
+    "checkpoint_chain_v2",
+  ] as const) {
     assertEqual(autoState.counts[table], 1, "S2_OUTBOX_AUTO_DUPLICATED_VISIBLE_ROW");
   }
 
@@ -1841,6 +1875,17 @@ async function attemptLegacyBackfill(problemId: string, scenario: string): Promi
   );
 }
 
+function assertSuccessfulV2Backfill(result: RequestResult, code: string): void {
+  assertEqual(result.status, 200, `${code}_FAILED`);
+  assertEqual(stringAt(result.body, "status"), "complete", `${code}_STATUS_INVALID`);
+  assertEqual(numberAt(result.body, "chain_version"), 2, `${code}_CHAIN_VERSION_INVALID`);
+  assertEqual(
+    stringAt(result.body, "checkpoint_mode"),
+    "unsigned-v0",
+    `${code}_CHECKPOINT_MODE_INVALID`,
+  );
+}
+
 /**
  * Both sides of the bounded-replay limit, against real local D1.
  *
@@ -1862,6 +1907,22 @@ async function legacyBoundedBackfill(): Promise<void> {
     "KRATER_INTEGRITY_BACKFILL_REQUIRED",
     "S2_LEGACY_OVER_LIMIT_CODE_INVALID",
   );
+  const refusedCounts = await counts(
+    LEGACY_OVER_LIMIT_PROBLEM,
+    "legacy-over-limit-counts-after-refusal",
+  );
+  assertEqual(refusedCounts.events, LEGACY_OVER_LIMIT_EVENTS, "S2_LEGACY_OVER_LIMIT_EVENTS_MUTATED");
+  assertEqual(refusedCounts.event_chain_v2, 0, "S2_LEGACY_OVER_LIMIT_EVENT_CHAIN_V2_PARTIAL");
+  assertEqual(
+    refusedCounts.integrity_checkpoints,
+    0,
+    "S2_LEGACY_OVER_LIMIT_CHECKPOINT_PARTIAL",
+  );
+  assertEqual(
+    refusedCounts.checkpoint_chain_v2,
+    0,
+    "S2_LEGACY_OVER_LIMIT_CHECKPOINT_CHAIN_V2_PARTIAL",
+  );
 
   // Atomicity: refusing twice must be indistinguishable from refusing once.
   const refusedAgain = await attemptLegacyBackfill(
@@ -1873,6 +1934,15 @@ async function legacyBoundedBackfill(): Promise<void> {
     stringAt(refusedAgain.body, "code"),
     "KRATER_INTEGRITY_BACKFILL_REQUIRED",
     "S2_LEGACY_OVER_LIMIT_SECOND_CODE_INVALID",
+  );
+  const refusedAgainCounts = await counts(
+    LEGACY_OVER_LIMIT_PROBLEM,
+    "legacy-over-limit-counts-after-second-refusal",
+  );
+  assertEqual(
+    JSON.stringify(refusedAgainCounts),
+    JSON.stringify(refusedCounts),
+    "S2_LEGACY_OVER_LIMIT_SECOND_REFUSAL_MUTATED_COUNTS",
   );
 
   // Nothing became readable: a partial replay would have unblocked the ledger.
@@ -1895,8 +1965,7 @@ async function legacyBoundedBackfill(): Promise<void> {
     LEGACY_AT_LIMIT_PROBLEM,
     "legacy-at-limit-backfill-complete",
   );
-  assertEqual(completed.status, 200, "S2_LEGACY_AT_LIMIT_BACKFILL_FAILED");
-  assertEqual(stringAt(completed.body, "status"), "complete", "S2_LEGACY_AT_LIMIT_STATUS_INVALID");
+  assertSuccessfulV2Backfill(completed, "S2_LEGACY_AT_LIMIT_BACKFILL");
   // This is the replay's `db.batch`, not the later ordinary write batch. A positive value
   // proves the backfill receipt preserves the D1 metadata instead of reporting only reads.
   assertEqual(
@@ -1916,6 +1985,16 @@ async function legacyBoundedBackfill(): Promise<void> {
     upgraded.counts.integrity_checkpoints,
     LEGACY_AT_LIMIT_EVENTS,
     "S2_LEGACY_AT_LIMIT_CHECKPOINTS_INVALID",
+  );
+  assertEqual(
+    upgraded.counts.event_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_LEGACY_AT_LIMIT_EVENT_CHAIN_V2_INVALID",
+  );
+  assertEqual(
+    upgraded.counts.checkpoint_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_LEGACY_AT_LIMIT_CHECKPOINT_CHAIN_V2_INVALID",
   );
   assertEqual(
     upgraded.checkpoint_mode,
@@ -1973,7 +2052,7 @@ async function ordinaryWritesPastTheLimit(): Promise<void> {
     LEGACY_WRITE_BOUNDARY_PROBLEM,
     "legacy-write-boundary-backfill",
   );
-  assertEqual(upgraded.status, 200, "S2_WRITE_BOUNDARY_BACKFILL_FAILED");
+  assertSuccessfulV2Backfill(upgraded, "S2_WRITE_BOUNDARY_BACKFILL");
 
   // 513th event: allowed even before the fix, because the limit was not yet exceeded.
   const crossing = await request(
@@ -2029,7 +2108,7 @@ async function ordinaryWritesPastTheLimit(): Promise<void> {
 async function mixedDigestLogIsNotComplete(): Promise<void> {
   await plantLegacy(LEGACY_MIXED_PROBLEM, 8, "legacy-mixed-plant");
   const upgraded = await attemptLegacyBackfill(LEGACY_MIXED_PROBLEM, "legacy-mixed-backfill");
-  assertEqual(upgraded.status, 200, "S2_MIXED_BACKFILL_FAILED");
+  assertSuccessfulV2Backfill(upgraded, "S2_MIXED_BACKFILL");
 
   // One undigested envelope appended to a log the backfill row still calls complete.
   const appended = await request(
@@ -2126,6 +2205,16 @@ async function probePlanUsesPartialIndex(): Promise<void> {
     LEGACY_AT_LIMIT_EVENTS,
     "S2_PROBE_PLAN_SUBJECT_NOT_UPGRADED",
   );
+  assertEqual(
+    healthy.counts.event_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_PROBE_PLAN_EVENT_CHAIN_V2_INCOMPLETE",
+  );
+  assertEqual(
+    healthy.counts.checkpoint_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_PROBE_PLAN_CHECKPOINT_CHAIN_V2_INCOMPLETE",
+  );
 }
 
 /**
@@ -2148,7 +2237,7 @@ async function preflightCostDoesNotGrowWithHistory(): Promise<void> {
   ] as const) {
     await plantLegacy(problemId, events, scenario);
     const upgraded = await attemptLegacyBackfill(problemId, `${scenario}-backfill`);
-    assertEqual(upgraded.status, 200, "S2_PREFLIGHT_SUBJECT_BACKFILL_FAILED");
+    assertSuccessfulV2Backfill(upgraded, "S2_PREFLIGHT_SUBJECT_BACKFILL");
   }
 
   const measured: Record<string, number> = {};
@@ -2225,6 +2314,16 @@ async function legacyBoundedBackfillAfterRestart(): Promise<void> {
     LEGACY_AT_LIMIT_EVENTS,
     "S2_LEGACY_AT_LIMIT_RESTART_CHECKPOINTS_INVALID",
   );
+  assertEqual(
+    upgraded.counts.event_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_LEGACY_AT_LIMIT_RESTART_EVENT_CHAIN_V2_INVALID",
+  );
+  assertEqual(
+    upgraded.counts.checkpoint_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_LEGACY_AT_LIMIT_RESTART_CHECKPOINT_CHAIN_V2_INVALID",
+  );
 
   // The write boundary has to hold across a restart too. Exercising it only in a warm
   // process would miss a freeze that reappears once the integrity state is re-read from D1
@@ -2244,6 +2343,16 @@ async function legacyBoundedBackfillAfterRestart(): Promise<void> {
     boundary.counts.integrity_checkpoints,
     LEGACY_AT_LIMIT_EVENTS + 2,
     "S2_WRITE_BOUNDARY_RESTART_CHECKPOINTS_INVALID",
+  );
+  assertEqual(
+    boundary.counts.event_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS + 2,
+    "S2_WRITE_BOUNDARY_RESTART_EVENT_CHAIN_V2_INVALID",
+  );
+  assertEqual(
+    boundary.counts.checkpoint_chain_v2,
+    LEGACY_AT_LIMIT_EVENTS + 2,
+    "S2_WRITE_BOUNDARY_RESTART_CHECKPOINT_CHAIN_V2_INVALID",
   );
 
   const beyond = await request(
@@ -2308,8 +2417,7 @@ async function upgradeExisting(lane: UpgradeEvidenceLane = "raw-sql"): Promise<v
     "upgrade-existing-bounded-backfill",
     { problem_id: UPGRADE_EXISTING_PROBLEM, completed_at: CREATED_AT },
   );
-  assertEqual(firstBackfill.status, 200, "S2_UPGRADE_EXISTING_BACKFILL_FAILED");
-  assertEqual(firstBackfill.body.status, "complete", "S2_UPGRADE_EXISTING_BACKFILL_STATUS_INVALID");
+  assertSuccessfulV2Backfill(firstBackfill, "S2_UPGRADE_EXISTING_BACKFILL");
   assertEqual(
     numberAt(firstBackfill.body, "backfill_rows_written") > 0,
     true,
@@ -2326,15 +2434,21 @@ async function upgradeExisting(lane: UpgradeEvidenceLane = "raw-sql"): Promise<v
     "upgrade-existing-backfill-idempotence",
     { problem_id: UPGRADE_EXISTING_PROBLEM, completed_at: CREATED_AT },
   );
-  assertEqual(secondBackfill.status, 200, "S2_UPGRADE_EXISTING_BACKFILL_RERUN_FAILED");
+  assertSuccessfulV2Backfill(secondBackfill, "S2_UPGRADE_EXISTING_BACKFILL_RERUN");
 
   const restored = await state(UPGRADE_EXISTING_PROBLEM, "upgrade-existing-restored-state");
   assertEqual(restored.cursor, 1, "S2_UPGRADE_EXISTING_CURSOR_INVALID");
   assertEqual(restored.counts.events, 1, "S2_UPGRADE_EXISTING_EVENT_COUNT_INVALID");
+  assertEqual(restored.counts.event_chain_v2, 1, "S2_UPGRADE_EXISTING_EVENT_CHAIN_V2_INVALID");
   assertEqual(
     restored.counts.integrity_checkpoints,
     1,
     "S2_UPGRADE_EXISTING_CHECKPOINT_COUNT_INVALID",
+  );
+  assertEqual(
+    restored.counts.checkpoint_chain_v2,
+    1,
+    "S2_UPGRADE_EXISTING_CHECKPOINT_CHAIN_V2_INVALID",
   );
   assertEqual(restored.checkpoint_mode, "unsigned-v0", "S2_UPGRADE_EXISTING_MODE_INVALID");
   await assertReplay(UPGRADE_EXISTING_PROBLEM, 1, "upgrade-existing-replay-after-backfill");
@@ -2459,7 +2573,13 @@ async function upgradeEmpty(lane: UpgradeEvidenceLane = "raw-sql"): Promise<void
   assertEqual(appended.seq, 1, "S2_UPGRADE_EMPTY_SEQUENCE_INVALID");
   const upgraded = await state(UPGRADE_EMPTY_PROBLEM, "upgrade-empty-post-migration-state");
   assertEqual(upgraded.cursor, 1, "S2_UPGRADE_EMPTY_CURSOR_INVALID");
+  assertEqual(upgraded.counts.event_chain_v2, 1, "S2_UPGRADE_EMPTY_EVENT_CHAIN_V2_INVALID");
   assertEqual(upgraded.counts.integrity_checkpoints, 1, "S2_UPGRADE_EMPTY_CHECKPOINT_INVALID");
+  assertEqual(
+    upgraded.counts.checkpoint_chain_v2,
+    1,
+    "S2_UPGRADE_EMPTY_CHECKPOINT_CHAIN_V2_INVALID",
+  );
   await assertReplay(UPGRADE_EMPTY_PROBLEM, 1, "upgrade-empty-post-migration-replay");
   emit({
     tool: "bun",
@@ -2535,9 +2655,11 @@ async function exercise(): Promise<void> {
     "claims",
     "claim_projections",
     "events",
+    "event_chain_v2",
     "idempotency",
     "outbox",
     "integrity_checkpoints",
+    "checkpoint_chain_v2",
   ]) {
     assertEqual(primaryState.counts[table], 13, "S2_PRIMARY_ROW_COUNT_INVALID");
   }
@@ -2707,6 +2829,12 @@ async function exercise(): Promise<void> {
   assertEqual(durableOutboxState.cursor, 31, "S2_OUTBOX_CURSOR_INVALID");
   assertEqual(durableOutboxState.counts.outbox, 31, "S2_OUTBOX_PENDING_INVALID");
   assertEqual(durableOutboxState.counts.integrity_checkpoints, 31, "S2_CHECKPOINT_COUNT_INVALID");
+  assertEqual(durableOutboxState.counts.event_chain_v2, 31, "S2_EVENT_CHAIN_V2_COUNT_INVALID");
+  assertEqual(
+    durableOutboxState.counts.checkpoint_chain_v2,
+    31,
+    "S2_CHECKPOINT_CHAIN_V2_COUNT_INVALID",
+  );
 
   const readStorm = await Promise.all(
     Array.from({ length: 64 }, () =>
@@ -2800,6 +2928,12 @@ async function restartVerify(): Promise<void> {
   assertEqual(primary.cursor, 31, "S2_RESTART_CURSOR_INVALID");
   assertEqual(primary.counts.outbox, 31, "S2_RESTART_OUTBOX_INVALID");
   assertEqual(primary.counts.integrity_checkpoints, 31, "S2_RESTART_CHECKPOINT_INVALID");
+  assertEqual(primary.counts.event_chain_v2, 31, "S2_RESTART_EVENT_CHAIN_V2_INVALID");
+  assertEqual(
+    primary.counts.checkpoint_chain_v2,
+    31,
+    "S2_RESTART_CHECKPOINT_CHAIN_V2_INVALID",
+  );
   await assertReplay(PRIMARY_PROBLEM, 31, "outbox-worker-restart-replay");
   await assertReplay(LARGE_PROBLEM, 201, "large-replay-after-worker-restart");
   const recoveredOutbox = await waitForOutbox(
@@ -2819,7 +2953,15 @@ async function restartVerify(): Promise<void> {
     "S2_OUTBOX_QUARANTINE_DIAGNOSTIC_INVALID",
   );
   const outboxProblem = await state(OUTBOX_PROBLEM, "outbox-restart-visible-state");
-  for (const table of ["claims", "claim_projections", "events", "outbox"] as const) {
+  for (const table of [
+    "claims",
+    "claim_projections",
+    "events",
+    "event_chain_v2",
+    "outbox",
+    "integrity_checkpoints",
+    "checkpoint_chain_v2",
+  ] as const) {
     assertEqual(outboxProblem.counts[table], 7, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
   }
   await assertReplay(OUTBOX_PROBLEM, 7, "outbox-restart-visible-replay");
@@ -2869,7 +3011,7 @@ async function restartVerify(): Promise<void> {
 // request, and never written to argv, exported env, a log line, or a retained
 // receipt -- `request`'s diagnostics only ever read typed body fields.
 // The full per-problem successful-write census: `/__s2/state` counts exactly
-// these eight tables (readState in krater.ts), and a committed promotion writes
+// these ten tables (inspectProblem in krater.ts), and a committed promotion writes
 // one row into every one of them. Asserting the whole set -- not the
 // claims/projections/events/outbox subset the outbox scenarios elsewhere use --
 // is what makes the mounted no-lost/no-phantom claim exact rather than partial.
@@ -2877,11 +3019,13 @@ const MOUNTED_TABLES = [
   "claims",
   "claim_projections",
   "events",
+  "event_chain_v2",
   "event_content",
   "public_claim_fts",
   "idempotency",
   "outbox",
   "integrity_checkpoints",
+  "checkpoint_chain_v2",
 ] as const;
 
 // A schema-valid WorkshopObjectId (W- + 26 base62 chars) that this fixture does
@@ -3462,6 +3606,12 @@ async function mountedCrashSetupLeavesOneDurablePending(): Promise<void> {
   const census = await state(MOUNTED_CRASH_PROBLEM, "mounted-crash-setup-census");
   assertEqual(census.counts.outbox, 1, "S2_MOUNTED_CRASH_SETUP_OUTBOX_INVALID");
   assertEqual(census.counts.events, 1, "S2_MOUNTED_CRASH_SETUP_EVENT_INVALID");
+  assertEqual(census.counts.event_chain_v2, 1, "S2_MOUNTED_CRASH_SETUP_EVENT_CHAIN_V2_INVALID");
+  assertEqual(
+    census.counts.checkpoint_chain_v2,
+    1,
+    "S2_MOUNTED_CRASH_SETUP_CHECKPOINT_CHAIN_V2_INVALID",
+  );
 }
 
 /**
@@ -3475,6 +3625,12 @@ async function mountedCrashRecoveryDeliversExactlyOnce(): Promise<void> {
   const survived = await state(MOUNTED_CRASH_PROBLEM, "mounted-crash-survived");
   assertEqual(survived.counts.outbox, 1, "S2_MOUNTED_CRASH_ROW_LOST");
   assertEqual(survived.counts.events, 1, "S2_MOUNTED_CRASH_EVENT_LOST");
+  assertEqual(survived.counts.event_chain_v2, 1, "S2_MOUNTED_CRASH_EVENT_CHAIN_V2_LOST");
+  assertEqual(
+    survived.counts.checkpoint_chain_v2,
+    1,
+    "S2_MOUNTED_CRASH_CHECKPOINT_CHAIN_V2_LOST",
+  );
   assertEqual(survived.counts.claims, 1, "S2_MOUNTED_CRASH_CLAIM_LOST");
   // The crash row was committed via the binding-failure seam, so the DO never
   // armed an alarm for it; on restart it does not self-deliver, and /status is

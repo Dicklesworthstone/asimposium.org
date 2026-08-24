@@ -48,6 +48,7 @@ interface EvidenceRecord {
   readonly stage?: string;
   readonly status: string;
   readonly exit_code?: number | null;
+  readonly subject_revision?: string | null;
   readonly record?: string;
   readonly code?: string;
   readonly delegated_suite?: string;
@@ -413,6 +414,11 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(
       evidence.filter((record) => record.stage !== undefined).map((record) => record.status),
     ).toEqual(STAGES.map(() => "pass"));
+    expect(
+      evidence
+        .filter((record) => record.stage !== undefined)
+        .every((record) => record.subject_revision === null),
+    ).toBe(true);
     expect(evidence.filter((record) => record.record === "delegated-suite")).toHaveLength(6);
     expect(evidence.at(-1)).toMatchObject({
       record: "summary",

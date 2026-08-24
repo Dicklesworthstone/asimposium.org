@@ -1143,6 +1143,14 @@ async function handleHarnessRequest(
       return response(await upstream.json(), upstream.status);
     }
 
+    // Read-only census for integrity-refusal plants. `/__s2/state` correctly
+    // refuses an incomplete chain, so it cannot prove that a failed backfill
+    // left every legacy and v2 table untouched. This local, token-gated seam
+    // exposes counts only; it does not weaken the production read path.
+    if (request.method === "GET" && url.pathname === "/__s2/counts") {
+      return response({ counts: await inspectProblem(env.DB, queryString(url, "problem_id")) });
+    }
+
     if (request.method === "GET" && url.pathname === "/__s2/state") {
       const problemId = queryString(url, "problem_id");
       const eventId = queryOptionalString(url, "event_id");
