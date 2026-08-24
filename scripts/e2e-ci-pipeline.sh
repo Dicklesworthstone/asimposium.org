@@ -12,6 +12,7 @@ source "$repository_root/e2e/lib/run-diagnostics.sh"
 readonly SUITE="ci-pipeline"
 readonly USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 readonly STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
+readonly VERCEL_CLI_VERSION="59.5.0"
 readonly PIPELINE_TEST_MODE="${ASIMP_CI_PROCESS_TEST:-0}"
 readonly -a STAGES=(
   "root-gate"
@@ -25,6 +26,7 @@ readonly -a STAGES=(
 RUN_ID=""
 REVISION=""
 RUNNER="manual"
+RUNNER_BUILD_ID=""
 ARTIFACT_DIRECTORY=""
 CURRENT_STAGE=""
 CURRENT_STAGE_STARTED=""
@@ -143,11 +145,38 @@ record_remaining_not_run() {
 }
 
 assert_revision_unchanged() {
+  local checkout_status
   [[ "$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" == "$REVISION" ]] || return 65
   if [[ "$PIPELINE_TEST_MODE" != "1" ]]; then
-    git -C "$repository_root" diff --quiet --ignore-submodules -- || return 65
-    git -C "$repository_root" diff --cached --quiet --ignore-submodules -- || return 65
+    checkout_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=normal 2>/dev/null)" || return 65
+    [[ -z "$checkout_status" ]] || return 65
   fi
+}
+
+validate_runner_context() {
+  case "$RUNNER" in
+    manual)
+      [[ "${WORKERS_CI:-0}" != "1" ]] || return 78
+      ;;
+    cloudflare-workers-builds)
+      [[ "${CI:-}" == "true" && "${WORKERS_CI:-}" == "1" ]] || return 78
+      [[ "${WORKERS_CI_COMMIT_SHA:-}" == "$REVISION" ]] || return 65
+      [[ "${WORKERS_CI_BUILD_UUID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 78
+      RUNNER_BUILD_ID="$WORKERS_CI_BUILD_UUID"
+      ;;
+    *) return 64 ;;
+  esac
+}
+
+record_runner_context() {
+  local build_id_json="null" observed_at record
+  if [[ -n "$RUNNER_BUILD_ID" ]]; then
+    build_id_json="\"$RUNNER_BUILD_ID\""
+  fi
+  observed_at="$(now_iso)"
+  record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"record\":\"runner\",\"status\":\"observed\",\"runner_build_id\":$build_id_json,\"observed_at\":\"$observed_at\"}"
+  append_evidence "$record" || return 1
+  printf '%s\n' "$record"
 }
 
 timeout_for_stage() {
@@ -262,7 +291,7 @@ plant_stage() {
     hang)
       trap '' INT TERM HUP
       if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
-        (sleep 5; printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE") &
+        (sleep 3; printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE") &
       fi
       sleep 30
       ;;
@@ -401,8 +430,9 @@ web_deploy() {
   local project_receipt="$ARTIFACT_DIRECTORY/vercel-project.json"
   local deployment_url_file="$ARTIFACT_DIRECTORY/vercel-deployment-url.txt"
   local raw_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
+  local api_receipt="$ARTIFACT_DIRECTORY/vercel-deployment-api.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
-  local deployment_origin status
+  local deployment_host deployment_origin status
 
   require_live_variable VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
@@ -434,7 +464,7 @@ PY
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
-  vercel deploy "$repository_root" \
+  bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
     --yes \
     --target preview \
     --meta "asimposiumRevision=$REVISION" \
@@ -459,11 +489,21 @@ print("https://" + parts.hostname)
 PY
 )" || return 1
 
-  vercel inspect "$deployment_origin" --wait --timeout 25m --json > "$raw_receipt"
+  bunx --bun "vercel@$VERCEL_CLI_VERSION" inspect "$deployment_origin" --wait --timeout 25m --json > "$raw_receipt"
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
-  python3 - "$raw_receipt" <<'PY' > "$safe_receipt"
+  deployment_host="${deployment_origin#https://}"
+  curl --fail --silent --show-error \
+    --user-agent "$USER_AGENT" \
+    --connect-timeout 5 --max-time 20 \
+    --header "Authorization: Bearer $VERCEL_TOKEN" \
+    --output "$api_receipt" \
+    "https://api.vercel.com/v13/deployments/$deployment_host?teamId=$VERCEL_ORG_ID"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  python3 - "$raw_receipt" "$api_receipt" "$REVISION" "$VERCEL_PROJECT_ID" <<'PY' > "$safe_receipt"
 import datetime
 import json
 import re
@@ -472,11 +512,16 @@ from urllib.parse import urlsplit
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     document = json.load(stream)
+with open(sys.argv[2], encoding="utf-8") as stream:
+    api_document = json.load(stream)
 if not isinstance(document, dict):
+    sys.exit(1)
+if not isinstance(api_document, dict):
     sys.exit(1)
 deployment_id = document.get("id") or document.get("uid") or document.get("deploymentId")
 url = document.get("url")
 state = document.get("readyState") or document.get("state") or document.get("status")
+target = document.get("target")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
 if not isinstance(url, str):
@@ -486,7 +531,27 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() not in ("READY", "SUCCEEDED"):
+if not isinstance(state, str) or state.upper() != "READY":
+    sys.exit(1)
+if target != "preview":
+    sys.exit(1)
+if api_document.get("id") != deployment_id:
+    sys.exit(1)
+api_url = api_document.get("url")
+if api_url != parts.hostname:
+    sys.exit(1)
+api_state = api_document.get("readyState") or api_document.get("state") or api_document.get("status")
+if not isinstance(api_state, str) or api_state.upper() != "READY":
+    sys.exit(1)
+if api_document.get("target") not in (None, "preview"):
+    sys.exit(1)
+project_id = api_document.get("projectId")
+if project_id is None and isinstance(api_document.get("project"), dict):
+    project_id = api_document["project"].get("id")
+if project_id != sys.argv[4]:
+    sys.exit(1)
+metadata = api_document.get("meta")
+if not isinstance(metadata, dict) or metadata.get("asimposiumRevision") != sys.argv[3]:
     sys.exit(1)
 observed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 print(json.dumps({"deployment_id": deployment_id, "observed_at": observed_at, "status": "ready", "origin": "https://" + parts.hostname}, separators=(",", ":")))
@@ -655,6 +720,13 @@ esac
 if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
   RUNNER="process-test"
   [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]] || exit 64
+else
+  validate_runner_context
+  runner_status=$?
+  if [[ "$runner_status" -ne 0 ]]; then
+    printf 'ci-pipeline: runner identity or revision binding is invalid\n' >&2
+    exit "$runner_status"
+  fi
 fi
 
 RUN_ID="${explicit_run_id:-ci-${REVISION:0:12}-$(date -u +%Y%m%dT%H%M%S)-$$}"
@@ -682,6 +754,7 @@ fi
 mkdir "$ARTIFACT_DIRECTORY/curl-home" || exit 64
 printf 'user-agent = "%s"\n' "$USER_AGENT" > "$ARTIFACT_DIRECTORY/curl-home/.curlrc" || exit 64
 export CURL_HOME="$ARTIFACT_DIRECTORY/curl-home"
+record_runner_context || exit 1
 
 for stage in "${STAGES[@]}"; do
   run_stage "$stage"

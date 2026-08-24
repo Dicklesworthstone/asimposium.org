@@ -64,7 +64,13 @@ function plantedEnvironment(
   paths: ReturnType<typeof fixture>,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
-    ...process.env,
+    // Keep this allowlist deliberately small. This object is serialized into a
+    // helper's `bun -e` source, so spreading the parent environment would put
+    // unrelated credentials in the process table and crash diagnostics.
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    LANG: process.env.LANG ?? "C",
+    LC_ALL: "C",
     NODE_ENV: "test",
     ASIMP_CI_PROCESS_TEST: "1",
     ASIMP_CI_PROCESS_PLANT_STAGE: stage,
@@ -236,7 +242,7 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
     child.kill("SIGTERM");
 
     const completion = await new Promise((resolve) => {
-      child.once("exit", (code, signal) => resolve({ code, signal }));
+      child.once("close", (code, signal) => resolve({ code, signal }));
     });
 
     writeFileSync(
@@ -269,6 +275,37 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
 }
 
 describe("OPS.2b review pipeline orchestration", () => {
+  test("process controls never serialize ambient credentials into helper source", () => {
+    const environment = plantedEnvironment("root-gate", "pass", fixture("minimal-environment"));
+    const allowedNames = new Set([
+      "PATH",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "NODE_ENV",
+      "ASIMP_CI_PROCESS_TEST",
+      "ASIMP_CI_PROCESS_PLANT_STAGE",
+      "ASIMP_CI_PROCESS_PLANT_OUTCOME",
+      "ASIMP_CI_PROCESS_TRACE",
+      "ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY",
+      "ASIMP_CI_ROOT_GATE_TIMEOUT_SECONDS",
+      "ASIMP_CI_WORKER_DEPLOY_TIMEOUT_SECONDS",
+      "ASIMP_CI_WORKER_READINESS_TIMEOUT_SECONDS",
+      "ASIMP_CI_WEB_DEPLOY_TIMEOUT_SECONDS",
+      "ASIMP_CI_SMOKE_AGENT_TIMEOUT_SECONDS",
+      "ASIMP_CI_SMOKE_GALLERY_TIMEOUT_SECONDS",
+      "ASIMP_CI_GAUNTLET_STATUS",
+      "ASIMP_CI_PLAYWRIGHT_STATUS",
+      "ASIMP_CI_LOAD_STATUS",
+      "ASIMP_CI_RESTORE_STATUS",
+      "ASIMP_CI_LAUNCH_STATUS",
+      "ASIMP_CI_RELEASE_STATUS",
+    ]);
+
+    expect(Object.keys(environment).every((name) => allowedNames.has(name))).toBe(true);
+    expect(environment.HOME).toBeUndefined();
+  });
+
   test("the all-pass process control runs each stage in doctrine order", () => {
     const run = runPipeline("smoke-gallery", "pass");
 
