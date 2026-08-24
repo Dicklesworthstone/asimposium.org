@@ -96,7 +96,7 @@ self_test_remote_interface_gate() {
     fi
     scratch="$supplied"
     retained_scratch=""
-    if [ -n "$(find "$scratch" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    if (shopt -s nullglob dotglob; entries=("$scratch"/*); ((${#entries[@]} > 0))); then
       printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"SELF_TEST_SCRATCH_REFUSED","detail":"the supplied scratch directory must be empty so no existing file is overwritten"}'
       return 1
     fi
@@ -225,7 +225,6 @@ TOPOLOGY_STATUS=0
 TOPOLOGY_JSON="$(bun infra/validate-environments.mjs)" || TOPOLOGY_STATUS=$?
 STAGING_WORKER_ORIGIN="$(printf '%s' "$TOPOLOGY_JSON" | python3 -c '
 import json
-import re
 import sys
 
 try:
@@ -285,6 +284,7 @@ migration_receipt_matches() {
   local mode="$1" environment="$2" receipt="$3"
   printf '%s' "$receipt" | python3 -c '
 import json
+import re
 import sys
 
 lines = [line for line in sys.stdin.read().splitlines() if line.strip()]

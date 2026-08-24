@@ -209,6 +209,7 @@ const COST_WRITES: readonly S2SettledWriteResult[] = [
     row_digest: "2".repeat(64),
     build_digest: "3".repeat(64),
     chain_digest: "4".repeat(64),
+    chain_version: 2,
     checkpoint_digest: "5".repeat(64),
     write_phase_ms: 1,
     successful_batch_rows_read: 3,
@@ -238,6 +239,7 @@ const COST_WRITES: readonly S2SettledWriteResult[] = [
     row_digest: "7".repeat(64),
     build_digest: "8".repeat(64),
     chain_digest: "9".repeat(64),
+    chain_version: 2,
     checkpoint_digest: "a".repeat(64),
     write_phase_ms: 20,
     successful_batch_rows_read: 5,
@@ -267,6 +269,7 @@ const COST_WRITES: readonly S2SettledWriteResult[] = [
     row_digest: "c".repeat(64),
     build_digest: "d".repeat(64),
     chain_digest: "e".repeat(64),
+    chain_version: 2,
     checkpoint_digest: "f".repeat(64),
     write_phase_ms: 9,
     successful_batch_rows_read: 7,
@@ -1011,15 +1014,21 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(
       parseS2StateResult({
         cursor: maximum,
-        counts: {},
+        counts: {
+          events: 0,
+          event_chain_v2: 0,
+          integrity_checkpoints: 0,
+          checkpoint_chain_v2: 0,
+        },
         chain_digest: "a".repeat(64),
+        chain_version: 2,
         checkpoint_digest: null,
         checkpoint_mode: "unsigned-v0",
       }),
     ).toMatchObject({ cursor: maximum });
     expect(
       parseS2EventPageResult({
-        events: [{ seq: maximum }],
+        events: [{ seq: maximum, chainVersion: 2 }],
         next_cursor: maximum,
         has_more: false,
       }),
@@ -1032,15 +1041,21 @@ describe("S2 to S7 normalized cost receipt", () => {
       expect(() =>
         parseS2StateResult({
           cursor: invalid,
-          counts: {},
+          counts: {
+            events: 0,
+            event_chain_v2: 0,
+            integrity_checkpoints: 0,
+            checkpoint_chain_v2: 0,
+          },
           chain_digest: "a".repeat(64),
+          chain_version: 2,
           checkpoint_digest: null,
           checkpoint_mode: "unsigned-v0",
         }),
       ).toThrow("S2_RESPONSE_INVALID");
       expect(() =>
         parseS2EventPageResult({
-          events: [{ seq: invalid }],
+          events: [{ seq: invalid, chainVersion: 2 }],
           next_cursor: invalid,
           has_more: false,
         }),
@@ -1057,8 +1072,14 @@ describe("S2 to S7 normalized cost receipt", () => {
   test("PLANTED: S2 parsers refuse laundered unions, non-string digests, and omitted nullables", () => {
     const validState = {
       cursor: 1,
-      counts: {},
+      counts: {
+        events: 1,
+        event_chain_v2: 1,
+        integrity_checkpoints: 1,
+        checkpoint_chain_v2: 1,
+      },
       chain_digest: "4".repeat(64),
+      chain_version: 2,
       checkpoint_digest: null,
       checkpoint_mode: "unsigned-v0",
     };
@@ -1129,6 +1150,67 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(() => parseS2WriteResult(writeWithoutPreflightSqlMs)).toThrow("S2_RESPONSE_INVALID");
     const { checkpoint_digest: _checkpoint, ...stateWithoutCheckpoint } = validState;
     expect(() => parseS2StateResult(stateWithoutCheckpoint)).toThrow("S2_RESPONSE_INVALID");
+  });
+
+  test("PLANTED: S2 v2 responses refuse missing, downgraded, and malformed integrity fields", () => {
+    const validState = {
+      cursor: 1,
+      counts: {
+        events: 1,
+        event_chain_v2: 1,
+        integrity_checkpoints: 1,
+        checkpoint_chain_v2: 1,
+      },
+      chain_digest: "4".repeat(64),
+      chain_version: 2,
+      checkpoint_digest: "5".repeat(64),
+      checkpoint_mode: "unsigned-v0",
+    };
+    expect(parseS2WriteResult({ ...FIRST_COST_WRITE }).chain_version).toBe(2);
+    expect(parseS2StateResult(validState).chain_version).toBe(2);
+    expect(
+      parseS2EventPageResult({
+        events: [{ seq: 1, chainVersion: 2 }],
+        next_cursor: 1,
+        has_more: false,
+      }),
+    ).toEqual({ sequences: [1], nextCursor: 1, hasMore: false });
+
+    for (const invalid of [undefined, null, 1, 3]) {
+      expect(() =>
+        parseS2WriteResult({ ...FIRST_COST_WRITE, chain_version: invalid }),
+      ).toThrow("S2_CHAIN_VERSION_INVALID");
+      expect(() => parseS2StateResult({ ...validState, chain_version: invalid })).toThrow(
+        "S2_CHAIN_VERSION_INVALID",
+      );
+      expect(() =>
+        parseS2EventPageResult({
+          events: [{ seq: 1, chainVersion: invalid }],
+          next_cursor: 1,
+          has_more: false,
+        }),
+      ).toThrow("S2_CHAIN_VERSION_INVALID");
+    }
+
+    for (const table of [
+      "events",
+      "event_chain_v2",
+      "integrity_checkpoints",
+      "checkpoint_chain_v2",
+    ] as const) {
+      const { [table]: _missing, ...withoutTable } = validState.counts;
+      expect(() => parseS2StateResult({ ...validState, counts: withoutTable })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+      for (const invalid of [-1, 0.5, "1"]) {
+        expect(() =>
+          parseS2StateResult({
+            ...validState,
+            counts: { ...validState.counts, [table]: invalid },
+          }),
+        ).toThrow("S2_RESPONSE_INVALID");
+      }
+    }
   });
 
   // 9yv2: `outbox_handoff` is the fourth union guard. Unlike its siblings it

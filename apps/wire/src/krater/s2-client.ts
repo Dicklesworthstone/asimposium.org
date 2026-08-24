@@ -849,7 +849,7 @@ export function parseS2WriteResult(body: Record<string, unknown>): WriteResult {
     build_digest: stringAt(body, "build_digest"),
     chain_digest: stringAt(body, "chain_digest"),
     chain_version: (() => {
-      if (safePositiveIntegerAt(body, "chain_version") !== 2) fail("S2_CHAIN_VERSION_INVALID");
+      if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
       return 2;
     })(),
     checkpoint_digest: stringAt(body, "checkpoint_digest"),
@@ -935,7 +935,7 @@ export function parseS2StateResult(body: Record<string, unknown>): S2StateResult
     counts: parseS2Counts(body),
     chain_digest: stringAt(body, "chain_digest"),
     chain_version: (() => {
-      if (safePositiveIntegerAt(body, "chain_version") !== 2) fail("S2_CHAIN_VERSION_INVALID");
+      if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
       return 2;
     })(),
     checkpoint_digest: body.checkpoint_digest === null ? null : stringAt(body, "checkpoint_digest"),
@@ -953,7 +953,7 @@ export function parseS2EventPageResult(body: Record<string, unknown>): S2EventPa
   return {
     sequences: (rows as unknown[]).map((row: unknown) => {
       const event = asRecord(row);
-      if (safePositiveIntegerAt(event, "chainVersion") !== 2) {
+      if (event.chainVersion !== 2) {
         fail("S2_CHAIN_VERSION_INVALID");
       }
       return safePositiveIntegerAt(event, "seq");
