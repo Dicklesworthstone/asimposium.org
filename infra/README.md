@@ -231,6 +231,10 @@ that preview to production. It also re-observes Cloudflare's active deployment,
 including the expected Worker version and revision message, after Worker
 readiness and again after the Vercel preview reaches ready.
 
+Vercel's deployment APIs encode Preview as a null provider `target`; the
+pipeline requires that exact value and normalizes it to `"preview"` only in its
+own bounded safe receipts. Named `production` or `staging` targets are refused.
+
 Before activating this trigger, disconnect the Vercel project's Git integration.
 Otherwise Vercel can start a web build directly from the push and race the
 Worker readiness gate. The pipeline queries the Vercel project before deploying
@@ -252,10 +256,11 @@ revision metadata.
 Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment
 IDs and UTC observations, and explicit delegated-suite status. Wrangler's own
-NDJSON receipt is captured with its supported output-file interface. Vercel
-responses are reduced at the pipe boundary to exact project/deployment/status
-projections; full project, deployment-list, inspect, and deployment API objects
-are never written to artifacts. The live
+NDJSON receipt is captured with its supported output-file interface. Cloudflare
+deployment-list responses and Vercel responses are reduced at the pipe boundary
+to exact project/deployment/status projections; full provider project,
+deployment-list, inspect, and deployment API objects are never written to
+artifacts. The live
 suite owners may supply only `pass`, `blocked`, `not-run`, or `stale`. Every
 non-`not-run` value requires a real UTC observation and the exact Git revision
 it describes; `pass` and `blocked` must name the current pipeline revision.

@@ -456,26 +456,25 @@ curl_with_bearer() {
 }
 
 observe_active_worker_deployment() {
-  local raw_receipt="$1" expected_version_id="$2" expected_deployment_id="$3" safe_receipt="$4"
+  local expected_version_id="$1" expected_deployment_id="$2" safe_receipt="$3"
   local status
+  local -a pipeline_statuses=()
 
   curl_with_bearer "$CLOUDFLARE_API_TOKEN" \
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    --output "$raw_receipt" \
-    "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/asimposium-stoa-staging/deployments"
-  status=$?
-  [[ "$status" -eq 0 ]] || return "$status"
-
-  python3 - "$raw_receipt" "$expected_version_id" "$expected_deployment_id" "$REVISION" <<'PY' > "$safe_receipt"
+    "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/asimposium-stoa-staging/deployments" | \
+    python3 -c '
 import datetime
 import json
 import re
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    document = json.load(stream)
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(1)
 if not isinstance(document, dict) or document.get("success") is not True:
     sys.exit(1)
 payload = document.get("result")
@@ -503,32 +502,36 @@ except (OverflowError, TypeError, ValueError):
 deployment_id = active.get("id")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", deployment_id):
     sys.exit(1)
-if sys.argv[3] and deployment_id != sys.argv[3]:
+if sys.argv[2] and deployment_id != sys.argv[2]:
     sys.exit(1)
 versions = active.get("versions")
 if not isinstance(versions, list) or len(versions) != 1 or not isinstance(versions[0], dict):
     sys.exit(1)
 version = versions[0]
-if version.get("version_id") != sys.argv[2] or version.get("percentage") != 100:
+if version.get("version_id") != sys.argv[1] or version.get("percentage") != 100:
     sys.exit(1)
 annotations = active.get("annotations")
-if not isinstance(annotations, dict) or annotations.get("workers/message") != "asimposium revision " + sys.argv[4]:
+if not isinstance(annotations, dict) or annotations.get("workers/message") != "asimposium revision " + sys.argv[3]:
     sys.exit(1)
 observed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 print(json.dumps({
     "deployment_id": deployment_id,
-    "version_id": sys.argv[2],
+    "version_id": sys.argv[1],
     "observed_at": observed_at,
     "status": "ready",
 }, separators=(",", ":")))
-PY
+' "$expected_version_id" "$expected_deployment_id" "$REVISION" > "$safe_receipt"
+  pipeline_statuses=("${PIPESTATUS[@]}")
+  status="${pipeline_statuses[0]}"
+  [[ "$status" -eq 0 ]] || return "$status"
+  status="${pipeline_statuses[1]}"
+  [[ "$status" -eq 0 ]] || return "$status"
 }
 
 worker_deploy() {
   local config="$repository_root/infra/deploy-resolved/staging.wrangler.toml"
   local raw_receipt="$ARTIFACT_DIRECTORY/wrangler-output.jsonl"
   local version_receipt="$ARTIFACT_DIRECTORY/worker-version.json"
-  local deployments_receipt="$ARTIFACT_DIRECTORY/cloudflare-deployments-after-publish.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/worker-deployment.json"
   local status version_id
 
@@ -584,13 +587,12 @@ PY
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
   version_id="$(safe_receipt_field "$version_receipt" version_id)" || return 1
-  observe_active_worker_deployment "$deployments_receipt" "$version_id" "" "$safe_receipt"
+  observe_active_worker_deployment "$version_id" "" "$safe_receipt"
 }
 
 worker_readiness() {
   local capabilities="$ARTIFACT_DIRECTORY/capabilities.json"
   local schema_paths="$ARTIFACT_DIRECTORY/schema-paths.txt"
-  local deployments_receipt="$ARTIFACT_DIRECTORY/cloudflare-deployments-after-readiness.json"
   local attestation_receipt="$ARTIFACT_DIRECTORY/worker-readiness-deployment.json"
   local deployment_id schema_path version_id index=0 status
 
@@ -656,7 +658,7 @@ PY
   deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
   version_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" version_id)" || return 1
   observe_active_worker_deployment \
-    "$deployments_receipt" "$version_id" "$deployment_id" "$attestation_receipt"
+    "$version_id" "$deployment_id" "$attestation_receipt"
 }
 
 web_deploy() {
@@ -665,7 +667,6 @@ web_deploy() {
   local deployment_url_file="$ARTIFACT_DIRECTORY/vercel-deployment-url.txt"
   local inspect_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
   local api_receipt="$ARTIFACT_DIRECTORY/vercel-deployment-api.json"
-  local worker_deployments_receipt="$ARTIFACT_DIRECTORY/cloudflare-deployments-after-web-ready.json"
   local worker_attestation_receipt="$ARTIFACT_DIRECTORY/worker-web-ready-deployment.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
   local deployment_host deployment_id deployment_origin deployment_output inspect_output status version_id
@@ -719,7 +720,7 @@ print(json.dumps({"project_id": sys.argv[1], "git_linked": False}, separators=("
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=1" | \
+    "https://api.vercel.com/v7/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=1" | \
     python3 -c '
 import json
 import re
@@ -739,7 +740,9 @@ if not deployments:
 if len(deployments) != 1:
     sys.exit(1)
 baseline = deployments[0]
-if not isinstance(baseline, dict) or baseline.get("target") != "preview":
+# Vercel's API encodes Preview as a null target; production and custom staging
+# have named targets. Normalize only after proving the provider value is null.
+if not isinstance(baseline, dict) or baseline.get("target") is not None:
     sys.exit(1)
 project_id = baseline.get("projectId")
 if project_id is None and isinstance(baseline.get("project"), dict):
@@ -819,7 +822,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY" or document.get("target") != "preview":
+if not isinstance(state, str) or state.upper() != "READY" or document.get("target") is not None:
     sys.exit(1)
 print(json.dumps({
     "deployment_id": deployment_id,
@@ -862,7 +865,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY" or document.get("target") != "preview":
+if not isinstance(state, str) or state.upper() != "READY" or document.get("target") is not None:
     sys.exit(1)
 project_id = document.get("projectId")
 if project_id is None and isinstance(document.get("project"), dict):
@@ -888,7 +891,7 @@ print(json.dumps({
   deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
   version_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" version_id)" || return 1
   observe_active_worker_deployment \
-    "$worker_deployments_receipt" "$version_id" "$deployment_id" "$worker_attestation_receipt"
+    "$version_id" "$deployment_id" "$worker_attestation_receipt"
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
