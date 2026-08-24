@@ -822,33 +822,44 @@ stage_environment_prefix() {
   # Stages run third-party tools and remote probes. Start each one from a small
   # operational allowlist so a root gate or smoke cannot inherit unrelated
   # provider credentials from the hosted runner. Stage-specific authority is
-  # appended below only where it is actually needed.
-  printf '%s\0' env -i \
-    "PATH=${PATH:-/usr/bin:/bin}" \
-    "HOME=${HOME:-}" \
-    "TMPDIR=${TMPDIR:-/tmp}" \
-    "LANG=${LANG:-C}" \
-    "LC_ALL=${LC_ALL:-C}" \
-    "TZ=${TZ:-UTC}" \
-    "CURL_HOME=${CURL_HOME:-}" \
-    "BUN_VERSION=${BUN_VERSION:-}" \
-    "CI=${CI:-}" \
-    "WORKERS_CI=${WORKERS_CI:-}" \
-    "WORKERS_CI_BUILD_UUID=${WORKERS_CI_BUILD_UUID:-}" \
-    "WORKERS_CI_COMMIT_SHA=${WORKERS_CI_COMMIT_SHA:-}"
+  # retained only where it is actually needed. The wrapper inherits secrets as
+  # environment variables and unsets them before exec; putting secret
+  # assignments in an `env -i` argv would merely move the disclosure into the
+  # process table.
+  local stage="$1"
+  printf '%s\0' bash -c '
+stage="$1"
+shift
+for name in $(compgen -e); do
+  case "$name" in
+    PATH|HOME|TMPDIR|LANG|LC_ALL|TZ|CURL_HOME|BUN_VERSION|CI|WORKERS_CI|WORKERS_CI_BUILD_UUID|WORKERS_CI_COMMIT_SHA|USER|LOGNAME|SHELL|CARGO_HOME|RUSTUP_HOME|CARGO_TARGET_DIR|BUN_INSTALL|SSL_CERT_FILE|SSL_CERT_DIR)
+      ;;
+    ASIMP_CI_PROCESS_TEST|ASIMP_CI_PROCESS_PLANT_STAGE|ASIMP_CI_PROCESS_PLANT_OUTCOME|ASIMP_CI_PROCESS_TRACE|ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY)
+      ;;
+    CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)
+      [[ "$stage" == worker-deploy || "$stage" == worker-readiness || "$stage" == web-deploy ]] || unset "$name"
+      ;;
+    ASIMP_D1_DATABASE_ID_STAGING|ASIMP_STAGING_SERVICE_ENVELOPE_KEYS)
+      [[ "$stage" == worker-deploy || "$stage" == worker-readiness ]] || unset "$name"
+      ;;
+    VERCEL_TOKEN|VERCEL_ORG_ID|VERCEL_PROJECT_ID)
+      [[ "$stage" == web-deploy ]] || unset "$name"
+      ;;
+    ASIMPOSIUM_SMOKE_FELLOW_TOKEN)
+      [[ "$stage" == smoke-agent ]] || unset "$name"
+      ;;
+    *) unset "$name" ;;
+  esac
+done
+exec "$@"
+' bash "$stage"
 }
 
 stage_command() {
   local stage="$1"
-  stage_environment_prefix
+  stage_environment_prefix "$stage"
   if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
-    printf '%s\0' \
-      "ASIMP_CI_PROCESS_TEST=1" \
-      "ASIMP_CI_PROCESS_PLANT_STAGE=${ASIMP_CI_PROCESS_PLANT_STAGE:-}" \
-      "ASIMP_CI_PROCESS_PLANT_OUTCOME=${ASIMP_CI_PROCESS_PLANT_OUTCOME:-}" \
-      "ASIMP_CI_PROCESS_TRACE=${ASIMP_CI_PROCESS_TRACE:-}" \
-      "ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY=${ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY:-}" \
-      bash "$repository_root/scripts/e2e-ci-pipeline.sh" __plant "$stage"
+    printf '%s\0' bash "$repository_root/scripts/e2e-ci-pipeline.sh" __plant "$stage"
     return 0
   fi
   case "$stage" in
@@ -856,48 +867,25 @@ stage_command() {
       printf '%s\0' bash "$repository_root/scripts/gates.sh" --all
       ;;
     worker-deploy)
-      printf '%s\0' \
-        "ASIMP_CI_INTERNAL=1" \
-        "ASIMP_CI_INTERNAL_RUN_ID=$RUN_ID" \
-        "ASIMP_CI_RUNNER=$RUNNER" \
-        "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}" \
-        "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}" \
-        "ASIMP_D1_DATABASE_ID_STAGING=${ASIMP_D1_DATABASE_ID_STAGING:-}" \
-        "ASIMP_STAGING_SERVICE_ENVELOPE_KEYS=${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS:-}" \
+      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" ASIMP_CI_RUNNER="$RUNNER" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_deploy
       ;;
     worker-readiness)
-      printf '%s\0' \
-        "ASIMP_CI_INTERNAL=1" \
-        "ASIMP_CI_INTERNAL_RUN_ID=$RUN_ID" \
-        "ASIMP_CI_RUNNER=$RUNNER" \
-        "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}" \
-        "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}" \
-        "ASIMP_D1_DATABASE_ID_STAGING=${ASIMP_D1_DATABASE_ID_STAGING:-}" \
-        "ASIMP_STAGING_SERVICE_ENVELOPE_KEYS=${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS:-}" \
+      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" ASIMP_CI_RUNNER="$RUNNER" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_readiness
       ;;
     web-deploy)
-      printf '%s\0' \
-        "ASIMP_CI_INTERNAL=1" \
-        "ASIMP_CI_INTERNAL_RUN_ID=$RUN_ID" \
-        "ASIMP_CI_RUNNER=$RUNNER" \
-        "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}" \
-        "CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}" \
-        "VERCEL_TOKEN=${VERCEL_TOKEN:-}" \
-        "VERCEL_ORG_ID=${VERCEL_ORG_ID:-}" \
-        "VERCEL_PROJECT_ID=${VERCEL_PROJECT_ID:-}" \
+      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" ASIMP_CI_RUNNER="$RUNNER" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __web_deploy
       ;;
     smoke-agent)
-      printf '%s\0' \
-        "ASIMPOSIUM_STAGING_AGENT_BASE_URL=$STAGING_WORKER_ORIGIN" \
-        "ASIMPOSIUM_SMOKE_FELLOW_TOKEN=${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}" \
+      printf '%s\0' env \
+        ASIMPOSIUM_STAGING_AGENT_BASE_URL="$STAGING_WORKER_ORIGIN" \
         bash "$repository_root/scripts/smoke-agent.sh" --write-artifacts --run-id "smoke-agent-${REVISION:0:12}-$$"
       ;;
     smoke-gallery)
-      printf '%s\0' \
-        "ASIMPOSIUM_STAGING_AGORA_BASE_URL=$STAGING_AGORA_ORIGIN" \
+      printf '%s\0' env \
+        ASIMPOSIUM_STAGING_AGORA_BASE_URL="$STAGING_AGORA_ORIGIN" \
         bash "$repository_root/scripts/smoke-gallery.sh" --write-artifacts --run-id "smoke-gallery-${REVISION:0:12}-$$"
       ;;
     *) return 64 ;;

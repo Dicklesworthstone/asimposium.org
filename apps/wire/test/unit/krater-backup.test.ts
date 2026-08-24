@@ -44,7 +44,11 @@ function fakeBucket(): BackupBucket & { readonly writes: Map<string, string> } {
 }
 
 /** Seed a problem + one chain-valid event directly, computing the chain. */
-async function seedClaimProblem(db: ReturnType<typeof localD1>, problemId: string) {
+async function seedClaimProblem(
+  db: ReturnType<typeof localD1>,
+  problemId: string,
+  checkpointDigestOverride?: string,
+) {
   const { checkpointDigest, genesisChainDigest, eventChainDigest, eventRowDigest } = await import(
     "../../src/krater/krater.ts"
   );
@@ -100,7 +104,7 @@ async function seedClaimProblem(db: ReturnType<typeof localD1>, problemId: strin
     "INSERT INTO integrity_checkpoints (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version, checkpoint_mode, created_at) VALUES (?, 1, ?, ?, 1, 'unsigned-v0', ?)",
     problemId,
     chain,
-    checkpoint,
+    checkpointDigestOverride ?? checkpoint,
     now,
   );
 }
@@ -155,6 +159,16 @@ describe("the W2.8 backup export", () => {
     const { verifyProblemExportChain } = await import("../../src/krater/export.ts");
     const reverify = await verifyProblemExportChain(written);
     expect(reverify.intact).toBe(true);
+  });
+
+  test("a forged stored checkpoint digest is refused before any backup write", async () => {
+    const db = freshDb();
+    const bucket = fakeBucket();
+    await seedClaimProblem(db, "P-FORGED-CHECKPOINT", "ff".repeat(32));
+    await expect(
+      backupProblem(db as never, bucket, "P-FORGED-CHECKPOINT", "forged", "2026-08-20"),
+    ).rejects.toThrow("checkpoint");
+    expect(bucket.writes.size).toBe(0);
   });
 
   test("the backup key is dated and content-addressed", async () => {
