@@ -63,29 +63,46 @@ interface GateRun {
 
 function runAll(checkStatus: number): GateRun {
   closeSync(openSync(LOG, "w", 0o600));
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  env.PATH = `${BIN}${delimiter}${process.env.PATH ?? "/bin:/usr/bin"}`;
-  env.ASIMPOSIUM_GATES_TEST_LOG = LOG;
-  env.ASIMPOSIUM_GATES_TEST_CHECK_STATUS = String(checkStatus);
-
-  const child = Bun.spawnSync({
-    cmd: ["bash", GATES, "--all"],
-    cwd: REPO_ROOT,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
+  const resultPath = join(SCRATCH, `run-${checkStatus}.json`);
+  closeSync(openSync(resultPath, "w", 0o600));
+  const helperSource = `
+    import { spawnSync } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    const child = spawnSync("bash", [${JSON.stringify(GATES)}, "--all"], {
+      cwd: ${JSON.stringify(REPO_ROOT)},
+      env: {
+        ...process.env,
+        PATH: ${JSON.stringify(`${BIN}${delimiter}${process.env.PATH ?? ""}`)},
+        ASIMPOSIUM_GATES_TEST_LOG: ${JSON.stringify(LOG)},
+        ASIMPOSIUM_GATES_TEST_CHECK_STATUS: ${JSON.stringify(String(checkStatus))},
+      },
+      encoding: "utf8",
+      timeout: 30000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    writeFileSync(
+      ${JSON.stringify(resultPath)},
+      JSON.stringify({
+        status: child.status,
+        signal: child.signal,
+        stdout: child.stdout ?? "",
+        stderr: child.stderr ?? "",
+      }) + "\\n",
+    );
+  `;
+  const helper = spawnSync(process.execPath, ["-e", helperSource], {
+    encoding: "utf8",
+    timeout: 45000,
   });
-  const stdout = new TextDecoder().decode(child.stdout);
-  const stderr = new TextDecoder().decode(child.stderr);
-  console.log("SPAWN RESULT:", { exitCode: child.exitCode, stdout, stderr, commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean) });
+  if (helper.status !== 0) {
+    throw new Error(`helper failed: ${helper.stderr}`);
+  }
+  const parsed = JSON.parse(readFileSync(resultPath, "utf8"));
   return {
-    status: child.exitCode,
-    signal: child.signalCode ?? null,
-    stdout,
-    stderr,
+    status: parsed.status,
+    signal: parsed.signal,
+    stdout: parsed.stdout,
+    stderr: parsed.stderr,
     commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean),
   };
 }
