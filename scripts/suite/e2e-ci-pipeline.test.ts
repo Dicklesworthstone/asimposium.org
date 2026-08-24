@@ -162,6 +162,22 @@ function runPipeline(stage: Stage, outcome: string, timeout = false): PipelineRu
   };
 }
 
+function runInternalAction(action: string, runId: string): ReturnType<typeof spawnSync> {
+  return spawnSync("bash", [PIPELINE, action], {
+    cwd: REPO_ROOT,
+    env: {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+      LANG: process.env.LANG ?? "C",
+      LC_ALL: "C",
+      ASIMP_CI_INTERNAL: "1",
+      ASIMP_CI_INTERNAL_RUN_ID: runId,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+}
+
 function records(run: PipelineRun): readonly EvidenceRecord[] {
   return run.stdout
     .split("\n")
@@ -306,6 +322,14 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(environment.HOME).toBeUndefined();
   });
 
+  test("internal deploy actions refuse a caller without an orchestrated stage prefix", () => {
+    for (const action of ["__worker_deploy", "__worker_readiness", "__web_deploy"]) {
+      const result = runInternalAction(action, `pipeline-test-unclaimed-${action.slice(2)}`);
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(64);
+    }
+  });
+
   test("the all-pass process control runs each stage in doctrine order", () => {
     const run = runPipeline("smoke-gallery", "pass");
 
@@ -347,6 +371,13 @@ describe("OPS.2b review pipeline orchestration", () => {
       expect(trace).not.toContain("descendant-survived:");
     }
   }, 60_000);
+
+  test("PLANTED: timeout kills an ignoring descendant after the stage leader exits", async () => {
+    const run = runPipeline("worker-deploy", "hang-orphan", true);
+    expectStoppedAt(run, "worker-deploy", "timeout", 124);
+    await Bun.sleep(3_500);
+    expect(readFileSync(run.tracePath, "utf8")).not.toContain("descendant-survived:");
+  }, 30_000);
 
   test("PLANTED: TERM cancellation at every stage returns 143, cleans descendants, and stops", async () => {
     const runs: PipelineRun[] = [];

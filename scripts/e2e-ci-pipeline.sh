@@ -232,14 +232,21 @@ child = subprocess.Popen(command, start_new_session=True)
 caught = None
 
 def terminate_group(first_signal: int) -> None:
+    def group_exists() -> bool:
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
     try:
         os.killpg(child.pid, first_signal)
     except ProcessLookupError:
         return
     deadline = time.monotonic() + 1.0
-    while child.poll() is None and time.monotonic() < deadline:
+    while group_exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    if child.poll() is None:
+    if group_exists():
         try:
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -288,10 +295,19 @@ plant_stage() {
   fi
   case "$outcome" in
     pass) return 0 ;;
-    hang)
-      trap '' INT TERM HUP
+    hang | hang-orphan)
+      if [[ "$outcome" == "hang-orphan" ]]; then
+        trap 'exit 143' TERM
+      else
+        trap '' TERM
+      fi
+      trap '' INT HUP
       if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
-        (sleep 3; printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE") &
+        (
+          trap '' INT TERM HUP
+          sleep 3
+          printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE"
+        ) &
       fi
       sleep 30
       ;;
@@ -310,14 +326,31 @@ require_live_variable() {
   }
 }
 
+require_bearer_token() {
+  local name="$1" value="${!1:-}"
+  require_live_variable "$name" || return $?
+  [[ "$value" =~ ^[A-Za-z0-9._~-]{20,512}$ ]] || {
+    printf 'ci-pipeline: hosted bearer token has an unsafe shape: %s\n' "$name" >&2
+    return 78
+  }
+}
+
+curl_with_bearer() {
+  local token="$1"
+  shift
+  # Supplying the header through curl's stdin config keeps the credential out
+  # of process argv and therefore out of routine process-table diagnostics.
+  printf 'header = "Authorization: Bearer %s"\n' "$token" | curl --config - "$@"
+}
+
 observe_active_worker_deployment() {
   local raw_receipt="$1" expected_version_id="$2" expected_deployment_id="$3" safe_receipt="$4"
   local status
 
-  curl --fail --silent --show-error \
+  curl_with_bearer "$CLOUDFLARE_API_TOKEN" \
+    --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
     --output "$raw_receipt" \
     "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/asimposium-stoa-staging/deployments"
   status=$?
@@ -387,12 +420,13 @@ worker_deploy() {
   local safe_receipt="$ARTIFACT_DIRECTORY/worker-deployment.json"
   local status version_id
 
-  require_live_variable CLOUDFLARE_API_TOKEN || return $?
+  require_bearer_token CLOUDFLARE_API_TOKEN || return $?
   require_live_variable CLOUDFLARE_ACCOUNT_ID || return $?
   require_live_variable ASIMP_D1_DATABASE_ID_STAGING || return $?
   require_live_variable ASIMP_STAGING_SERVICE_ENVELOPE_KEYS || return $?
 
-  bun "$repository_root/infra/resolve-wrangler-deploy.mjs" --env staging --write
+  ASIMP_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
+    bun "$repository_root/infra/resolve-wrangler-deploy.mjs" --env staging --write
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
@@ -518,16 +552,16 @@ web_deploy() {
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
   local deployment_host deployment_id deployment_origin status version_id
 
-  require_live_variable VERCEL_TOKEN || return $?
+  require_bearer_token VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
   require_live_variable VERCEL_PROJECT_ID || return $?
   [[ "$VERCEL_ORG_ID" =~ ^(team|user)_[A-Za-z0-9]+$ ]] || return 78
   [[ "$VERCEL_PROJECT_ID" =~ ^prj_[A-Za-z0-9]+$ ]] || return 78
 
-  curl --fail --silent --show-error \
+  curl_with_bearer "$VERCEL_TOKEN" \
+    --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    --header "Authorization: Bearer $VERCEL_TOKEN" \
     --output "$project_receipt" \
     "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID"
   status=$?
@@ -542,7 +576,7 @@ if not isinstance(document, dict) or document.get("id") != sys.argv[2]:
     sys.exit(1)
 # A connected Git provider can deploy the web revision concurrently with this
 # ordered pipeline. Absence is the only provider state this gate treats as safe.
-if document.get("link") is not None:
+if "link" not in document or document["link"] is not None:
     sys.exit(78)
 PY
   status=$?
@@ -578,10 +612,10 @@ PY
   [[ "$status" -eq 0 ]] || return "$status"
 
   deployment_host="${deployment_origin#https://}"
-  curl --fail --silent --show-error \
+  curl_with_bearer "$VERCEL_TOKEN" \
+    --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    --header "Authorization: Bearer $VERCEL_TOKEN" \
     --output "$api_receipt" \
     "https://api.vercel.com/v13/deployments/$deployment_host?teamId=$VERCEL_ORG_ID"
   status=$?
@@ -672,6 +706,40 @@ pattern = patterns.get(sys.argv[2])
 if pattern is None or not re.fullmatch(pattern, value):
     sys.exit(1)
 print(value)
+PY
+}
+
+require_stage_prefix() {
+  local expected_csv="$1"
+  local evidence="$ARTIFACT_DIRECTORY/ci-pipeline.jsonl"
+  [[ -f "$evidence" && ! -L "$evidence" ]] || return 64
+  python3 - "$evidence" "$RUN_ID" "$REVISION" "$expected_csv" <<'PY'
+import json
+import sys
+
+records = []
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        value = json.loads(line)
+        if value.get("run_id") == sys.argv[2] and value.get("revision") == sys.argv[3]:
+            records.append(value)
+runner_records = [value for value in records if value.get("record") == "runner"]
+if len(runner_records) != 1 or runner_records[0].get("status") != "observed":
+    sys.exit(64)
+observed = [
+    value.get("stage")
+    for value in records
+    if isinstance(value.get("stage"), str)
+]
+expected = [] if not sys.argv[4] else sys.argv[4].split(",")
+if observed != expected:
+    sys.exit(64)
+if any(
+    value.get("status") != "pass" or value.get("exit_code") != 0
+    for value in records
+    if isinstance(value.get("stage"), str)
+):
+    sys.exit(64)
 PY
 }
 
@@ -786,12 +854,25 @@ internal_entrypoint() {
       RUN_ID="${ASIMP_CI_INTERNAL_RUN_ID:-}"
       e2e_validate_run_id "$RUN_ID" || return 64
       ARTIFACT_DIRECTORY="$(e2e_artifact_directory_at_root "$repository_root" "$RUN_ID")" || return 64
+      [[ -d "$ARTIFACT_DIRECTORY" && ! -L "$ARTIFACT_DIRECTORY" ]] || return 64
       REVISION="$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" || return 65
       [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || return 65
+      RUNNER="${ASIMP_CI_RUNNER:-manual}"
+      validate_runner_context || return $?
+      assert_revision_unchanged || return $?
       case "$action" in
-        __worker_deploy) worker_deploy ;;
-        __worker_readiness) worker_readiness ;;
-        __web_deploy) web_deploy ;;
+        __worker_deploy)
+          require_stage_prefix "root-gate" || return $?
+          worker_deploy
+          ;;
+        __worker_readiness)
+          require_stage_prefix "root-gate,worker-deploy" || return $?
+          worker_readiness
+          ;;
+        __web_deploy)
+          require_stage_prefix "root-gate,worker-deploy,worker-readiness" || return $?
+          web_deploy
+          ;;
       esac
       ;;
     *) return 64 ;;

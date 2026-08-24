@@ -413,9 +413,6 @@ case "$MIGRATE_SECOND" in
   *'"status":"pass"'*'"idempotent":true'*'"to_apply":[]'*)
     emit "migrate-apply-twice" "pass" "OK" "second remote apply observed idempotent with an empty plan"
     ;;
-  *'"status":"pass"'*)
-    emit "migrate-apply-twice" "pass" "OK" "second remote apply passed; plan reported already-applied state"
-    ;;
   *)
     fail_phase "migrate-apply-twice" "MIGRATION_IDEMPOTENCE_UNPROVEN" \
       "The second remote migration run did not pass; idempotence was not observed."
