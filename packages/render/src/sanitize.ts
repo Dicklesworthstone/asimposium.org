@@ -298,6 +298,7 @@ function rawBrowserTokenizerScanText(value: string): string {
   return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ASCII fast-path check requires 0x00-0x7f range
 const NON_ASCII = /[^\x00-\x7f]/;
 
 /**
