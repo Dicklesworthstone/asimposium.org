@@ -6899,7 +6899,7 @@ describe("committed promotion outbox nudge", () => {
     // marker, six heads compose the newest five plus a candidate_limit
     // omission naming workshop heads — never a silently incomplete pack.
     const openSession = async (
-      callFn: (path: string, init?: RequestInit) => Promise<Response>,
+      callFn: (path: string, init?: RequestInit) => Response | Promise<Response>,
       key: string,
     ): Promise<string> => {
       const opened = await callFn("/v1/sessions", {
@@ -6911,7 +6911,7 @@ describe("committed promotion outbox nudge", () => {
       return SessionOpenResponseSchema.parse(await opened.json()).session_id;
     };
     const pushDraft = async (
-      callFn: (path: string, init?: RequestInit) => Promise<Response>,
+      callFn: (path: string, init?: RequestInit) => Response | Promise<Response>,
       sessionId: string,
       key: string,
       title: string,
