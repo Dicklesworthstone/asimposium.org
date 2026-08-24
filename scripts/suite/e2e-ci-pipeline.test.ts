@@ -245,16 +245,28 @@ function expectStoppedAt(run: PipelineRun, stage: Stage, status: string, exitCod
   expect(evidence.every((record) => record.runner === "process-test")).toBe(true);
 }
 
-async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
-  const paths = fixture(`${stage}-cancel`);
+async function cancelPipeline(
+  stage: Stage,
+  point: "during-stage" | "after-record" = "during-stage",
+): Promise<PipelineRun> {
+  const paths = fixture(`${stage}-cancel-${point}`);
   const resultPath = join(paths.artifactDirectory, "cancel-result.json");
+  const environment = plantedEnvironment(
+    stage,
+    point === "during-stage" ? "hang" : "pass",
+    paths,
+  );
+  if (point === "after-record") {
+    environment.ASIMP_CI_PROCESS_PAUSE_AFTER_STAGE_RECORD = stage;
+  }
+  const marker = `${point === "during-stage" ? "begin" : "recorded"}:${stage}\n`;
   const helperSource = `
     import { spawn } from "node:child_process";
     import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
     const child = spawn("bash", [${JSON.stringify(PIPELINE)}, "--run-id", ${JSON.stringify(paths.runId)}], {
       cwd: ${JSON.stringify(REPO_ROOT)},
-      env: ${JSON.stringify(plantedEnvironment(stage, "hang", paths))},
+      env: ${JSON.stringify(environment)},
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -269,23 +281,23 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
     });
 
     const deadline = Date.now() + 30000;
-    let began = false;
+    let reached = false;
     while (Date.now() < deadline) {
       if (
         existsSync(${JSON.stringify(paths.tracePath)}) &&
-        readFileSync(${JSON.stringify(paths.tracePath)}, "utf8").includes("begin:" + ${JSON.stringify(stage)} + "\\n")
+        readFileSync(${JSON.stringify(paths.tracePath)}, "utf8").includes(${JSON.stringify(marker)})
       ) {
-        began = true;
+        reached = true;
         break;
       }
       if (child.exitCode !== null || child.signalCode !== null) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
 
-    if (!began) {
+    if (!reached) {
       child.kill("SIGKILL");
       await completionPromise;
-      throw new Error("pipeline stage did not begin before cancellation");
+      throw new Error("pipeline did not reach the requested cancellation point");
     }
     child.kill("SIGTERM");
     const completion = await completionPromise;
@@ -335,6 +347,7 @@ describe("OPS.2b review pipeline orchestration", () => {
       "ASIMP_CI_PROCESS_TRACE",
       "ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY",
       "ASIMP_CI_PROCESS_SCOPE_PLANT",
+      "ASIMP_CI_PROCESS_PAUSE_AFTER_STAGE_RECORD",
       "ASIMP_CI_ROOT_GATE_TIMEOUT_SECONDS",
       "ASIMP_CI_WORKER_DEPLOY_TIMEOUT_SECONDS",
       "ASIMP_CI_WORKER_READINESS_TIMEOUT_SECONDS",
@@ -530,6 +543,34 @@ describe("OPS.2b review pipeline orchestration", () => {
     for (const run of runs) {
       const trace = readFileSync(run.tracePath, "utf8");
       expect(trace).not.toContain("descendant-survived:");
+    }
+  }, 120_000);
+
+  test("PLANTED: TERM after a durable stage result never adds a contradictory cancellation", async () => {
+    for (const stage of STAGES) {
+      const run = await cancelPipeline(stage, "after-record");
+      const index = STAGES.indexOf(stage);
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(143);
+      expect(begunStages(run)).toEqual([...STAGES.slice(0, index + 1)]);
+
+      const evidence = records(run);
+      const executable = evidence.filter((record) => record.stage !== undefined);
+      expect(executable.map((record) => record.stage)).toEqual([...STAGES]);
+      for (let position = 0; position < STAGES.length; position += 1) {
+        expect(executable[position]).toMatchObject(
+          position <= index
+            ? { stage: STAGES[position], status: "pass", exit_code: 0 }
+            : { stage: STAGES[position], status: "not-run", exit_code: null },
+        );
+      }
+      expect(
+        executable.filter((record) => record.stage === stage && record.status === "cancelled"),
+      ).toHaveLength(0);
+      const delegated = evidence.filter((record) => record.record === "delegated-suite");
+      expect(delegated).toHaveLength(6);
+      expect(delegated.every((record) => record.status === "not-run")).toBe(true);
+      expect(evidence.some((record) => record.code === "PROCESS_TEST_COMPLETE")).toBe(false);
     }
   }, 120_000);
 });

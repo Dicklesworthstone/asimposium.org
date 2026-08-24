@@ -4,9 +4,10 @@
 # Runs every static phase from a checkout, then — when the four credential
 # variables are present — resolves the staging deploy config, observes remote
 # migration idempotence twice, probes the deployed worker's health and origin,
-# and round-trips a private R2 canary while proving no public hostname serves
-# it. Without credentials it stops before those phases and reports BLOCKED
-# with the exact missing thing. It never deploys, never mutates production,
+# and round-trips a private R2 canary while proving neither a custom domain nor
+# the independent r2.dev switch exposes it. Without credentials it stops before
+# those phases and reports BLOCKED with the exact missing thing. It never deploys,
+# never mutates production,
 # and never simulates a result it did not obtain.
 #
 #   exit 0  every phase that could run, ran and passed
@@ -79,6 +80,7 @@ block_phase() {
 self_test_remote_interface_gate() {
   local scratch fake_bun fake_bunx fake_curl command_log nested_output nested_status
   local r2_command_log r2_commands_valid r2_output r2_status
+  local r2_dev_body_file r2_dev_command_log r2_dev_commands_valid r2_dev_output r2_dev_status
   local supplied scratch_mode scratch_owner retained_scratch retained_scratch_json
   local planted_token="asimp_ag_remote_e2e_canary_1234567890abcdefghijklmnop"
 
@@ -137,13 +139,23 @@ self_test_remote_interface_gate() {
     'case "$*" in' \
     '  "infra/validate-scaffold.mjs"|"infra/generate-wrangler.mjs --check"|"infra/generate-wrangler.test.mjs") exit 0 ;;' \
     '  "infra/validate-environments.mjs") printf "{\\\"suite\\\":\\\"environment-topology-static\\\",\\\"status\\\":\\\"pass\\\",\\\"vercel\\\":{\\\"preview_environment\\\":\\\"staging\\\"},\\\"environments\\\":{\\\"staging\\\":{\\\"kind\\\":\\\"remote\\\",\\\"is_preview\\\":true,\\\"may_hold_production_keys\\\":false,\\\"worker_origin\\\":\\\"https://a-staging.asimposium.org\\\"}}}\\n"; exit 0 ;;' \
-    '  "infra/resolve-wrangler-deploy.mjs --env staging --write") if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ]; then printf "{\\\"suite\\\":\\\"staging-wrangler-deploy-resolution\\\",\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"mode\\\":\\\"write\\\",\\\"published\\\":true,\\\"idempotent\\\":false}\\n"; exit 0; fi; exit 93 ;;' \
-    '  infra/migrate.mjs\ --env\ staging\ --resolved-database-id\ *\ --apply) if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ]; then printf "{\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"phase\\\":\\\"apply\\\",\\\"second_plan_idempotent\\\":true,\\\"applied\\\":[],\\\"skipped\\\":[],\\\"head_before\\\":0}\\n"; exit 0; fi; exit 93 ;;' \
+    '  "infra/resolve-wrangler-deploy.mjs --env staging --write") case "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" in r2-write-failure|r2-dev-url-enabled) printf "{\\\"suite\\\":\\\"staging-wrangler-deploy-resolution\\\",\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"mode\\\":\\\"write\\\",\\\"published\\\":true,\\\"idempotent\\\":false}\\n"; exit 0 ;; *) exit 93 ;; esac ;;' \
+    '  infra/migrate.mjs\ --env\ staging\ --resolved-database-id\ *\ --apply) case "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" in r2-write-failure|r2-dev-url-enabled) printf "{\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"phase\\\":\\\"apply\\\",\\\"second_plan_idempotent\\\":true,\\\"applied\\\":[],\\\"skipped\\\":[],\\\"head_before\\\":0}\\n"; exit 0 ;; *) exit 93 ;; esac ;;' \
     '  *) exit 93 ;;' \
     'esac' >"$fake_bun"
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
   printf '%s\n' '#!/bin/sh' \
     'printf "bunx %s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
+    'if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then' \
+    '  case "$*" in' \
+    '    "--bun wrangler r2 object put "*" --remote --pipe") cat > "$E2E_ENVIRONMENTS_TEST_R2_BODY_FILE"; exit 0 ;;' \
+    '    "--bun wrangler r2 object get "*" --remote --pipe") cat "$E2E_ENVIRONMENTS_TEST_R2_BODY_FILE"; exit 0 ;;' \
+    '    "--bun wrangler r2 object delete "*" --remote") exit 0 ;;' \
+    '    "--bun wrangler r2 bucket domain list asimposium-artifacts-staging") printf "There are no custom domains connected to this bucket.\\n"; exit 0 ;;' \
+    '    "--bun wrangler r2 bucket dev-url get asimposium-artifacts-staging") printf "Public access is enabled at https://example.r2.dev.\\n"; exit 0 ;;' \
+    '    *) exit 96 ;;' \
+    '  esac' \
+    'fi' \
     'case "$*" in' \
     '  "--bun wrangler r2 object put "*" --remote --pipe") exit 95 ;;' \
     '  "--bun wrangler r2 object delete "*" --remote") exit 0 ;;' \
@@ -155,6 +167,7 @@ self_test_remote_interface_gate() {
     'case "$*" in' \
     '  *"/internal/health"*) printf "{\\\"ok\\\":true}\\n"; exit 0 ;;' \
     '  *"/capabilities"*) printf "{\\\"origin\\\":\\\"https://a-staging.asimposium.org\\\"}\\n"; exit 0 ;;' \
+    '  *"https://artifacts-staging.asimposium.org/"*) if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then printf "404"; exit 0; fi; exit 94 ;;' \
     '  *) exit 94 ;;' \
     'esac' >"$fake_curl"
   chmod 700 "$fake_bun" "$fake_bunx" "$fake_curl"
@@ -238,10 +251,74 @@ PY
     return 1
   fi
 
+  # A bucket with no custom domain can still be public through Cloudflare's
+  # independent r2.dev switch. Reach the complete canary path with inert
+  # commands, plant that switch enabled, and require an exact refusal after the
+  # canary has been read, probed, and removed.
+  r2_dev_command_log="$scratch/r2-dev-url-enabled-commands.log"
+  r2_dev_body_file="$scratch/r2-dev-url-enabled-body.txt"
+  : >"$r2_dev_command_log"
+  chmod 600 "$r2_dev_command_log"
+  set +e
+  r2_dev_output="$(
+    PATH="$scratch:/usr/bin:/bin" \
+      E2E_ENVIRONMENTS_TEST_COMMAND_LOG="$r2_dev_command_log" \
+      E2E_ENVIRONMENTS_TEST_R2_BODY_FILE="$r2_dev_body_file" \
+      E2E_ENVIRONMENTS_TEST_SCENARIO="r2-dev-url-enabled" \
+      CLOUDFLARE_API_TOKEN="$planted_token" \
+      CLOUDFLARE_ACCOUNT_ID="00000000000000000000000000000000" \
+      ASIMP_D1_DATABASE_ID_STAGING="11111111-2222-4333-8444-555555555555" \
+      ASIMP_STAGING_SERVICE_ENVELOPE_KEYS='[{"kid":"staging-svc-2026-08","publicKeyHex":"1111111111111111111111111111111111111111111111111111111111111111","notBefore":1},{"kid":"staging-svc-2026-07","publicKeyHex":"2222222222222222222222222222222222222222222222222222222222222222","notBefore":0,"notAfter":2}]' \
+      /bin/bash "$SCRIPT_PATH" staging 2>&1
+  )"
+  r2_dev_status=$?
+  set -e
+
+  r2_dev_commands_valid="$(python3 - "$r2_dev_command_log" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    r2_commands = [
+        line.strip()
+        for line in stream
+        if line.startswith("bunx --bun wrangler r2 ")
+    ]
+if len(r2_commands) != 5:
+    sys.exit(1)
+put = re.fullmatch(
+    r"bunx --bun wrangler r2 object put asimposium-artifacts-staging/(canary-[0-9a-f]{32}\.txt) --remote --pipe",
+    r2_commands[0],
+)
+get = re.fullmatch(
+    r"bunx --bun wrangler r2 object get asimposium-artifacts-staging/(canary-[0-9a-f]{32}\.txt) --remote --pipe",
+    r2_commands[1],
+)
+if put is None or get is None or put.group(1) != get.group(1):
+    sys.exit(1)
+if r2_commands[2:] != [
+    "bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging",
+    "bunx --bun wrangler r2 bucket dev-url get asimposium-artifacts-staging",
+    f"bunx --bun wrangler r2 object delete asimposium-artifacts-staging/{put.group(1)} --remote",
+]:
+    sys.exit(1)
+print("1")
+PY
+)" || r2_dev_commands_valid=0
+
+  if [ "$r2_dev_status" -ne 1 ] ||
+    [[ "$r2_dev_output" != *'"code":"R2_PRIVATE_BUCKET_HAS_DEV_URL"'* ]] ||
+    [[ "$r2_dev_output" == *"$planted_token"* ]] ||
+    [ ! -f "$r2_dev_body_file" ] ||
+    [ "$r2_dev_commands_valid" != "1" ]; then
+    printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"R2_DEV_URL_EXPOSURE_PLANT_FAILED","detail":"an enabled r2.dev public URL did not fail the private-canary gate after exact provider observations"}'
+    return 1
+  fi
+
   # A standalone run keeps the one directory it made and says so, rather than
   # deleting evidence. A lent directory is reported as retained by nobody here.
   retained_scratch_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$retained_scratch")" || return 1
-  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present resolver refusal and failed-R2-create ownership controls passed with inert commands","retained_evidence_dir":%s}\n' \
+  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present resolver refusal, failed-R2-create cleanup, and enabled-r2.dev exposure controls passed with inert commands","retained_evidence_dir":%s}\n' \
     "$retained_scratch_json"
 }
 
@@ -729,8 +806,11 @@ PUBLIC_CANARY_STATUS="$(curl --silent --show-error --output /dev/null \
   --user-agent "$WEB_USER_AGENT" --connect-timeout 5 --max-time 15 \
   --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null)" || PUBLIC_CANARY_CURL_STATUS=$?
 STAGING_DOMAINS_STATUS=0
-STAGING_DOMAINS="$(CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
-  bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)" || STAGING_DOMAINS_STATUS=$?
+STAGING_DOMAINS="$(FORCE_COLOR=0 CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+  bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging)" || STAGING_DOMAINS_STATUS=$?
+STAGING_DEV_URL_STATUS=0
+STAGING_DEV_URL="$(FORCE_COLOR=0 CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+  bunx --bun wrangler r2 bucket dev-url get asimposium-artifacts-staging)" || STAGING_DEV_URL_STATUS=$?
 CANARY_DELETE_STATUS=0
 cleanup_private_canary || CANARY_DELETE_STATUS=$?
 if [ "$CANARY_DELETE_STATUS" -ne 0 ]; then
@@ -760,16 +840,28 @@ if [ "$STAGING_DOMAINS_STATUS" -ne 0 ]; then
   fail_phase "r2-private-canary" "R2_DOMAIN_OBSERVATION_FAILED" \
     "The staging bucket domain state could not be observed."
 fi
+if [ "$STAGING_DEV_URL_STATUS" -ne 0 ]; then
+  fail_phase "r2-private-canary" "R2_DEV_URL_OBSERVATION_FAILED" \
+    "The staging bucket r2.dev public-access state could not be observed."
+fi
 if [ -z "$STAGING_DOMAINS" ]; then
   fail_phase "r2-private-canary" "R2_DOMAIN_RESPONSE_INVALID" \
     "The staging bucket domain query returned an empty response."
 fi
-if [ "$STAGING_DOMAINS" != "${STAGING_DOMAINS#*no custom domains}" ]; then
-  emit "r2-private-canary" "pass" "OK" "private canary round-tripped through remote provider storage, remained absent at the public hostname while it existed, and was removed"
-else
+if [ -z "$STAGING_DEV_URL" ]; then
+  fail_phase "r2-private-canary" "R2_DEV_URL_RESPONSE_INVALID" \
+    "The staging bucket r2.dev query returned an empty response."
+fi
+if [ "$STAGING_DOMAINS" != "There are no custom domains connected to this bucket." ]; then
   fail_phase "r2-private-canary" "R2_PRIVATE_BUCKET_HAS_DOMAIN" \
     "The private staging bucket carries a custom domain; the topology forbids that."
 fi
+if [ "$STAGING_DEV_URL" != "Public access via the r2.dev URL is disabled." ]; then
+  fail_phase "r2-private-canary" "R2_PRIVATE_BUCKET_HAS_DEV_URL" \
+    "The private staging bucket has r2.dev public access enabled; the topology forbids that."
+fi
+emit "r2-private-canary" "pass" "OK" \
+  "private canary round-tripped through remote provider storage, remained absent at the public hostname while it existed, had no custom or r2.dev public access, and was removed"
 
 printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"summary","environment":"%s","status":"pass","code":"OK","detail":"static, resolve, migration-idempotence, health, and private-canary phases all observed against the real staging environment.","reproduce":"scripts/e2e-environments.sh %s"}\n' \
   "$ENVIRONMENT" "$ENVIRONMENT"

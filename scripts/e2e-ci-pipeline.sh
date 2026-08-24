@@ -34,6 +34,9 @@ CURRENT_STAGE_STARTED=""
 CURRENT_WRAPPER_PID=""
 CURRENT_STAGE_RECORDED=0
 NEXT_STAGE_INDEX=0
+SIGNAL_RECORD_CRITICAL=0
+DEFERRED_SIGNAL_NAME=""
+DEFERRED_SIGNAL_EXIT_CODE=""
 
 case "$PIPELINE_TEST_MODE" in
   0 | 1) ;;
@@ -253,6 +256,16 @@ timeout_for_stage() {
 
 on_signal() {
   local signal_name="$1" exit_code="$2" finished_at
+  if [[ "$SIGNAL_RECORD_CRITICAL" == "1" ]]; then
+    # The stage command has already reached a terminal outcome while its one
+    # durable record is being committed. Defer delivery across that tiny
+    # boundary so a signal cannot append a contradictory cancellation record.
+    if [[ -z "$DEFERRED_SIGNAL_NAME" ]]; then
+      DEFERRED_SIGNAL_NAME="$signal_name"
+      DEFERRED_SIGNAL_EXIT_CODE="$exit_code"
+    fi
+    return 0
+  fi
   trap - INT TERM HUP
   if [[ -n "$CURRENT_WRAPPER_PID" ]]; then
     kill -s "$signal_name" "$CURRENT_WRAPPER_PID" 2>/dev/null || true
@@ -282,6 +295,41 @@ on_signal() {
 trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
+
+record_current_stage_result() {
+  local stage_status="$1" exit_code="$2" finished_at="$3" record_status=0
+  local deferred_name deferred_exit_code pause_deadline
+
+  SIGNAL_RECORD_CRITICAL=1
+  record_stage "$CURRENT_STAGE" "$stage_status" "$exit_code" \
+    "$CURRENT_STAGE_STARTED" "$finished_at" || record_status=$?
+
+  # Causal process plant for the exact post-append/pre-bookkeeping signal seam.
+  # It is unreachable in live mode and stops waiting as soon as the deferred
+  # trap records delivery.
+  if [[ "$record_status" -eq 0 && "$PIPELINE_TEST_MODE" == "1" &&
+    "${ASIMP_CI_PROCESS_PAUSE_AFTER_STAGE_RECORD:-}" == "$CURRENT_STAGE" ]]; then
+    printf 'recorded:%s\n' "$CURRENT_STAGE" >> "$ASIMP_CI_PROCESS_TRACE"
+    pause_deadline=$((SECONDS + 10))
+    while [[ -z "$DEFERRED_SIGNAL_NAME" && "$SECONDS" -lt "$pause_deadline" ]]; do
+      sleep 0.02
+    done
+    [[ -n "$DEFERRED_SIGNAL_NAME" ]] || record_status=99
+  fi
+  if [[ "$record_status" -eq 0 ]]; then
+    CURRENT_STAGE_RECORDED=1
+  fi
+
+  SIGNAL_RECORD_CRITICAL=0
+  if [[ -n "$DEFERRED_SIGNAL_NAME" ]]; then
+    deferred_name="$DEFERRED_SIGNAL_NAME"
+    deferred_exit_code="$DEFERRED_SIGNAL_EXIT_CODE"
+    DEFERRED_SIGNAL_NAME=""
+    DEFERRED_SIGNAL_EXIT_CODE=""
+    on_signal "$deferred_name" "$deferred_exit_code"
+  fi
+  return "$record_status"
+}
 
 run_bounded() {
   local timeout_seconds="$1" termination_grace_seconds=10 status
@@ -1156,13 +1204,12 @@ run_stage() {
   fi
 
   case "$status" in
-    0) record_stage "$stage" "pass" 0 "$CURRENT_STAGE_STARTED" "$finished_at" || return 1 ;;
-    75 | 78) record_stage "$stage" "blocked" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
-    124) record_stage "$stage" "timeout" 124 "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
-    129 | 130 | 143) record_stage "$stage" "cancelled" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
-    *) record_stage "$stage" "fail" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
+    0) record_current_stage_result "pass" 0 "$finished_at" || return 1 ;;
+    75 | 78) record_current_stage_result "blocked" "$status" "$finished_at" || return 1 ;;
+    124) record_current_stage_result "timeout" 124 "$finished_at" || return 1 ;;
+    129 | 130 | 143) record_current_stage_result "cancelled" "$status" "$finished_at" || return 1 ;;
+    *) record_current_stage_result "fail" "$status" "$finished_at" || return 1 ;;
   esac
-  CURRENT_STAGE_RECORDED=1
 
   completed_index="$(stage_index "$stage")" || return 64
   NEXT_STAGE_INDEX=$((completed_index + 1))
