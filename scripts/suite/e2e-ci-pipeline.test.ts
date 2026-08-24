@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -175,11 +175,11 @@ function expectStoppedAt(run: PipelineRun, stage: Stage, status: string, exitCod
   const index = STAGES.indexOf(stage);
   expect(run.signal).toBeNull();
   expect(run.status).toBe(exitCode);
-  expect(begunStages(run)).toEqual(STAGES.slice(0, index + 1));
+  expect(begunStages(run)).toEqual([...STAGES.slice(0, index + 1)]);
 
   const evidence = records(run);
   const executable = evidence.filter((record) => record.stage !== undefined);
-  expect(executable.map((record) => record.stage)).toEqual(STAGES);
+  expect(executable.map((record) => record.stage)).toEqual([...STAGES]);
   for (let position = 0; position < STAGES.length; position += 1) {
     const record = executable[position];
     if (position < index) {
@@ -200,15 +200,6 @@ function expectStoppedAt(run: PipelineRun, stage: Stage, status: string, exitCod
   expect(evidence.some((record) => record.code === "PIPELINE_COMPLETE")).toBe(false);
   expect(evidence.some((record) => record.code === "PROCESS_TEST_COMPLETE")).toBe(false);
   expect(evidence.every((record) => record.runner === "process-test")).toBe(true);
-}
-
-async function waitForTrace(path: string, stage: Stage): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    if (existsSync(path) && readFileSync(path, "utf8").includes(`begin:${stage}\n`)) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`pipeline never began ${stage}`);
 }
 
 async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
@@ -245,7 +236,7 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
     child.kill("SIGTERM");
 
     const completion = await new Promise((resolve) => {
-      child.once("close", (code, signal) => resolve({ code, signal }));
+      child.once("exit", (code, signal) => resolve({ code, signal }));
     });
 
     writeFileSync(
@@ -283,7 +274,7 @@ describe("OPS.2b review pipeline orchestration", () => {
 
     expect(run.status).toBe(0);
     expect(run.signal).toBeNull();
-    expect(begunStages(run)).toEqual(STAGES);
+    expect(begunStages(run)).toEqual([...STAGES]);
     const evidence = records(run);
     expect(
       evidence.filter((record) => record.stage !== undefined).map((record) => record.status),
