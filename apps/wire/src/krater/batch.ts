@@ -27,14 +27,14 @@ import {
 export {
   BATCH_PLAN_REFUSAL_CODES,
   BATCH_TEMP_ID_PATTERN,
-  MAX_BATCH_MEMBERS,
-  MAX_CAUSED_BY_PER_MEMBER,
   type BatchMember,
   type BatchPlan,
   type BatchPlanFailure,
   type BatchPlanRefusalCode,
   type BatchPlanSuccess,
   type BatchTempId,
+  MAX_BATCH_MEMBERS,
+  MAX_CAUSED_BY_PER_MEMBER,
 };
 
 /**
