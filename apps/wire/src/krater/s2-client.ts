@@ -49,7 +49,8 @@ const BINDINGS: S2CostMeasurementReceipt["bindings"] = {
   r2: null,
 };
 const S2_IDLE_RECONCILE_CLOCK_TOLERANCE_MS = 1_000;
-const HARNESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+const LOWER_SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const HARNESS_TOKEN_PATTERN = LOWER_SHA256_PATTERN;
 const SUCCESSFUL_BATCH_METRIC_SCOPE: typeof S2_SUCCESSFUL_BATCH_SCOPE = S2_SUCCESSFUL_BATCH_SCOPE;
 const FAILED_RETRY_BATCH_METRICS: typeof S2_FAILED_RETRY_SCOPE = S2_FAILED_RETRY_SCOPE;
 const WRITE_CLAIM_WALL_SCOPE: typeof S2_WRITE_CLAIM_SCOPE = S2_WRITE_CLAIM_SCOPE;
@@ -214,12 +215,12 @@ function requireBoundSettledWrite(write: S2SettledWriteResult): void {
   if (
     write.idempotent !== false ||
     typeof write.event_id !== "string" ||
-    typeof write.payload_sha256 !== "string" ||
-    typeof write.row_digest !== "string" ||
-    typeof write.build_digest !== "string" ||
-    typeof write.chain_digest !== "string" ||
+    !LOWER_SHA256_PATTERN.test(write.payload_sha256) ||
+    !LOWER_SHA256_PATTERN.test(write.row_digest) ||
+    !LOWER_SHA256_PATTERN.test(write.build_digest) ||
+    !LOWER_SHA256_PATTERN.test(write.chain_digest) ||
     write.chain_version !== 2 ||
-    typeof write.checkpoint_digest !== "string" ||
+    !LOWER_SHA256_PATTERN.test(write.checkpoint_digest) ||
     write.successful_batch_metric_scope !== S2_SUCCESSFUL_BATCH_SCOPE ||
     write.failed_retry_batch_metrics !== S2_FAILED_RETRY_SCOPE ||
     write.write_claim_wall_scope !== S2_WRITE_CLAIM_SCOPE ||
@@ -473,9 +474,26 @@ export interface S2StateResult {
 }
 
 export interface S2EventPageResult {
+  readonly events: readonly S2EventDigestResult[];
   readonly sequences: readonly number[];
   readonly nextCursor: number;
   readonly hasMore: boolean;
+}
+
+export interface S2EventDigestResult {
+  readonly seq: number;
+  readonly row_digest: string;
+  readonly chain_digest: string;
+  readonly chain_version: 2;
+}
+
+export interface S2ReplayResult {
+  readonly matches: boolean;
+  readonly cursor: number;
+  readonly event_count: number;
+  readonly chain_digest: string;
+  readonly chain_version: 2;
+  readonly checkpoint_digest: string;
 }
 
 function parseS2Counts(body: Record<string, unknown>): Record<string, number> {
@@ -644,6 +662,12 @@ function stringAt(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   if (typeof value !== "string") fail("S2_RESPONSE_INVALID");
   return value as string;
+}
+
+function lowerSha256At(record: Record<string, unknown>, key: string): string {
+  const value = stringAt(record, key);
+  if (!LOWER_SHA256_PATTERN.test(value)) fail("S2_RESPONSE_INVALID");
+  return value;
 }
 
 function nullableStringAt(record: Record<string, unknown>, key: string): string | null {
@@ -844,15 +868,15 @@ export function parseS2WriteResult(body: Record<string, unknown>): WriteResult {
     idempotent: booleanAt(body, "idempotent"),
     pre_cursor: safeNonnegativeIntegerAt(body, "pre_cursor"),
     post_cursor: safeNonnegativeIntegerAt(body, "post_cursor"),
-    payload_sha256: stringAt(body, "payload_sha256"),
-    row_digest: stringAt(body, "row_digest"),
-    build_digest: stringAt(body, "build_digest"),
-    chain_digest: stringAt(body, "chain_digest"),
+    payload_sha256: lowerSha256At(body, "payload_sha256"),
+    row_digest: lowerSha256At(body, "row_digest"),
+    build_digest: lowerSha256At(body, "build_digest"),
+    chain_digest: lowerSha256At(body, "chain_digest"),
     chain_version: (() => {
       if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
       return 2;
     })(),
-    checkpoint_digest: stringAt(body, "checkpoint_digest"),
+    checkpoint_digest: lowerSha256At(body, "checkpoint_digest"),
     write_phase_ms: numberAt(body, "write_phase_ms"),
     successful_batch_rows_read: numberAt(body, "successful_batch_rows_read"),
     successful_batch_rows_written: numberAt(body, "successful_batch_rows_written"),
@@ -933,12 +957,13 @@ export function parseS2StateResult(body: Record<string, unknown>): S2StateResult
   return {
     cursor: safeNonnegativeIntegerAt(body, "cursor"),
     counts: parseS2Counts(body),
-    chain_digest: stringAt(body, "chain_digest"),
+    chain_digest: lowerSha256At(body, "chain_digest"),
     chain_version: (() => {
       if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
       return 2;
     })(),
-    checkpoint_digest: body.checkpoint_digest === null ? null : stringAt(body, "checkpoint_digest"),
+    checkpoint_digest:
+      body.checkpoint_digest === null ? null : lowerSha256At(body, "checkpoint_digest"),
     checkpoint_mode: ((): "unsigned-v0" => {
       const mode = stringAt(body, "checkpoint_mode");
       if (mode !== "unsigned-v0") fail("S2_CHECKPOINT_MODE_INVALID");
@@ -950,17 +975,59 @@ export function parseS2StateResult(body: Record<string, unknown>): S2StateResult
 export function parseS2EventPageResult(body: Record<string, unknown>): S2EventPageResult {
   const rows = body.events;
   if (!Array.isArray(rows)) fail("S2_RESPONSE_INVALID");
+  const events = (rows as unknown[]).map((row: unknown): S2EventDigestResult => {
+    const event = asRecord(row);
+    if (event.chainVersion !== 2) {
+      fail("S2_CHAIN_VERSION_INVALID");
+    }
+    return {
+      seq: safePositiveIntegerAt(event, "seq"),
+      row_digest: lowerSha256At(event, "rowDigest"),
+      chain_digest: lowerSha256At(event, "chainDigest"),
+      chain_version: 2,
+    };
+  });
   return {
-    sequences: (rows as unknown[]).map((row: unknown) => {
-      const event = asRecord(row);
-      if (event.chainVersion !== 2) {
-        fail("S2_CHAIN_VERSION_INVALID");
-      }
-      return safePositiveIntegerAt(event, "seq");
-    }),
+    events,
+    sequences: events.map((event) => event.seq),
     nextCursor: safeNonnegativeIntegerAt(body, "next_cursor"),
     hasMore: booleanAt(body, "has_more"),
   };
+}
+
+export function parseS2ReplayResult(body: Record<string, unknown>): S2ReplayResult {
+  return {
+    matches: booleanAt(body, "matches"),
+    cursor: safeNonnegativeIntegerAt(body, "cursor"),
+    event_count: safeNonnegativeIntegerAt(body, "event_count"),
+    chain_digest: lowerSha256At(body, "chain_digest"),
+    chain_version: (() => {
+      if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
+      return 2;
+    })(),
+    checkpoint_digest: lowerSha256At(body, "checkpoint_digest"),
+  };
+}
+
+export function assertS2TerminalDigestParity(
+  write: WriteResult,
+  event: S2EventDigestResult,
+  stateResult: S2StateResult,
+  replay: S2ReplayResult,
+): void {
+  if (
+    write.seq !== event.seq ||
+    write.seq !== stateResult.cursor ||
+    write.seq !== replay.cursor ||
+    write.row_digest !== event.row_digest ||
+    write.chain_digest !== event.chain_digest ||
+    write.chain_digest !== stateResult.chain_digest ||
+    write.chain_digest !== replay.chain_digest ||
+    write.checkpoint_digest !== stateResult.checkpoint_digest ||
+    write.checkpoint_digest !== replay.checkpoint_digest
+  ) {
+    fail("S2_INTEGRITY_DIGEST_MISMATCH");
+  }
 }
 
 function assertEqual(actual: unknown, expected: unknown, code: string): void {
@@ -1681,12 +1748,14 @@ async function assertReplay(
   problemId: string,
   expectedEvents: number,
   scenario: string,
-): Promise<void> {
+): Promise<S2ReplayResult> {
   const replay = await request("POST", "/__s2/replay", scenario, { problem_id: problemId });
   assertEqual(replay.status, 200, "S2_PROJECTION_REPLAY_FAILED");
-  assertEqual(booleanAt(replay.body, "matches"), true, "S2_PROJECTION_REPLAY_MISMATCH");
-  assertEqual(numberAt(replay.body, "chain_version"), 2, "S2_REPLAY_CHAIN_VERSION_INVALID");
-  assertEqual(numberAt(replay.body, "event_count"), expectedEvents, "S2_REPLAY_PAGE_COUNT_INVALID");
+  const parsed = parseS2ReplayResult(replay.body);
+  assertEqual(parsed.matches, true, "S2_PROJECTION_REPLAY_MISMATCH");
+  assertEqual(parsed.cursor, expectedEvents, "S2_REPLAY_CURSOR_INVALID");
+  assertEqual(parsed.event_count, expectedEvents, "S2_REPLAY_PAGE_COUNT_INVALID");
+  return parsed;
 }
 
 async function exerciseOutboxDrainer(): Promise<void> {
@@ -2678,6 +2747,11 @@ async function exercise(): Promise<void> {
   if (eventPage.sequences.length !== 13 || eventPage.nextCursor !== 13 || eventPage.hasMore) {
     fail("S2_EVENT_PAGE_INVALID");
   }
+  const terminalWrite = concurrent.find((entry) => entry.seq === 13);
+  const terminalEvent = eventPage.events.find((entry) => entry.seq === 13);
+  if (terminalWrite === undefined || terminalEvent === undefined) {
+    fail("S2_TERMINAL_INTEGRITY_EVIDENCE_MISSING");
+  }
 
   // Every write above deliberately deferred its outbox nudge so this phase can
   // inspect the durable queue before the real DO drainer runs. FTS is an async
@@ -2723,7 +2797,8 @@ async function exercise(): Promise<void> {
     fail("S2_FTS_REBUILD_RESULT_INVALID");
   }
 
-  await assertReplay(PRIMARY_PROBLEM, 13, "replay-primary");
+  const primaryReplay = await assertReplay(PRIMARY_PROBLEM, 13, "replay-primary");
+  assertS2TerminalDigestParity(terminalWrite, terminalEvent, primaryState, primaryReplay);
   await assertReplay(SECONDARY_PROBLEM, 1, "replay-secondary");
 
   for (const operation of ["update", "delete"] as const) {

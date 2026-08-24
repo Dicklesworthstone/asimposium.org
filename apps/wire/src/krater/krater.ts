@@ -228,6 +228,7 @@ interface ProblemHeadRow {
 }
 
 interface BackfillProblemHeadRow extends ProblemHeadRow {
+  v2_contiguity_guard_ready: number;
   terminal_v2_complete: number;
 }
 
@@ -1135,12 +1136,15 @@ export async function backfillKraterIntegrity(
       db,
       `SELECT public_seq, chain_digest, chain_version,
               CASE
-                WHEN NOT EXISTS (
+                WHEN EXISTS (
                   SELECT 1 FROM krater_chain_v2_contiguity_migration_guard g
                   WHERE g.migration = '0040'
                     AND g.event_gap_count = 0
                     AND g.checkpoint_gap_count = 0
-                ) THEN 0
+                ) THEN 1
+                ELSE 0
+              END AS v2_contiguity_guard_ready,
+              CASE
                 WHEN public_seq = 0 THEN 1
                 WHEN EXISTS (
                   SELECT 1 FROM event_chain_v2 e
@@ -1163,6 +1167,11 @@ export async function backfillKraterIntegrity(
   );
   if (rawHead === null) {
     throw new KraterProblemNotFoundError("problem must exist before integrity replay.");
+  }
+  if (rawHead.v2_contiguity_guard_ready !== 1) {
+    backfillRequired(
+      "the v2 contiguity migration witness is absent; refusing both replay and fast-path writes.",
+    );
   }
   const publicSeq = requireStoredSequence(rawHead.public_seq, "problem cursor", true);
   const storedBackfill = await readIntegrityBackfill(db, problemId, cost);

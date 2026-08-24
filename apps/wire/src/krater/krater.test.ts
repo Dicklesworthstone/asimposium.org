@@ -163,6 +163,7 @@ function ensureProblemHarness(): {
               public_seq: 0,
               chain_digest: null,
               chain_version: null,
+              v2_contiguity_guard_ready: 1,
               terminal_v2_complete: 1,
             },
           ]);
@@ -203,6 +204,7 @@ function retryingWriteHarness(
     readonly forceOutboxPredicateMiss?: boolean;
     readonly failOnSynchronousFts?: boolean;
     readonly forceWrongEmptyGenesis?: boolean;
+    readonly forceLegacyMissingContiguityWitness?: boolean;
   } = {},
 ): {
   readonly db: Parameters<typeof writeClaim>[0];
@@ -258,19 +260,29 @@ function retryingWriteHarness(
           if (publicSeq === 0 && options.forceWrongEmptyGenesis !== true) {
             chainDigest = await genesisChainDigest(String(bindings[0]));
           }
+          const legacyMissingWitness = options.forceLegacyMissingContiguityWitness === true;
           return fakeD1Result([
             {
               public_seq: publicSeq,
-              chain_digest: chainDigest,
-              chain_version: 2,
+              chain_digest: legacyMissingWitness ? null : chainDigest,
+              chain_version: legacyMissingWitness ? null : 2,
+              v2_contiguity_guard_ready: legacyMissingWitness ? 0 : 1,
               terminal_v2_complete: 1,
             },
           ]);
         }
         if (sql.includes("FROM krater_integrity_backfill")) {
+          if (options.forceLegacyMissingContiguityWitness === true) {
+            return fakeD1Result([
+              { state: "required", legacy_event_count: 0, chain_version: null },
+            ]);
+          }
           return fakeD1Result([
             { state: "complete", legacy_event_count: publicSeq, chain_version: 2 },
           ]);
+        }
+        if (options.forceLegacyMissingContiguityWitness === true) {
+          throw new Error("PLANTED_MISSING_CONTIGUITY_WITNESS_REPLAY_TOUCHED");
         }
         if (sql.includes("SELECT id FROM events")) return fakeD1Result();
         if (sql.includes("FROM events e") && sql.includes("WHERE e.problem_id")) {
@@ -840,6 +852,21 @@ describe("Krater deterministic contracts", () => {
         createdAt: "2026-08-19T00:00:00.000Z",
       }),
     ).resolves.toMatchObject({ seq: 1, preflight: { upgraded_fast_path: true } });
+  });
+
+  test("PLANTED: a missing 0040 witness blocks legacy replay before any write", async () => {
+    const harness = retryingWriteHarness({ forceLegacyMissingContiguityWitness: true });
+    await expect(
+      writeClaim(harness.db, {
+        problemId: "P-legacy-missing-contiguity-witness",
+        claimId: "C-legacy-missing-contiguity-witness",
+        eventId: "E-legacy-missing-contiguity-witness",
+        idempotencyKey: "IK-legacy-missing-contiguity-witness",
+        statement: "Replay cannot establish v2 authority before migration 0040 is witnessed.",
+        createdAt: "2026-08-19T00:00:00.000Z",
+      }),
+    ).rejects.toThrow(KraterIntegrityBackfillRequiredError);
+    expect(harness.persistedWrite()).toBeUndefined();
   });
 
   test("captures a deterministic server-authored canonical UTC outbox instant", () => {

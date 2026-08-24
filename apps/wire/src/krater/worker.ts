@@ -1036,6 +1036,7 @@ async function handleHarnessRequest(
           (terminal?.chainDigest ?? integrity.chainDigest) === integrity.chainDigest,
         cursor,
         event_count: events.length,
+        chain_digest: integrity.chainDigest,
         chain_version: integrity.chainVersion,
         checkpoint_digest: integrity.checkpointDigest,
       });
