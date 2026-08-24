@@ -149,10 +149,18 @@ describe("determinism across process restarts", () => {
       };
       process.stdout.write(renderProjection(projection, ${JSON.stringify(format)}).body);
     `;
-    const child = Bun.spawnSync({ cmd: ["bun", "-e", source], stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "-e", source],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env,
+    });
+    const stdout = new TextDecoder().decode(child.stdout);
     const stderr = new TextDecoder().decode(child.stderr);
-    if (child.exitCode !== 0) throw new Error(`child render failed: ${stderr}`);
-    return new TextDecoder().decode(child.stdout);
+    if (child.exitCode !== 0 || stdout.length === 0) {
+      throw new Error(`child render failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`);
+    }
+    return stdout;
   }
 
   for (const format of ["md", "json", "html-fragment"] as const) {

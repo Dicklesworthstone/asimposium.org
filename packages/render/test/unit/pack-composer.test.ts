@@ -279,11 +279,19 @@ describe("stable-prefix composition", () => {
       });
       process.stdout.write(pack.canonical_json);
     `;
-    const child = Bun.spawnSync({ cmd: ["bun", "-e", source], stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "-e", source],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env,
+    });
+    const stdout = new TextDecoder().decode(child.stdout);
     const stderr = new TextDecoder().decode(child.stderr);
-    if (child.exitCode !== 0) throw new Error(`fresh composer failed: ${stderr}`);
+    if (child.exitCode !== 0 || stdout.length === 0) {
+      throw new Error(`fresh composer failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`);
+    }
 
-    const fresh = new TextDecoder().decode(child.stdout);
+    const fresh = stdout;
     const inProcess = composePack(
       input({
         candidates: [
