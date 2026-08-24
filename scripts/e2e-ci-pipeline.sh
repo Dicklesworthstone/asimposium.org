@@ -742,7 +742,7 @@ if len(deployments) != 1:
 baseline = deployments[0]
 # Vercel's API encodes Preview as a null target; production and custom staging
 # have named targets. Normalize only after proving the provider value is null.
-if not isinstance(baseline, dict) or baseline.get("target") is not None:
+if not isinstance(baseline, dict) or "target" not in baseline or baseline["target"] is not None:
     sys.exit(1)
 project_id = baseline.get("projectId")
 if project_id is None and isinstance(baseline.get("project"), dict):
@@ -812,7 +812,7 @@ if not isinstance(document, dict):
     sys.exit(1)
 deployment_id = document.get("id") or document.get("uid") or document.get("deploymentId")
 url = document.get("url")
-state = document.get("readyState") or document.get("state") or document.get("status")
+state = document.get("readyState")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
 if not isinstance(url, str):
@@ -822,7 +822,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY" or document.get("target") is not None:
+if not isinstance(state, str) or state.upper() != "READY" or document.get("target") != "preview":
     sys.exit(1)
 print(json.dumps({
     "deployment_id": deployment_id,
@@ -855,7 +855,7 @@ if not isinstance(document, dict):
     sys.exit(1)
 deployment_id = document.get("id")
 url = document.get("url")
-state = document.get("readyState") or document.get("state") or document.get("status")
+state = document.get("readyState")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
 if not isinstance(url, str):
@@ -865,7 +865,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY" or document.get("target") is not None:
+if not isinstance(state, str) or state.upper() != "READY" or "target" not in document or document["target"] is not None:
     sys.exit(1)
 project_id = document.get("projectId")
 if project_id is None and isinstance(document.get("project"), dict):

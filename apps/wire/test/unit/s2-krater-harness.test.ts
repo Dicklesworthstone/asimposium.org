@@ -1302,6 +1302,9 @@ describe("S2 to S7 normalized cost receipt", () => {
 
     const changed = "6".repeat(64);
     expect(() =>
+      assertS2TerminalDigestParity(write, { ...event, seq: 2 }, state, replay),
+    ).toThrow("S2_TERMINAL_SEQUENCE_MISMATCH");
+    expect(() =>
       assertS2TerminalDigestParity(write, { ...event, row_digest: changed }, state, replay),
     ).toThrow("S2_V2_ROW_DIGEST_MISMATCH");
     expect(() =>

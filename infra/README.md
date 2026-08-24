@@ -231,9 +231,10 @@ that preview to production. It also re-observes Cloudflare's active deployment,
 including the expected Worker version and revision message, after Worker
 readiness and again after the Vercel preview reaches ready.
 
-Vercel's deployment APIs encode Preview as a null provider `target`; the
-pipeline requires that exact value and normalizes it to `"preview"` only in its
-own bounded safe receipts. Named `production` or `staging` targets are refused.
+Vercel's deployment APIs encode Preview as a null provider `target`, while
+`vercel inspect --json` normalizes it to `"preview"`. The pipeline requires each
+surface's exact representation and emits `"preview"` in its own bounded safe
+receipts. Named `production` or `staging` API targets are refused.
 
 Before activating this trigger, disconnect the Vercel project's Git integration.
 Otherwise Vercel can start a web build directly from the push and race the
