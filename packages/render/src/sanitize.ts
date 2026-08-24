@@ -1394,6 +1394,29 @@ function isAsimpControlComment(body: string, openOffset: number): boolean {
     if (body.startsWith("-->", cursor) || body.startsWith("--!>", cursor)) {
       return semanticLength === CONTROL_COMMENT_NAMESPACE.length;
     }
+    const code = body.charCodeAt(cursor);
+    if (code <= 0x7f) {
+      if (code === 58 /* ':' */) {
+        return semanticLength === CONTROL_COMMENT_NAMESPACE.length;
+      }
+      if (code === 32 || (code >= 9 && code <= 13)) {
+        if (semanticLength !== 0) return semanticLength === CONTROL_COMMENT_NAMESPACE.length;
+        cursor += 1;
+        continue;
+      }
+      const folded =
+        code >= 65 && code <= 90 ? String.fromCharCode(code + 32) : (body[cursor] as string);
+      if (
+        semanticLength === CONTROL_COMMENT_NAMESPACE.length ||
+        folded !== CONTROL_COMMENT_NAMESPACE[semanticLength]
+      ) {
+        return false;
+      }
+      semanticLength += 1;
+      cursor += 1;
+      continue;
+    }
+
     const character = codePointAt(body, cursor);
     if (character.normalize("NFKC") === ":") {
       return semanticLength === CONTROL_COMMENT_NAMESPACE.length;
