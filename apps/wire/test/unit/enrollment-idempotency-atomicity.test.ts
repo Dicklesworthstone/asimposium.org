@@ -803,6 +803,52 @@ describe("device enrollment first-decider SQL", () => {
     ).toEqual({ status: "expired" });
   });
 
+  test("nzee: losing both pacing CAS attempts answers coarse slow-down for a healthy pending row", async () => {
+    // Three-plus concurrent polls of one flow handle can lose the pacing CAS
+    // twice; before the fix the post-loop check then threw FLOW_INVALID,
+    // telling a legitimate poller its valid handle was bad. A concurrent
+    // winner is simulated deterministically by bumping last_poll_at ahead of
+    // every pacing UPDATE, so both in-poll attempts lose on stale snapshots.
+    const sqlite = deviceDatabase();
+    const input = deviceInput("nzee-race");
+    let sabotages = 0;
+    let armed = false; // arm only for the poll; deviceCreate writes the same column
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        onStatement: (query) => {
+          if (armed && query.includes("poll_interval_seconds")) {
+            sabotages += 1;
+            sqlite
+              .prepare(
+                "UPDATE enrollment_proposals SET last_poll_at = COALESCE(last_poll_at, ?) + 1 WHERE proposal_id = ?",
+              )
+              .run(input.deviceExpiresAt - 2, input.proposal.proposalId);
+          }
+        },
+      }),
+    );
+    await store.deviceCreate(input);
+    armed = true;
+
+    await expect(
+      store.poll({
+        flowHandleHash: input.proposal.flowHandleHash,
+        now: input.deviceExpiresAt - 1,
+        createToken: async () => {
+          throw new Error("contention must not reach the token factory");
+        },
+      }),
+    ).resolves.toMatchObject({ kind: "slow-down" });
+    expect(sabotages).toBeGreaterThanOrEqual(2);
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_proposals WHERE proposal_id = ?",
+        )
+        .get(input.proposal.proposalId),
+    ).toEqual({ status: "pending" });
+  });
+
   test("D1 polling first at the requested grant boundary expires without a credential", async () => {
     const sqlite = deviceDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
