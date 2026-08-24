@@ -135,15 +135,16 @@ bun infra/resolve-wrangler-deploy.mjs --env staging --check
 bun infra/resolve-wrangler-deploy.mjs --env staging --write
 ```
 
-It accepts only `ASIMP_D1_DATABASE_ID_STAGING` (a canonical nonzero UUID) and
+It accepts only `ASIMP_ACCOUNT_ID` (a canonical Cloudflare account id),
+`ASIMP_D1_DATABASE_ID_STAGING` (a canonical nonzero UUID), and
 `ASIMP_STAGING_SERVICE_ENVELOPE_KEYS` (the two declared staging public
 verification-key records). It revalidates the generated staging bytes, derives
 the Worker custom-domain route solely from staging `worker_origin`, and writes
 only `infra/deploy-resolved/staging.wrangler.toml`. It never reads a route,
-origin, R2 hostname, account id, or secret from ambient input. The public R2
-hostname remains an R2 custom domain rather than a Worker route; `ARTIFACTS`
-and `PUBLIC_ARTIFACTS` remain distinct bindings; and deferred `HERALD_ROOMS`
-remains absent. Local, production, and unknown environments are refused.
+origin, R2 hostname, or secret from ambient input. The public R2 hostname remains
+an R2 custom domain rather than a Worker route; `ARTIFACTS` and
+`PUBLIC_ARTIFACTS` remain distinct bindings; and deferred `HERALD_ROOMS` remains
+absent. Local, production, and unknown environments are refused.
 
 The artifact directory is gitignored. Publication uses exclusive creation: an
 equal existing artifact is an idempotent success, while a symlink or different

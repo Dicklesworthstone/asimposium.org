@@ -27,8 +27,9 @@ import {
 /**
  * Resolve the one deployable staging Worker configuration without contacting a
  * provider. The topology and generated staging template remain the authorities;
- * this file supplies only the two provisioned values a generated template
- * intentionally cannot carry: the staging D1 UUID and public verification keys.
+ * this file supplies only the three provisioned values a generated template
+ * intentionally cannot carry: the Cloudflare account id, staging D1 UUID, and
+ * public verification keys.
  *
  * This is deliberately a separate resolver rather than a mode of
  * generate-wrangler.mjs. Generation remains a credential-free projection for
@@ -358,7 +359,7 @@ export function canonicalServiceEnvelopeKeys(serialized, staging) {
   return JSON.stringify(ordered);
 }
 
-/** Read exactly the two deploy inputs. Origin, routes, and R2 remain topology-derived. */
+/** Read exactly the three deploy inputs. Origin, routes, and R2 remain topology-derived. */
 export function readStagingDeployInputs(environment = process.env) {
   return {
     d1DatabaseId: environment[STAGING_D1_INPUT],

@@ -19,10 +19,11 @@ material; additive `event_chain_v2` and `checkpoint_chain_v2` rows are the sole
 runtime integrity authority after bounded replay. An absent or mixed v2 stream
 is refused, never verified under a fallback formula.
 
-Migration `0040_krater_chain_v2_contiguity.sql` adds forward-only predecessor
-guards to both v2 sidecar streams. Because v2 rows are already immutable, a
-terminal sidecar can serve as a bounded complete-stream witness only when no
-insertion can skip an earlier sequence.
+Migration `0040_krater_chain_v2_contiguity.sql` first refuses any pre-existing
+0039 sidecar gap and records the zero-gap migration witness, then adds
+forward-only predecessor guards to both v2 sidecar streams. Because v2 rows
+are already immutable, a terminal sidecar can serve as a bounded
+complete-stream witness only when no insertion can skip an earlier sequence.
 
 When W2 begins, each migration must use the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

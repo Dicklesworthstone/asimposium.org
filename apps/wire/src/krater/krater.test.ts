@@ -1990,7 +1990,9 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"),
         "utf8",
       );
-      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).toThrow();
+      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).toThrow(
+        /event_gap_count/u,
+      );
       expect(
         sqlite
           .query(
@@ -1998,6 +2000,38 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
           )
           .get(),
       ).toBeNull();
+
+      // Repair only the event-sidecar gap. The next attempt must reach and
+      // refuse the independently planted checkpoint gap rather than passing
+      // because one of the two migration counts happened to be sufficient.
+      sqlite
+        .query(
+          `INSERT INTO event_chain_v2
+             (event_id, problem_id, seq, row_digest, chain_digest, chain_version)
+           VALUES (?, ?, 1, ?, ?, 2)`,
+        )
+        .run(event1, problemId, "bb".repeat(32), root1);
+      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).toThrow(
+        /checkpoint_gap_count/u,
+      );
+
+      // Once both exact ranges are present, 0040 may install its forward-only
+      // guards and must retain a zero-gap migration witness.
+      sqlite
+        .query(
+          `INSERT INTO checkpoint_chain_v2
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, chain_version)
+           VALUES (?, 1, ?, ?, 2)`,
+        )
+        .run(problemId, root1, "cc".repeat(32));
+      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).not.toThrow();
+      expect(
+        sqlite
+          .query(
+            "SELECT migration, event_gap_count, checkpoint_gap_count FROM krater_chain_v2_contiguity_migration_guard",
+          )
+          .get(),
+      ).toEqual({ migration: "0040", event_gap_count: 0, checkpoint_gap_count: 0 });
     } finally {
       sqlite.close();
     }
