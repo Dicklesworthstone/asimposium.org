@@ -81,7 +81,7 @@ export interface PackActionCandidate extends NextAction {
   /** Explicit server assertion that this GET is safe to advertise anonymously. */
   readonly public_read: boolean;
   /** All listed effective permissions are required to advertise this action. */
-  readonly requires?: readonly string[];
+  readonly requires?: readonly string[] | undefined;
 }
 
 export interface PackViewer {
@@ -102,8 +102,8 @@ export interface PackComposerInput {
   readonly candidates: readonly PackCandidate[];
   readonly action_candidates: readonly PackActionCandidate[];
   /** Server-authored selector omissions known before budget selection. */
-  readonly omitted?: readonly OmittedEntry[];
-  readonly degraded?: readonly string[];
+  readonly omitted?: readonly OmittedEntry[] | undefined;
+  readonly degraded?: readonly string[] | undefined;
 }
 
 export interface ComposedPackItem {
