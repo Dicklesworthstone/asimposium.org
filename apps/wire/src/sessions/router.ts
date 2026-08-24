@@ -379,12 +379,35 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     ) => readonly SessionPreparedStatement[];
   }
 
+  /**
+   * asimposiumorg-zdz.8: the versioned AEAD context binding every sealed
+   * session replay to exactly one replay identity. A ciphertext copied to any
+   * other row (other scope, principal, route, key, or body) fails GCM
+   * authentication under this additional data instead of replaying.
+   */
+  const sessionReplayContext = (
+    scope: ReplayScope,
+    principal: string,
+    target: string,
+    key: string,
+    requestDigest: string,
+  ): string =>
+    JSON.stringify({
+      v: 1,
+      scope,
+      principal,
+      target,
+      idempotency_key: key,
+      request_digest: requestDigest,
+    });
+
   async function readReplayRecord(
     db: Env["DB"],
     scope: ReplayScope,
     principal: string,
     key: string,
     requestDigest: string,
+    target: string,
   ): Promise<ReplayRecord | undefined> {
     const existing = await db
       .prepare(
@@ -418,10 +441,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     if (existing.request_digest !== requestDigest) throw new ReplayConflictError();
     return {
-      plaintext: await options.replayProtector.open({
-        ciphertext: existing.response_ciphertext,
-        initializationVector: existing.response_initialization_vector,
-      }),
+      plaintext: await options.replayProtector.open(
+        {
+          ciphertext: existing.response_ciphertext,
+          initializationVector: existing.response_initialization_vector,
+        },
+        sessionReplayContext(scope, principal, target, key, requestDigest),
+      ),
       claimToken: existing.claim_token,
     };
   }
@@ -432,16 +458,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     principal: string,
     key: string,
     requestDigest: string,
+    target: string,
+    parse: (raw: string) => unknown,
   ): Promise<Response | undefined> {
-    const replay = await readReplayRecord(db, scope, principal, key, requestDigest);
-    return replay === undefined
-      ? undefined
-      : privateNoStore(
-          new Response(replay.plaintext, {
-            status: 200,
-            headers: { "content-type": "application/json; charset=utf-8" },
-          }),
-        );
+    const replay = await readReplayRecord(db, scope, principal, key, requestDigest, target);
+    if (replay === undefined) return undefined;
+    // The exact route response schema is the replayed bytes' exit gate: a row
+    // that authenticates but does not satisfy the contract this route serves
+    // is refused here, before any 200 is built from it.
+    parse(replay.plaintext);
+    return privateNoStore(
+      new Response(replay.plaintext, {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+    );
   }
 
   /**
@@ -458,32 +489,37 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     principal: string,
     key: string,
     requestDigest: string,
+    target: string,
+    parse: (raw: string) => T,
     prepare: (claimToken: string) => Promise<ReplayMutation<T>>,
     retryAfterRollback?: (error: unknown) => boolean,
   ): Promise<{ replayed: boolean; value: T }> {
     for (let attempt = 0; attempt <= 16; attempt += 1) {
-      const existing = await readReplayRecord(db, scope, principal, key, requestDigest);
+      const existing = await readReplayRecord(db, scope, principal, key, requestDigest, target);
       if (existing !== undefined) {
-        return { replayed: true, value: JSON.parse(existing.plaintext) as T };
+        return { replayed: true, value: parse(existing.plaintext) };
       }
       const claimToken = mintId("R");
       const mutation = await prepare(claimToken);
-      const sealed = await options.replayProtector.seal(JSON.stringify(mutation.value));
+      const sealed = await options.replayProtector.seal(
+        JSON.stringify(mutation.value),
+        sessionReplayContext(scope, principal, target, key, requestDigest),
+      );
       try {
         await db.batch([...mutation.statements(sealed, claimToken)]);
       } catch (error) {
-        const winner = await readReplayRecord(db, scope, principal, key, requestDigest);
+        const winner = await readReplayRecord(db, scope, principal, key, requestDigest, target);
         if (winner !== undefined) {
-          return { replayed: true, value: JSON.parse(winner.plaintext) as T };
+          return { replayed: true, value: parse(winner.plaintext) };
         }
         if (attempt < 16 && retryAfterRollback?.(error) === true) continue;
         throw error;
       }
-      const settled = await readReplayRecord(db, scope, principal, key, requestDigest);
+      const settled = await readReplayRecord(db, scope, principal, key, requestDigest, target);
       if (settled === undefined) throw new ReplayClaimNotCommittedError();
       return {
         replayed: settled.claimToken !== claimToken,
-        value: JSON.parse(settled.plaintext) as T,
+        value: parse(settled.plaintext),
       };
     }
     throw new Error("session replay retry budget exhausted");
