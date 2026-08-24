@@ -702,7 +702,7 @@ if not isinstance(document, dict) or document.get("id") != sys.argv[1]:
     sys.exit(1)
 # A connected Git provider can deploy the web revision concurrently with this
 # ordered pipeline. Absence is the only provider state this gate treats as safe.
-if document.get("link") is not None:
+if "link" not in document or document["link"] is not None:
     sys.exit(78)
 print(json.dumps({"project_id": sys.argv[1], "git_linked": False}, separators=(",", ":")))
 ' "$VERCEL_PROJECT_ID" > "$project_receipt"
@@ -822,7 +822,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY" or document.get("target") != "preview":
+if state != "READY" or document.get("target") != "preview":
     sys.exit(1)
 print(json.dumps({
     "deployment_id": deployment_id,
@@ -865,7 +865,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY" or "target" not in document or document["target"] is not None:
+if state != "READY" or "target" not in document or document["target"] is not None:
     sys.exit(1)
 project_id = document.get("projectId")
 if project_id is None and isinstance(document.get("project"), dict):

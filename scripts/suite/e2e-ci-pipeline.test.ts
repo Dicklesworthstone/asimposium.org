@@ -369,6 +369,19 @@ describe("OPS.2b review pipeline orchestration", () => {
     }
   });
 
+  test("provider parsers require explicit safe Vercel states", () => {
+    const source = readFileSync(PIPELINE, "utf8");
+
+    expect(source).toContain('if "link" not in document or document["link"] is not None:');
+    expect(source).not.toContain('document.get("link") is not None');
+    expect(source).toContain(
+      'if state != "READY" or document.get("target") != "preview":',
+    );
+    expect(source).toContain(
+      'if state != "READY" or "target" not in document or document["target"] is not None:',
+    );
+  });
+
   test("delegated pass evidence without the current revision is refused", () => {
     const unbound = runPipeline("smoke-gallery", "pass", false, {
       ASIMP_CI_GAUNTLET_STATUS: "pass",
