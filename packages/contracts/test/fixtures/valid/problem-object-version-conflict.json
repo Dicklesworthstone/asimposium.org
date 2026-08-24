@@ -8,5 +8,10 @@
   "rule": "P9",
   "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
   "head_version": 4,
-  "example": { "claim_id": "C-3", "base_version": 4, "kind": "conjecture", "statement": "<new text>" }
+  "example": {
+    "claim_id": "C-3",
+    "base_version": 4,
+    "kind": "conjecture",
+    "statement": "<new text>"
+  }
 }

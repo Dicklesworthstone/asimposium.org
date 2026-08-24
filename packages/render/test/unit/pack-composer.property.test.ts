@@ -34,15 +34,21 @@ const SCOPES = ["system", "ledger", "workshop"] as const;
 function arbitraryCandidate(rand: () => number, index: number): PackCandidate {
   const tokens = 1 + Math.floor(rand() * 900);
   const bodyLength = 1 + Math.floor(rand() * 240);
-  let body = "";
-  for (let i = 0; i < bodyLength; i += 1) {
-    body += String.fromCharCode(32 + Math.floor(rand() * 95));
-  }
-  const kind = KINDS[Math.floor(rand() * KINDS.length)];
+  // Draw scope first: a trusted system body renders raw on the markdown face,
+  // so admission law (TRUSTED_BODY_CONTAINS_BACKTICK) bans backticks there.
+  // The generator respects that contract instead of minting refusals as
+  // "found bugs"; untrusted bodies keep the full printable-ASCII alphabet.
   const scope = SCOPES[Math.floor(rand() * SCOPES.length)];
-  if (kind === undefined || scope === undefined) {
+  if (scope === undefined) {
     throw new Error("non-empty property-test vocabularies must yield a candidate value");
   }
+  let body = "";
+  for (let i = 0; i < bodyLength; i += 1) {
+    let codeUnit = 32 + Math.floor(rand() * 95);
+    if (scope === "system" && codeUnit === 96) codeUnit = 39;
+    body += String.fromCharCode(codeUnit);
+  }
+  const kind = KINDS[Math.floor(rand() * KINDS.length)];
   return {
     kind,
     id: `X-${index}-${Math.floor(rand() * 1000)}`,

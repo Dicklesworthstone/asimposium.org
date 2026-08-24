@@ -23,7 +23,9 @@ export type RenderErrorCode =
   | "INVALID_HEADER_VALUE"
   | "INVALID_NEXT_ACTION"
   | "BODY_TOO_LARGE"
-  | "TRUSTED_BODY_CONTAINS_CONTROL_MARKER";
+  | "TRUSTED_BODY_CONTAINS_CONTROL_MARKER"
+  | "TRUSTED_BODY_CONTAINS_BACKTICK"
+  | "TRUSTED_BODY_UNCLOSED_FENCE";
 
 export interface RenderProblem {
   readonly type: string;

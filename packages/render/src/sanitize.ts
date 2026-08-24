@@ -1455,6 +1455,87 @@ export function fenceFor(text: string): Fence {
   return { delimiter: "`".repeat(length), extended: length > 3 };
 }
 
+export interface TrustedBodyFenceAudit {
+  /**
+   * Offset of a line-start fence opener that no later line of `text` closes —
+   * one whose fenced block would swallow every byte that follows it.
+   * `undefined` when the body's top-level fence state ends closed.
+   */
+  readonly unclosedFenceOffset: number | undefined;
+}
+
+/**
+ * Audit one trusted body against the one fence invariant that survives
+ * prepare.ts's backtick ban: tilde fences. The markdown face renders trusted
+ * bodies unmodified between renderer-authored blank lines, so a body whose
+ * fenced block is still open at its end would swallow every following byte —
+ * the item-end delimiter, the trailer, and face-end. Using the same
+ * CommonMark interpretation as `markdownFencedCodeBlockEnd`: openers are
+ * 0-3-space-indented runs of three or more backticks or tildes at a line
+ * start, backtick info strings may not contain a backtick, closers are
+ * same-character runs at least as long as their opener with only whitespace
+ * after, and everything inside an open block is inert until such a closer
+ * arrives. Walking the body's lines from closed state therefore reproduces
+ * exactly the document-level fence state the face inherits after the body.
+ */
+export function auditTrustedBodyFences(text: string): TrustedBodyFenceAudit {
+  let openDelimiter = "";
+  let openLength = 0;
+  let openOffset = -1;
+
+  let cursor = 0;
+  while (cursor < text.length) {
+    const lineEnd = markdownLineEnd(text, cursor);
+    if (openDelimiter === "") {
+      let position = cursor;
+      let indentation = 0;
+      while (text[position] === " " && indentation < 4) {
+        position += 1;
+        indentation += 1;
+      }
+      const delimiter = text[position];
+      if (
+        indentation <= 3 &&
+        (delimiter === "`" || delimiter === "~") &&
+        !isMarkdownEscaped(text, position)
+      ) {
+        let runLength = 0;
+        while (text[position + runLength] === delimiter) runLength += 1;
+        const infoString = text.slice(position + runLength, lineEnd).trim();
+        if (runLength >= 3 && !(delimiter === "`" && infoString.includes("`"))) {
+          openDelimiter = delimiter;
+          openLength = runLength;
+          openOffset = position;
+        }
+      }
+    } else {
+      let position = cursor;
+      let closingIndentation = 0;
+      while (text[position] === " " && closingIndentation < 4) {
+        position += 1;
+        closingIndentation += 1;
+      }
+      if (closingIndentation <= 3) {
+        let closingLength = 0;
+        while (text[position + closingLength] === openDelimiter) closingLength += 1;
+        if (closingLength >= openLength) {
+          let tail = position + closingLength;
+          while (text[tail] === " " || text[tail] === "\t") tail += 1;
+          if (tail === lineEnd) {
+            openDelimiter = "";
+            openLength = 0;
+          }
+        }
+      }
+    }
+    cursor = markdownNextLineStart(text, lineEnd);
+  }
+
+  return {
+    unclosedFenceOffset: openDelimiter === "" ? undefined : openOffset,
+  };
+}
+
 const HTML_ESCAPES: Readonly<Record<string, string>> = {
   "&": "&amp;",
   "<": "&lt;",

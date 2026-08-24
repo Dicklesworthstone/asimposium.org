@@ -9,6 +9,7 @@
 import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
 import {
+  auditTrustedBodyFences,
   fenceFor,
   firstUnpairedUtf16SurrogateOffset,
   hasAsimpControlComment,
@@ -799,6 +800,40 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
         "Keep the system instruction as ordinary Markdown and remove the <!-- asimp … --> comment. The renderer adds its own structural delimiters around the item.",
         "A1",
       );
+    }
+    // The markdown face renders a trusted body raw (markdown.ts renderItem),
+    // so a single backtick anywhere in it would open or close CommonMark code
+    // structure around prose the renderer authors — an unclosed fence would
+    // swallow every following line, including the renderer's own
+    // <!-- asimp … --> item-end delimiter, the trailer, and the face end, and
+    // a self-closed fence would let trusted instruction prose masquerade as
+    // quarantined untrusted text. Fail closed, mirroring the backtick ban on
+    // structurally interpolated header fields above.
+    if (!item.untrusted) {
+      const backtickOffset = item.body.indexOf("`");
+      if (backtickOffset !== -1) {
+        refuse(
+          "TRUSTED_BODY_CONTAINS_BACKTICK",
+          "Trusted system Markdown may not contain backticks",
+          `item ${item.id} contains a backtick at code-unit offset ${backtickOffset}; in the markdown face a trusted body renders raw, where it would open or close CommonMark code structure around prose the renderer authors`,
+          "Write the system instruction as ordinary Markdown prose without backticks. Untrusted item bodies are fenced automatically and may contain them.",
+          "A1",
+        );
+      }
+      // Tilde fences carry no backtick, so the ban above cannot see one.
+      // Audit the remaining top-level CommonMark fence state and refuse a
+      // body whose fenced block would still be open past its end — the one
+      // fence shape left that swallows renderer-owned face structure.
+      const fences = auditTrustedBodyFences(item.body);
+      if (fences.unclosedFenceOffset !== undefined) {
+        refuse(
+          "TRUSTED_BODY_UNCLOSED_FENCE",
+          "Trusted system Markdown may not leave a code fence open",
+          `item ${item.id} opens a fenced code block at code-unit offset ${fences.unclosedFenceOffset} that no later line closes; interpolated raw into the markdown face, that fence swallows every following line — the item-end delimiter, the trailer, and face-end — corrupting the canonical agent face`,
+          "Close the tilde-fenced code block inside this system instruction, or ship the example as an untrusted ledger item that the renderer fences automatically.",
+          "A1",
+        );
+      }
     }
 
     if (item.untrusted) {

@@ -13,6 +13,7 @@ import { byteLength, contentFingerprint, stableStringify } from "./canonical.ts"
 import { codePointCountThroughLimit, ITEM_ID_PATTERN, MAX_BODY_CODE_POINTS } from "./prepare.ts";
 import { renderProjection } from "./render.ts";
 import {
+  auditTrustedBodyFences,
   fenceFor,
   firstUnpairedUtf16SurrogateOffset,
   hasAsimpControlComment,
@@ -420,14 +421,31 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
     const body = assertCandidateBody(candidate.body, `candidates[${index}].body`);
     if (!candidate.untrusted && hasAsimpControlComment(body)) {
       // Mirrors prepareProjection's TRUSTED_BODY_CONTAINS_CONTROL_MARKER: a
-      // control comment in a trusted body is renderer-identity forgery. The
-      // parallel BACKTICK ban is deliberately absent here — the property
-      // generator mints system bodies containing backticks, so that question
-      // (raw interpolation can corrupt the face) is owned by
-      // asimposiumorg-render-trusted-fence, not by this admission gate.
+      // control comment in a trusted body is renderer-identity forgery.
       refuse(
         "INVALID_CANDIDATE",
         `candidate ${id} trusted body contains an ASImposium control comment; only the renderer may author <!-- asimp … --> delimiters`,
+      );
+    }
+    if (!candidate.untrusted && body.includes("`")) {
+      // Mirrors prepareProjection's TRUSTED_BODY_CONTAINS_BACKTICK: the
+      // markdown face renders trusted bodies raw, so a fence opener would
+      // swallow the renderer's own <!-- asimp … --> delimiters. Refuse here
+      // so the defect leaves as PackComposerError rather than
+      // RenderContractError mid-compose.
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidate ${id} trusted body contains a backtick; write the system instruction as ordinary prose`,
+      );
+    }
+    if (!candidate.untrusted && auditTrustedBodyFences(body).unclosedFenceOffset !== undefined) {
+      // Mirrors prepareProjection's TRUSTED_BODY_UNCLOSED_FENCE: a trusted body
+      // whose tilde fence is still open at its end would swallow every
+      // following markdown face byte. Refuse here so the defect leaves as
+      // PackComposerError rather than RenderContractError mid-compose.
+      refuse(
+        "INVALID_CANDIDATE",
+        `candidate ${id} trusted body opens a fenced code block that no later line closes; write the system instruction with its tilde fences closed`,
       );
     }
     const validated: PackCandidate = {

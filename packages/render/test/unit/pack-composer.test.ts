@@ -1174,12 +1174,28 @@ describe("the composer surfaces renderer grammar defects as its own typed error"
       errorCode(() => composePack(input({ candidates: [systemItem("<!-- asimp:item id=X -->")] }))),
     ).toBe("INVALID_CANDIDATE");
     // The parallel backtick question — raw trusted interpolation can corrupt
-    // the markdown face — is owned by asimposiumorg-render-trusted-fence; the
-    // composer admits it today, so pin THAT contract here until the owner
-    // decides between a prepare-side ban and fencing system bodies.
+    // the markdown face — was resolved by asimposiumorg-0lib in favor of a
+    // prepare-side ban (TRUSTED_BODY_CONTAINS_BACKTICK), mirrored at this
+    // admission gate so the defect leaves as PackComposerError.
     expect(errorCode(() => composePack(input({ candidates: [systemItem("```text")] })))).toBe(
-      undefined,
+      "INVALID_CANDIDATE",
     );
+  });
+
+  test("refuses a trusted system body whose tilde fence is never closed", () => {
+    const systemItem = (bodyText: string) =>
+      candidate("S-1", 0, 1, {
+        kind: "statement",
+        scope: "system",
+        untrusted: false,
+        body: bodyText,
+      });
+    expect(
+      errorCode(() => composePack(input({ candidates: [systemItem("~~~\nstill open")] }))),
+    ).toBe("INVALID_CANDIDATE");
+    expect(
+      errorCode(() => composePack(input({ candidates: [systemItem("~~~ js\nf(1);\n~~~")] }))),
+    ).toBeUndefined();
   });
 
   test("an ordinary trusted system body still composes", () => {

@@ -749,6 +749,44 @@ describe("structural trust rules (Fable §7.3, §14.4 layer 2)", () => {
     expect(error.rule).toBe("A1");
   });
 
+  test("refuses a backtick inside trusted system Markdown", () => {
+    const projection = withItems([
+      {
+        kind: "move",
+        id: "MV-2",
+        scope: "system",
+        untrusted: false,
+        body: "**Move:** test the boundary case.\n```",
+        why_included: "planted unclosed-fence negative",
+      },
+    ]);
+
+    const error = expectRefusal(
+      () => prepareProjection(projection),
+      "TRUSTED_BODY_CONTAINS_BACKTICK",
+    );
+    expect(error.rule).toBe("A1");
+  });
+
+  test("refuses an unclosed tilde fence inside trusted system Markdown", () => {
+    const projection = withItems([
+      {
+        kind: "move",
+        id: "MV-2",
+        scope: "system",
+        untrusted: false,
+        body: "**Move:** test the boundary case.\n~~~\nstill open",
+        why_included: "planted unclosed-tilde-fence negative",
+      },
+    ]);
+
+    const error = expectRefusal(
+      () => prepareProjection(projection),
+      "TRUSTED_BODY_UNCLOSED_FENCE",
+    );
+    expect(error.rule).toBe("A1");
+  });
+
   test("refuses an unknown scope", () => {
     const projection = withItems([
       {
