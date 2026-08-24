@@ -27,7 +27,9 @@ const DOCUMENT_IDS: readonly DocumentId[] = [
 const REFERENCE_PATTERN = /`(\/[A-Za-z0-9._{}/:-]*)`/g;
 
 /** Schema URLs are exact-derived from the same registry that mounts them. */
-const SCHEMA_PATHS = new Set(listPublicSchemas().map((document) => document.served_at));
+const SCHEMA_PATHS: ReadonlySet<string> = new Set(
+  listPublicSchemas().map((document) => document.served_at),
+);
 
 const STATIC_FACE_PATHS = new Set(DOCUMENT_IDS.map((id) => getDocument(id).served_at));
 
