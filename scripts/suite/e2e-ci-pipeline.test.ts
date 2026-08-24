@@ -213,34 +213,64 @@ async function waitForTrace(path: string, stage: Stage): Promise<void> {
 
 async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
   const paths = fixture(`${stage}-cancel`);
-  const child = spawn("bash", [PIPELINE, "--run-id", paths.runId], {
-    cwd: REPO_ROOT,
-    env: plantedEnvironment(stage, "hang", paths),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  await waitForTrace(paths.tracePath, stage);
-  expect(child.kill("SIGTERM")).toBe(true);
-  const completion = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve, reject) => {
-      child.once("error", reject);
+  const resultPath = join(paths.artifactDirectory, "cancel-result.json");
+  const helperSource = `
+    import { spawn } from "node:child_process";
+    import { existsSync, readFileSync, writeFileSync } from "node:fs";
+
+    const child = spawn("bash", [${JSON.stringify(PIPELINE)}, "--run-id", ${JSON.stringify(paths.runId)}], {
+      cwd: ${JSON.stringify(REPO_ROOT)},
+      env: ${JSON.stringify(plantedEnvironment(stage, "hang", paths))},
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (
+        existsSync(${JSON.stringify(paths.tracePath)}) &&
+        readFileSync(${JSON.stringify(paths.tracePath)}, "utf8").includes("begin:" + ${JSON.stringify(stage)} + "\\n")
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    child.kill("SIGTERM");
+
+    const completion = await new Promise((resolve) => {
       child.once("close", (code, signal) => resolve({ code, signal }));
-    },
-  );
+    });
+
+    writeFileSync(
+      ${JSON.stringify(resultPath)},
+      JSON.stringify({
+        status: completion.code,
+        signal: completion.signal,
+        stdout,
+        stderr,
+      }) + "\\n",
+    );
+  `;
+  const helper = spawnSync(process.execPath, ["-e", helperSource], {
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  if (helper.status !== 0) {
+    throw new Error(`cancel helper failed: ${helper.stderr}`);
+  }
+  const parsed = JSON.parse(readFileSync(resultPath, "utf8"));
   return {
-    status: completion.code,
-    signal: completion.signal,
-    stdout,
-    stderr,
+    status: parsed.status,
+    signal: parsed.signal,
+    stdout: parsed.stdout,
+    stderr: parsed.stderr,
     tracePath: paths.tracePath,
   };
 }
