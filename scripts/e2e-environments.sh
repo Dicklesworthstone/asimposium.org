@@ -145,8 +145,8 @@ self_test_remote_interface_gate() {
   printf '%s\n' '#!/bin/sh' \
     'printf "bunx %s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
     'case "$*" in' \
-    '  "--bun wrangler r2 object put "*) exit 95 ;;' \
-    '  "--bun wrangler r2 object delete "*) exit 0 ;;' \
+    '  "--bun wrangler r2 object put "*" --remote --pipe") exit 95 ;;' \
+    '  "--bun wrangler r2 object delete "*" --remote") exit 0 ;;' \
     '  *) exit 96 ;;' \
     'esac' >"$fake_bunx"
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
@@ -654,7 +654,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 10 (staging) — the private R2 canary: owner-readable, publicly absent.
+# Phase 10 (staging) — the private R2 canary: provider-readable, publicly absent.
 # ---------------------------------------------------------------------------
 CANARY_CLEANUP_REQUIRED=0
 CANARY_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" ||
@@ -667,7 +667,7 @@ CANARY_BODY="ops3-private-canary-$RANDOM$RANDOM"
 cleanup_private_canary() {
   if [ "$CANARY_CLEANUP_REQUIRED" -eq 0 ]; then return 0; fi
   if CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
-    bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1; then
+    bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" --remote >/dev/null 2>&1; then
     CANARY_CLEANUP_REQUIRED=0
     return 0
   fi
@@ -685,7 +685,7 @@ trap 'on_canary_signal 143' TERM
 trap 'on_canary_signal 129' HUP
 CANARY_CLEANUP_REQUIRED=1
 if printf '%s' "$CANARY_BODY" | CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
-  bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
+  bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --remote --pipe >/dev/null 2>&1; then
   :
 else
   if ! cleanup_private_canary; then
@@ -696,7 +696,7 @@ else
 fi
 CANARY_READ_STATUS=0
 CANARY_READ="$(CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
-  bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)" || CANARY_READ_STATUS=$?
+  bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --remote --pipe 2>/dev/null)" || CANARY_READ_STATUS=$?
 # Probe while the canary still exists. Deleting it first would make a 404
 # inevitable and turn the public-absence assertion into a vacuous green.
 PUBLIC_CANARY_CURL_STATUS=0
@@ -715,10 +715,10 @@ fi
 trap - EXIT INT TERM HUP
 if [ "$CANARY_READ_STATUS" -ne 0 ]; then
   fail_phase "r2-private-canary" "R2_CANARY_READ_FAILED" \
-    "The private staging canary could not be read back through the owner binding."
+    "The private staging canary could not be read back through the authenticated provider API."
 fi
 if [ "$CANARY_READ" != "$CANARY_BODY" ]; then
-  fail_phase "r2-private-canary" "R2_CANARY_READ_MISMATCH" "The canary read back through the binding did not match the write."
+  fail_phase "r2-private-canary" "R2_CANARY_READ_MISMATCH" "The canary read back through the authenticated provider API did not match the write."
 fi
 if [ "$PUBLIC_CANARY_CURL_STATUS" -ne 0 ]; then
   fail_phase "r2-private-canary" "R2_PUBLIC_CANARY_UNOBSERVED" \
@@ -740,7 +740,7 @@ if [ -z "$STAGING_DOMAINS" ]; then
     "The staging bucket domain query returned an empty response."
 fi
 if [ "$STAGING_DOMAINS" != "${STAGING_DOMAINS#*no custom domains}" ]; then
-  emit "r2-private-canary" "pass" "OK" "private canary round-tripped through the owner binding, remained absent at the public hostname while it existed, and was removed"
+  emit "r2-private-canary" "pass" "OK" "private canary round-tripped through remote provider storage, remained absent at the public hostname while it existed, and was removed"
 else
   fail_phase "r2-private-canary" "R2_PRIVATE_BUCKET_HAS_DOMAIN" \
     "The private staging bucket carries a custom domain; the topology forbids that."

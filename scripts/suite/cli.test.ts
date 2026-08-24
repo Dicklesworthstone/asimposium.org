@@ -234,6 +234,21 @@ function capturedRun(
 }
 
 describe("provider-free environment interface gate registration", () => {
+  test("the live R2 canary explicitly selects remote storage for every object operation", () => {
+    const source = readFileSync(join(REPO_ROOT, "scripts", "e2e-environments.sh"), "utf8");
+    const liveCanary = source.slice(source.indexOf("# Phase 10 (staging)"));
+    const objectCommands = [
+      ...liveCanary.matchAll(/wrangler r2 object (put|get|delete)[^\n]*/g),
+    ].map((match) => match[0]);
+
+    expect(objectCommands.map((command) => command.match(/object (put|get|delete)/)?.[1])).toEqual([
+      "delete",
+      "put",
+      "get",
+    ]);
+    expect(objectCommands.every((command) => command.includes("--remote"))).toBe(true);
+  });
+
   test("PLANTED: the self-test re-enters through an absolute script path", () => {
     const bash = Bun.which("bash");
     if (bash === null) throw new Error("bash is required for the environment self-test");

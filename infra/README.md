@@ -319,8 +319,9 @@ cannot close on the strength of what is here.**
   does not establish that any D1 database, R2 bucket, Durable Object namespace,
   custom domain, deployment, or console wiring currently exists or matches the
   checkout. The private-canary requirement is proven only by a successful live
-  staging receipt that reads the object through the owner binding while the
-  public probe is absent, then removes it; no such receipt is present here.
+  staging receipt that reads the object back through authenticated remote
+  provider storage while the public probe is absent, then removes it; no such
+  receipt is present here.
 
 Validating the topology proves the *contract* is coherent, and generation proves
 the deployable artifact matches it. Neither proves that any named resource
