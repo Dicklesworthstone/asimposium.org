@@ -780,7 +780,28 @@ async function readEventById(db: D1Database, eventId: string): Promise<EventRow>
   if (row.row_digest === null || row.chain_digest === null) {
     backfillRequired("Krater write did not persist complete v2 event digests.");
   }
-  return eventRowWithSafeSequence(row);
+  const safeRow = eventRowWithSafeSequence(row);
+  const expectedRowDigest = await eventEnvelopeRowDigest({
+    eventId: safeRow.id,
+    problemId: safeRow.problem_id,
+    seq: safeRow.seq,
+    type: safeRow.type,
+    objectKind: safeRow.object_kind,
+    objectId: safeRow.object_id,
+    objectVersion: safeRow.object_version,
+    payloadSha256: safeRow.payload_sha256,
+    createdAt: safeRow.created_at,
+    actorFellowId: safeRow.actor_fellow_id,
+    actorSponsorId: safeRow.actor_sponsor_id,
+    actorSessionId: safeRow.actor_session_id,
+    modelStringSelfDeclared: safeRow.model_string_self_declared,
+    harness: safeRow.harness,
+    writerCredentialId: safeRow.writer_credential_id,
+  });
+  if (safeRow.row_digest !== expectedRowDigest) {
+    backfillRequired("the stored v2 row digest disagrees with its immutable event envelope.");
+  }
+  return safeRow;
 }
 
 async function readProjectionByEvent(db: D1Database, event: EventRow): Promise<ProjectionRow> {
@@ -816,6 +837,13 @@ async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<C
     row.chain_version,
     "Krater write did not persist one current-version checkpoint chain.",
   );
+  if (
+    row.root_chain_digest !== event.chain_digest ||
+    row.checkpoint_digest !==
+      (await checkpointDigest(row.problem_id, row.checkpoint_seq, row.root_chain_digest))
+  ) {
+    backfillRequired("the stored v2 checkpoint digest disagrees with its event chain root.");
+  }
   return {
     ...row,
     checkpoint_seq: requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false),
@@ -1117,7 +1145,7 @@ export async function backfillKraterIntegrity(
   ) {
     backfillRequired("the legacy integrity columns are partial; refusing to infer authority.");
   }
-  if (storedBackfill === null) {
+  if (storedBackfill === null && (publicSeq !== 0 || legacyEvents.length !== 0)) {
     backfillRequired("the legacy integrity state is absent; refusing to infer authority.");
   }
   const everyLegacyEventWasDigested = legacyEvents.every(
@@ -2774,12 +2802,32 @@ export async function readEvents(
       afterSeq,
       limit,
     ).all<EventRow>();
-    return result.results.map((rawRow) => {
+    return Promise.all(result.results.map(async (rawRow) => {
       const row = eventRowWithSafeSequence(rawRow);
       if (row.row_digest === null || row.chain_digest === null) {
         backfillRequired("event reads require one complete v2 Krater integrity replay.");
       }
       requireCurrentChainVersion(row.chain_version);
+      const expectedRowDigest = await eventEnvelopeRowDigest({
+        eventId: row.id,
+        problemId: row.problem_id,
+        seq: row.seq,
+        type: row.type,
+        objectKind: row.object_kind,
+        objectId: row.object_id,
+        objectVersion: row.object_version,
+        payloadSha256: row.payload_sha256,
+        createdAt: row.created_at,
+        actorFellowId: row.actor_fellow_id,
+        actorSponsorId: row.actor_sponsor_id,
+        actorSessionId: row.actor_session_id,
+        modelStringSelfDeclared: row.model_string_self_declared,
+        harness: row.harness,
+        writerCredentialId: row.writer_credential_id,
+      });
+      if (row.row_digest !== expectedRowDigest) {
+        backfillRequired("event reads refuse a v2 row digest that disagrees with its envelope.");
+      }
       return {
         eventId: row.id,
         problemId: row.problem_id,
@@ -2800,7 +2848,7 @@ export async function readEvents(
         harness: row.harness,
         writerCredentialId: row.writer_credential_id,
       };
-    });
+    }));
   } catch (error) {
     if (
       error instanceof KraterValidationError ||

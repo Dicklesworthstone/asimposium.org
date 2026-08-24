@@ -41,7 +41,7 @@ const harnessToken = process.env.S2_HARNESS_TOKEN;
 const REVISION = process.env.S2_GIT_HEAD;
 const DIRTY_STATE = process.env.S2_GIT_DIRTY;
 const SOURCE_DIGEST = process.env.S2_SOURCE_DIGEST;
-const SEED = "s2-local-chain-v1";
+const SEED = "s2-local-chain-v2";
 const SCOPE = S2_LOCAL_SCOPE;
 const BINDINGS: S2CostMeasurementReceipt["bindings"] = {
   d1: "DB",
@@ -130,6 +130,7 @@ export interface WriteResult {
   row_digest: string;
   build_digest: string;
   chain_digest: string;
+  chain_version: 2;
   checkpoint_digest: string;
   write_phase_ms: number;
   successful_batch_rows_read: number;
@@ -217,6 +218,7 @@ function requireBoundSettledWrite(write: S2SettledWriteResult): void {
     typeof write.row_digest !== "string" ||
     typeof write.build_digest !== "string" ||
     typeof write.chain_digest !== "string" ||
+    write.chain_version !== 2 ||
     typeof write.checkpoint_digest !== "string" ||
     write.successful_batch_metric_scope !== S2_SUCCESSFUL_BATCH_SCOPE ||
     write.failed_retry_batch_metrics !== S2_FAILED_RETRY_SCOPE ||
@@ -465,6 +467,7 @@ export interface S2StateResult {
   cursor: number;
   counts: Record<string, number>;
   chain_digest: string;
+  chain_version: 2;
   checkpoint_digest: string | null;
   checkpoint_mode: "unsigned-v0";
 }
@@ -673,6 +676,7 @@ function requestDiagnostics(
     row_digest: body === undefined ? null : nullableStringAt(body, "row_digest"),
     build_digest: body === undefined ? null : nullableStringAt(body, "build_digest"),
     chain_digest: body === undefined ? null : nullableStringAt(body, "chain_digest"),
+    chain_version: body === undefined ? null : nullableNumberAt(body, "chain_version"),
     checkpoint_digest: body === undefined ? null : nullableStringAt(body, "checkpoint_digest"),
     write_phase_ms: body === undefined ? null : nullableNumberAt(body, "write_phase_ms"),
     successful_batch_rows_read:
@@ -824,6 +828,10 @@ export function parseS2WriteResult(body: Record<string, unknown>): WriteResult {
     row_digest: stringAt(body, "row_digest"),
     build_digest: stringAt(body, "build_digest"),
     chain_digest: stringAt(body, "chain_digest"),
+    chain_version: (() => {
+      if (safePositiveIntegerAt(body, "chain_version") !== 2) fail("S2_CHAIN_VERSION_INVALID");
+      return 2;
+    })(),
     checkpoint_digest: stringAt(body, "checkpoint_digest"),
     write_phase_ms: numberAt(body, "write_phase_ms"),
     successful_batch_rows_read: numberAt(body, "successful_batch_rows_read"),
@@ -912,6 +920,10 @@ export function parseS2StateResult(body: Record<string, unknown>): S2StateResult
     cursor: safeNonnegativeIntegerAt(body, "cursor"),
     counts: typedCounts,
     chain_digest: stringAt(body, "chain_digest"),
+    chain_version: (() => {
+      if (safePositiveIntegerAt(body, "chain_version") !== 2) fail("S2_CHAIN_VERSION_INVALID");
+      return 2;
+    })(),
     checkpoint_digest: body.checkpoint_digest === null ? null : stringAt(body, "checkpoint_digest"),
     checkpoint_mode: ((): "unsigned-v0" => {
       const mode = stringAt(body, "checkpoint_mode");
@@ -952,6 +964,7 @@ function percentile95(values: readonly number[]): number {
 function canonicalState(state: S2StateResult): string {
   return JSON.stringify({
     chain_digest: state.chain_digest,
+    chain_version: state.chain_version,
     checkpoint_digest: state.checkpoint_digest,
     checkpoint_mode: state.checkpoint_mode,
     counts: state.counts,
@@ -1642,6 +1655,7 @@ async function assertReplay(
   const replay = await request("POST", "/__s2/replay", scenario, { problem_id: problemId });
   assertEqual(replay.status, 200, "S2_PROJECTION_REPLAY_FAILED");
   assertEqual(booleanAt(replay.body, "matches"), true, "S2_PROJECTION_REPLAY_MISMATCH");
+  assertEqual(numberAt(replay.body, "chain_version"), 2, "S2_REPLAY_CHAIN_VERSION_INVALID");
   assertEqual(numberAt(replay.body, "event_count"), expectedEvents, "S2_REPLAY_PAGE_COUNT_INVALID");
 }
 
