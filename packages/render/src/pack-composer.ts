@@ -9,7 +9,7 @@
  * property of one route.
  */
 
-import { byteLength, contentFingerprint, stableStringify } from "./canonical.ts";
+import { byteLength, contentFingerprint, countNewlines, stableStringify } from "./canonical.ts";
 import { codePointCountThroughLimit, ITEM_ID_PATTERN, MAX_BODY_CODE_POINTS } from "./prepare.ts";
 import { renderProjection } from "./render.ts";
 import {
@@ -928,13 +928,19 @@ export function composePack(input: PackComposerInput): ComposedPack {
     let estimate = Math.max(1, floor);
     if (estimate > budgetTokens) return estimate;
     ensureAnchor(signature, omitted, tokenSum);
+    // The json face is pretty-printed at indent 2 with a trailing newline:
+    // `"items": []` costs 2 bytes, while k>=1 elements cost their own
+    // indent-adjusted serialization plus '\n    ' (first) or ',\n    '
+    // (subsequent) separators and the '\n  ]' tail. includedItemBytes holds
+    // Σ R_j where R_j is the indent-adjusted element length; the rest is
+    // closed-form below.
     let quickResult = -1;
     while (true) {
       const bytes =
         anchorBytes +
         (anchorSubstitutedMarker ? -BUDGET_EXCEEDED_MARKER_BYTES : 0) +
-        includedItemBytes -
-        (items.length > 0 ? 1 : 0) +
+        includedItemBytes +
+        (items.length > 0 ? 6 * items.length + 2 : 0) +
         (String(estimate).length - anchorWidth);
       const renderedEstimate = Math.max(floor, Math.ceil(bytes / 4));
       if (renderedEstimate > budgetTokens || renderedEstimate === estimate) {
@@ -942,12 +948,6 @@ export function composePack(input: PackComposerInput): ComposedPack {
         break;
       }
       estimate = renderedEstimate;
-    }
-    if (process.env.ASIMP_DEBUG_ESTIMATE === "1") {
-      const legacy = estimatePackTokens(contentsWith(omitted));
-      console.error(
-        `[est] sig=${signature} k=${items.length} sum=${tokenSum} quick=${quickResult} legacy=${legacy} anchor=${anchorBytes} incl=${includedItemBytes} w=${anchorWidth} sub=${anchorSubstitutedMarker}`,
-      );
     }
     return quickResult;
   };
@@ -965,8 +965,11 @@ export function composePack(input: PackComposerInput): ComposedPack {
       ...itemWithoutTokens,
       tokens: wholeItemTokenUpperBound(itemWithoutTokens, candidate.value.tokens),
     };
-    const candidateByteDelta =
-      byteLength(stableStringify(preparedFaceItemObject(itemWithoutTokens, item.tokens))) + 1;
+    // R_j: the element's bytes as embedded at array depth (indent 4 applied
+    // to every internal newline) — the exact shape the pretty-printed face
+    // embeds.
+    const itemJson = stableStringify(preparedFaceItemObject(itemWithoutTokens, item.tokens));
+    const candidateByteDelta = byteLength(itemJson) + 4 * countNewlines(itemJson);
     items.push(item);
     includedItemBytes += candidateByteDelta;
     includedDeltas.push(candidateByteDelta);

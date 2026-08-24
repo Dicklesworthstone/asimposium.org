@@ -61,3 +61,10 @@ export function contentFingerprint(text: string): string {
 export function byteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
+
+/** Newline count of a pretty-printed fragment, for indent-adjusted byte math. */
+export function countNewlines(text: string): number {
+  let count = 0;
+  for (const character of text) if (character === "\n") count += 1;
+  return count;
+}
