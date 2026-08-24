@@ -196,7 +196,13 @@ ASIMPOSIUM_SMOKE_FELLOW_TOKEN                (secret; required for full agent sm
 Vercel's Preview environment must already hold its Auth.js and service-envelope
 secrets. The pipeline pins `STOA_ORIGIN` to the staging Worker at both build and
 runtime and waits for the preview deployment; it never promotes that preview to
-production.
+production. Before activating this trigger, disconnect the Vercel project's Git
+integration. Otherwise Vercel can start a web build directly from the push and
+race the Worker readiness gate. The pipeline queries the Vercel project before
+deploying and returns blocked exit 78 while a Git link remains; a configuration
+label or operator assertion cannot bypass that provider-state check. This
+ordered CLI preview path supersedes the earlier native-Git preview plan. Launch
+promotion remains a separately owned gate.
 
 Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment

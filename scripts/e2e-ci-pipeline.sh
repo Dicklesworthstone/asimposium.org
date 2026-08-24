@@ -207,7 +207,7 @@ def terminate_group(first_signal: int) -> None:
         os.killpg(child.pid, first_signal)
     except ProcessLookupError:
         return
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 1.0
     while child.poll() is None and time.monotonic() < deadline:
         time.sleep(0.02)
     if child.poll() is None:
@@ -262,7 +262,7 @@ plant_stage() {
     hang)
       trap '' INT TERM HUP
       if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
-        (sleep 3; printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE") &
+        (sleep 5; printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE") &
       fi
       sleep 30
       ;;
@@ -398,6 +398,7 @@ PY
 }
 
 web_deploy() {
+  local project_receipt="$ARTIFACT_DIRECTORY/vercel-project.json"
   local deployment_url_file="$ARTIFACT_DIRECTORY/vercel-deployment-url.txt"
   local raw_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
@@ -406,6 +407,32 @@ web_deploy() {
   require_live_variable VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
   require_live_variable VERCEL_PROJECT_ID || return $?
+  [[ "$VERCEL_ORG_ID" =~ ^(team|user)_[A-Za-z0-9]+$ ]] || return 78
+  [[ "$VERCEL_PROJECT_ID" =~ ^prj_[A-Za-z0-9]+$ ]] || return 78
+
+  curl --fail --silent --show-error \
+    --user-agent "$USER_AGENT" \
+    --connect-timeout 5 --max-time 20 \
+    --header "Authorization: Bearer $VERCEL_TOKEN" \
+    --output "$project_receipt" \
+    "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+  python3 - "$project_receipt" "$VERCEL_PROJECT_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+if not isinstance(document, dict) or document.get("id") != sys.argv[2]:
+    sys.exit(1)
+# A connected Git provider can deploy the web revision concurrently with this
+# ordered pipeline. Absence is the only provider state this gate treats as safe.
+if document.get("link") is not None:
+    sys.exit(78)
+PY
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
 
   vercel deploy "$repository_root" \
     --yes \
