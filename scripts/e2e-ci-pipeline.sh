@@ -33,6 +33,7 @@ CURRENT_STAGE=""
 CURRENT_STAGE_STARTED=""
 CURRENT_WRAPPER_PID=""
 CURRENT_STAGE_RECORDED=0
+NEXT_STAGE_INDEX=0
 
 case "$PIPELINE_TEST_MODE" in
   0 | 1) ;;
@@ -183,13 +184,20 @@ record_delegated_statuses() {
   done
 }
 
-record_remaining_not_run() {
-  local completed_stage="$1" completed_index index timestamp
-  completed_index="$(stage_index "$completed_stage")" || return 1
+record_not_run_from_index() {
+  local first_index="$1" index timestamp
+  [[ "$first_index" =~ ^[0-9]+$ ]] || return 1
+  ((first_index >= 0 && first_index <= ${#STAGES[@]})) || return 1
   timestamp="$(now_iso)"
-  for ((index = completed_index + 1; index < ${#STAGES[@]}; index += 1)); do
+  for ((index = first_index; index < ${#STAGES[@]}; index += 1)); do
     record_stage "${STAGES[$index]}" "not-run" "null" "$timestamp" "$timestamp" || return 1
   done
+}
+
+record_remaining_not_run() {
+  local completed_stage="$1" completed_index
+  completed_index="$(stage_index "$completed_stage")" || return 1
+  record_not_run_from_index "$((completed_index + 1))"
 }
 
 assert_revision_unchanged() {
@@ -260,6 +268,12 @@ on_signal() {
     # run_stage clears its bookkeeping. The prior shape skipped these records
     # in that window and left downstream state ambiguous.
     record_remaining_not_run "$CURRENT_STAGE" || true
+    record_delegated_statuses 1 || true
+  elif ((NEXT_STAGE_INDEX < ${#STAGES[@]})) && [[ -n "$RUN_ID" && -n "$ARTIFACT_DIRECTORY" ]]; then
+    # A signal can also land after one stage clears its bookkeeping but before
+    # the next stage begins. Preserve the same explicit terminal state in that
+    # inter-stage window instead of leaving every remaining stage absent.
+    record_not_run_from_index "$NEXT_STAGE_INDEX" || true
     record_delegated_statuses 1 || true
   fi
   exit "$exit_code"
@@ -1079,7 +1093,7 @@ stage_command() {
 }
 
 run_stage() {
-  local stage="$1" timeout_seconds status finished_at deployment_id observed_at deployment_status
+  local stage="$1" timeout_seconds status finished_at deployment_id observed_at deployment_status completed_index
   local -a command=()
   timeout_seconds="$(timeout_for_stage "$stage")" || return 64
   while IFS= read -r -d '' value; do
@@ -1136,6 +1150,8 @@ run_stage() {
   esac
   CURRENT_STAGE_RECORDED=1
 
+  completed_index="$(stage_index "$stage")" || return 64
+  NEXT_STAGE_INDEX=$((completed_index + 1))
   CURRENT_STAGE=""
   CURRENT_STAGE_STARTED=""
   return "$status"

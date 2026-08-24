@@ -387,6 +387,14 @@ describe("OPS.2b review pipeline orchestration", () => {
     );
   });
 
+  test("signal bookkeeping retains an explicit inter-stage terminal path", () => {
+    const source = readFileSync(PIPELINE, "utf8");
+
+    expect(source).toContain("NEXT_STAGE_INDEX=0");
+    expect(source).toContain('record_not_run_from_index "$NEXT_STAGE_INDEX"');
+    expect(source).toContain("NEXT_STAGE_INDEX=$((completed_index + 1))");
+  });
+
   test("delegated pass evidence without the current revision is refused", () => {
     const unbound = runPipeline("smoke-gallery", "pass", false, {
       ASIMP_CI_GAUNTLET_STATUS: "pass",

@@ -78,7 +78,7 @@ block_phase() {
 # available, the planted command refuses and this self-test cannot return green.
 self_test_remote_interface_gate() {
   local scratch fake_bun fake_bunx fake_curl command_log nested_output nested_status
-  local r2_command_log r2_output r2_status
+  local r2_command_log r2_commands_valid r2_output r2_status
   local supplied scratch_mode scratch_owner retained_scratch retained_scratch_json
   local planted_token="asimp_ag_remote_e2e_canary_1234567890abcdefghijklmnop"
 
@@ -203,12 +203,37 @@ self_test_remote_interface_gate() {
   r2_status=$?
   set -e
 
+  r2_commands_valid="$(python3 - "$r2_command_log" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    object_commands = [
+        line.strip()
+        for line in stream
+        if line.startswith("bunx --bun wrangler r2 object ")
+    ]
+if len(object_commands) != 2:
+    sys.exit(1)
+put = re.fullmatch(
+    r"bunx --bun wrangler r2 object put asimposium-artifacts-staging/(canary-[0-9a-f]{32}\.txt) --remote --pipe",
+    object_commands[0],
+)
+delete = re.fullmatch(
+    r"bunx --bun wrangler r2 object delete asimposium-artifacts-staging/(canary-[0-9a-f]{32}\.txt) --remote",
+    object_commands[1],
+)
+if put is None or delete is None or put.group(1) != delete.group(1):
+    sys.exit(1)
+print("1")
+PY
+)" || r2_commands_valid=0
+
   if [ "$r2_status" -ne 1 ] ||
     [[ "$r2_output" != *'"code":"R2_CANARY_WRITE_FAILED"'* ]] ||
     [[ "$r2_output" == *"$planted_token"* ]] ||
     [ ! -f "$r2_command_log" ] ||
-    [[ "$(grep -Fc 'bunx --bun wrangler r2 object put ' "$r2_command_log")" != "1" ]] ||
-    [[ "$(grep -Fc 'bunx --bun wrangler r2 object delete ' "$r2_command_log")" != "1" ]]; then
+    [ "$r2_commands_valid" != "1" ]; then
     printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"R2_AMBIGUOUS_WRITE_CLEANUP_PLANT_FAILED","detail":"a failed R2 create did not issue exactly one compensating delete"}'
     return 1
   fi
