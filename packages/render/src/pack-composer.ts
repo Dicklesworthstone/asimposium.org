@@ -928,6 +928,7 @@ export function composePack(input: PackComposerInput): ComposedPack {
     let estimate = Math.max(1, floor);
     if (estimate > budgetTokens) return estimate;
     ensureAnchor(signature, omitted, tokenSum);
+    let quickResult = -1;
     while (true) {
       const bytes =
         anchorBytes +
@@ -937,10 +938,18 @@ export function composePack(input: PackComposerInput): ComposedPack {
         (String(estimate).length - anchorWidth);
       const renderedEstimate = Math.max(floor, Math.ceil(bytes / 4));
       if (renderedEstimate > budgetTokens || renderedEstimate === estimate) {
-        return renderedEstimate;
+        quickResult = renderedEstimate;
+        break;
       }
       estimate = renderedEstimate;
     }
+    if (process.env.ASIMP_DEBUG_ESTIMATE === "1") {
+      const legacy = estimatePackTokens(contentsWith(omitted));
+      console.error(
+        `[est] sig=${signature} k=${items.length} sum=${tokenSum} quick=${quickResult} legacy=${legacy} anchor=${anchorBytes} incl=${includedItemBytes} w=${anchorWidth} sub=${anchorSubstitutedMarker}`,
+      );
+    }
+    return quickResult;
   };
 
   for (const [index, candidate] of visible.entries()) {
