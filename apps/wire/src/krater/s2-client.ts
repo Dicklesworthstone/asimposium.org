@@ -937,9 +937,13 @@ export function parseS2EventPageResult(body: Record<string, unknown>): S2EventPa
   const rows = body.events;
   if (!Array.isArray(rows)) fail("S2_RESPONSE_INVALID");
   return {
-    sequences: (rows as unknown[]).map((row: unknown) =>
-      safePositiveIntegerAt(asRecord(row), "seq"),
-    ),
+    sequences: (rows as unknown[]).map((row: unknown) => {
+      const event = asRecord(row);
+      if (safePositiveIntegerAt(event, "chainVersion") !== 2) {
+        fail("S2_CHAIN_VERSION_INVALID");
+      }
+      return safePositiveIntegerAt(event, "seq");
+    }),
     nextCursor: safeNonnegativeIntegerAt(body, "next_cursor"),
     hasMore: booleanAt(body, "has_more"),
   };
