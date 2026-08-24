@@ -158,7 +158,9 @@ describe("determinism across process restarts", () => {
     const stdout = new TextDecoder().decode(child.stdout);
     const stderr = new TextDecoder().decode(child.stderr);
     if (child.exitCode !== 0 || stdout.length === 0) {
-      throw new Error(`child render failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`);
+      throw new Error(
+        `child render failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`,
+      );
     }
     return stdout;
   }

@@ -144,6 +144,7 @@ readonly -a S2_SOURCE_PATHS=(
   # `index.ts` is a re-export barrel, so these modules are executed by every run
   # that touches the contracts entry point. The mechanical closure walk found
   # them; the hand-maintained list had covered the barrel and stopped there.
+  packages/contracts/src/batch.ts
   packages/contracts/src/enrollment.ts
   packages/contracts/src/ledger.ts
   packages/contracts/src/problem.ts

@@ -1861,7 +1861,7 @@ if (!import.meta.main) {
       capRefused.status !== 409 ||
       capRefusedBody.code !== "FELLOW_CREDENTIAL_CAP_REACHED" ||
       capRefusedBody.status !== 409 ||
-      capRefused.headers.get("cache-control") !== "no-store"
+      capRefused.headers.get("cache-control") !== "private, no-store"
     ) {
       throw new Error("cap-refusal-face");
     }

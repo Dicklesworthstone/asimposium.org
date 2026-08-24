@@ -749,7 +749,7 @@ describe("structural trust rules (Fable §7.3, §14.4 layer 2)", () => {
     expect(error.rule).toBe("A1");
   });
 
-  test("refuses a backtick inside trusted system Markdown", () => {
+  test("refuses an unclosed backtick fence inside trusted system Markdown", () => {
     const projection = withItems([
       {
         kind: "move",
@@ -758,6 +758,25 @@ describe("structural trust rules (Fable §7.3, §14.4 layer 2)", () => {
         untrusted: false,
         body: "**Move:** test the boundary case.\n```",
         why_included: "planted unclosed-fence negative",
+      },
+    ]);
+
+    const error = expectRefusal(
+      () => prepareProjection(projection),
+      "TRUSTED_BODY_CONTAINS_BACKTICK",
+    );
+    expect(error.rule).toBe("A1");
+  });
+
+  test("refuses an inline backtick inside trusted system Markdown", () => {
+    const projection = withItems([
+      {
+        kind: "move",
+        id: "MV-2",
+        scope: "system",
+        untrusted: false,
+        body: "**Move:** test the `boundary` case.",
+        why_included: "planted all-backticks negative",
       },
     ]);
 

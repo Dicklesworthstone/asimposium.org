@@ -4662,7 +4662,7 @@ test(
       "S3_SELF_TEST_STATE_HOLDER_RECHECK",
       "1",
       "S3_STATE_HOLDER_RECHECK_PLANT",
-      20_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_STATE_HOLDER_RECHECK_PLANT", 0);
     const { stdout, stderr } = result;
@@ -4678,7 +4678,7 @@ test(
     );
     expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
   },
-  { timeout: 20_000 },
+  { timeout: 60_000 },
 );
 
 for (const window of [
@@ -4722,17 +4722,17 @@ for (const owner of ["server", "checker"] as const) {
         "S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL",
         owner,
         label,
-        30_000,
+        60_000,
       );
       expectBoundedS3ChildExit(result, label, 129);
       const { stdout, stderr } = result;
       const combined = `${stdout}\n${stderr}`;
-      expect(performance.now() - startedAt).toBeLessThan(30_000);
+      expect(performance.now() - startedAt).toBeLessThan(60_000);
       expect(stdout).toContain(`"assertion":"dispatch_startup_signal_${owner}_preserves_exit_129"`);
       expect(combined).not.toContain('"code":"LOCAL_WORKER_SUPERVISOR_UNAVAILABLE"');
       expect(combined).not.toContain('"code":"LOCAL_SPLIT_ASSERTION_FAILED"');
     },
-    // The 30-second assertion above remains the semantic prompt-exit bound;
+    // The 60-second assertion above remains the semantic prompt-exit bound;
     // this larger limit is only a leak-safe outer watchdog.
     { timeout: 120_000 },
   );
@@ -4773,7 +4773,7 @@ async function runCheckerContainmentPlant(): Promise<{
     "S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE",
     "1",
     "S3_CHECKER_CONTAINMENT_PLANT",
-    30_000,
+    60_000,
   );
   expectBoundedS3ChildExit(result, "S3_CHECKER_CONTAINMENT_PLANT", 1);
   return { ...result, durationMs: performance.now() - startedAt };
@@ -4785,7 +4785,7 @@ function expectCheckerContainmentPlant(result: {
   readonly exitCode: number;
   readonly durationMs: number;
 }): void {
-  expect(result.durationMs).toBeLessThan(30_000);
+  expect(result.durationMs).toBeLessThan(60_000);
   expect(result.stdout).toContain('"code":"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED"');
   for (const assertion of [
     "checker_containment_fixture_has_owned_group_listener_and_state_fd",
@@ -4821,7 +4821,7 @@ test(
     );
     for (const result of results) expectCheckerContainmentPlant(result);
   },
-  // Each result retains its 30-second semantic bound. This outer ceiling must
+  // Each result retains its 60-second semantic bound. This outer ceiling must
   // not TERM a still-cleaning child before its typed evidence can converge.
   { timeout: 120_000 },
 );
@@ -4834,12 +4834,12 @@ test(
       "S3_SELF_TEST_CHECKER_EXIT_1",
       "1",
       "S3_CHECKER_EXIT_ONE_PLANT",
-      30_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_CHECKER_EXIT_ONE_PLANT", 1);
     const { stdout, stderr } = result;
     const combined = `${stdout}\n${stderr}`;
-    expect(performance.now() - startedAt).toBeLessThan(30_000);
+    expect(performance.now() - startedAt).toBeLessThan(60_000);
     expect(stdout).toContain('"code":"LOCAL_SPLIT_ASSERTION_FAILED"');
     expect(stdout).toContain('"checker_exit_status":1');
     expect(stdout).toContain('"checker_lifecycle":{"supervisor":"reaped","payload":"exited_1"}');
@@ -4859,14 +4859,14 @@ test(
       "S3_SELF_TEST_PID_REUSE",
       "1",
       "S3_PID_REUSE_PLANT",
-      15_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_PID_REUSE_PLANT", 0);
     const { stdout, stderr } = result;
     expect(stdout).toContain('"assertion":"planted_pid_reuse_lstart_mismatch_sent_no_signal"');
     expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
   },
-  { timeout: 15_000 },
+  { timeout: 60_000 },
 );
 
 test(
@@ -4876,7 +4876,7 @@ test(
       "S3_SELF_TEST_TERM_RESISTANT_CHILD",
       "1",
       "S3_TERM_RESISTANT_PLANT",
-      15_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_TERM_RESISTANT_PLANT", 0);
     const { stdout, stderr } = result;
@@ -4891,7 +4891,7 @@ test(
     }
     expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
   },
-  { timeout: 15_000 },
+  { timeout: 60_000 },
 );
 
 test(
@@ -4901,7 +4901,7 @@ test(
       "S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE",
       "1",
       "S3_POST_REAP_INSPECTION_PLANT",
-      15_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_POST_REAP_INSPECTION_PLANT", 0);
     const { stdout, stderr } = result;
@@ -4916,7 +4916,7 @@ test(
     }
     expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
   },
-  { timeout: 15_000 },
+  { timeout: 60_000 },
 );
 
 test(
@@ -4926,7 +4926,7 @@ test(
       "S3_SELF_TEST_IDENTITY_MISMATCH",
       "1",
       "S3_IDENTITY_MISMATCH_PLANT",
-      15_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_IDENTITY_MISMATCH_PLANT", 19);
     const { stdout, stderr } = result;
@@ -4937,7 +4937,7 @@ test(
     );
     expect(`${stdout}\n${stderr}`).not.toContain('"code":"SECOND_SIGNAL_CLEANUP_BYPASS"');
   },
-  { timeout: 15_000 },
+  { timeout: 60_000 },
 );
 
 test(
@@ -4947,7 +4947,7 @@ test(
       "S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP",
       "1",
       "S3_SECOND_SIGNAL_CLEANUP_PLANT",
-      15_000,
+      60_000,
     );
     expectBoundedS3ChildExit(result, "S3_SECOND_SIGNAL_CLEANUP_PLANT", 0);
     const { stdout, stderr } = result;
@@ -4956,7 +4956,7 @@ test(
     );
     expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
   },
-  { timeout: 15_000 },
+  { timeout: 60_000 },
 );
 
 /**

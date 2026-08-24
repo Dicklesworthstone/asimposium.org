@@ -729,11 +729,20 @@ process_group_of() {
 # an unchecked group TERM is how a runner kills its own parent shell, or a
 # stranger's process once the pid has been reaped and the id reused.
 owns_process_group() {
-  local pid="$1" pgid mine
-  pgid="$(process_group_of "$pid")" || return 1
-  [[ "$pgid" == "$pid" ]] || return 1
-  mine="$(process_group_of "$$")" || return 1
-  [[ "$pgid" != "$mine" ]]
+  local pid="$1" pgid mine deadline=""
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$pid" != "$$" ]] || return 1
+  deadline="$(transient_retry_deadline_us)" || return 1
+  while :; do
+    pgid="$(process_group_of "$pid")" || pgid=""
+    mine="$(process_group_of "$$")" || mine=""
+    if [[ "$pgid" == "$pid" && -n "$mine" && "$pgid" != "$mine" ]]; then
+      return 0
+    fi
+    transient_retry_deadline_elapsed "$deadline" && break
+    sleep 0.02
+  done
+  return 1
 }
 
 # Live (non-zombie) members of a process group. Non-zero means *unknown*, which is
@@ -1751,7 +1760,6 @@ start_pinned_supervisor() {
   if ((use_private_handoff == 1)); then
     private_workerd_handoff_fd_is_ambient_closed || return 1
   fi
-  capture_deadline="$(transient_retry_deadline_us)" || return 1
   status_auth="$(new_status_authenticator)" || return 1
   marker="$(new_supervisor_marker)" || return 1
   begin_lifecycle_critical || return 1
@@ -1865,12 +1873,14 @@ start_pinned_supervisor() {
   # shell just forked by us. A first process-table observation can race process
   # creation, so both absence and unavailable inspection are retried here. No
   # signal is authorized if the bounded capture never succeeds.
+  local capture_deadline
+  capture_deadline=$((SECONDS + SUPERVISOR_STOP_DEADLINE_SECONDS))
   while :; do
     identity_status=0
     PROVISIONAL_IDENTITY="$(process_identity "$PROVISIONAL_PID" "$PROVISIONAL_MARKER")" || identity_status=$?
     if ((identity_status == 0)); then break; fi
     PROVISIONAL_IDENTITY=""
-    transient_retry_deadline_elapsed "$capture_deadline" && break
+    ((SECONDS >= capture_deadline)) && break
     sleep 0.02
   done
   if ((identity_status != 0)) || [[ -z "$PROVISIONAL_IDENTITY" ]]; then

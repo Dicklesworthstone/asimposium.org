@@ -288,7 +288,9 @@ describe("stable-prefix composition", () => {
     const stdout = new TextDecoder().decode(child.stdout);
     const stderr = new TextDecoder().decode(child.stderr);
     if (child.exitCode !== 0 || stdout.length === 0) {
-      throw new Error(`fresh composer failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`);
+      throw new Error(
+        `fresh composer failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`,
+      );
     }
 
     const fresh = stdout;
@@ -1188,6 +1190,9 @@ describe("the composer surfaces renderer grammar defects as its own typed error"
     expect(errorCode(() => composePack(input({ candidates: [systemItem("```text")] })))).toBe(
       "INVALID_CANDIDATE",
     );
+    expect(
+      errorCode(() => composePack(input({ candidates: [systemItem("use `plain` prose")] }))),
+    ).toBe("INVALID_CANDIDATE");
   });
 
   test("refuses a trusted system body whose tilde fence is never closed", () => {

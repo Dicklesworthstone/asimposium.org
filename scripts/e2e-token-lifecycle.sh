@@ -1599,7 +1599,7 @@ CONTROLLER_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
 PORT="$(${BUN} --eval '
 const server = Bun.serve({ port: 0, fetch: () => new Response("unused") });
 console.log(server.port);
-server.stop();
+server.stop(true);
 ')"
 [[ "${PORT}" =~ ^[0-9]+$ ]] || { fail "TOKEN_LIFECYCLE_PORT_UNAVAILABLE"; exit 1; }
 readonly ORIGIN="http://127.0.0.1:${PORT}"
