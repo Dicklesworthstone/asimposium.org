@@ -17,8 +17,9 @@
 # Diagnostics are one NDJSON record per phase on stdout: environment, phase,
 # status, code, duration, and a reproduction command. Never a secret, a
 # credential, a cookie, a token, a service signature, or a database row. The
-# script tests only for the PRESENCE of credential variables and never prints,
-# logs, exports, or interpolates their values.
+# credential gate tests only for PRESENCE. Authorized downstream tools read the
+# values from their environment, while this wrapper never prints them or places
+# secret values in command arguments.
 
 set -euo pipefail
 
@@ -119,7 +120,7 @@ self_test_remote_interface_gate() {
     'printf "%s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
     'case "$*" in' \
     '  "infra/validate-scaffold.mjs"|"infra/generate-wrangler.mjs --check"|"infra/generate-wrangler.test.mjs") exit 0 ;;' \
-    '  "infra/validate-environments.mjs") printf "{\\\"preview_environment\\\":\\\"staging\\\"}\\n"; exit 0 ;;' \
+    '  "infra/validate-environments.mjs") printf "{\\\"suite\\\":\\\"environment-topology-static\\\",\\\"status\\\":\\\"pass\\\",\\\"vercel\\\":{\\\"preview_environment\\\":\\\"staging\\\"},\\\"environments\\\":{\\\"staging\\\":{\\\"kind\\\":\\\"remote\\\",\\\"is_preview\\\":true,\\\"may_hold_production_keys\\\":false,\\\"worker_origin\\\":\\\"https://a-staging.asimposium.org\\\"}}}\\n"; exit 0 ;;' \
     '  *) exit 93 ;;' \
     'esac' >"$fake_bun"
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
@@ -215,17 +216,41 @@ fi
 # serves a preview from. Live wiring stays unobserved until a deployed check
 # reports it.
 # ---------------------------------------------------------------------------
-TOPOLOGY_JSON="$(bun infra/validate-environments.mjs)"
-case "$TOPOLOGY_JSON" in
-  *'"preview_environment":"staging"'*)
-    emit "preview-key-isolation" "pass" "OK" \
-      "repository topology designates staging as the preview tier; the topology validator rejects a preview that targets production, holds production keys, or shares a key id. Live Vercel preview wiring is not observed by this check"
-    ;;
-  *)
-    fail_phase "preview-key-isolation" "PREVIEW_WIRING_UNCONFIRMED" \
-      "Repository topology does not designate a non-production preview tier."
-    ;;
-esac
+TOPOLOGY_STATUS=0
+TOPOLOGY_JSON="$(bun infra/validate-environments.mjs)" || TOPOLOGY_STATUS=$?
+STAGING_WORKER_ORIGIN="$(printf '%s' "$TOPOLOGY_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    document = json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    sys.exit(1)
+if not isinstance(document, dict):
+    sys.exit(1)
+vercel = document.get("vercel")
+environments = document.get("environments")
+staging = environments.get("staging") if isinstance(environments, dict) else None
+if (
+    document.get("suite") != "environment-topology-static"
+    or document.get("status") != "pass"
+    or not isinstance(vercel, dict)
+    or vercel.get("preview_environment") != "staging"
+    or not isinstance(staging, dict)
+    or staging.get("kind") != "remote"
+    or staging.get("is_preview") is not True
+    or staging.get("may_hold_production_keys") is not False
+    or staging.get("worker_origin") != "https://a-staging.asimposium.org"
+):
+    sys.exit(1)
+print(staging["worker_origin"])
+')" || TOPOLOGY_STATUS=$?
+if [ "$TOPOLOGY_STATUS" -ne 0 ]; then
+  fail_phase "preview-key-isolation" "PREVIEW_WIRING_UNCONFIRMED" \
+    "Repository topology does not structurally designate the non-production staging preview tier."
+fi
+emit "preview-key-isolation" "pass" "OK" \
+  "repository topology designates staging as the preview tier; the topology validator rejects a preview that targets production, holds production keys, or shares a key id. Live Vercel preview wiring is not observed by this check"
 
 # ---------------------------------------------------------------------------
 # Generated Wrangler configuration must still match the topology. A hand-edited
@@ -430,19 +455,35 @@ migrate_apply_once() {
       printf '%s' "$output"
       return 0
     fi
-    sleep 10
+    if [ "$attempt" -lt 3 ]; then sleep 10; fi
   done
   printf '%s' "$output"
   return 1
 }
 MIGRATE_FIRST="$(migrate_apply_once)" || MIGRATE_FIRST_STATUS=$?
 migration_budget_exhausted() {
-  case "$1" in
-    *'"code":"REMOTE_OBSERVATION_DEADLINE_EXCEEDED"'*|*'"code":"REMOTE_D1_TRANSPORT_TIMEOUT"'*|*'"code":"REMOTE_D1_CATALOG_UNREADABLE"'*|*'"code":"REMOTE_TARGET_UNDESCRIBED"'*)
-      return 0
-        ;;
-  esac
-  return 1
+  local receipt="$1"
+  printf '%s' "$receipt" | python3 -c '
+import json
+import sys
+
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if len(lines) != 1:
+    sys.exit(1)
+try:
+    document = json.loads(lines[0])
+except json.JSONDecodeError:
+    sys.exit(1)
+if not isinstance(document, dict) or document.get("status") != "fail":
+    sys.exit(1)
+if document.get("code") not in {
+    "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
+    "REMOTE_D1_TRANSPORT_TIMEOUT",
+    "REMOTE_D1_CATALOG_UNREADABLE",
+    "REMOTE_TARGET_UNDESCRIBED",
+}:
+    sys.exit(1)
+'
 }
 if [ "${MIGRATE_FIRST_STATUS:-0}" -ne 0 ]; then
   # A hard observation budget that cannot fit this machine's provider latency
@@ -493,7 +534,6 @@ else:
 ' "$mode"
 }
 
-STAGING_WORKER_ORIGIN="$(printf '%s' "$TOPOLOGY_JSON" | grep -o '"worker_origin":"https://a-staging\.asimposium\.org"' | head -1 | cut -d'"' -f4)"
 if [ -z "$STAGING_WORKER_ORIGIN" ]; then
   fail_phase "health-and-smoke" "STAGING_ORIGIN_NOT_IN_TOPOLOGY" \
     "The validated topology does not declare the staging worker origin."
@@ -518,8 +558,27 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 10 (staging) — the private R2 canary: owner-readable, publicly absent.
 # ---------------------------------------------------------------------------
+CANARY_PRESENT=1
 CANARY_KEY="canary-$(date +%s)-$$.txt"
 CANARY_BODY="ops3-private-canary-$RANDOM$RANDOM"
+cleanup_private_canary() {
+  if [ "$CANARY_PRESENT" -eq 0 ]; then return 0; fi
+  if bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1; then
+    CANARY_PRESENT=0
+    return 0
+  fi
+  return 1
+}
+on_canary_signal() {
+  local exit_code="$1"
+  trap - EXIT INT TERM HUP
+  cleanup_private_canary || true
+  exit "$exit_code"
+}
+trap 'cleanup_private_canary || true' EXIT
+trap 'on_canary_signal 130' INT
+trap 'on_canary_signal 143' TERM
+trap 'on_canary_signal 129' HUP
 if printf '%s' "$CANARY_BODY" | bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
   :
 else
@@ -536,11 +595,12 @@ PUBLIC_CANARY_STATUS="$(curl --silent --show-error --output /dev/null \
 STAGING_DOMAINS_STATUS=0
 STAGING_DOMAINS="$(bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)" || STAGING_DOMAINS_STATUS=$?
 CANARY_DELETE_STATUS=0
-bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1 || CANARY_DELETE_STATUS=$?
+cleanup_private_canary || CANARY_DELETE_STATUS=$?
 if [ "$CANARY_DELETE_STATUS" -ne 0 ]; then
   fail_phase "r2-private-canary" "R2_CANARY_DELETE_FAILED" \
     "The private staging canary could not be removed after the observation attempts."
 fi
+trap - EXIT INT TERM HUP
 if [ "$CANARY_READ_STATUS" -ne 0 ]; then
   fail_phase "r2-private-canary" "R2_CANARY_READ_FAILED" \
     "The private staging canary could not be read back through the owner binding."

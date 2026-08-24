@@ -233,6 +233,9 @@ caught = None
 
 def terminate_group(first_signal: int) -> None:
     def group_exists() -> bool:
+        # Reap an exited group leader before probing the process group. A live
+        # ignoring descendant keeps the group addressable after that reap.
+        child.poll()
         try:
             os.killpg(child.pid, 0)
         except ProcessLookupError:
@@ -713,7 +716,7 @@ require_stage_prefix() {
   local expected_csv="$1"
   local evidence="$ARTIFACT_DIRECTORY/ci-pipeline.jsonl"
   [[ -f "$evidence" && ! -L "$evidence" ]] || return 64
-  python3 - "$evidence" "$RUN_ID" "$REVISION" "$expected_csv" "$RUNNER" <<'PY'
+  python3 - "$evidence" "$RUN_ID" "$REVISION" "$expected_csv" "$RUNNER" "$RUNNER_BUILD_ID" <<'PY'
 import json
 import sys
 
@@ -721,8 +724,9 @@ records = []
 with open(sys.argv[1], encoding="utf-8") as stream:
     for line in stream:
         value = json.loads(line)
-        if value.get("run_id") == sys.argv[2] and value.get("revision") == sys.argv[3]:
-            records.append(value)
+        if value.get("run_id") != sys.argv[2] or value.get("revision") != sys.argv[3]:
+            sys.exit(64)
+        records.append(value)
 runner_records = [value for value in records if value.get("record") == "runner"]
 if any(value.get("suite") != "ci-pipeline" for value in records):
     sys.exit(64)
@@ -730,6 +734,7 @@ if (
     len(runner_records) != 1
     or runner_records[0].get("status") != "observed"
     or runner_records[0].get("runner") != sys.argv[5]
+    or runner_records[0].get("runner_build_id") != (sys.argv[6] or None)
 ):
     sys.exit(64)
 observed = [
@@ -801,7 +806,6 @@ run_stage() {
   run_bounded "$timeout_seconds" "${command[@]}"
   status=$?
   finished_at="$(now_iso)"
-  CURRENT_STAGE_RECORDED=1
 
   if [[ "$status" -eq 0 ]]; then
     assert_revision_unchanged || status=$?
@@ -843,6 +847,7 @@ run_stage() {
     129 | 130 | 143) record_stage "$stage" "cancelled" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
     *) record_stage "$stage" "fail" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
   esac
+  CURRENT_STAGE_RECORDED=1
 
   CURRENT_STAGE=""
   CURRENT_STAGE_STARTED=""
