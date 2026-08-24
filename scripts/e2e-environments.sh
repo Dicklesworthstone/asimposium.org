@@ -41,6 +41,17 @@ STARTED_AT_NS=$(date +%s000000000 2>/dev/null || echo 0)
 BLOCKERS=()
 readonly WEB_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 
+# Static validators, HTTP probes, and receipt parsers need no deployment
+# authority. Preserve these values as shell variables for the narrow commands
+# below, but do not let every child inherit them merely because the caller
+# supplied a complete staging environment.
+for scoped_name in \
+  CLOUDFLARE_API_TOKEN \
+  ASIMP_D1_DATABASE_ID_STAGING \
+  ASIMP_STAGING_SERVICE_ENVELOPE_KEYS; do
+  if [ -n "${!scoped_name:-}" ]; then export -n "$scoped_name"; fi
+done
+
 now_ms() { echo $(( $(date +%s) * 1000 )); }
 
 # emit <phase> <status> <code> <detail>
@@ -445,7 +456,11 @@ fi
 # precedence so an operator-set ASIMP_ACCOUNT_ID always wins.
 export ASIMP_ACCOUNT_ID="${ASIMP_ACCOUNT_ID:-$CLOUDFLARE_ACCOUNT_ID}"
 RESOLVE_STATUS=0
-RESOLVE_OUTPUT="$(bun infra/resolve-wrangler-deploy.mjs --env staging --write 2>&1)" || RESOLVE_STATUS=$?
+RESOLVE_OUTPUT="$(
+  ASIMP_D1_DATABASE_ID_STAGING="$ASIMP_D1_DATABASE_ID_STAGING" \
+    ASIMP_STAGING_SERVICE_ENVELOPE_KEYS="$ASIMP_STAGING_SERVICE_ENVELOPE_KEYS" \
+    bun infra/resolve-wrangler-deploy.mjs --env staging --write 2>&1
+)" || RESOLVE_STATUS=$?
 if [ "${RESOLVE_STATUS:-0}" -eq 0 ] && printf '%s' "$RESOLVE_OUTPUT" | python3 -c '
 import json
 import sys
@@ -486,7 +501,7 @@ fi
 migrate_apply_once() {
   local attempt output
   for attempt in 1 2 3; do
-    if output="$(bun infra/migrate.mjs --env staging --resolved-database-id "$ASIMP_D1_DATABASE_ID_STAGING" --apply 2>&1)" && \
+    if output="$(CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" bun infra/migrate.mjs --env staging --resolved-database-id "$ASIMP_D1_DATABASE_ID_STAGING" --apply 2>&1)" && \
       migration_receipt_matches pass staging "$output"; then
       printf '%s' "$output"
       return 0
@@ -599,7 +614,8 @@ CANARY_KEY="canary-$(date +%s)-$$.txt"
 CANARY_BODY="ops3-private-canary-$RANDOM$RANDOM"
 cleanup_private_canary() {
   if [ "$CANARY_PRESENT" -eq 0 ]; then return 0; fi
-  if bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1; then
+  if CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+    bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1; then
     CANARY_PRESENT=0
     return 0
   fi
@@ -615,13 +631,15 @@ trap 'cleanup_private_canary || true' EXIT
 trap 'on_canary_signal 130' INT
 trap 'on_canary_signal 143' TERM
 trap 'on_canary_signal 129' HUP
-if printf '%s' "$CANARY_BODY" | bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
+if printf '%s' "$CANARY_BODY" | CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+  bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
   :
 else
   fail_phase "r2-private-canary" "R2_CANARY_WRITE_FAILED" "The private staging bucket refused the canary write."
 fi
 CANARY_READ_STATUS=0
-CANARY_READ="$(bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)" || CANARY_READ_STATUS=$?
+CANARY_READ="$(CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+  bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)" || CANARY_READ_STATUS=$?
 # Probe while the canary still exists. Deleting it first would make a 404
 # inevitable and turn the public-absence assertion into a vacuous green.
 PUBLIC_CANARY_CURL_STATUS=0
@@ -629,7 +647,8 @@ PUBLIC_CANARY_STATUS="$(curl --silent --show-error --output /dev/null \
   --user-agent "$WEB_USER_AGENT" --connect-timeout 5 --max-time 15 \
   --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null)" || PUBLIC_CANARY_CURL_STATUS=$?
 STAGING_DOMAINS_STATUS=0
-STAGING_DOMAINS="$(bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)" || STAGING_DOMAINS_STATUS=$?
+STAGING_DOMAINS="$(CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+  bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)" || STAGING_DOMAINS_STATUS=$?
 CANARY_DELETE_STATUS=0
 cleanup_private_canary || CANARY_DELETE_STATUS=$?
 if [ "$CANARY_DELETE_STATUS" -ne 0 ]; then

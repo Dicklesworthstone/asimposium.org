@@ -1252,7 +1252,7 @@ describe("migration 0005 forward-applies onto an exact 0004 database", () => {
   });
 });
 
-describe("migration 0039 replays an exact completed v1 history into one v2 authority", () => {
+describe("migrations 0039-0040 replay an exact completed v1 history into one v2 authority", () => {
   const MIGRATIONS = resolve(import.meta.dir, "..", "..", "..", "..", "db", "migrations");
 
   interface LocalPreparedStatement {
@@ -1421,6 +1421,9 @@ describe("migration 0039 replays an exact completed v1 history into one v2 autho
         .run(problemId, legacyChainDigest, legacyCheckpointDigest, createdAt);
 
       sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
+      sqlite.run(
+        readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8"),
+      );
       expect(
         sqlite
           .query(
@@ -1675,6 +1678,9 @@ describe("migration 0039 replays an exact completed v1 history into one v2 autho
         )
         .run(problemId, root, checkpoint, createdAt);
       sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
+      sqlite.run(
+        readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8"),
+      );
 
       const insertEventSidecar = (
         candidateEventId: string,
@@ -1722,6 +1728,111 @@ describe("migration 0039 replays an exact completed v1 history into one v2 autho
         count: 0,
       });
       expect(() => insertCheckpointSidecar(1, root)).not.toThrow();
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  test("terminal v2 sidecars cannot skip an earlier event or checkpoint sequence", () => {
+    const sqlite = new Database(":memory:");
+    try {
+      for (const migration of readdirSync(MIGRATIONS)
+        .filter((name) => /^00(?:0[1-9]|[12][0-9]|3[0-8])_.*\.sql$/u.test(name))
+        .sort()) {
+        sqlite.run(readFileSync(join(MIGRATIONS, migration), "utf8"));
+      }
+      const createdAt = "2026-08-24T18:00:00.000Z";
+      const problemId = "P-v2-contiguous";
+      const event1 = "E-v2-contiguous-1";
+      const event2 = "E-v2-contiguous-2";
+      const root1 = "11".repeat(32);
+      const root2 = "22".repeat(32);
+      sqlite
+        .query(
+          "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES (?, 1, ?, ?, ?)",
+        )
+        .run(problemId, createdAt, createdAt, root1);
+      sqlite
+        .query(
+          `INSERT INTO krater_integrity_backfill
+             (problem_id, state, legacy_event_count, completed_at)
+           VALUES (?, 'complete', 1, ?)`,
+        )
+        .run(problemId, createdAt);
+      sqlite
+        .query(
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version,
+              payload_sha256, created_at, row_digest, chain_digest)
+           VALUES (?, ?, 1, 'claim.created', 'claim', 'C-v2-contiguous-1', 1, ?, ?, ?, ?)`,
+        )
+        .run(event1, problemId, "33".repeat(32), createdAt, "44".repeat(32), root1);
+      sqlite
+        .query(
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
+              checkpoint_version, checkpoint_mode, created_at)
+           VALUES (?, 1, ?, ?, 1, 'unsigned-v0', ?)`,
+        )
+        .run(problemId, root1, "55".repeat(32), createdAt);
+      sqlite
+        .query("UPDATE problems SET public_seq = 2, chain_digest = ? WHERE id = ?")
+        .run(root2, problemId);
+      sqlite
+        .query(
+          "UPDATE krater_integrity_backfill SET legacy_event_count = 2 WHERE problem_id = ?",
+        )
+        .run(problemId);
+      sqlite
+        .query(
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version,
+              payload_sha256, created_at, row_digest, chain_digest)
+           VALUES (?, ?, 2, 'claim.created', 'claim', 'C-v2-contiguous-2', 1, ?, ?, ?, ?)`,
+        )
+        .run(event2, problemId, "66".repeat(32), createdAt, "77".repeat(32), root2);
+      sqlite
+        .query(
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
+              checkpoint_version, checkpoint_mode, created_at)
+           VALUES (?, 2, ?, ?, 1, 'unsigned-v0', ?)`,
+        )
+        .run(problemId, root2, "88".repeat(32), createdAt);
+      sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
+      sqlite.run(
+        readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8"),
+      );
+
+      const insertEventSidecar = (eventId: string, sequence: number, root: string): void => {
+        sqlite
+          .query(
+            `INSERT INTO event_chain_v2
+               (event_id, problem_id, seq, row_digest, chain_digest, chain_version)
+             VALUES (?, ?, ?, ?, ?, 2)`,
+          )
+          .run(eventId, problemId, sequence, "99".repeat(32), root);
+      };
+      expect(() => insertEventSidecar(event2, 2, root2)).toThrow(
+        "KRATER_CHAIN_V2_PREDECESSOR_MISSING",
+      );
+      expect(() => insertEventSidecar(event1, 1, root1)).not.toThrow();
+      expect(() => insertEventSidecar(event2, 2, root2)).not.toThrow();
+
+      const insertCheckpointSidecar = (sequence: number, root: string): void => {
+        sqlite
+          .query(
+            `INSERT INTO checkpoint_chain_v2
+               (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, chain_version)
+             VALUES (?, ?, ?, ?, 2)`,
+          )
+          .run(problemId, sequence, root, "aa".repeat(32));
+      };
+      expect(() => insertCheckpointSidecar(2, root2)).toThrow(
+        "KRATER_CHECKPOINT_CHAIN_V2_PREDECESSOR_MISSING",
+      );
+      expect(() => insertCheckpointSidecar(1, root1)).not.toThrow();
+      expect(() => insertCheckpointSidecar(2, root2)).not.toThrow();
     } finally {
       sqlite.close();
     }

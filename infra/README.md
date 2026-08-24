@@ -194,6 +194,9 @@ The Fellow smoke token is passed only to the agent smoke; Cloudflare authority
 is passed only to Worker deployment/readiness and the final active-deployment
 re-attestation; Vercel authority is passed only to web deployment. Root gates
 and gallery smoke receive none of those credentials.
+Within those stages, credentials are narrowed again: static environment checks,
+HTTP probes, and receipt parsers do not inherit provider tokens; Wrangler and
+Vercel CLI processes receive only their own provider authority.
 
 Configure these Workers Builds variables. Provider credentials and the Fellow
 token are secrets; resource/project identifiers, the runner label, and public

@@ -129,6 +129,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0037_session_open_cap.sql
   db/migrations/0038_events_writer_credential.sql
   db/migrations/0039_krater_chain_v2.sql
+  db/migrations/0040_krater_chain_v2_contiguity.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -288,6 +289,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0037_session_open_cap.sql
   0038_events_writer_credential.sql
   0039_krater_chain_v2.sql
+  0040_krater_chain_v2_contiguity.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

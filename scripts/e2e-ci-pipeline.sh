@@ -491,6 +491,10 @@ worker_deploy() {
   require_live_variable CLOUDFLARE_ACCOUNT_ID || return $?
   require_live_variable ASIMP_D1_DATABASE_ID_STAGING || return $?
   require_live_variable ASIMP_STAGING_SERVICE_ENVELOPE_KEYS || return $?
+  # The resolver and receipt parsers do not need deployment authority. Keep the
+  # token as a shell variable for stdin-config API calls, exporting it only for
+  # Wrangler's authenticated deploy process.
+  export -n CLOUDFLARE_API_TOKEN
 
   ASIMP_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
     bun "$repository_root/infra/resolve-wrangler-deploy.mjs" --env staging --write
@@ -499,6 +503,7 @@ worker_deploy() {
 
   (
     cd "$repository_root/apps/wire" || exit 1
+    export CLOUDFLARE_API_TOKEN
     FORCE_COLOR=0 \
       WRANGLER_LOG_SANITIZE=true \
       WRANGLER_OUTPUT_FILE_PATH="$raw_receipt" \
@@ -623,8 +628,15 @@ web_deploy() {
   require_bearer_token VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
   require_live_variable VERCEL_PROJECT_ID || return $?
+  require_bearer_token CLOUDFLARE_API_TOKEN || return $?
+  require_live_variable CLOUDFLARE_ACCOUNT_ID || return $?
   [[ "$VERCEL_ORG_ID" =~ ^(team|user)_[A-Za-z0-9]+$ ]] || return 78
   [[ "$VERCEL_PROJECT_ID" =~ ^prj_[A-Za-z0-9]+$ ]] || return 78
+  # API credentials travel through curl's stdin config. Do not also export them
+  # to unrelated curl/parser children; Vercel authority is exported only for
+  # the two Vercel CLI invocations below, and Cloudflare authority never is.
+  export -n CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
+  export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
 
   curl_with_bearer "$VERCEL_TOKEN" \
     --fail --silent --show-error \
@@ -691,6 +703,7 @@ PY
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
     --yes \
     --target preview \
@@ -700,6 +713,7 @@ PY
     --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
     > "$deployment_url_file"
   status=$?
+  export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"
 
   deployment_origin="$(python3 - "$deployment_url_file" <<'PY'
@@ -717,8 +731,10 @@ print("https://" + parts.hostname)
 PY
 )" || return 1
 
+  export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   bunx --bun "vercel@$VERCEL_CLI_VERSION" inspect "$deployment_origin" --wait --timeout 25m --json > "$raw_receipt"
   status=$?
+  export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"
 
   deployment_host="${deployment_origin#https://}"

@@ -1174,7 +1174,10 @@ export async function backfillKraterIntegrity(
   // an N-element array walked by `.every()`, on every single write. The predicate is
   // unchanged — the same three conditions in the same order — but the third is now asked as
   // an existence question, answered by the partial index migration 0005 adds (see
-  // firstUndigestedEvent for the query plans on either side of it).
+  // firstUndigestedEvent for the query plans on either side of it). Migration 0040 makes
+  // both immutable v2 sidecar streams predecessor-contiguous, so the two terminal sidecars
+  // above are bounded witnesses for complete 1..public_seq ranges rather than merely evidence
+  // that the last rows happen to exist.
   if (
     storedBackfill?.state === "complete" &&
     storedBackfill.chain_version === KRATER_CHAIN_VERSION &&
