@@ -157,7 +157,9 @@ function ensureProblemHarness(): {
           return fakeD1Result([{ public_seq: 0, chain_digest: null, chain_version: null }]);
         }
         if (sql.includes("FROM krater_integrity_backfill")) return fakeD1Result();
-        if (sql.includes("FROM events WHERE problem_id")) return fakeD1Result();
+        if (sql.includes("FROM events e") && sql.includes("WHERE e.problem_id")) {
+          return fakeD1Result();
+        }
         throw new Error(`unexpected ensureProblem all query: ${sql}`);
       },
       first: async () => null,

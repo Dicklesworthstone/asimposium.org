@@ -18,6 +18,7 @@ import * as ts from "typescript";
 import { createApp, protocolDocumentReaderAfterInvariantGate } from "../../src/app";
 import type { Env } from "../../src/env";
 import wireEntrypoint from "../../src/index";
+import { eventEnvelopeRowDigest } from "../../src/krater/krater";
 import {
   createExperimentalLedgerEventTailRoutes,
   createExperimentalProblemFaceRoutes,
@@ -995,6 +996,23 @@ describe("face wire format", () => {
 
   test("the retained event-tail experiment serializes camelCase KraterEvents without mounting it", async () => {
     const queries: string[] = [];
+    const rowDigest = await eventEnvelopeRowDigest({
+      eventId: "EV-7",
+      problemId: "P-4DSP",
+      seq: 7,
+      type: "claim.created",
+      objectKind: "claim",
+      objectId: "C-7",
+      objectVersion: 1,
+      payloadSha256: "a".repeat(64),
+      createdAt: "2026-08-19T00:00:07.000Z",
+      actorFellowId: null,
+      actorSponsorId: null,
+      actorSessionId: null,
+      modelStringSelfDeclared: null,
+      harness: null,
+      writerCredentialId: null,
+    });
     const experimental = createExperimentalLedgerEventTailRoutes();
     const response = await experimental.fetch(
       new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=0"),
@@ -1007,6 +1025,15 @@ describe("face wire format", () => {
                 if (query.includes("SELECT id FROM problems WHERE id = ?")) {
                   return { first: async () => ({ id: "P-4DSP" }) };
                 }
+                if (query.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+                  return {
+                    first: async () => ({
+                      public_seq: 7,
+                      chain_digest: "c".repeat(64),
+                      chain_version: 2,
+                    }),
+                  };
+                }
                 if (query.includes("FROM events")) {
                   return {
                     all: async () => ({
@@ -1016,11 +1043,20 @@ describe("face wire format", () => {
                           problem_id: "P-4DSP",
                           seq: 7,
                           type: "claim.created",
+                          object_kind: "claim",
                           object_id: "C-7",
+                          object_version: 1,
                           payload_sha256: "a".repeat(64),
-                          row_digest: "b".repeat(64),
+                          row_digest: rowDigest,
                           chain_digest: "c".repeat(64),
+                          chain_version: 2,
                           created_at: "2026-08-19T00:00:07.000Z",
+                          actor_fellow_id: null,
+                          actor_sponsor_id: null,
+                          actor_session_id: null,
+                          model_string_self_declared: null,
+                          harness: null,
+                          writer_credential_id: null,
                         },
                       ],
                     }),
@@ -1049,9 +1085,10 @@ describe("face wire format", () => {
       ],
       has_more: false,
     });
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(3);
     expect(queries[0]).toContain("SELECT id FROM problems WHERE id = ?");
-    expect(queries[1]).toContain("FROM events");
+    expect(queries[1]).toContain("SELECT public_seq, chain_digest, chain_version FROM problems");
+    expect(queries[2]).toContain("FROM events");
   });
 
   test("session and cursor routes are mounted and refuse unauthenticated writes", async () => {
