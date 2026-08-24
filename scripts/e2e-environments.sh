@@ -77,7 +77,8 @@ block_phase() {
 # deploy, migration, or curl before an accepted remote migration interface is
 # available, the planted command refuses and this self-test cannot return green.
 self_test_remote_interface_gate() {
-  local scratch fake_bun fake_curl command_log nested_output nested_status
+  local scratch fake_bun fake_bunx fake_curl command_log nested_output nested_status
+  local r2_command_log r2_output r2_status
   local supplied scratch_mode scratch_owner retained_scratch retained_scratch_json
   local planted_token="asimp_ag_remote_e2e_canary_1234567890abcdefghijklmnop"
 
@@ -121,6 +122,7 @@ self_test_remote_interface_gate() {
   fi
 
   fake_bun="$scratch/bun"
+  fake_bunx="$scratch/bunx"
   fake_curl="$scratch/curl"
   command_log="$scratch/commands.log"
 
@@ -135,13 +137,27 @@ self_test_remote_interface_gate() {
     'case "$*" in' \
     '  "infra/validate-scaffold.mjs"|"infra/generate-wrangler.mjs --check"|"infra/generate-wrangler.test.mjs") exit 0 ;;' \
     '  "infra/validate-environments.mjs") printf "{\\\"suite\\\":\\\"environment-topology-static\\\",\\\"status\\\":\\\"pass\\\",\\\"vercel\\\":{\\\"preview_environment\\\":\\\"staging\\\"},\\\"environments\\\":{\\\"staging\\\":{\\\"kind\\\":\\\"remote\\\",\\\"is_preview\\\":true,\\\"may_hold_production_keys\\\":false,\\\"worker_origin\\\":\\\"https://a-staging.asimposium.org\\\"}}}\\n"; exit 0 ;;' \
+    '  "infra/resolve-wrangler-deploy.mjs --env staging --write") if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ]; then printf "{\\\"suite\\\":\\\"staging-wrangler-deploy-resolution\\\",\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"mode\\\":\\\"write\\\",\\\"published\\\":true,\\\"idempotent\\\":false}\\n"; exit 0; fi; exit 93 ;;' \
+    '  infra/migrate.mjs\ --env\ staging\ --resolved-database-id\ *\ --apply) if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ]; then printf "{\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"phase\\\":\\\"apply\\\",\\\"second_plan_idempotent\\\":true,\\\"applied\\\":[],\\\"skipped\\\":[],\\\"head_before\\\":0}\\n"; exit 0; fi; exit 93 ;;' \
     '  *) exit 93 ;;' \
     'esac' >"$fake_bun"
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
   printf '%s\n' '#!/bin/sh' \
+    'printf "bunx %s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
+    'case "$*" in' \
+    '  "--bun wrangler r2 object put "*) exit 95 ;;' \
+    '  "--bun wrangler r2 object delete "*) exit 0 ;;' \
+    '  *) exit 96 ;;' \
+    'esac' >"$fake_bunx"
+  # shellcheck disable=SC2016 # The fake command must expand its own variables later.
+  printf '%s\n' '#!/bin/sh' \
     'printf "curl %s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
-    'exit 94' >"$fake_curl"
-  chmod 700 "$fake_bun" "$fake_curl"
+    'case "$*" in' \
+    '  *"/internal/health"*) printf "{\\\"ok\\\":true}\\n"; exit 0 ;;' \
+    '  *"/capabilities"*) printf "{\\\"origin\\\":\\\"https://a-staging.asimposium.org\\\"}\\n"; exit 0 ;;' \
+    '  *) exit 94 ;;' \
+    'esac' >"$fake_curl"
+  chmod 700 "$fake_bun" "$fake_bunx" "$fake_curl"
 
   set +e
   nested_output="$(
@@ -166,10 +182,41 @@ self_test_remote_interface_gate() {
     return 1
   fi
 
+  # A failed create does not establish ownership of the selected R2 key. Drive
+  # the complete pre-canary path with inert commands, fail the put itself, and
+  # prove the EXIT trap does not turn that failure into a delete of an object
+  # this run never created.
+  r2_command_log="$scratch/r2-write-failure-commands.log"
+  : >"$r2_command_log"
+  chmod 600 "$r2_command_log"
+  set +e
+  r2_output="$(
+    PATH="$scratch:/usr/bin:/bin" \
+      E2E_ENVIRONMENTS_TEST_COMMAND_LOG="$r2_command_log" \
+      E2E_ENVIRONMENTS_TEST_SCENARIO="r2-write-failure" \
+      CLOUDFLARE_API_TOKEN="$planted_token" \
+      CLOUDFLARE_ACCOUNT_ID="00000000000000000000000000000000" \
+      ASIMP_D1_DATABASE_ID_STAGING="11111111-2222-4333-8444-555555555555" \
+      ASIMP_STAGING_SERVICE_ENVELOPE_KEYS='[{"kid":"staging-svc-2026-08","publicKeyHex":"1111111111111111111111111111111111111111111111111111111111111111","notBefore":1},{"kid":"staging-svc-2026-07","publicKeyHex":"2222222222222222222222222222222222222222222222222222222222222222","notBefore":0,"notAfter":2}]' \
+      /bin/bash "$SCRIPT_PATH" staging 2>&1
+  )"
+  r2_status=$?
+  set -e
+
+  if [ "$r2_status" -ne 1 ] ||
+    [[ "$r2_output" != *'"code":"R2_CANARY_WRITE_FAILED"'* ]] ||
+    [[ "$r2_output" == *"$planted_token"* ]] ||
+    [ ! -f "$r2_command_log" ] ||
+    ! grep -Fq 'bunx --bun wrangler r2 object put ' "$r2_command_log" ||
+    grep -Fq 'bunx --bun wrangler r2 object delete ' "$r2_command_log"; then
+    printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"R2_FAILED_CREATE_OWNERSHIP_PLANT_FAILED","detail":"a failed R2 create did not stop without attempting an unowned delete"}'
+    return 1
+  fi
+
   # A standalone run keeps the one directory it made and says so, rather than
   # deleting evidence. A lent directory is reported as retained by nobody here.
   retained_scratch_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$retained_scratch")" || return 1
-  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present nested run with inert commands stopped exactly at the resolver; migration, wrangler, and curl were never reached","retained_evidence_dir":%s}\n' \
+  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present resolver refusal and failed-R2-create ownership controls passed with inert commands","retained_evidence_dir":%s}\n' \
     "$retained_scratch_json"
 }
 
@@ -609,7 +656,7 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 10 (staging) — the private R2 canary: owner-readable, publicly absent.
 # ---------------------------------------------------------------------------
-CANARY_PRESENT=1
+CANARY_PRESENT=0
 CANARY_KEY="canary-$(date +%s)-$$.txt"
 CANARY_BODY="ops3-private-canary-$RANDOM$RANDOM"
 cleanup_private_canary() {
@@ -633,7 +680,7 @@ trap 'on_canary_signal 143' TERM
 trap 'on_canary_signal 129' HUP
 if printf '%s' "$CANARY_BODY" | CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
   bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
-  :
+  CANARY_PRESENT=1
 else
   fail_phase "r2-private-canary" "R2_CANARY_WRITE_FAILED" "The private staging bucket refused the canary write."
 fi

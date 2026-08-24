@@ -282,6 +282,7 @@ describe("provider-free environment interface gate registration", () => {
     expect(run.output).toContain('"code":"SELF_TEST_SCRATCH_REFUSED"');
     expect(readFileSync(sentinel, "utf8")).toBe("preserve-these-bytes\n");
     expect(existsSync(join(scratch, "bun"))).toBe(false);
+    expect(existsSync(join(scratch, "bunx"))).toBe(false);
     expect(existsSync(join(scratch, "curl"))).toBe(false);
     expect(existsSync(join(scratch, "commands.log"))).toBe(false);
   });
