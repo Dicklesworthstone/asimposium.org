@@ -1204,9 +1204,17 @@ describe("S2 to S7 normalized cost receipt", () => {
           has_more: false,
         }),
       ).toThrow("S2_CHAIN_VERSION_INVALID");
+      expect(() => parseS2ReplayResult({ ...VALID_REPLAY, chain_version: invalid })).toThrow(
+        "S2_CHAIN_VERSION_INVALID",
+      );
     }
 
-    for (const invalid of ["A".repeat(64), "0".repeat(63), "g".repeat(64)]) {
+    for (const invalid of [
+      "A".repeat(64),
+      "0".repeat(63),
+      "0".repeat(65),
+      "g".repeat(64),
+    ]) {
       for (const field of [
         "payload_sha256",
         "row_digest",
@@ -1297,8 +1305,22 @@ describe("S2 to S7 normalized cost receipt", () => {
       assertS2TerminalDigestParity(write, { ...event, row_digest: changed }, state, replay),
     ).toThrow("S2_V2_ROW_DIGEST_MISMATCH");
     expect(() =>
+      assertS2TerminalDigestParity(write, { ...event, chain_digest: changed }, state, replay),
+    ).toThrow("S2_V2_CHAIN_DIGEST_MISMATCH");
+    expect(() =>
       assertS2TerminalDigestParity(write, event, { ...state, chain_digest: changed }, replay),
     ).toThrow("S2_V2_CHAIN_DIGEST_MISMATCH");
+    expect(() =>
+      assertS2TerminalDigestParity(write, event, state, { ...replay, chain_digest: changed }),
+    ).toThrow("S2_V2_CHAIN_DIGEST_MISMATCH");
+    expect(() =>
+      assertS2TerminalDigestParity(
+        write,
+        event,
+        { ...state, checkpoint_digest: changed },
+        replay,
+      ),
+    ).toThrow("S2_V2_CHECKPOINT_DIGEST_MISMATCH");
     expect(() =>
       assertS2TerminalDigestParity(write, event, state, {
         ...replay,

@@ -668,7 +668,7 @@ web_deploy() {
   local worker_deployments_receipt="$ARTIFACT_DIRECTORY/cloudflare-deployments-after-web-ready.json"
   local worker_attestation_receipt="$ARTIFACT_DIRECTORY/worker-web-ready-deployment.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
-  local deployment_host deployment_id deployment_origin inspect_output status version_id
+  local deployment_host deployment_id deployment_origin deployment_output inspect_output status version_id
   local -a pipeline_statuses=()
 
   require_bearer_token VERCEL_TOKEN || return $?
@@ -762,32 +762,33 @@ print(json.dumps({
   [[ "$status" -eq 0 ]] || return "$status"
 
   export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
-  bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
+  deployment_output="$(bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
     --yes \
     --target preview \
     --skip-domain \
     --meta "asimposiumRevision=$REVISION" \
     --build-env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
-    --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
-    > "$deployment_url_file"
+    --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN")"
   status=$?
   export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"
 
-  deployment_origin="$(python3 - "$deployment_url_file" <<'PY'
+  printf '%s' "$deployment_output" | python3 -c '
 import sys
 from urllib.parse import urlsplit
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    value = stream.read().strip()
+value = sys.stdin.read().strip()
 parts = urlsplit(value if "://" in value else "https://" + value)
 if parts.scheme != "https" or not parts.hostname or parts.port is not None or parts.path not in ("", "/") or parts.query or parts.fragment:
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
 print("https://" + parts.hostname)
-PY
-)" || return 1
+' > "$deployment_url_file"
+  status=$?
+  deployment_output=""
+  [[ "$status" -eq 0 ]] || return "$status"
+  deployment_origin="$(<"$deployment_url_file")"
 
   export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   inspect_output="$(bunx --bun "vercel@$VERCEL_CLI_VERSION" inspect "$deployment_origin" --wait --timeout 25m --json)"
