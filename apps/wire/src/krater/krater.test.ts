@@ -16,6 +16,7 @@ import {
   eventRowDigest,
   genesisChainDigest,
   type KraterEvent,
+  KraterIntegrityBackfillRequiredError,
   type KraterOutboxRecord,
   KraterReplayError,
   KraterValidationError,
@@ -153,7 +154,10 @@ function ensureProblemHarness(): {
         return statement;
       },
       all: async () => {
-        if (sql.includes("END AS terminal_v2_complete") && sql.includes("FROM problems WHERE id")) {
+        if (
+          sql.includes("END AS terminal_v2_complete") &&
+          sql.includes("FROM problems WHERE id")
+        ) {
           return fakeD1Result([
             {
               public_seq: 0,
@@ -198,6 +202,7 @@ function retryingWriteHarness(
     readonly forceClaimPredicateMiss?: boolean;
     readonly forceOutboxPredicateMiss?: boolean;
     readonly failOnSynchronousFts?: boolean;
+    readonly forceWrongEmptyGenesis?: boolean;
   } = {},
 ): {
   readonly db: Parameters<typeof writeClaim>[0];
@@ -246,7 +251,13 @@ function retryingWriteHarness(
         return statement;
       },
       all: async () => {
-        if (sql.includes("END AS terminal_v2_complete") && sql.includes("FROM problems WHERE id")) {
+        if (
+          sql.includes("END AS terminal_v2_complete") &&
+          sql.includes("FROM problems WHERE id")
+        ) {
+          if (publicSeq === 0 && options.forceWrongEmptyGenesis !== true) {
+            chainDigest = await genesisChainDigest(String(bindings[0]));
+          }
           return fakeD1Result([
             {
               public_seq: publicSeq,
@@ -262,6 +273,9 @@ function retryingWriteHarness(
           ]);
         }
         if (sql.includes("SELECT id FROM events")) return fakeD1Result();
+        if (sql.includes("FROM events e") && sql.includes("WHERE e.problem_id")) {
+          return fakeD1Result();
+        }
         throw new Error(`unexpected retry-harness all query: ${sql}`);
       },
       first: async () => {
@@ -801,6 +815,33 @@ describe("Krater deterministic contracts", () => {
     expect(completion?.bindings).toEqual([0, canonical, problemId]);
   });
 
+  test("PLANTED: an empty complete-v2 fast path binds the exact problem genesis", async () => {
+    const wrong = retryingWriteHarness({ forceWrongEmptyGenesis: true });
+    await expect(
+      writeClaim(wrong.db, {
+        problemId: "P-empty-wrong-genesis",
+        claimId: "C-empty-wrong-genesis",
+        eventId: "E-empty-wrong-genesis",
+        idempotencyKey: "IK-empty-wrong-genesis",
+        statement: "The first link must extend the canonical problem genesis.",
+        createdAt: "2026-08-19T00:00:00.000Z",
+      }),
+    ).rejects.toThrow(KraterIntegrityBackfillRequiredError);
+    expect(wrong.persistedWrite()).toBeUndefined();
+
+    const exact = retryingWriteHarness();
+    await expect(
+      writeClaim(exact.db, {
+        problemId: "P-empty-exact-genesis",
+        claimId: "C-empty-exact-genesis",
+        eventId: "E-empty-exact-genesis",
+        idempotencyKey: "IK-empty-exact-genesis",
+        statement: "The exact genesis control remains writable.",
+        createdAt: "2026-08-19T00:00:00.000Z",
+      }),
+    ).resolves.toMatchObject({ event: { seq: 1 } });
+  });
+
   test("captures a deterministic server-authored canonical UTC outbox instant", () => {
     const serverNowMs = Date.parse("2026-08-19T00:00:00.123Z");
 
@@ -1268,7 +1309,10 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
 
   function localD1(
     sqlite: Database,
-    options: { readonly failBatchStatementContaining?: string } = {},
+    options: {
+      readonly failBatchStatementContaining?: string;
+      readonly throwAfterBatchCommit?: boolean;
+    } = {},
   ): Parameters<typeof backfillKraterIntegrity>[0] {
     const prepared = (query: string, values: readonly unknown[]): LocalPreparedStatement => ({
       query,
@@ -1287,21 +1331,28 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       prepare: (query: string) => ({
         bind: (...values: unknown[]) => prepared(query, values),
       }),
-      batch: async (statements: readonly LocalPreparedStatement[]) =>
-        sqlite.transaction(() => statements.map((statement) => {
-          if (
-            options.failBatchStatementContaining !== undefined &&
-            statement.query.includes(options.failBatchStatementContaining)
-          ) {
-            throw new Error("PLANTED_LATE_BACKFILL_BATCH_FAILURE");
-          }
-          const result = sqlite.query(statement.query).run(...(statement.values as never));
-          return {
-            success: true,
-            results: [],
-            meta: { rows_read: 0, rows_written: result.changes },
-          };
-        }))(),
+      batch: async (statements: readonly LocalPreparedStatement[]) => {
+        const results = sqlite.transaction(() =>
+          statements.map((statement) => {
+            if (
+              options.failBatchStatementContaining !== undefined &&
+              statement.query.includes(options.failBatchStatementContaining)
+            ) {
+              throw new Error("PLANTED_LATE_BACKFILL_BATCH_FAILURE");
+            }
+            const result = sqlite.query(statement.query).run(...(statement.values as never));
+            return {
+              success: true,
+              results: [],
+              meta: { rows_read: 0, rows_written: result.changes },
+            };
+          }),
+        )();
+        if (options.throwAfterBatchCommit === true) {
+          throw new Error("PLANTED_LOST_BACKFILL_BATCH_RESPONSE");
+        }
+        return results;
+      },
     } as never;
   }
 
@@ -1504,7 +1555,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
           failedAt,
           Date.parse(failedAt),
         ),
-      ).rejects.toThrow("could not atomically complete");
+      ).rejects.toThrow("batch outcome is indeterminate");
       expect(sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get()).toEqual({
         count: 0,
       });
@@ -1557,12 +1608,21 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         1,
         expectedChainDigest,
       );
-      await backfillKraterIntegrity(
+      await expect(
+        backfillKraterIntegrity(
+          localD1(sqlite, { throwAfterBatchCommit: true }),
+          problemId,
+          completedAt,
+          Date.parse(completedAt),
+        ),
+      ).rejects.toThrow("batch outcome is indeterminate");
+      const retryCost = await backfillKraterIntegrity(
         localD1(sqlite),
         problemId,
         completedAt,
         Date.parse(completedAt),
       );
+      expect(retryCost.upgraded_fast_path).toBe(true);
 
       expect(
         sqlite

@@ -1160,6 +1160,8 @@ export async function backfillKraterIntegrity(
   }
   const publicSeq = requireStoredSequence(rawHead.public_seq, "problem cursor", true);
   const storedBackfill = await readIntegrityBackfill(db, problemId, cost);
+  const emptyHeadHasExactGenesis =
+    publicSeq !== 0 || rawHead.chain_digest === (await genesisChainDigest(problemId));
   // An already-upgraded problem is done, whatever its size. This check must precede the
   // bounded-replay limit below: every write calls this function, so testing the limit first
   // made a healthy, fully-digested problem permanently unwritable once it passed 512 events
@@ -1183,6 +1185,7 @@ export async function backfillKraterIntegrity(
     storedBackfill.chain_version === KRATER_CHAIN_VERSION &&
     rawHead.chain_digest !== null &&
     rawHead.chain_version === KRATER_CHAIN_VERSION &&
+    emptyHeadHasExactGenesis &&
     rawHead.terminal_v2_complete === 1
   ) {
     const probe = await firstUndigestedEvent(db, problemId);
@@ -1455,33 +1458,14 @@ export async function backfillKraterIntegrity(
     const batchResults = await db.batch(updates);
     recordD1Results(cost, batchResults);
   } catch (_error) {
-    const rechecked = await readIntegrityBackfill(db, problemId, cost);
-    if (rechecked?.state === "complete" && rechecked.chain_version === KRATER_CHAIN_VERSION) {
-      try {
-        const [recheckedEvents, recheckedCheckpoints, recheckedIntegrity] = await Promise.all([
-          readAllEvents(db, problemId),
-          readCheckpoints(db, problemId),
-          readIntegrityState(db, problemId),
-        ]);
-        const terminalRoot =
-          recheckedEvents[recheckedEvents.length - 1]?.chainDigest ??
-          (await genesisChainDigest(problemId));
-        if (
-          recheckedEvents.length === legacyEvents.length &&
-          recheckedCheckpoints.length === legacyEvents.length &&
-          recheckedIntegrity.chainVersion === KRATER_CHAIN_VERSION &&
-          recheckedIntegrity.chainDigest === terminalRoot &&
-          (await eventChainMatches(recheckedEvents))
-        ) {
-          return settleCost(cost, preflightStartedAt, false);
-        }
-      } catch {
-        // Fall through to the one refusal below. A concurrent "complete" row
-        // is not sufficient authority unless every v2 surface re-verifies.
-      }
-    }
+    // D1 can lose a batch response after committing it. Without result
+    // metadata, this invocation cannot report truthful rows-written or SQL
+    // cost, and a second read set could race a later append. Refuse this
+    // indeterminate attempt; the caller's idempotent retry re-enters through
+    // the ordinary fast path, which validates the durable v2 witnesses and
+    // returns a complete receipt for that fresh preflight.
     backfillRequired(
-      "the integrity replay could not atomically complete and exact v2 authority did not re-verify.",
+      "the integrity replay batch outcome is indeterminate; retry the exact request through a fresh v2 preflight.",
     );
   }
   return settleCost(cost, preflightStartedAt, false);
