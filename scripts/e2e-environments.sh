@@ -182,10 +182,10 @@ self_test_remote_interface_gate() {
     return 1
   fi
 
-  # A failed create does not establish ownership of the selected R2 key. Drive
-  # the complete pre-canary path with inert commands, fail the put itself, and
-  # prove the EXIT trap does not turn that failure into a delete of an object
-  # this run never created.
+  # A failed create response is ambiguous: the provider may have accepted the
+  # write before the transport failed. Drive the complete pre-canary path with
+  # inert commands, fail the put itself, and prove the run still issues exactly
+  # one compensating delete for its cryptographically unique canary key.
   r2_command_log="$scratch/r2-write-failure-commands.log"
   : >"$r2_command_log"
   chmod 600 "$r2_command_log"
@@ -207,9 +207,9 @@ self_test_remote_interface_gate() {
     [[ "$r2_output" != *'"code":"R2_CANARY_WRITE_FAILED"'* ]] ||
     [[ "$r2_output" == *"$planted_token"* ]] ||
     [ ! -f "$r2_command_log" ] ||
-    ! grep -Fq 'bunx --bun wrangler r2 object put ' "$r2_command_log" ||
-    grep -Fq 'bunx --bun wrangler r2 object delete ' "$r2_command_log"; then
-    printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"R2_FAILED_CREATE_OWNERSHIP_PLANT_FAILED","detail":"a failed R2 create did not stop without attempting an unowned delete"}'
+    [[ "$(grep -Fc 'bunx --bun wrangler r2 object put ' "$r2_command_log")" != "1" ]] ||
+    [[ "$(grep -Fc 'bunx --bun wrangler r2 object delete ' "$r2_command_log")" != "1" ]]; then
+    printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"R2_AMBIGUOUS_WRITE_CLEANUP_PLANT_FAILED","detail":"a failed R2 create did not issue exactly one compensating delete"}'
     return 1
   fi
 
@@ -656,14 +656,19 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 10 (staging) — the private R2 canary: owner-readable, publicly absent.
 # ---------------------------------------------------------------------------
-CANARY_PRESENT=0
-CANARY_KEY="canary-$(date +%s)-$$.txt"
+CANARY_CLEANUP_REQUIRED=0
+CANARY_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" ||
+  fail_phase "r2-private-canary" "R2_CANARY_NONCE_FAILED" "A unique private-canary key could not be generated."
+if [[ ! "$CANARY_NONCE" =~ ^[0-9a-f]{32}$ ]]; then
+  fail_phase "r2-private-canary" "R2_CANARY_NONCE_FAILED" "The generated private-canary key was malformed."
+fi
+CANARY_KEY="canary-$CANARY_NONCE.txt"
 CANARY_BODY="ops3-private-canary-$RANDOM$RANDOM"
 cleanup_private_canary() {
-  if [ "$CANARY_PRESENT" -eq 0 ]; then return 0; fi
+  if [ "$CANARY_CLEANUP_REQUIRED" -eq 0 ]; then return 0; fi
   if CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
     bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1; then
-    CANARY_PRESENT=0
+    CANARY_CLEANUP_REQUIRED=0
     return 0
   fi
   return 1
@@ -678,10 +683,15 @@ trap 'cleanup_private_canary || true' EXIT
 trap 'on_canary_signal 130' INT
 trap 'on_canary_signal 143' TERM
 trap 'on_canary_signal 129' HUP
+CANARY_CLEANUP_REQUIRED=1
 if printf '%s' "$CANARY_BODY" | CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
   bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
-  CANARY_PRESENT=1
+  :
 else
+  if ! cleanup_private_canary; then
+    fail_phase "r2-private-canary" "R2_CANARY_WRITE_CLEANUP_UNPROVEN" \
+      "The canary write failed ambiguously and its compensating delete also failed."
+  fi
   fail_phase "r2-private-canary" "R2_CANARY_WRITE_FAILED" "The private staging bucket refused the canary write."
 fi
 CANARY_READ_STATUS=0

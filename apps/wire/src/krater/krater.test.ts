@@ -839,7 +839,7 @@ describe("Krater deterministic contracts", () => {
         statement: "The exact genesis control remains writable.",
         createdAt: "2026-08-19T00:00:00.000Z",
       }),
-    ).resolves.toMatchObject({ event: { seq: 1 } });
+    ).resolves.toMatchObject({ seq: 1, preflight: { upgraded_fast_path: true } });
   });
 
   test("captures a deterministic server-authored canonical UTC outbox instant", () => {
@@ -1296,6 +1296,48 @@ describe("migration 0005 forward-applies onto an exact 0004 database", () => {
 describe("migrations 0039-0040 replay an exact completed v1 history into one v2 authority", () => {
   const MIGRATIONS = resolve(import.meta.dir, "..", "..", "..", "..", "db", "migrations");
 
+  function contiguityMigrationStatements(): readonly string[] {
+    const source = readFileSync(
+      join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"),
+      "utf8",
+    )
+      .replace(/^\s*--.*$/gmu, "")
+      .trim();
+    const firstTrigger = source.indexOf("CREATE TRIGGER");
+    if (firstTrigger < 0) throw new Error("0040 migration has no trigger boundary");
+    const prefix = source
+      .slice(0, firstTrigger)
+      .split(/;\s*/u)
+      .map((statement) => statement.trim())
+      .filter((statement) => statement.length > 0);
+    const triggerSource = source.slice(firstTrigger).trim();
+    const triggers = triggerSource.match(/CREATE TRIGGER[\s\S]*?\bEND;/gu) ?? [];
+    const reconstructed = [
+      ...prefix.map((statement) => `${statement};`),
+      ...triggers,
+    ].join("\n");
+    if (normalizeSql(reconstructed) !== normalizeSql(source)) {
+      throw new Error("0040 statement splitter did not consume the exact migration bytes");
+    }
+    return [...prefix, ...triggers];
+  }
+
+  let contiguitySavepointSequence = 0;
+
+  function applyContiguityMigrationAtomically(sqlite: Database): void {
+    contiguitySavepointSequence += 1;
+    const savepoint = `krater_0040_${contiguitySavepointSequence}`;
+    sqlite.run(`SAVEPOINT ${savepoint}`);
+    try {
+      for (const statement of contiguityMigrationStatements()) sqlite.run(statement);
+      sqlite.run(`RELEASE ${savepoint}`);
+    } catch (error) {
+      sqlite.run(`ROLLBACK TO ${savepoint}`);
+      sqlite.run(`RELEASE ${savepoint}`);
+      throw error;
+    }
+  }
+
   interface LocalPreparedStatement {
     readonly query: string;
     readonly values: readonly unknown[];
@@ -1472,9 +1514,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         .run(problemId, legacyChainDigest, legacyCheckpointDigest, createdAt);
 
       sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
-      sqlite.run(
-        readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8"),
-      );
+      applyContiguityMigrationAtomically(sqlite);
       expect(
         sqlite
           .query(
@@ -1738,9 +1778,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         )
         .run(problemId, root, checkpoint, createdAt);
       sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
-      sqlite.run(
-        readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8"),
-      );
+      applyContiguityMigrationAtomically(sqlite);
 
       const insertEventSidecar = (
         candidateEventId: string,
@@ -1860,9 +1898,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         )
         .run(problemId, root2, "88".repeat(32), createdAt);
       sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
-      sqlite.run(
-        readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8"),
-      );
+      applyContiguityMigrationAtomically(sqlite);
 
       const insertEventSidecar = (eventId: string, sequence: number, root: string): void => {
         sqlite
@@ -1986,13 +2022,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       expect(
         sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get(),
       ).toEqual({ count: 1 });
-      const migration0040 = readFileSync(
-        join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"),
-        "utf8",
-      );
-      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).toThrow(
-        /event_gap_count/u,
-      );
+      expect(() => applyContiguityMigrationAtomically(sqlite)).toThrow(/event_gap_count/u);
       expect(
         sqlite
           .query(
@@ -2011,7 +2041,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
            VALUES (?, ?, 1, ?, ?, 2)`,
         )
         .run(event1, problemId, "bb".repeat(32), root1);
-      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).toThrow(
+      expect(() => applyContiguityMigrationAtomically(sqlite)).toThrow(
         /checkpoint_gap_count/u,
       );
 
@@ -2024,7 +2054,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
            VALUES (?, 1, ?, ?, 2)`,
         )
         .run(problemId, root1, "cc".repeat(32));
-      expect(() => sqlite.transaction(() => sqlite.run(migration0040))()).not.toThrow();
+      expect(() => applyContiguityMigrationAtomically(sqlite)).not.toThrow();
       expect(
         sqlite
           .query(
