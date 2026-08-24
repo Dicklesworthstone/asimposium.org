@@ -41,7 +41,7 @@ if [ -n "\${ASIMPOSIUM_GATES_TEST_LOG:-}" ]; then
   done
   printf '\\n' >> "$ASIMPOSIUM_GATES_TEST_LOG"
 fi
-if [ '${name}' = 'bun' ] && [ "\${1:-}" = 'run' ] && [ "\${2:-}" = 'typecheck' ]; then
+if [ '${name}' = 'bun' ] && [ "\${1:-}" = 'run' ] && [ "\${2:-}" = 'check' ]; then
   exit "\${ASIMPOSIUM_GATES_TEST_CHECK_STATUS:-0}"
 fi
 exit 0
@@ -62,8 +62,9 @@ interface GateRun {
 }
 
 function runAll(checkStatus: number): GateRun {
+  console.log("CONFIG:", { GATES, REPO_ROOT, BIN, LOG, exists: require("node:fs").existsSync(GATES) });
   closeSync(openSync(LOG, "w", 0o600));
-  const child = spawnSync("bash", [GATES, "--all"], {
+  const child = Bun.spawnSync(["/bin/bash", "-c", `"${GATES}" --all`], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
@@ -71,30 +72,16 @@ function runAll(checkStatus: number): GateRun {
       ASIMPOSIUM_GATES_TEST_LOG: LOG,
       ASIMPOSIUM_GATES_TEST_CHECK_STATUS: String(checkStatus),
     },
-    encoding: "utf8",
-    timeout: 30_000,
-    maxBuffer: 1024 * 1024,
   });
-  if (child.error) {
-    console.log("child.error:", child.error);
-  }
-  const result = {
-    status: child.status,
-    signal: child.signal,
-    stdout: child.stdout ?? "",
-    stderr: child.stderr ?? "",
+  const res = {
+    status: child.exitCode,
+    signal: child.signalCode ?? null,
+    stdout: child.stdout ? new TextDecoder().decode(child.stdout) : "",
+    stderr: child.stderr ? new TextDecoder().decode(child.stderr) : "",
     commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean),
   };
-  if (result.status !== 0) {
-    console.error("DEBUG runAll failed:", {
-      status: result.status,
-      signal: result.signal,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      commands: result.commands,
-    });
-  }
-  return result;
+  console.log("RUNALL RES:", res);
+  return res;
 }
 
 describe("provider-neutral full gate", () => {
@@ -106,17 +93,12 @@ describe("provider-neutral full gate", () => {
     expect(run.stderr).toBe("");
     expect(run.commands).toEqual([
       "bun\tinstall\t--frozen-lockfile",
-      "bun\trun\ttypecheck",
-      "bun\trun\tlint",
-      "bun\trun\t--filter\t@asimposium/contracts\ttest",
-      "bun\trun\t--filter\t@asimposium/protocol\ttest",
-      "bun\trun\t--filter\t@asimposium/render\ttest",
-      "bun\trun\t--filter\t@asimposium/web\ttest",
-      "bun\trun\t--filter\t@asimposium/wire\ttest:unit",
+      "bun\trun\tcheck",
       "cargo\ttest",
     ]);
     expect(run.stdout).toContain("=== gate: migration-pin parity ===");
     expect(run.stdout).toContain("=== gate: problem-corpus parity ===");
+    expect(run.stdout).toContain("=== gate: canonical full suite ===");
     expect(run.stdout).toContain("=== all selected gates passed ===");
   });
 
@@ -130,7 +112,7 @@ describe("provider-neutral full gate", () => {
     expect(run.status).toBe(status);
     expect(run.commands).toEqual([
       "bun\tinstall\t--frozen-lockfile",
-      "bun\trun\ttypecheck",
+      "bun\trun\tcheck",
     ]);
     expect(run.stdout).not.toContain("=== all selected gates passed ===");
   });
