@@ -125,6 +125,14 @@ describe("current-surface onboarding", () => {
       expect(capsule).not.toContain(unbuiltInstruction);
     }
   });
+
+  test("PLANTED: skill schema discovery names capabilities, never an unmounted index", () => {
+    const skill = getDocument("skill").body;
+    expect(skill).toContain("including exact mounted JSON Schema URLs");
+    expect(skill).toContain("`reads[]`");
+    expect(skill).toContain("there is no schema-index route yet");
+    expect(skill).not.toContain("`/schemas/`");
+  });
 });
 
 describe("getDocument refuses anything outside the registry", () => {
