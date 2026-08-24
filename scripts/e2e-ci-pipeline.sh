@@ -34,6 +34,11 @@ CURRENT_STAGE_STARTED=""
 CURRENT_WRAPPER_PID=""
 CURRENT_STAGE_RECORDED=0
 
+case "$PIPELINE_TEST_MODE" in
+  0 | 1) ;;
+  *) printf 'ci-pipeline: ASIMP_CI_PROCESS_TEST must be 0 or 1\n' >&2; exit 64 ;;
+esac
+
 usage() {
   printf 'usage: scripts/e2e-ci-pipeline.sh [--run-id <safe-id>]\n' >&2
 }
@@ -902,6 +907,7 @@ internal_entrypoint() {
       plant_stage "$stage"
       ;;
     __worker_deploy | __worker_readiness | __web_deploy)
+      [[ "$PIPELINE_TEST_MODE" != "1" ]] || return 64
       [[ "${ASIMP_CI_INTERNAL:-0}" == "1" ]] || return 64
       RUN_ID="${ASIMP_CI_INTERNAL_RUN_ID:-}"
       e2e_validate_run_id "$RUN_ID" || return 64
@@ -956,6 +962,10 @@ case "$RUNNER" in
   *) printf 'ci-pipeline: unsupported runner label\n' >&2; exit 64 ;;
 esac
 if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+  if [[ "${CI:-}" == "true" || "${WORKERS_CI:-0}" == "1" ]]; then
+    printf 'ci-pipeline: process-test mode is forbidden under hosted CI markers\n' >&2
+    exit 78
+  fi
   RUNNER="process-test"
   [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]] || exit 64
 else

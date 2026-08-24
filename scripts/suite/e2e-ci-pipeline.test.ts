@@ -384,6 +384,25 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(begunStages(wrongRevision)).toEqual([]);
   });
 
+  test("process-test mode is refused under hosted runner markers", () => {
+    const run = runPipeline("smoke-gallery", "pass", false, {
+      CI: "true",
+      WORKERS_CI: "1",
+    });
+    expect(run.status).toBe(78);
+    expect(begunStages(run)).toEqual([]);
+    expect(run.stderr).toContain("process-test mode is forbidden");
+  });
+
+  test("an invalid process-test selector is refused before any stage", () => {
+    const run = runPipeline("smoke-gallery", "pass", false, {
+      ASIMP_CI_PROCESS_TEST: "2",
+    });
+    expect(run.status).toBe(64);
+    expect(begunStages(run)).toEqual([]);
+    expect(run.stderr).toContain("ASIMP_CI_PROCESS_TEST must be 0 or 1");
+  });
+
   test("the all-pass process control runs each stage in doctrine order", () => {
     const run = runPipeline("smoke-gallery", "pass");
 

@@ -4,8 +4,10 @@ import { join, relative, resolve } from "node:path";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import {
+  checkpointDigest,
   eventChainDigest,
   eventChainMatches,
+  eventEnvelopeRowDigest,
   genesisChainDigest,
   type KraterEvent,
 } from "./krater";
@@ -50,9 +52,18 @@ function databaseWithCursor(cursor: number): D1Database {
 
 function databaseWithEvents(events: readonly Record<string, unknown>[]): D1Database {
   return {
-    prepare() {
+    prepare(sql: string) {
       return {
         bind() {
+          if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+            return {
+              first: async () => ({
+                public_seq: events.length,
+                chain_digest: "a".repeat(64),
+                chain_version: 2,
+              }),
+            };
+          }
           return {
             all: async () => ({ results: events }),
           };
@@ -70,29 +81,44 @@ interface ChangedBuilderReplayFixture {
   readonly projectionRows: readonly Record<string, unknown>[];
   readonly outboxRows: readonly Record<string, unknown>[];
   readonly cursor: number;
+  readonly checkpointDigest: string;
 }
 
 async function changedBuilderReplayFixture(): Promise<ChangedBuilderReplayFixture> {
   const body = Object.freeze({ problem_id: "P-v2-builder" });
   const payloadSha256 = "a".repeat(64);
-  const rowDigest = "b".repeat(64);
-  const chainDigest = await eventChainDigest(
-    body.problem_id,
-    1,
-    payloadSha256,
-    await genesisChainDigest(body.problem_id),
-  );
-  const event: KraterEvent = {
+  const eventDraft = {
     eventId: "E-v2-builder",
     problemId: body.problem_id,
     seq: 1,
     type: "claim.created",
+    objectKind: "claim",
     objectId: "C-v2-builder",
+    objectVersion: 1,
+    payloadSha256,
+    createdAt: "2026-08-20T00:00:00.000Z",
+    actorFellowId: null,
+    actorSponsorId: null,
+    actorSessionId: null,
+    modelStringSelfDeclared: null,
+    harness: null,
+    writerCredentialId: null,
+  } as const;
+  const rowDigest = await eventEnvelopeRowDigest(eventDraft);
+  const chainDigest = await eventChainDigest(
+    body.problem_id,
+    1,
     payloadSha256,
     rowDigest,
+    await genesisChainDigest(body.problem_id),
+  );
+  const event: KraterEvent = {
+    ...eventDraft,
+    rowDigest,
     chainDigest,
-    createdAt: "2026-08-20T00:00:00.000Z",
+    chainVersion: 2,
   };
+  const integrityCheckpointDigest = await checkpointDigest(body.problem_id, 1, chainDigest);
   return {
     body,
     eventBody: Object.freeze({
@@ -107,11 +133,20 @@ async function changedBuilderReplayFixture(): Promise<ChangedBuilderReplayFixtur
         problem_id: event.problemId,
         seq: event.seq,
         type: event.type,
+        object_kind: event.objectKind,
         object_id: event.objectId,
+        object_version: event.objectVersion,
         payload_sha256: event.payloadSha256,
         row_digest: event.rowDigest,
         chain_digest: event.chainDigest,
+        chain_version: event.chainVersion,
         created_at: event.createdAt,
+        actor_fellow_id: event.actorFellowId,
+        actor_sponsor_id: event.actorSponsorId,
+        actor_session_id: event.actorSessionId,
+        model_string_self_declared: event.modelStringSelfDeclared,
+        harness: event.harness,
+        writer_credential_id: event.writerCredentialId,
       },
     ],
     // Independently specified V2 output: never call the production projection
@@ -128,6 +163,7 @@ async function changedBuilderReplayFixture(): Promise<ChangedBuilderReplayFixtur
     ],
     outboxRows: [{ event_id: event.eventId, kind: "search.index", state: "pending" }],
     cursor: 1,
+    checkpointDigest: integrityCheckpointDigest,
   };
 }
 
@@ -144,11 +180,36 @@ function replayReadOnlyDatabase(fixture: ChangedBuilderReplayFixture): {
       }
       return {
         bind(...bindings: unknown[]) {
-          if (sql.includes("FROM events WHERE problem_id = ? AND seq > ?")) {
+          if (sql.includes("FROM events e") && sql.includes("e.seq > ?")) {
             if (bindings[0] !== fixture.body.problem_id || bindings[1] !== 0) {
               throw new Error("S2_TEST_REPLAY_EVENT_QUERY_MISMATCH");
             }
             return { all: async () => ({ results: fixture.eventRows }) };
+          }
+          if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+            if (bindings[0] !== fixture.body.problem_id) {
+              throw new Error("S2_TEST_REPLAY_HEAD_QUERY_MISMATCH");
+            }
+            return {
+              first: async () => ({
+                public_seq: fixture.cursor,
+                chain_digest: fixture.event.chainDigest,
+                chain_version: 2,
+              }),
+            };
+          }
+          if (sql.includes("FROM checkpoint_chain_v2 c")) {
+            if (bindings[0] !== fixture.body.problem_id) {
+              throw new Error("S2_TEST_REPLAY_CHECKPOINT_QUERY_MISMATCH");
+            }
+            return {
+              first: async () => ({
+                checkpoint_digest: fixture.checkpointDigest,
+                chain_version: 2,
+                checkpoint_seq: fixture.cursor,
+                root_chain_digest: fixture.event.chainDigest,
+              }),
+            };
           }
           if (sql.includes("FROM claim_projections WHERE problem_id = ?")) {
             if (bindings[0] !== fixture.body.problem_id) {
@@ -513,7 +574,13 @@ describe("S2 local harness boundary", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ matches: true, cursor: 1, event_count: 1 });
+    expect(await response.json()).toEqual({
+      matches: true,
+      cursor: 1,
+      event_count: 1,
+      chain_version: 2,
+      checkpoint_digest: v1Fixture.checkpointDigest,
+    });
     expect(readonlyDb.writeAttempts()).toBe(0);
     expect(
       JSON.stringify({
@@ -557,7 +624,13 @@ describe("S2 local harness boundary", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ matches: false, cursor: 1, event_count: 1 });
+    expect(await response.json()).toEqual({
+      matches: false,
+      cursor: 1,
+      event_count: 1,
+      chain_version: 2,
+      checkpoint_digest: fixture.checkpointDigest,
+    });
     expect(readonlyDb.writeAttempts()).toBe(0);
     expect(
       JSON.stringify({
@@ -617,7 +690,13 @@ describe("S2 local harness boundary", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ matches: false, cursor: 1, event_count: 1 });
+    expect(await response.json()).toEqual({
+      matches: false,
+      cursor: 1,
+      event_count: 1,
+      chain_version: 2,
+      checkpoint_digest: drifted.checkpointDigest,
+    });
     expect(readonlyDb.writeAttempts()).toBe(0);
     expect(
       JSON.stringify({

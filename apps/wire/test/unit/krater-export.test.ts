@@ -10,7 +10,7 @@ import {
 import {
   checkpointDigest,
   eventChainDigest,
-  eventRowDigest,
+  eventEnvelopeRowDigest,
   genesisChainDigest,
   type KraterEvent,
   sha256Hex,
@@ -22,11 +22,20 @@ function event(seq: number): KraterEvent {
     problemId: "P-4DSP",
     seq,
     type: "claim.created",
+    objectKind: "claim",
     objectId: `C-${seq}`,
+    objectVersion: 1,
     payloadSha256: `sha256:${seq}`,
     rowDigest: `rd-${seq}`,
     chainDigest: `cd-${seq}`,
+    chainVersion: 2,
     createdAt: "2026-08-18T00:00:00Z",
+    actorFellowId: null,
+    actorSponsorId: null,
+    actorSessionId: null,
+    modelStringSelfDeclared: null,
+    harness: null,
+    writerCredentialId: null,
   };
 }
 
@@ -59,6 +68,7 @@ describe("per-problem event export (W2.8)", () => {
           rootChainDigest: "a".repeat(64),
           checkpointDigest: "b".repeat(64),
           checkpointVersion: 1,
+          chainVersion: 2,
           checkpointMode: "unsigned-v0",
         },
       ],
@@ -107,7 +117,8 @@ describe("per-problem event export (W2.8)", () => {
     const header = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     const plantedSecret = "asimp_ag_must-not-reflect";
     const foreignFormats: readonly unknown[] = [
-      "asimposium.problem-export.v2",
+      "asimposium.problem-export.v1",
+      "asimposium.problem-export.v3",
       plantedSecret.repeat(5_000),
       null,
       [],
@@ -159,31 +170,32 @@ async function chainedEvent(
   const eventId = `E-${seq}`;
   const objectId = `C-${seq}`;
   const createdAt = "2026-08-18T00:00:00Z";
-  const chain = await eventChainDigest("P-4DSP", seq, payloadSha256, previous);
-  const rowDigest = await eventRowDigest(
-    {
-      eventId,
-      problemId: "P-4DSP",
-      claimId: objectId,
-      idempotencyKey: `I-${seq}`,
-      statement: `statement-${seq}`,
-      createdAt,
-    },
+  const envelope = {
+    eventId,
+    problemId: "P-4DSP",
     seq,
+    type: "claim.created",
+    objectKind: "claim",
+    objectId,
+    objectVersion: 1,
     payloadSha256,
-  );
+    createdAt,
+    actorFellowId: seq === 1 ? "F-alpha" : null,
+    actorSponsorId: seq === 1 ? "U-sponsor" : null,
+    actorSessionId: seq === 1 ? "S-session" : null,
+    modelStringSelfDeclared: seq === 1 ? "model-self-declared" : null,
+    harness: seq === 1 ? "codex-cli" : null,
+    writerCredentialId: seq === 1 ? "CRD-alpha" : null,
+  } as const;
+  const rowDigest = await eventEnvelopeRowDigest(envelope);
+  const chain = await eventChainDigest("P-4DSP", seq, payloadSha256, rowDigest, previous);
   return {
     chain,
     event: {
-      eventId,
-      problemId: "P-4DSP",
-      seq,
-      type: "claim.created",
-      objectId,
-      payloadSha256,
+      ...envelope,
       rowDigest,
       chainDigest: chain,
-      createdAt,
+      chainVersion: 2,
     },
   };
 }
@@ -209,6 +221,7 @@ async function buildExport(
         rootChainDigest,
         checkpointDigest: await checkpointDigest("P-4DSP", checkpointSeq, rootChainDigest),
         checkpointVersion: 1 as const,
+        chainVersion: 2 as const,
         checkpointMode: "unsigned-v0" as const,
       };
     }),

@@ -12,6 +12,7 @@ import {
   ensureProblem,
   eventChainDigest,
   eventChainMatches,
+  eventEnvelopeRowDigest,
   eventRowDigest,
   genesisChainDigest,
   type KraterEvent,
@@ -43,12 +44,41 @@ function event(
     problemId,
     seq,
     type: "claim.created",
+    objectKind: "claim",
     objectId: `C-${problemId}-${seq}`,
+    objectVersion: 1,
     payloadSha256,
     rowDigest,
     chainDigest,
+    chainVersion: 2,
     createdAt: "2026-08-14T00:00:00.000Z",
+    actorFellowId: null,
+    actorSponsorId: null,
+    actorSessionId: null,
+    modelStringSelfDeclared: null,
+    harness: null,
+    writerCredentialId: null,
   };
+}
+
+async function canonicalEventRow(eventValue: KraterEvent): Promise<string> {
+  return eventEnvelopeRowDigest({
+    eventId: eventValue.eventId,
+    problemId: eventValue.problemId,
+    seq: eventValue.seq,
+    type: eventValue.type,
+    objectKind: eventValue.objectKind,
+    objectId: eventValue.objectId,
+    objectVersion: eventValue.objectVersion,
+    payloadSha256: eventValue.payloadSha256,
+    createdAt: eventValue.createdAt,
+    actorFellowId: eventValue.actorFellowId,
+    actorSponsorId: eventValue.actorSponsorId,
+    actorSessionId: eventValue.actorSessionId,
+    modelStringSelfDeclared: eventValue.modelStringSelfDeclared,
+    harness: eventValue.harness,
+    writerCredentialId: eventValue.writerCredentialId,
+  });
 }
 
 interface ObservedD1Statement {
@@ -75,9 +105,11 @@ function normalizeSql(sql: string): string {
   return sql.replace(/\s+/g, " ").trim();
 }
 
-const EVENT_READ_SQL = normalizeSql(`SELECT id, problem_id, seq, type, object_kind, object_id,
-  object_version, payload_sha256, row_digest, chain_digest, created_at
-  FROM events WHERE id = ?`);
+const EVENT_READ_SQL = normalizeSql(`SELECT e.id, e.problem_id, e.seq, e.type, e.object_kind,
+  e.object_id, e.object_version, e.payload_sha256, c.row_digest, c.chain_digest,
+  c.chain_version, e.created_at, e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
+  e.model_string_self_declared, e.harness, e.writer_credential_id FROM events e
+  LEFT JOIN event_chain_v2 c ON c.event_id = e.id WHERE e.id = ?`);
 const CLAIM_READ_SQL = normalizeSql(`SELECT id, problem_id, statement, payload_sha256, source_seq
   FROM claims WHERE id = ? AND problem_id = ? AND source_seq = ?`);
 const OUTBOX_READ_SQL = normalizeSql(`SELECT event_id, problem_id, kind, dedupe_key,
@@ -121,8 +153,8 @@ function ensureProblemHarness(): {
         return statement;
       },
       all: async () => {
-        if (sql.includes("SELECT public_seq, chain_digest FROM problems")) {
-          return fakeD1Result([{ public_seq: 0, chain_digest: null }]);
+        if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+          return fakeD1Result([{ public_seq: 0, chain_digest: null, chain_version: null }]);
         }
         if (sql.includes("FROM krater_integrity_backfill")) return fakeD1Result();
         if (sql.includes("FROM events WHERE problem_id")) return fakeD1Result();
@@ -205,18 +237,22 @@ function retryingWriteHarness(
         return statement;
       },
       all: async () => {
-        if (sql.includes("SELECT public_seq, chain_digest FROM problems")) {
-          return fakeD1Result([{ public_seq: publicSeq, chain_digest: chainDigest }]);
+        if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+          return fakeD1Result([
+            { public_seq: publicSeq, chain_digest: chainDigest, chain_version: 2 },
+          ]);
         }
         if (sql.includes("FROM krater_integrity_backfill")) {
-          return fakeD1Result([{ state: "complete", legacy_event_count: publicSeq }]);
+          return fakeD1Result([
+            { state: "complete", legacy_event_count: publicSeq, chain_version: 2 },
+          ]);
         }
         if (sql.includes("SELECT id FROM events")) return fakeD1Result();
         throw new Error(`unexpected retry-harness all query: ${sql}`);
       },
       first: async () => {
-        if (sql.includes("SELECT public_seq, chain_digest FROM problems")) {
-          return { public_seq: publicSeq, chain_digest: chainDigest };
+        if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+          return { public_seq: publicSeq, chain_digest: chainDigest, chain_version: 2 };
         }
         if (
           sql.includes("SELECT request_digest, event_id, event_seq") &&
@@ -237,13 +273,24 @@ function retryingWriteHarness(
             problemId: persistedEventSnapshot.problem_id as string,
             seq: persistedEventSnapshot.seq as number,
             type: persistedEventSnapshot.type as "claim.created",
+            objectKind: persistedEventSnapshot.object_kind as string,
             objectId: persistedEventSnapshot.object_id as string,
+            objectVersion: persistedEventSnapshot.object_version as number,
             payloadSha256: persistedEventSnapshot.payload_sha256 as string,
             rowDigest: persistedEventSnapshot.row_digest as string,
             chainDigest: persistedEventSnapshot.chain_digest as string,
+            chainVersion: 2,
             createdAt: persistedEventSnapshot.created_at as string,
+            actorFellowId: persistedEventSnapshot.actor_fellow_id as string | null,
+            actorSponsorId: persistedEventSnapshot.actor_sponsor_id as string | null,
+            actorSessionId: persistedEventSnapshot.actor_session_id as string | null,
+            modelStringSelfDeclared: persistedEventSnapshot.model_string_self_declared as
+              | string
+              | null,
+            harness: persistedEventSnapshot.harness as string | null,
+            writerCredentialId: persistedEventSnapshot.writer_credential_id as string | null,
           };
-          return persistedEventSnapshot;
+          return { ...persistedEventSnapshot, chain_version: 2 };
         }
         if (sql.includes("FROM claims WHERE id = ?")) {
           if (normalizeSql(sql) !== CLAIM_READ_SQL || bindings.length !== 3) {
@@ -488,7 +535,10 @@ function retryingWriteHarness(
         persistedEvent = scratch
           .query(
             `SELECT id, problem_id, seq, type, object_kind, object_id, object_version,
-                    payload_sha256, row_digest, chain_digest, created_at FROM events LIMIT 1`,
+                    payload_sha256, row_digest, chain_digest, created_at,
+                    actor_fellow_id, actor_sponsor_id, actor_session_id,
+                    model_string_self_declared, harness, writer_credential_id
+             FROM events LIMIT 1`,
           )
           .get() as Record<string, unknown> | null;
         persistedOutbox = scratch
@@ -525,6 +575,7 @@ function retryingWriteHarness(
           root_chain_digest: chainDigest,
           checkpoint_digest: checkpointBindings[0],
           checkpoint_version: 1,
+          chain_version: 2,
           checkpoint_mode: "unsigned-v0",
         };
       }
@@ -1015,10 +1066,20 @@ describe("Krater deterministic contracts", () => {
     const firstPayload = "a".repeat(64);
     const secondPayload = "b".repeat(64);
     const genesis = await genesisChainDigest(problemId);
-    const firstChain = await eventChainDigest(problemId, 1, firstPayload, genesis);
-    const secondChain = await eventChainDigest(problemId, 2, secondPayload, firstChain);
-    const first = event(problemId, 1, firstPayload, "1".repeat(64), firstChain);
-    const second = event(problemId, 2, secondPayload, "2".repeat(64), secondChain);
+    const firstDraft = event(problemId, 1, firstPayload);
+    const firstRow = await canonicalEventRow(firstDraft);
+    const firstChain = await eventChainDigest(problemId, 1, firstPayload, firstRow, genesis);
+    const first = { ...firstDraft, rowDigest: firstRow, chainDigest: firstChain };
+    const secondDraft = event(problemId, 2, secondPayload);
+    const secondRow = await canonicalEventRow(secondDraft);
+    const secondChain = await eventChainDigest(
+      problemId,
+      2,
+      secondPayload,
+      secondRow,
+      firstChain,
+    );
+    const second = { ...secondDraft, rowDigest: secondRow, chainDigest: secondChain };
     const valid = [first, second];
 
     expect(await eventChainMatches(valid)).toBe(true);
@@ -1040,13 +1101,15 @@ describe("Krater deterministic contracts", () => {
     const payload = "a".repeat(64);
     const prior = "b".repeat(64);
 
-    await expect(eventChainDigest(input.problemId, max, payload, prior)).resolves.toMatch(
+    await expect(eventChainDigest(input.problemId, max, payload, "c".repeat(64), prior)).resolves.toMatch(
       /^[a-f0-9]{64}$/,
     );
     await expect(eventRowDigest(input, max, payload)).resolves.toMatch(/^[a-f0-9]{64}$/);
     await expect(checkpointDigest(input.problemId, max, prior)).resolves.toMatch(/^[a-f0-9]{64}$/);
     for (const invalid of [max + 1, 1.5]) {
-      await expect(eventChainDigest(input.problemId, invalid, payload, prior)).rejects.toThrow(
+      await expect(
+        eventChainDigest(input.problemId, invalid, payload, "c".repeat(64), prior),
+      ).rejects.toThrow(
         KraterValidationError,
       );
       await expect(eventRowDigest(input, invalid, payload)).rejects.toThrow(KraterValidationError);
