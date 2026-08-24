@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/BINDING_MISSING",
+  "title": "Required Worker bindings are not configured",
+  "status": 503,
+  "code": "BINDING_MISSING",
+  "detail": "Missing or wrong-shaped bindings: DB.",
+  "fix_hint": "Bind every name in `missing` in the Worker configuration for this environment, then redeploy.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/internal/health?format=json"
+  },
+  "missing": ["DB"]
+}

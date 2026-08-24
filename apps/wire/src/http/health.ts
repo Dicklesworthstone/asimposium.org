@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type BindingState, bindingHealthSnapshot, type RequiredBinding } from "../env";
-import { problem, SCHEMA_BASE, success, validatedProblem } from "./envelope";
+import { SCHEMA_BASE, success, validatedProblem } from "./envelope";
 
 /**
  * `GET /internal/health` — the operational scaffold face.
@@ -78,6 +78,7 @@ export function handleHealth(request: HealthRequest): Response {
       detail: `Missing or wrong-shaped bindings: ${missing.join(", ")}.`,
       fixHint:
         "Bind every name in `missing` in the Worker configuration for this environment, then redeploy.",
+      rule: "A5",
       extensions: {
         schema: "https://a.asimposium.org/schemas/problem.v1.json",
         example: { method: "GET", path: "/internal/health?format=json" },

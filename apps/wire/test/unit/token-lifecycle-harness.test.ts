@@ -783,6 +783,40 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
     seq: 1,
     status: "pass",
   });
+  const packMeasurements = records.filter(
+    (record) => record.record === "mounted-pack-performance-observation",
+  );
+  expect(packMeasurements).toHaveLength(1);
+  const packMeasurement = packMeasurements[0];
+  expect(packMeasurement).toEqual({
+    suite: "token-lifecycle-local",
+    record: "mounted-pack-performance-observation",
+    assertion: "mounted_workerd_d1_pack_candidate_cap_measured",
+    scope: "local-workerd-d1-mounted-production-route-not-p95-or-edge",
+    candidate_claims: 130,
+    selected_items: expect.any(Number),
+    sample_count: 5,
+    samples_ms: expect.any(Array),
+    median_ms: expect.any(Number),
+    max_ms: expect.any(Number),
+    plan_budget_ms: 600,
+    status: "pass",
+  });
+  expect(packMeasurement?.selected_items).toBeNumber();
+  expect(packMeasurement?.selected_items).toBeGreaterThanOrEqual(64);
+  const packSamples = packMeasurement?.samples_ms;
+  if (!Array.isArray(packSamples) || !packSamples.every((sample) => typeof sample === "number")) {
+    throw new Error("mounted pack observations are not a numeric sample set");
+  }
+  expect(packSamples).toHaveLength(5);
+  for (const sample of packSamples) {
+    expect(Number.isFinite(sample)).toBe(true);
+    expect(sample).toBeGreaterThanOrEqual(0);
+    expect(sample).toBeLessThanOrEqual(600);
+  }
+  const sortedPackSamples = [...packSamples].sort((left, right) => left - right);
+  expect(packMeasurement?.median_ms).toBe(sortedPackSamples[2]);
+  expect(packMeasurement?.max_ms).toBe(sortedPackSamples.at(-1));
   const authorizationRecord = records.find((record) => record.record === "authorization-decision");
   expect(authorizationRecord).toBeDefined();
   expect(authorizationRecord?.assertion).toBe(
@@ -829,6 +863,9 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   );
   expect(result.stdout).toContain(
     '"assertion":"post_stop_d1_exact_revoke_and_session_replay_side_effect_counts","status":"pass"',
+  );
+  expect(result.stdout).toContain(
+    '"assertion":"real_d1_session_and_130_claim_pack_measurement_problems_seeded","status":"pass"',
   );
   expect(result.stdout).toContain('"assertion":"revoke_vs_effectful_domain_write","status":"pass"');
   expect(result.stdout).toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');

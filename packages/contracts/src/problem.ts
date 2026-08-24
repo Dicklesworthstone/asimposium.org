@@ -265,10 +265,23 @@ const unknownProfileProblem = z
   })
   .strict();
 
+const bindingMissingProblem = z
+  .object({
+    ...problemBase,
+    code: z.literal("BINDING_MISSING"),
+    ...teachingFields,
+    /** Missing binding names, present only on BINDING_MISSING. */
+    missing: z.array(z.string().min(1).max(64)).min(1).max(20),
+    /** Binding state map, present only on BINDING_MISSING. */
+    bindings: z.record(z.string().min(1).max(64), z.enum(["bound", "missing"])),
+  })
+  .strict();
+
 export const ContractProblemSchema = z.discriminatedUnion("code", [
   generalContractProblem,
   unknownFormatProblem,
   unknownProfileProblem,
+  bindingMissingProblem,
 ]);
 
 /**

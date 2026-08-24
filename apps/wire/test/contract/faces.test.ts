@@ -72,16 +72,18 @@ const BINDING_MISSING =
   '"title":"Required Worker bindings are not configured","status":503,"code":"BINDING_MISSING",' +
   '"detail":"Missing or wrong-shaped bindings: DB.",' +
   '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
-  'then redeploy.","bindings":{"DB":"missing","ARTIFACTS":"bound",' +
-  '"PUBLIC_ARTIFACTS":"bound","KRATER_OUTBOX":"bound"},"missing":["DB"]}';
+  'then redeploy.","rule":"A5","schema":"https://a.asimposium.org/schemas/problem.v1.json",' +
+  '"example":{"method":"GET","path":"/internal/health?format=json"},"missing":["DB"],' +
+  '"bindings":{"DB":"missing","ARTIFACTS":"bound","PUBLIC_ARTIFACTS":"bound","KRATER_OUTBOX":"bound"}}';
 
 const PUBLIC_ARTIFACTS_MISSING =
   '{"type":"https://asimposium.org/errors/BINDING_MISSING",' +
   '"title":"Required Worker bindings are not configured","status":503,"code":"BINDING_MISSING",' +
   '"detail":"Missing or wrong-shaped bindings: PUBLIC_ARTIFACTS.",' +
   '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
-  'then redeploy.","bindings":{"DB":"bound",' +
-  '"ARTIFACTS":"bound","PUBLIC_ARTIFACTS":"missing","KRATER_OUTBOX":"bound"},"missing":["PUBLIC_ARTIFACTS"]}';
+  'then redeploy.","rule":"A5","schema":"https://a.asimposium.org/schemas/problem.v1.json",' +
+  '"example":{"method":"GET","path":"/internal/health?format=json"},"missing":["PUBLIC_ARTIFACTS"],' +
+  '"bindings":{"DB":"bound","ARTIFACTS":"bound","PUBLIC_ARTIFACTS":"missing","KRATER_OUTBOX":"bound"}}';
 
 const ENROLLMENT_UNAVAILABLE =
   '{"type":"https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",' +

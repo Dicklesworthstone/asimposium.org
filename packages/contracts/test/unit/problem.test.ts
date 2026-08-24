@@ -54,6 +54,10 @@ const INVALID_UNKNOWN_PROFILE_WITHOUT_ALLOWED = new URL(
   "../fixtures/invalid/problem-unknown-profile-no-allowed.json",
   import.meta.url,
 );
+const INVALID_BINDING_MISSING_UNTAUGHT = new URL(
+  "../fixtures/invalid/problem-binding-missing-untaught.json",
+  import.meta.url,
+);
 const INVALID_FELLOW_LIST_CURSOR_INVALID_UNTAUGHT = new URL(
   "../fixtures/invalid/problem-fellow-list-cursor-invalid-untaught.json",
   import.meta.url,
@@ -382,6 +386,49 @@ test("UNKNOWN_PROFILE is a teaching code with a bounded allowed list", async () 
     ProblemDocumentSchema.safeParse({
       ...(document as Record<string, unknown>),
       allowed: Array.from({ length: 13 }, (_, index) => `profile-${index}`),
+    }).success,
+  ).toBe(false);
+});
+
+test("BINDING_MISSING is a teaching code with missing array and bindings map", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-binding-missing.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(CONTRACT_PROBLEM_CODES).toContain("BINDING_MISSING");
+  expect(OPAQUE_PROBLEM_CODES).not.toContain("BINDING_MISSING" as never);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_BINDING_MISSING_UNTAUGHT)).success,
+  ).toBe(false);
+
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      missing: [],
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      missing: undefined,
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      bindings: {},
+    }).success,
+  ).toBe(true);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      bindings: { DB: "unknown_state" },
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      bindings: undefined,
     }).success,
   ).toBe(false);
 });

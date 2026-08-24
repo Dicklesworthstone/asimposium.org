@@ -358,6 +358,107 @@
                 "allowed"
               ],
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 400,
+                  "maximum": 599
+                },
+                "code": {
+                  "type": "string",
+                  "const": "BINDING_MISSING"
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "fix_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "rule": {
+                  "type": "string",
+                  "enum": [
+                    "A5",
+                    "ADR-20",
+                    "P-EN-NAME",
+                    "P1",
+                    "P2/P4",
+                    "P3",
+                    "P6",
+                    "P9",
+                    "P10",
+                    "P11",
+                    "§7.6"
+                  ]
+                },
+                "schema": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "format": "uri"
+                },
+                "example": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "missing": {
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "bindings": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "bound",
+                      "missing"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "status",
+                "code",
+                "detail",
+                "fix_hint",
+                "rule",
+                "schema",
+                "example",
+                "missing",
+                "bindings"
+              ],
+              "additionalProperties": false
             }
           ]
         },
@@ -783,6 +884,107 @@
             "schema",
             "example",
             "allowed"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 200,
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "code": {
+              "type": "string",
+              "const": "BINDING_MISSING"
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "fix_hint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "rule": {
+              "type": "string",
+              "enum": [
+                "A5",
+                "ADR-20",
+                "P-EN-NAME",
+                "P1",
+                "P2/P4",
+                "P3",
+                "P6",
+                "P9",
+                "P10",
+                "P11",
+                "§7.6"
+              ]
+            },
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "format": "uri"
+            },
+            "example": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "missing": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "bindings": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "additionalProperties": {
+                "type": "string",
+                "enum": [
+                  "bound",
+                  "missing"
+                ]
+              }
+            }
+          },
+          "required": [
+            "type",
+            "title",
+            "status",
+            "code",
+            "detail",
+            "fix_hint",
+            "rule",
+            "schema",
+            "example",
+            "missing",
+            "bindings"
           ],
           "additionalProperties": false
         }
