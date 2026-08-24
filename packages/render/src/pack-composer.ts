@@ -746,6 +746,23 @@ export function bucketizePackBudget(requestedMaxTokens: number): PackBudgetBucke
  * only extend the selected list, never skip forward and reshuffle it.
  */
 export function composePack(input: PackComposerInput): ComposedPack {
+  return composePackWithSelectionEstimator(input, false);
+}
+
+/**
+ * Differential-test oracle for asimposiumorg-ye45. This deliberately keeps
+ * the original full-render-per-prefix selection path available to the source
+ * test module without exporting it from the package entrypoint. Production
+ * callers must use composePack; this reference is intentionally quadratic.
+ */
+export function composePackWithLegacyEstimatorForTest(input: PackComposerInput): ComposedPack {
+  return composePackWithSelectionEstimator(input, true);
+}
+
+function composePackWithSelectionEstimator(
+  input: PackComposerInput,
+  useLegacySelectionEstimator: boolean,
+): ComposedPack {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return refuse("INVALID_INPUT", "pack composer input must be an object");
   }
@@ -924,6 +941,9 @@ export function composePack(input: PackComposerInput): ComposedPack {
     omitted: readonly OmittedEntry[],
     tokenSum: number,
   ): number => {
+    if (useLegacySelectionEstimator) {
+      return estimatePackTokens(contentsWith(omitted));
+    }
     const floor = tokenSum + envelopeFloorTokens;
     let estimate = Math.max(1, floor);
     if (estimate > budgetTokens) return estimate;
@@ -968,7 +988,7 @@ export function composePack(input: PackComposerInput): ComposedPack {
     // R_j: the element's bytes as embedded at array depth (indent 4 applied
     // to every internal newline) — the exact shape the pretty-printed face
     // embeds.
-    const itemJson = stableStringify(preparedFaceItemObject(itemWithoutTokens, item.tokens));
+    const itemJson = stableStringify(preparedFaceItemObject(itemWithoutTokens, item.tokens), 2);
     const candidateByteDelta = byteLength(itemJson) + 4 * countNewlines(itemJson);
     items.push(item);
     includedItemBytes += candidateByteDelta;
