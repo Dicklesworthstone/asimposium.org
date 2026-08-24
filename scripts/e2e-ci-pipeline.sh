@@ -1,0 +1,654 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+# OPS.2b review pipeline. Cloudflare Workers Builds is the hosted runner; this
+# entry point remains provider-neutral at the command boundary and delegates
+# product assertions to their existing suites.
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=e2e/lib/run-diagnostics.sh
+source "$repository_root/e2e/lib/run-diagnostics.sh"
+
+readonly SUITE="ci-pipeline"
+readonly USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
+readonly STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
+readonly PIPELINE_TEST_MODE="${ASIMP_CI_PROCESS_TEST:-0}"
+readonly -a STAGES=(
+  "root-gate"
+  "worker-deploy"
+  "worker-readiness"
+  "web-deploy"
+  "smoke-agent"
+  "smoke-gallery"
+)
+
+RUN_ID=""
+REVISION=""
+RUNNER="manual"
+ARTIFACT_DIRECTORY=""
+CURRENT_STAGE=""
+CURRENT_STAGE_STARTED=""
+CURRENT_WRAPPER_PID=""
+CURRENT_STAGE_RECORDED=0
+
+usage() {
+  printf 'usage: scripts/e2e-ci-pipeline.sh [--run-id <safe-id>]\n' >&2
+}
+
+now_iso() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+stage_index() {
+  local wanted="$1" index
+  for ((index = 0; index < ${#STAGES[@]}; index += 1)); do
+    if [[ "${STAGES[$index]}" == "$wanted" ]]; then
+      printf '%s\n' "$index"
+      return 0
+    fi
+  done
+  return 1
+}
+
+append_evidence() {
+  local record="$1"
+  if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+    [[ -n "$ARTIFACT_DIRECTORY" && -d "$ARTIFACT_DIRECTORY" && ! -L "$ARTIFACT_DIRECTORY" ]] || return 1
+    [[ ! -L "$ARTIFACT_DIRECTORY/ci-pipeline.jsonl" ]] || return 1
+    printf '%s\n' "$record" >> "$ARTIFACT_DIRECTORY/ci-pipeline.jsonl"
+    return $?
+  fi
+  e2e_append_artifact_jsonl_at_root \
+    "$repository_root" "$RUN_ID" "ci-pipeline.jsonl" "$record" >/dev/null
+}
+
+record_stage() {
+  local stage="$1" status="$2" exit_code="$3" started_at="$4" finished_at="$5"
+  local record
+  record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"stage\":\"$stage\",\"status\":\"$status\",\"exit_code\":$exit_code,\"started_at\":\"$started_at\",\"finished_at\":\"$finished_at\"}"
+  append_evidence "$record" || return 1
+  printf '%s\n' "$record"
+}
+
+record_deployment() {
+  local provider="$1" deployment_id="$2" observed_at="$3" status="$4"
+  local record
+  record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"record\":\"deployment\",\"provider\":\"$provider\",\"deployment_id\":\"$deployment_id\",\"status\":\"$status\",\"observed_at\":\"$observed_at\"}"
+  append_evidence "$record" || return 1
+  printf '%s\n' "$record"
+}
+
+delegated_value() {
+  case "$1:$2" in
+    cold-agent-gauntlet:status) printf '%s\n' "${ASIMP_CI_GAUNTLET_STATUS:-not-run}" ;;
+    cold-agent-gauntlet:observed) printf '%s\n' "${ASIMP_CI_GAUNTLET_OBSERVED_AT:-}" ;;
+    human-playwright:status) printf '%s\n' "${ASIMP_CI_PLAYWRIGHT_STATUS:-not-run}" ;;
+    human-playwright:observed) printf '%s\n' "${ASIMP_CI_PLAYWRIGHT_OBSERVED_AT:-}" ;;
+    load:status) printf '%s\n' "${ASIMP_CI_LOAD_STATUS:-not-run}" ;;
+    load:observed) printf '%s\n' "${ASIMP_CI_LOAD_OBSERVED_AT:-}" ;;
+    restore:status) printf '%s\n' "${ASIMP_CI_RESTORE_STATUS:-not-run}" ;;
+    restore:observed) printf '%s\n' "${ASIMP_CI_RESTORE_OBSERVED_AT:-}" ;;
+    launch:status) printf '%s\n' "${ASIMP_CI_LAUNCH_STATUS:-not-run}" ;;
+    launch:observed) printf '%s\n' "${ASIMP_CI_LAUNCH_OBSERVED_AT:-}" ;;
+    *) return 64 ;;
+  esac
+}
+
+validate_delegated_statuses() {
+  local name status observed
+  for name in cold-agent-gauntlet human-playwright load restore launch; do
+    status="$(delegated_value "$name" status)" || return 64
+    observed="$(delegated_value "$name" observed)" || return 64
+    case "$status" in
+      not-run)
+        [[ -z "$observed" ]] || return 64
+        ;;
+      pass | blocked | stale)
+        [[ "$observed" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 64
+        ;;
+      *) return 64 ;;
+    esac
+  done
+}
+
+record_delegated_statuses() {
+  local force_not_run="${1:-0}" name status observed observed_json record
+  for name in cold-agent-gauntlet human-playwright load restore launch; do
+    if [[ "$force_not_run" == "1" ]]; then
+      status="not-run"
+      observed=""
+    else
+      status="$(delegated_value "$name" status)" || return 64
+      observed="$(delegated_value "$name" observed)" || return 64
+    fi
+    observed_json="null"
+    if [[ -n "$observed" ]]; then
+      observed_json="\"$observed\""
+    fi
+    record="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"record\":\"delegated-suite\",\"delegated_suite\":\"$name\",\"status\":\"$status\",\"observed_at\":$observed_json}"
+    append_evidence "$record" || return 1
+    printf '%s\n' "$record"
+  done
+}
+
+record_remaining_not_run() {
+  local completed_stage="$1" completed_index index timestamp
+  completed_index="$(stage_index "$completed_stage")" || return 1
+  timestamp="$(now_iso)"
+  for ((index = completed_index + 1; index < ${#STAGES[@]}; index += 1)); do
+    record_stage "${STAGES[$index]}" "not-run" "null" "$timestamp" "$timestamp" || return 1
+  done
+}
+
+assert_revision_unchanged() {
+  [[ "$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" == "$REVISION" ]] || return 65
+  if [[ "$PIPELINE_TEST_MODE" != "1" ]]; then
+    git -C "$repository_root" diff --quiet --ignore-submodules -- || return 65
+    git -C "$repository_root" diff --cached --quiet --ignore-submodules -- || return 65
+  fi
+}
+
+timeout_for_stage() {
+  local stage="$1" value
+  case "$stage" in
+    root-gate) value="${ASIMP_CI_ROOT_GATE_TIMEOUT_SECONDS:-3600}" ;;
+    worker-deploy) value="${ASIMP_CI_WORKER_DEPLOY_TIMEOUT_SECONDS:-900}" ;;
+    worker-readiness) value="${ASIMP_CI_WORKER_READINESS_TIMEOUT_SECONDS:-1800}" ;;
+    web-deploy) value="${ASIMP_CI_WEB_DEPLOY_TIMEOUT_SECONDS:-1800}" ;;
+    smoke-agent) value="${ASIMP_CI_SMOKE_AGENT_TIMEOUT_SECONDS:-900}" ;;
+    smoke-gallery) value="${ASIMP_CI_SMOKE_GALLERY_TIMEOUT_SECONDS:-900}" ;;
+    *) return 64 ;;
+  esac
+  [[ "$value" =~ ^[0-9]+$ ]] || return 64
+  ((value >= 1 && value <= 7200)) || return 64
+  printf '%s\n' "$value"
+}
+
+on_signal() {
+  local signal_name="$1" exit_code="$2" finished_at
+  trap - INT TERM HUP
+  if [[ -n "$CURRENT_WRAPPER_PID" ]]; then
+    kill -s "$signal_name" "$CURRENT_WRAPPER_PID" 2>/dev/null || true
+    wait "$CURRENT_WRAPPER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$CURRENT_STAGE" && "$CURRENT_STAGE_RECORDED" == "0" ]]; then
+    finished_at="$(now_iso)"
+    record_stage "$CURRENT_STAGE" "cancelled" "$exit_code" "$CURRENT_STAGE_STARTED" "$finished_at" || true
+    CURRENT_STAGE_RECORDED=1
+    record_remaining_not_run "$CURRENT_STAGE" || true
+    record_delegated_statuses 1 || true
+  fi
+  exit "$exit_code"
+}
+
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
+
+run_bounded() {
+  local timeout_seconds="$1" status
+  shift
+  python3 - "$timeout_seconds" "$@" <<'PY' &
+import os
+import signal
+import subprocess
+import sys
+import time
+
+timeout_seconds = int(sys.argv[1])
+command = sys.argv[2:]
+child = subprocess.Popen(command, start_new_session=True)
+caught = None
+
+def terminate_group(first_signal: int) -> None:
+    try:
+        os.killpg(child.pid, first_signal)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 2.0
+    while child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+def cancelled(signum: int, _frame: object) -> None:
+    global caught
+    caught = signum
+    terminate_group(signum)
+
+for forwarded in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(forwarded, cancelled)
+
+deadline = time.monotonic() + timeout_seconds
+while child.poll() is None and caught is None and time.monotonic() < deadline:
+    time.sleep(0.02)
+
+if caught is not None:
+    child.wait()
+    sys.exit(128 + caught)
+if child.poll() is None:
+    terminate_group(signal.SIGTERM)
+    child.wait()
+    sys.exit(124)
+
+status = child.returncode
+sys.exit(128 - status if status < 0 else status)
+PY
+  CURRENT_WRAPPER_PID=$!
+  wait "$CURRENT_WRAPPER_PID"
+  status=$?
+  CURRENT_WRAPPER_PID=""
+  return "$status"
+}
+
+plant_stage() {
+  local stage="$1" planted_stage outcome
+  [[ "$PIPELINE_TEST_MODE" == "1" ]] || return 64
+  planted_stage="${ASIMP_CI_PROCESS_PLANT_STAGE:-}"
+  outcome="${ASIMP_CI_PROCESS_PLANT_OUTCOME:-pass}"
+  if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
+    printf 'begin:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE"
+  fi
+  if [[ "$stage" != "$planted_stage" ]]; then
+    return 0
+  fi
+  case "$outcome" in
+    pass) return 0 ;;
+    hang)
+      trap '' INT TERM HUP
+      if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
+        (sleep 3; printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE") &
+      fi
+      sleep 30
+      ;;
+    *)
+      [[ "$outcome" =~ ^[0-9]+$ ]] || return 64
+      ((outcome >= 1 && outcome <= 255)) || return 64
+      return "$outcome"
+      ;;
+  esac
+}
+
+require_live_variable() {
+  [[ -n "${!1:-}" ]] || {
+    printf 'ci-pipeline: required hosted variable is missing: %s\n' "$1" >&2
+    return 78
+  }
+}
+
+worker_deploy() {
+  local config="$repository_root/infra/deploy-resolved/staging.wrangler.toml"
+  local raw_receipt="$ARTIFACT_DIRECTORY/wrangler-output.jsonl"
+  local safe_receipt="$ARTIFACT_DIRECTORY/worker-deployment.json"
+  local status
+
+  require_live_variable CLOUDFLARE_API_TOKEN || return $?
+  require_live_variable CLOUDFLARE_ACCOUNT_ID || return $?
+  require_live_variable ASIMP_D1_DATABASE_ID_STAGING || return $?
+  require_live_variable ASIMP_STAGING_SERVICE_ENVELOPE_KEYS || return $?
+
+  bun "$repository_root/infra/resolve-wrangler-deploy.mjs" --env staging --write
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  (
+    cd "$repository_root/apps/wire" || exit 1
+    FORCE_COLOR=0 \
+      WRANGLER_LOG_SANITIZE=true \
+      WRANGLER_OUTPUT_FILE_PATH="$raw_receipt" \
+      bunx --bun wrangler deploy \
+        --config "$config" \
+        --tag "rev-${REVISION:0:16}" \
+        --message "asimposium revision $REVISION"
+  )
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  python3 - "$raw_receipt" <<'PY' > "$safe_receipt"
+import json
+import re
+import sys
+
+selected = None
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        value = json.loads(line)
+        if value.get("type") == "deploy" and value.get("worker_name") == "asimposium-stoa-staging":
+            selected = value
+if selected is None:
+    sys.exit(1)
+deployment_id = selected.get("version_id")
+observed_at = selected.get("timestamp")
+if not isinstance(deployment_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", deployment_id):
+    sys.exit(1)
+if not isinstance(observed_at, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", observed_at):
+    sys.exit(1)
+print(json.dumps({"deployment_id": deployment_id, "observed_at": observed_at, "status": "ready"}, separators=(",", ":")))
+PY
+}
+
+worker_readiness() {
+  local capabilities="$ARTIFACT_DIRECTORY/capabilities.json"
+  local schema_paths="$ARTIFACT_DIRECTORY/schema-paths.txt"
+  local schema_path index=0 status
+
+  bash "$repository_root/scripts/e2e-environments.sh" staging
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  curl --fail --silent --show-error --location \
+    --user-agent "$USER_AGENT" \
+    --connect-timeout 5 --max-time 20 \
+    --output "$capabilities" \
+    "$STAGING_WORKER_ORIGIN/capabilities"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  python3 - "$capabilities" <<'PY' > "$schema_paths"
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+if document.get("origin") != "https://a-staging.asimposium.org":
+    sys.exit(1)
+reads = document.get("reads")
+if not isinstance(reads, list) or any(not isinstance(value, str) for value in reads):
+    sys.exit(1)
+paths = [value for value in reads if value.startswith("/schemas/")]
+if not paths or len(paths) != len(set(paths)):
+    sys.exit(1)
+if any(not re.fullmatch(r"/schemas/[a-z0-9.-]+\.v1\.json", value) for value in paths):
+    sys.exit(1)
+print("\n".join(paths))
+PY
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  while IFS= read -r schema_path; do
+    [[ -n "$schema_path" ]] || continue
+    index=$((index + 1))
+    curl --fail --silent --show-error --location \
+      --user-agent "$USER_AGENT" \
+      --connect-timeout 5 --max-time 20 \
+      --output "$ARTIFACT_DIRECTORY/schema-$index.json" \
+      "$STAGING_WORKER_ORIGIN$schema_path"
+    status=$?
+    [[ "$status" -eq 0 ]] || return "$status"
+    python3 - "$ARTIFACT_DIRECTORY/schema-$index.json" "$schema_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+expected = "https://a.asimposium.org" + sys.argv[2]
+if document.get("$id") != expected:
+    sys.exit(1)
+PY
+    status=$?
+    [[ "$status" -eq 0 ]] || return "$status"
+  done < "$schema_paths"
+  ((index > 0))
+}
+
+web_deploy() {
+  local raw_receipt="$ARTIFACT_DIRECTORY/vercel-output.json"
+  local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
+  local status
+
+  require_live_variable VERCEL_TOKEN || return $?
+  require_live_variable VERCEL_ORG_ID || return $?
+  require_live_variable VERCEL_PROJECT_ID || return $?
+
+  vercel deploy "$repository_root" \
+    --yes \
+    --target preview \
+    --json \
+    --meta "asimposiumRevision=$REVISION" \
+    --build-env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
+    --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
+    > "$raw_receipt"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  python3 - "$raw_receipt" <<'PY' > "$safe_receipt"
+import datetime
+import json
+import re
+import sys
+from urllib.parse import urlsplit
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+deployment_id = document.get("id") or document.get("deploymentId")
+url = document.get("url")
+state = document.get("readyState") or document.get("state") or document.get("status") or "READY"
+if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
+    sys.exit(1)
+if not isinstance(url, str):
+    sys.exit(1)
+parts = urlsplit(url if "://" in url else "https://" + url)
+if parts.scheme != "https" or not parts.hostname or parts.port is not None or parts.path not in ("", "/") or parts.query or parts.fragment:
+    sys.exit(1)
+if not parts.hostname.endswith(".vercel.app"):
+    sys.exit(1)
+if str(state).upper() not in ("READY", "SUCCEEDED"):
+    sys.exit(1)
+observed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+print(json.dumps({"deployment_id": deployment_id, "observed_at": observed_at, "status": "ready", "origin": "https://" + parts.hostname}, separators=(",", ":")))
+PY
+}
+
+safe_receipt_field() {
+  local receipt="$1" field="$2"
+  python3 - "$receipt" "$field" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+value = document.get(sys.argv[2])
+if not isinstance(value, str):
+    sys.exit(1)
+patterns = {
+    "deployment_id": r"[A-Za-z0-9._-]{1,128}",
+    "observed_at": r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z",
+    "status": r"ready",
+    "origin": r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)+",
+}
+if not re.fullmatch(patterns[sys.argv[2]], value):
+    sys.exit(1)
+print(value)
+PY
+}
+
+stage_command() {
+  local stage="$1" web_origin
+  if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+    printf '%s\0' bash "$repository_root/scripts/e2e-ci-pipeline.sh" __plant "$stage"
+    return 0
+  fi
+  case "$stage" in
+    root-gate)
+      printf '%s\0' bash "$repository_root/scripts/gates.sh" --all
+      ;;
+    worker-deploy)
+      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+        bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_deploy
+      ;;
+    worker-readiness)
+      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+        bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_readiness
+      ;;
+    web-deploy)
+      printf '%s\0' env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+        bash "$repository_root/scripts/e2e-ci-pipeline.sh" __web_deploy
+      ;;
+    smoke-agent)
+      printf '%s\0' env \
+        ASIMPOSIUM_STAGING_AGENT_BASE_URL="$STAGING_WORKER_ORIGIN" \
+        bash "$repository_root/scripts/smoke-agent.sh" --write-artifacts --run-id "smoke-agent-${REVISION:0:12}-$$"
+      ;;
+    smoke-gallery)
+      web_origin="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" origin)" || return 1
+      printf '%s\0' env \
+        ASIMPOSIUM_STAGING_AGORA_BASE_URL="$web_origin" \
+        bash "$repository_root/scripts/smoke-gallery.sh" --write-artifacts --run-id "smoke-gallery-${REVISION:0:12}-$$"
+      ;;
+    *) return 64 ;;
+  esac
+}
+
+run_stage() {
+  local stage="$1" timeout_seconds status finished_at deployment_id observed_at deployment_status
+  local -a command=()
+  timeout_seconds="$(timeout_for_stage "$stage")" || return 64
+  while IFS= read -r -d '' value; do
+    command+=("$value")
+  done < <(stage_command "$stage")
+  ((${#command[@]} > 0)) || return 64
+
+  CURRENT_STAGE="$stage"
+  CURRENT_STAGE_STARTED="$(now_iso)"
+  CURRENT_STAGE_RECORDED=0
+  run_bounded "$timeout_seconds" "${command[@]}"
+  status=$?
+  finished_at="$(now_iso)"
+  CURRENT_STAGE_RECORDED=1
+
+  if [[ "$status" -eq 0 ]]; then
+    assert_revision_unchanged || status=$?
+  fi
+
+  case "$status" in
+    0) record_stage "$stage" "pass" 0 "$CURRENT_STAGE_STARTED" "$finished_at" || return 1 ;;
+    78) record_stage "$stage" "blocked" 78 "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
+    124) record_stage "$stage" "timeout" 124 "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
+    129 | 130 | 143) record_stage "$stage" "cancelled" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
+    *) record_stage "$stage" "fail" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
+  esac
+
+  if [[ "$status" -eq 0 && "$PIPELINE_TEST_MODE" != "1" ]]; then
+    case "$stage" in
+      worker-deploy)
+        deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
+        observed_at="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" observed_at)" || return 1
+        deployment_status="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" status)" || return 1
+        record_deployment cloudflare "$deployment_id" "$observed_at" "$deployment_status" || return 1
+        ;;
+      web-deploy)
+        deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" deployment_id)" || return 1
+        observed_at="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" observed_at)" || return 1
+        deployment_status="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" status)" || return 1
+        record_deployment vercel "$deployment_id" "$observed_at" "$deployment_status" || return 1
+        ;;
+    esac
+  fi
+
+  CURRENT_STAGE=""
+  CURRENT_STAGE_STARTED=""
+  return "$status"
+}
+
+internal_entrypoint() {
+  local action="$1" stage="${2:-}"
+  case "$action" in
+    __plant)
+      plant_stage "$stage"
+      ;;
+    __worker_deploy | __worker_readiness | __web_deploy)
+      [[ "${ASIMP_CI_INTERNAL:-0}" == "1" ]] || return 64
+      RUN_ID="${ASIMP_CI_INTERNAL_RUN_ID:-}"
+      e2e_validate_run_id "$RUN_ID" || return 64
+      ARTIFACT_DIRECTORY="$(e2e_artifact_directory_at_root "$repository_root" "$RUN_ID")" || return 64
+      REVISION="$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" || return 65
+      [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || return 65
+      case "$action" in
+        __worker_deploy) worker_deploy ;;
+        __worker_readiness) worker_readiness ;;
+        __web_deploy) web_deploy ;;
+      esac
+      ;;
+    *) return 64 ;;
+  esac
+}
+
+if [[ "${1:-}" == __* ]]; then
+  internal_entrypoint "$@"
+  exit $?
+fi
+
+explicit_run_id=""
+while (($# > 0)); do
+  case "$1" in
+    --run-id)
+      (($# >= 2)) || { usage; exit 64; }
+      explicit_run_id="$2"
+      shift 2
+      ;;
+    *) usage; exit 64 ;;
+  esac
+done
+
+REVISION="$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" || exit 65
+[[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 65
+RUNNER="${ASIMP_CI_RUNNER:-manual}"
+case "$RUNNER" in
+  cloudflare-workers-builds | manual) ;;
+  *) printf 'ci-pipeline: unsupported runner label\n' >&2; exit 64 ;;
+esac
+if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+  RUNNER="process-test"
+  [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]] || exit 64
+fi
+
+RUN_ID="${explicit_run_id:-ci-${REVISION:0:12}-$(date -u +%Y%m%dT%H%M%S)-$$}"
+e2e_validate_run_id "$RUN_ID" || { usage; exit 64; }
+((${#RUN_ID} <= 72)) || { usage; exit 64; }
+validate_delegated_statuses || {
+  printf 'ci-pipeline: delegated suite status is invalid\n' >&2
+  exit 64
+}
+assert_revision_unchanged || {
+  printf 'ci-pipeline: checkout is dirty or revision drifted\n' >&2
+  exit 65
+}
+if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+  ARTIFACT_DIRECTORY="${ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY:-}"
+  [[ -n "$ARTIFACT_DIRECTORY" && "$ARTIFACT_DIRECTORY" == /* ]] || exit 64
+  [[ -d "$ARTIFACT_DIRECTORY" && ! -L "$ARTIFACT_DIRECTORY" ]] || exit 64
+else
+  e2e_claim_artifact_run_at_root "$repository_root" "$RUN_ID" || {
+    printf 'ci-pipeline: artifact run id is already claimed or unsafe\n' >&2
+    exit 64
+  }
+  ARTIFACT_DIRECTORY="$(e2e_artifact_directory_at_root "$repository_root" "$RUN_ID")" || exit 64
+fi
+mkdir "$ARTIFACT_DIRECTORY/curl-home" || exit 64
+printf 'user-agent = "%s"\n' "$USER_AGENT" > "$ARTIFACT_DIRECTORY/curl-home/.curlrc" || exit 64
+export CURL_HOME="$ARTIFACT_DIRECTORY/curl-home"
+
+for stage in "${STAGES[@]}"; do
+  run_stage "$stage"
+  stage_status=$?
+  if [[ "$stage_status" -ne 0 ]]; then
+    record_remaining_not_run "$stage" || true
+    record_delegated_statuses 1 || true
+    exit "$stage_status"
+  fi
+done
+
+record_delegated_statuses 0 || exit 1
+completion_code="PIPELINE_COMPLETE"
+if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+  completion_code="PROCESS_TEST_COMPLETE"
+fi
+completion_time="$(now_iso)"
+completion="{\"tool\":\"bash\",\"package\":\"e2e\",\"suite\":\"$SUITE\",\"run_id\":\"$RUN_ID\",\"revision\":\"$REVISION\",\"runner\":\"$RUNNER\",\"record\":\"summary\",\"status\":\"pass\",\"code\":\"$completion_code\",\"observed_at\":\"$completion_time\"}"
+append_evidence "$completion" || exit 1
+printf '%s\n' "$completion"

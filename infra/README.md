@@ -152,6 +152,74 @@ provider resource and does not establish that the D1 database, custom domain,
 R2 buckets, or key deployment exists. An operator must later supply the exact
 artifact to an authorized deploy command and separately prove the remote plane.
 
+### Hosted review pipeline (OPS.2b)
+
+The operator-accepted hosted runner is **Cloudflare Workers Builds with its
+native GitHub integration**. GitHub Actions remains unavailable and forbidden
+for this repository. The required `main` trigger uses the repository root and
+these commands:
+
+```text
+build command:  bash scripts/gates.sh --all
+deploy command: bash scripts/e2e-ci-pipeline.sh
+root directory: /
+branches:       include main; exclude none
+```
+
+The build command makes the canonical root gate the first provider result. The
+deploy command deliberately runs that gate again before any mutation; a stale
+or independently invoked deploy phase therefore cannot borrow another build's
+green result. It then performs, in order: staging Worker deploy; the existing
+environment rehearsal plus live health; capability-derived schema reads; a
+same-checkout Vercel preview tagged with the Git revision; `smoke-agent.sh`;
+and `smoke-gallery.sh`. A failure, blocked exit, timeout, or cancellation stops
+the sequence and records every later stage as `not-run`. The web deployment is
+never attempted before the Worker receipt and readiness checks pass.
+
+Configure these Workers Builds variables. Provider credentials and the Fellow
+token are secrets; resource/project identifiers, the runner label, and public
+verification-key records are not credentials but should still be scoped to
+this trigger:
+
+```text
+ASIMP_CI_RUNNER=cloudflare-workers-builds
+CLOUDFLARE_ACCOUNT_ID
+CLOUDFLARE_API_TOKEN                         (secret)
+ASIMP_D1_DATABASE_ID_STAGING
+ASIMP_STAGING_SERVICE_ENVELOPE_KEYS
+VERCEL_ORG_ID
+VERCEL_PROJECT_ID
+VERCEL_TOKEN                                 (secret)
+ASIMPOSIUM_SMOKE_FELLOW_TOKEN                (secret; required for full agent smoke)
+```
+
+Vercel's Preview environment must already hold its Auth.js and service-envelope
+secrets. The pipeline pins `STOA_ORIGIN` to the staging Worker at both build and
+runtime and waits for the preview deployment; it never promotes that preview to
+production.
+
+Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
+revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment
+IDs and UTC observations, and explicit delegated-suite status. Wrangler's own
+NDJSON receipt is captured with its supported output-file interface. The live
+suite owners may supply only `pass`, `blocked`, `not-run`, or `stale`, plus a UTC
+observation for every non-`not-run` value, through these pairs:
+
+```text
+ASIMP_CI_GAUNTLET_STATUS / ASIMP_CI_GAUNTLET_OBSERVED_AT
+ASIMP_CI_PLAYWRIGHT_STATUS / ASIMP_CI_PLAYWRIGHT_OBSERVED_AT
+ASIMP_CI_LOAD_STATUS / ASIMP_CI_LOAD_OBSERVED_AT
+ASIMP_CI_RESTORE_STATUS / ASIMP_CI_RESTORE_OBSERVED_AT
+ASIMP_CI_LAUNCH_STATUS / ASIMP_CI_LAUNCH_OBSERVED_AT
+```
+
+Their default is `not-run`; the pipeline never converts absence into green.
+Those records are a handoff, not substitute execution: the gauntlet, Playwright,
+load, restore, launch, and release Beads remain authoritative. Source presence
+also does not prove the Workers Builds trigger is installed or passing. Closing
+OPS.2b requires a provider build record bound to the same revision and the
+deployment receipts emitted by that run.
+
 ## What OPS.3 does NOT yet do
 
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3

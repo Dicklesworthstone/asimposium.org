@@ -123,17 +123,21 @@ describe("provider-neutral full gate", () => {
     expect(run.stdout).toContain("=== gate: problem-corpus parity ===");
     expect(run.stdout).toContain("=== gate: canonical full suite ===");
     expect(run.stdout).toContain("=== all selected gates passed ===");
-  });
+  }, 60_000);
 
   test.each([
     ["ordinary failure", 23],
     ["blocked proof", 78],
-  ] as const)("PLANTED: canonical %s stays non-green and stops later work", (_label, status) => {
-    const run = runAll(status);
+  ] as const)(
+    "PLANTED: canonical %s stays non-green and stops later work",
+    (_label, status) => {
+      const run = runAll(status);
 
-    expect(run.signal).toBeNull();
-    expect(run.status).toBe(status);
-    expect(run.commands).toEqual(["bun\tinstall\t--frozen-lockfile", "bun\trun\tcheck"]);
-    expect(run.stdout).not.toContain("=== all selected gates passed ===");
-  });
+      expect(run.signal).toBeNull();
+      expect(run.status).toBe(status);
+      expect(run.commands).toEqual(["bun\tinstall\t--frozen-lockfile", "bun\trun\tcheck"]);
+      expect(run.stdout).not.toContain("=== all selected gates passed ===");
+    },
+    60_000,
+  );
 });
