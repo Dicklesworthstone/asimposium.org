@@ -905,18 +905,15 @@ function markdownReferenceDefinitionEnd(
 
   const nextLineStart = markdownNextLineStart(text, destinationLineEnd);
   const nextLineEnd = markdownLineEnd(text, nextLineStart);
-  cursor = nextLineStart;
-  let indentationLength = 0;
-  while (text[cursor] === " " && indentationLength < 4) {
-    cursor += 1;
-    indentationLength += 1;
-  }
-  if (
-    indentationLength <= 3 &&
-    (text[cursor] === '"' || text[cursor] === "'" || text[cursor] === "(") &&
-    markdownReferenceTitleTailIsValid(text, cursor, nextLineEnd)
-  ) {
-    return nextLineEnd;
+  const nextContentStart = markdownContainerPrefixEnd(text, nextLineStart, nextLineEnd);
+  if (nextContentStart !== undefined) {
+    cursor = nextContentStart;
+    if (
+      (text[cursor] === '"' || text[cursor] === "'" || text[cursor] === "(") &&
+      markdownReferenceTitleTailIsValid(text, cursor, nextLineEnd)
+    ) {
+      return nextLineEnd;
+    }
   }
 
   // A non-title next line is ordinary content; the destination-only
@@ -1003,6 +1000,56 @@ function markdownContainerContentStart(
   return cursor;
 }
 
+function markdownContainerPrefixEnd(
+  text: string,
+  lineStart: number,
+  lineEnd: number,
+): number | undefined {
+  let cursor = lineStart;
+  while (cursor < lineEnd) {
+    let indentation = 0;
+    while (cursor < lineEnd && text[cursor] === " " && indentation < 4) {
+      cursor += 1;
+      indentation += 1;
+    }
+    if (indentation > 3) return undefined;
+    if (cursor === lineEnd) return cursor;
+
+    if (text[cursor] === ">") {
+      cursor += 1;
+      if (cursor < lineEnd && (text[cursor] === " " || text[cursor] === "\t")) cursor += 1;
+      continue;
+    }
+
+    const markerEnd = markdownListMarkerEnd(text, cursor, lineEnd);
+    if (markerEnd === undefined || markerEnd >= lineEnd) break;
+    cursor = markerEnd;
+    let padding = 0;
+    while (
+      cursor < lineEnd &&
+      padding < 4 &&
+      (text[cursor] === " " || text[cursor] === "\t")
+    ) {
+      cursor += 1;
+      padding += 1;
+    }
+    if (
+      padding === 0 ||
+      (cursor < lineEnd && (text[cursor] === " " || text[cursor] === "\t"))
+    ) {
+      return undefined;
+    }
+  }
+
+  let contentIndentation = 0;
+  while (cursor < lineEnd && text[cursor] === " " && contentIndentation < 4) {
+    cursor += 1;
+    contentIndentation += 1;
+  }
+  if (contentIndentation > 3) return undefined;
+  return cursor;
+}
+
 function markdownReferenceDefinitionAt(
   text: string,
   openOffset: number,
@@ -1018,14 +1065,12 @@ function markdownReferenceDefinitionAt(
   let lineEnd = markdownLineEnd(text, cursor);
   while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
   if (cursor === lineEnd && lineEnd < text.length) {
-    cursor = markdownNextLineStart(text, lineEnd);
-    lineEnd = markdownLineEnd(text, cursor);
-    let indentationLength = 0;
-    while (text[cursor] === " " && indentationLength < 4) {
-      cursor += 1;
-      indentationLength += 1;
-    }
-    if (indentationLength > 3) return undefined;
+    const nextLineStart = markdownNextLineStart(text, lineEnd);
+    const nextLineEnd = markdownLineEnd(text, nextLineStart);
+    const nextContentStart = markdownContainerPrefixEnd(text, nextLineStart, nextLineEnd);
+    if (nextContentStart === undefined) return undefined;
+    cursor = nextContentStart;
+    lineEnd = nextLineEnd;
   }
   if (cursor >= lineEnd) return undefined;
 

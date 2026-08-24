@@ -142,6 +142,45 @@ function adversarialDifferentialInput(seed: number, requestedOverride?: number):
   };
 }
 
+function boundaryAccountingInput(
+  firstCandidateTokens: number,
+  omitted: PackComposerInput["omitted"],
+): PackComposerInput {
+  return {
+    schema: "asimposium.pack.v1",
+    session: "S-boundary-accounting",
+    problem: "P-BOUNDARY",
+    profile: "working",
+    cursor: 1,
+    requested_max_tokens: 1,
+    viewer: { audience: "session", membership: "contributor", effective_permissions: [] },
+    candidates: [
+      {
+        kind: "claim",
+        id: "C-boundary-first",
+        scope: "ledger",
+        tokens: firstCandidateTokens,
+        untrusted: true,
+        body: "first boundary candidate",
+        why_included: "boundary accounting witness",
+        stable_prefix: 1,
+      },
+      {
+        kind: "claim",
+        id: "C-boundary-overflow",
+        scope: "ledger",
+        tokens: 800,
+        untrusted: true,
+        body: "forces the final budget_exceeded omission phase",
+        why_included: "boundary accounting overflow witness",
+        stable_prefix: 2,
+      },
+    ],
+    action_candidates: [],
+    omitted,
+  };
+}
+
 type DifferentialOutcome =
   | {
       readonly kind: "pack";
@@ -196,6 +235,23 @@ describe("pack composition properties (seeded, reproducible)", () => {
         expect.objectContaining({ item_id: "D-3-1", marker: "fence-extended" }),
       ]),
     );
+
+    // Sweep every possible caller floor in the smallest bucket. Empty omitted[]
+    // exercises the pretty-printed sentinel subtraction; a declared omission
+    // forces the later budget_exceeded phase to use its own mandatory envelope
+    // floor. Either shortcut drifting from the served JSON changes one outcome.
+    for (let tokens = 1; tokens <= 800; tokens += 1) {
+      for (const omitted of [
+        [],
+        [{ reason: "candidate_limit", detail: "claims" }],
+      ] as const) {
+        const boundary = boundaryAccountingInput(tokens, omitted);
+        expect(
+          differentialOutcome(composePack, boundary),
+          `boundary tokens=${tokens} omitted=${omitted.length}`,
+        ).toEqual(differentialOutcome(composePackWithLegacyEstimatorForTest, boundary));
+      }
+    }
   });
 
   test("composition is deterministic: identical input yields identical bytes and fingerprint", () => {

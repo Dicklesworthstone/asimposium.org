@@ -453,6 +453,11 @@ describe("neutralizeUntrustedBody", () => {
       "[nested]\n\n> - [nested]: javascript:from-nested-list()",
       "[after blank]\n\n> context\n>\n> [after blank]: data:text/html,after-quote-blank()",
       "[second]\n\n> [first]: https://example.test/\n> [second]: javascript:consecutive()",
+      "[split quote]\n\n> [split quote]:\n> javascript:from-split-quote()",
+      "[split quote angle]\n\n> [split quote angle]:\n> <javascript:from-split-quote-angle()>",
+      "[split bullet]\n\n- [split bullet]:\n  data:text/html,from-split-bullet()",
+      "[titled quote]\n\n> [titled quote]: javascript:from-quote-title()\n> \"a title\"",
+      "[split titled quote]\n\n> [split titled quote]:\n> javascript:from-split-quote-title()\n> \"a title\"",
     ];
 
     for (const body of controls) {

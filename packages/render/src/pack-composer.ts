@@ -903,10 +903,13 @@ function composePackWithSelectionEstimator(
   let anchorWidth = 1;
   // prepare refuses a projection with no items AND no omitted[] entry, so an
   // empty-omitted anchor borrows the same budget_exceeded marker the legacy
-  // envelope floor uses; its exact byte cost is subtracted back out in
-  // quickEstimate.
+  // envelope floor uses; its exact PRETTY-PRINTED byte cost is subtracted back
+  // out in quickEstimate. The array is embedded one object level down, adding
+  // two spaces to every continuation line beyond stableStringify(..., 2).
+  const substitutedOmission = stableStringify([omission("budget_exceeded")], 2);
   const BUDGET_EXCEEDED_MARKER_BYTES =
-    byteLength(stableStringify([omission("budget_exceeded")])) - 2;
+    byteLength(substitutedOmission) + 2 * countNewlines(substitutedOmission) - 2;
+  const envelopeFloorTokensBySignature = new Map<string, number>();
   let anchorSubstitutedMarker = false;
   const ensureAnchor = (
     signature: string,
@@ -931,11 +934,20 @@ function composePackWithSelectionEstimator(
       "json",
     ).bytes;
   };
-  const envelopeFloorTokens = estimatePackTokens({
-    ...contentsWith(staticOmitted),
-    items: [],
-    omitted: staticOmitted.length === 0 ? [omission("budget_exceeded")] : staticOmitted,
-  });
+  const envelopeFloorTokens = (
+    signature: string,
+    omitted: readonly OmittedEntry[],
+  ): number => {
+    const cached = envelopeFloorTokensBySignature.get(signature);
+    if (cached !== undefined) return cached;
+    const measured = estimatePackTokens({
+      ...contentsWith(omitted),
+      items: [],
+      omitted: omitted.length === 0 ? [omission("budget_exceeded")] : omitted,
+    });
+    envelopeFloorTokensBySignature.set(signature, measured);
+    return measured;
+  };
   const quickEstimate = (
     signature: string,
     omitted: readonly OmittedEntry[],
@@ -944,7 +956,10 @@ function composePackWithSelectionEstimator(
     if (useLegacySelectionEstimator) {
       return estimatePackTokens(contentsWith(omitted));
     }
-    const floor = tokenSum + envelopeFloorTokens;
+    // omitted[] changes after the first budget exclusion. Its mandatory bytes
+    // are part of the conservative item-token floor, not merely the rendered
+    // byte estimate, so measure and cache one envelope floor per omission phase.
+    const floor = tokenSum + envelopeFloorTokens(signature, omitted);
     let estimate = Math.max(1, floor);
     if (estimate > budgetTokens) return estimate;
     ensureAnchor(signature, omitted, tokenSum);
