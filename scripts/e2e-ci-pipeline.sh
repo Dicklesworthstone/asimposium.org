@@ -1142,7 +1142,7 @@ run_stage() {
 }
 
 internal_entrypoint() {
-  local action="$1" stage="${2:-}"
+  local action="$1" stage="${2:-}" physical_artifact_directory
   case "$action" in
     __plant)
       plant_stage "$stage"
@@ -1152,8 +1152,13 @@ internal_entrypoint() {
       [[ "${ASIMP_CI_INTERNAL:-0}" == "1" ]] || return 64
       RUN_ID="${ASIMP_CI_INTERNAL_RUN_ID:-}"
       e2e_validate_run_id "$RUN_ID" || return 64
-      ARTIFACT_DIRECTORY="$(e2e_artifact_directory_at_root "$repository_root" "$RUN_ID")" || return 64
+      # Internal actions may consume only the run directory already claimed by
+      # the parent orchestrator. The ordinary artifact helper creates a missing
+      # directory, which made a refused direct call leave filesystem state.
+      ARTIFACT_DIRECTORY="$repository_root/e2e/artifacts/$RUN_ID"
       [[ -d "$ARTIFACT_DIRECTORY" && ! -L "$ARTIFACT_DIRECTORY" ]] || return 64
+      physical_artifact_directory="$(cd "$ARTIFACT_DIRECTORY" && pwd -P)" || return 64
+      [[ "$physical_artifact_directory" == "$ARTIFACT_DIRECTORY" ]] || return 64
       REVISION="$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" || return 65
       [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || return 65
       RUNNER="${ASIMP_CI_RUNNER:-manual}"

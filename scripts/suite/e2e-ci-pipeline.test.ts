@@ -363,9 +363,14 @@ describe("OPS.2b review pipeline orchestration", () => {
 
   test("internal deploy actions refuse a caller without an orchestrated stage prefix", () => {
     for (const action of ["__worker_deploy", "__worker_readiness", "__web_deploy"]) {
-      const result = runInternalAction(action, `pipeline-test-unclaimed-${action.slice(2)}`);
+      runCounter += 1;
+      const runId = `pipeline-test-unclaimed-${action.slice(2)}-${process.pid}-${runCounter}`;
+      const artifactDirectory = join(REPO_ROOT, "e2e", "artifacts", runId);
+      expect(existsSync(artifactDirectory)).toBe(false);
+      const result = runInternalAction(action, runId);
       expect(result.signal).toBeNull();
       expect(result.status).toBe(64);
+      expect(existsSync(artifactDirectory)).toBe(false);
     }
   });
 
