@@ -18,7 +18,7 @@ use ureq::{Agent, AgentBuilder};
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads the public agent surface on a.asimposium.org. Write commands arrive with later W11 slices."
+    long_about = "Optional ASImposium command-line companion. Reads the public agent surface on a.asimposium.org. Write commands arrive with later W11 slices. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
@@ -142,8 +142,8 @@ pub fn problems_path(json: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
     use clap::CommandFactory;
+    use clap::error::ErrorKind;
 
     #[test]
     fn help_describes_asimp_as_optional() {

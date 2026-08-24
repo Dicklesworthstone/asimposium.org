@@ -1351,7 +1351,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const heads = await db
         .prepare(
           `SELECT workshop_id, type, title, workshop_seq, created_at FROM workshop_objects
-           WHERE problem_id = ? AND fellow_id = ? ORDER BY workshop_seq DESC LIMIT 5`,
+           WHERE problem_id = ? AND fellow_id = ? ORDER BY workshop_seq DESC LIMIT 6`,
         )
         .bind(session.problem_id, auth.binding.fellowId)
         .all<{
@@ -1362,6 +1362,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           created_at: string;
         }>();
       const headRows = heads.results ?? [];
+      // j9hw: one extra row decides disclosure. Exactly the newest five heads
+      // are composed (workshop_seq DESC, deterministic); when a sixth exists,
+      // the pack must say so via candidate_limit instead of silently dropping
+      // the tail.
+      const workshopHeadsTruncated = headRows.length > 5;
+      const emittedHeads = headRows.slice(0, 5);
       if (headRows.length === 0) {
         candidates.push({
           kind: "standing-context",
@@ -1374,7 +1380,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           stable_prefix: 300,
         });
       } else {
-        for (const [index, head] of headRows.entries()) {
+        for (const [index, head] of emittedHeads.entries()) {
           candidates.push({
             kind: "workshop-head",
             id: head.workshop_id,
@@ -1483,6 +1489,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
           : []),
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
+        ...(profile === "working" && workshopHeadsTruncated
+          ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
+          : []),
         ...(profile === "working"
           ? []
           : [{ reason: "profile_excludes_workshop", detail: "workshop-heads" }]),
