@@ -720,13 +720,22 @@ async function readEventById(db: D1Database, eventId: string): Promise<EventRow>
   const row = await statement(
     db,
     `SELECT e.id, e.problem_id, e.seq, e.type, e.object_kind, e.object_id, e.object_version,
-            e.payload_sha256, c.row_digest, c.chain_digest, c.chain_version, e.created_at
+            e.payload_sha256, c.row_digest, c.chain_digest, c.chain_version, e.created_at,
+            e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
+            e.model_string_self_declared, e.harness, e.writer_credential_id
      FROM events e
      LEFT JOIN event_chain_v2 c ON c.event_id = e.id
      WHERE e.id = ?`,
     eventId,
   ).first<EventRow>();
   if (row === null) throw new Error("Krater write did not persist an event envelope.");
+  requireCurrentChainVersion(
+    row.chain_version,
+    "Krater write did not persist one current-version event chain.",
+  );
+  if (row.row_digest === null || row.chain_digest === null) {
+    backfillRequired("Krater write did not persist complete v2 event digests.");
+  }
   return eventRowWithSafeSequence(row);
 }
 
@@ -759,6 +768,10 @@ async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<C
     event.seq,
   ).first<CheckpointRow>();
   if (row === null) throw new Error("Krater write did not persist an integrity checkpoint.");
+  requireCurrentChainVersion(
+    row.chain_version,
+    "Krater write did not persist one current-version checkpoint chain.",
+  );
   return {
     ...row,
     checkpoint_seq: requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false),
@@ -1020,7 +1033,8 @@ export async function backfillKraterIntegrity(
             e.payload_sha256, e.row_digest AS stored_row_digest,
             e.chain_digest AS stored_chain_digest, c.row_digest AS v2_row_digest,
             c.chain_digest AS v2_chain_digest, c.chain_version AS v2_chain_version,
-            e.created_at
+            e.created_at, e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
+            e.model_string_self_declared, e.harness, e.writer_credential_id
      FROM events e
      LEFT JOIN event_chain_v2 c ON c.event_id = e.id
      WHERE e.problem_id = ? ORDER BY e.seq ASC`,
@@ -1097,6 +1111,12 @@ export async function backfillKraterIntegrity(
       objectVersion: event.object_version,
       payloadSha256: event.payload_sha256,
       createdAt: event.created_at,
+      actorFellowId: event.actor_fellow_id,
+      actorSponsorId: event.actor_sponsor_id,
+      actorSessionId: event.actor_session_id,
+      modelStringSelfDeclared: event.model_string_self_declared,
+      harness: event.harness,
+      writerCredentialId: event.writer_credential_id,
     });
     const chainDigest = await eventChainDigest(
       event.problem_id,
@@ -1106,9 +1126,11 @@ export async function backfillKraterIntegrity(
       priorChainDigest,
     );
     const digestCheckpoint = await checkpointDigest(event.problem_id, event.seq, chainDigest);
-    if (event.stored_row_digest !== null && event.stored_row_digest !== rowDigest) {
-      backfillRequired("a stored legacy row digest disagrees with its immutable event envelope.");
-    }
+    // The compatibility digest is deliberately not compared with the v2 row
+    // digest. V1 predated the attribution and writer-credential fields now in
+    // the canonical envelope, so equal bytes would itself be a versioning bug.
+    // The immutable legacy value remains audit history; only this sidecar is
+    // authoritative for current reads, replay, exports, and checkpoints.
     updates.push(
       ...(event.stored_row_digest === null
         ? [
@@ -1246,7 +1268,11 @@ export async function writeClaim(
 
   while (retryCount <= MAX_CHAIN_RETRIES) {
     const before = await readProblemHead(db, input.problemId);
-    await hooks.afterReadHead?.({ publicSeq: before.public_seq, chainDigest: before.chain_digest });
+    await hooks.afterReadHead?.({
+      publicSeq: before.public_seq,
+      chainDigest: before.chain_digest,
+      chainVersion: before.chain_version,
+    });
     if (
       !Number.isSafeInteger(before.public_seq) ||
       before.public_seq < 0 ||
@@ -1271,10 +1297,14 @@ export async function writeClaim(
         ? sha256Hex(requestFor(attemptInput))
         : Promise.resolve(companionRequestDigest),
     ]);
-    const [nextChainDigest, nextRowDigest] = await Promise.all([
-      eventChainDigest(input.problemId, candidateSeq, payloadSha256, before.chain_digest),
-      eventRowDigest(attemptInput, candidateSeq, payloadSha256),
-    ]);
+    const nextRowDigest = await eventRowDigest(attemptInput, candidateSeq, payloadSha256);
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      nextRowDigest,
+      before.chain_digest,
+    );
     const nextBuildDigest = claimProjectionBuildDigestV1(nextRowDigest);
     const nextCheckpointDigest = await checkpointDigest(
       input.problemId,
@@ -1305,7 +1335,7 @@ export async function writeClaim(
         statement(
           db,
           `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
-           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2 AND EXISTS (
              SELECT 1 FROM idempotency
              WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
            )
@@ -1525,6 +1555,7 @@ export async function writeClaim(
       rowDigest: event.row_digest,
       buildDigest: projection.build_digest,
       chainDigest: event.chain_digest,
+      chainVersion: KRATER_CHAIN_VERSION,
       checkpointDigest: checkpoint.checkpoint_digest,
       writePhaseMs,
       successfulBatchRowsRead: metricSum(results, "rows_read"),
@@ -1656,7 +1687,11 @@ export async function writeClaimRevision(
 
   while (retryCount <= MAX_CHAIN_RETRIES) {
     const before = await readProblemHead(db, input.problemId);
-    await hooks.afterReadHead?.({ publicSeq: before.public_seq, chainDigest: before.chain_digest });
+    await hooks.afterReadHead?.({
+      publicSeq: before.public_seq,
+      chainDigest: before.chain_digest,
+      chainVersion: before.chain_version,
+    });
     if (
       !Number.isSafeInteger(before.public_seq) ||
       before.public_seq < 0 ||
@@ -1686,20 +1721,30 @@ export async function writeClaimRevision(
           )
         : Promise.resolve(companionRequestDigest),
     ]);
-    const [nextChainDigest, nextRowDigest] = await Promise.all([
-      eventChainDigest(input.problemId, candidateSeq, payloadSha256, before.chain_digest),
-      eventEnvelopeRowDigest({
-        eventId: input.eventId,
-        problemId: input.problemId,
-        seq: candidateSeq,
-        type: "claim.revised",
-        objectKind: "claim",
-        objectId: input.claimId,
-        objectVersion: input.newVersion,
-        payloadSha256,
-        createdAt: input.createdAt,
-      }),
-    ]);
+    const nextRowDigest = await eventEnvelopeRowDigest({
+      eventId: input.eventId,
+      problemId: input.problemId,
+      seq: candidateSeq,
+      type: "claim.revised",
+      objectKind: "claim",
+      objectId: input.claimId,
+      objectVersion: input.newVersion,
+      payloadSha256,
+      createdAt: input.createdAt,
+      actorFellowId: input.attribution?.fellowId ?? null,
+      actorSponsorId: input.attribution?.sponsorId ?? null,
+      actorSessionId: input.attribution?.sessionId ?? null,
+      modelStringSelfDeclared: input.attribution?.modelSelfDeclared ?? null,
+      harness: input.attribution?.harness ?? null,
+      writerCredentialId: input.attribution?.credentialId ?? null,
+    });
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      nextRowDigest,
+      before.chain_digest,
+    );
     const nextBuildDigest = claimProjectionBuildDigestV1(nextRowDigest);
     const nextCheckpointDigest = await checkpointDigest(
       input.problemId,
@@ -1730,7 +1775,7 @@ export async function writeClaimRevision(
         statement(
           db,
           `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
-           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2 AND EXISTS (
              SELECT 1 FROM idempotency
              WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
            )
@@ -1978,6 +2023,7 @@ export async function writeClaimRevision(
       rowDigest: event.row_digest,
       buildDigest: projection.build_digest,
       chainDigest: event.chain_digest,
+      chainVersion: KRATER_CHAIN_VERSION,
       checkpointDigest: checkpoint.checkpoint_digest,
       writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
       successfulBatchRowsRead: metricSum(results, "rows_read"),
@@ -2076,12 +2122,7 @@ export async function writeGapEvent(
     const gapId = input.mode === "filed" ? `G-${candidateSeq}` : input.gapId;
     const payloadJson = canonicalGapPayload(input);
     const payloadSha256 = await sha256Hex(payloadJson);
-    const nextChainDigest = await eventChainDigest(
-      input.problemId,
-      candidateSeq,
-      payloadSha256,
-      before.chain_digest,
-    );
+    const actorFellowId = input.mode === "filed" ? input.authorFellowId : input.actorFellowId;
     const nextRowDigest = await eventEnvelopeRowDigest({
       eventId: input.eventId,
       problemId: input.problemId,
@@ -2092,7 +2133,20 @@ export async function writeGapEvent(
       objectVersion: 1,
       payloadSha256,
       createdAt: input.createdAt,
+      actorFellowId,
+      actorSponsorId: null,
+      actorSessionId: null,
+      modelStringSelfDeclared: null,
+      harness: null,
+      writerCredentialId: input.writerCredentialId ?? null,
     });
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      nextRowDigest,
+      before.chain_digest,
+    );
     const nextCheckpointDigest = await checkpointDigest(
       input.problemId,
       candidateSeq,
@@ -2132,7 +2186,7 @@ export async function writeGapEvent(
         statement(
           db,
           `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
-           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2 AND EXISTS (
              SELECT 1 FROM idempotency
              WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
            )
@@ -2197,7 +2251,7 @@ export async function writeGapEvent(
           nextRowDigest,
           nextChainDigest,
           input.createdAt,
-          input.mode === "filed" ? input.authorFellowId : input.actorFellowId,
+          actorFellowId,
           input.writerCredentialId ?? null,
           input.idempotencyKey,
           input.problemId,
@@ -2301,6 +2355,7 @@ export async function writeGapEvent(
       rowDigest: nextRowDigest,
       buildDigest: "",
       chainDigest: nextChainDigest,
+      chainVersion: KRATER_CHAIN_VERSION,
       checkpointDigest: nextCheckpointDigest,
       writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
       successfulBatchRowsRead: metricSum(results, "rows_read"),
@@ -2371,12 +2426,6 @@ export async function writeRelationEvent(
       target: input.targetRef,
     });
     const payloadSha256 = await sha256Hex(payloadJson);
-    const nextChainDigest = await eventChainDigest(
-      input.problemId,
-      candidateSeq,
-      payloadSha256,
-      before.chain_digest,
-    );
     const nextRowDigest = await eventEnvelopeRowDigest({
       eventId: input.eventId,
       problemId: input.problemId,
@@ -2387,7 +2436,20 @@ export async function writeRelationEvent(
       objectVersion: 1,
       payloadSha256,
       createdAt: input.createdAt,
+      actorFellowId: input.assertedByFellow,
+      actorSponsorId: null,
+      actorSessionId: null,
+      modelStringSelfDeclared: null,
+      harness: null,
+      writerCredentialId: input.writerCredentialId ?? null,
     });
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      nextRowDigest,
+      before.chain_digest,
+    );
     const nextCheckpointDigest = await checkpointDigest(
       input.problemId,
       candidateSeq,
@@ -2411,7 +2473,7 @@ export async function writeRelationEvent(
         statement(
           db,
           `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
-           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2 AND EXISTS (
              SELECT 1 FROM idempotency
              WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
            )
@@ -2560,6 +2622,7 @@ export async function writeRelationEvent(
       rowDigest: nextRowDigest,
       buildDigest: "",
       chainDigest: nextChainDigest,
+      chainVersion: KRATER_CHAIN_VERSION,
       checkpointDigest: nextCheckpointDigest,
       writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
       successfulBatchRowsRead: metricSum(results, "rows_read"),
@@ -2607,10 +2670,16 @@ export async function readEvents(
     inputError("cursor reads require bounded integer pagination.");
   }
   try {
+    await readProblemHead(db, problemId);
     const result = await statement(
       db,
-      `SELECT id, problem_id, seq, type, object_id, payload_sha256, row_digest, chain_digest, created_at
-       FROM events WHERE problem_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+      `SELECT e.id, e.problem_id, e.seq, e.type, e.object_kind, e.object_id, e.object_version,
+              e.payload_sha256, c.row_digest, c.chain_digest, c.chain_version, e.created_at,
+              e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
+              e.model_string_self_declared, e.harness, e.writer_credential_id
+       FROM events e
+       LEFT JOIN event_chain_v2 c ON c.event_id = e.id
+       WHERE e.problem_id = ? AND e.seq > ? ORDER BY e.seq ASC LIMIT ?`,
       problemId,
       afterSeq,
       limit,
@@ -2618,18 +2687,28 @@ export async function readEvents(
     return result.results.map((rawRow) => {
       const row = eventRowWithSafeSequence(rawRow);
       if (row.row_digest === null || row.chain_digest === null) {
-        backfillRequired("event reads require completed Krater integrity replay.");
+        backfillRequired("event reads require one complete v2 Krater integrity replay.");
       }
+      requireCurrentChainVersion(row.chain_version);
       return {
         eventId: row.id,
         problemId: row.problem_id,
         seq: row.seq,
         type: row.type,
+        objectKind: row.object_kind,
         objectId: row.object_id,
+        objectVersion: row.object_version,
         payloadSha256: row.payload_sha256,
         rowDigest: row.row_digest,
         chainDigest: row.chain_digest,
+        chainVersion: KRATER_CHAIN_VERSION,
         createdAt: row.created_at,
+        actorFellowId: row.actor_fellow_id,
+        actorSponsorId: row.actor_sponsor_id,
+        actorSessionId: row.actor_session_id,
+        modelStringSelfDeclared: row.model_string_self_declared,
+        harness: row.harness,
+        writerCredentialId: row.writer_credential_id,
       };
     });
   } catch (error) {
@@ -2701,13 +2780,33 @@ export async function readIntegrityState(
       readProblemHead(db, problemId),
       statement(
         db,
-        `SELECT checkpoint_digest FROM integrity_checkpoints
-         WHERE problem_id = ? ORDER BY checkpoint_seq DESC LIMIT 1`,
+        `SELECT c.checkpoint_digest, c.chain_version, c.checkpoint_seq, c.root_chain_digest
+         FROM checkpoint_chain_v2 c
+         WHERE c.problem_id = ? ORDER BY c.checkpoint_seq DESC LIMIT 1`,
         problemId,
-      ).first<{ checkpoint_digest: string }>(),
+      ).first<{
+        checkpoint_digest: string;
+        chain_version: number;
+        checkpoint_seq: number;
+        root_chain_digest: string;
+      }>(),
     ]);
+    if (head.public_seq > 0 && checkpoint === null) {
+      backfillRequired("a nonempty v2 chain must have a current-version checkpoint.");
+    }
+    if (checkpoint !== null) {
+      requireCurrentChainVersion(checkpoint.chain_version);
+      if (
+        requireStoredSequence(checkpoint.checkpoint_seq, "checkpoint sequence", false) !==
+          head.public_seq ||
+        checkpoint.root_chain_digest !== head.chain_digest
+      ) {
+        backfillRequired("the v2 checkpoint does not bind the durable problem head.");
+      }
+    }
     return {
       chainDigest: head.chain_digest,
+      chainVersion: KRATER_CHAIN_VERSION,
       checkpointDigest: checkpoint?.checkpoint_digest ?? null,
     };
   } catch (error) {
@@ -2760,16 +2859,38 @@ export async function eventChainMatches(events: readonly KraterEvent[]): Promise
   for (const event of events) {
     if (
       event.problemId !== problemId ||
+      event.chainVersion !== KRATER_CHAIN_VERSION ||
       !isSafeNonnegativeInteger(event.seq) ||
       event.seq === 0 ||
-      event.seq !== priorSeq + 1
+      event.seq !== priorSeq + 1 ||
+      !Number.isSafeInteger(event.objectVersion) ||
+      event.objectVersion < 1
     ) {
       return false;
     }
+    const expectedRow = await eventEnvelopeRowDigest({
+      eventId: event.eventId,
+      problemId: event.problemId,
+      seq: event.seq,
+      type: event.type,
+      objectKind: event.objectKind,
+      objectId: event.objectId,
+      objectVersion: event.objectVersion,
+      payloadSha256: event.payloadSha256,
+      createdAt: event.createdAt,
+      actorFellowId: event.actorFellowId,
+      actorSponsorId: event.actorSponsorId,
+      actorSessionId: event.actorSessionId,
+      modelStringSelfDeclared: event.modelStringSelfDeclared,
+      harness: event.harness,
+      writerCredentialId: event.writerCredentialId,
+    });
+    if (expectedRow !== event.rowDigest) return false;
     const expected = await eventChainDigest(
       event.problemId,
       event.seq,
       event.payloadSha256,
+      expectedRow,
       priorDigest,
     );
     if (expected !== event.chainDigest) return false;

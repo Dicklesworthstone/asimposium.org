@@ -17,6 +17,13 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const PIPELINE = join(REPO_ROOT, "scripts", "e2e-ci-pipeline.sh");
 const SCRATCH = mkdtempSync(join(tmpdir(), "asimposium-ci-pipeline-test-"));
+const HELPER_ENV: NodeJS.ProcessEnv = {
+  PATH: process.env.PATH ?? "/usr/bin:/bin",
+  TMPDIR: process.env.TMPDIR ?? tmpdir(),
+  LANG: process.env.LANG ?? "C",
+  LC_ALL: "C",
+  NODE_ENV: "test",
+};
 const STAGES = [
   "root-gate",
   "worker-deploy",
@@ -147,6 +154,7 @@ function runPipeline(stage: Stage, outcome: string, timeout = false): PipelineRu
   `;
   const helper = spawnSync(process.execPath, ["-e", helperSource], {
     encoding: "utf8",
+    env: HELPER_ENV,
     timeout: 30000,
   });
   if (helper.status !== 0) {
@@ -243,23 +251,31 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const completionPromise = new Promise((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
 
     const deadline = Date.now() + 30000;
+    let began = false;
     while (Date.now() < deadline) {
       if (
         existsSync(${JSON.stringify(paths.tracePath)}) &&
         readFileSync(${JSON.stringify(paths.tracePath)}, "utf8").includes("begin:" + ${JSON.stringify(stage)} + "\\n")
       ) {
+        began = true;
         break;
       }
+      if (child.exitCode !== null || child.signalCode !== null) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
 
+    if (!began) {
+      child.kill("SIGKILL");
+      await completionPromise;
+      throw new Error("pipeline stage did not begin before cancellation");
+    }
     child.kill("SIGTERM");
-
-    const completion = await new Promise((resolve) => {
-      child.once("close", (code, signal) => resolve({ code, signal }));
-    });
+    const completion = await completionPromise;
 
     writeFileSync(
       ${JSON.stringify(resultPath)},
@@ -273,6 +289,7 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
   `;
   const helper = spawnSync(process.execPath, ["-e", helperSource], {
     encoding: "utf8",
+    env: HELPER_ENV,
     timeout: 45000,
   });
   if (helper.status !== 0) {
@@ -319,7 +336,9 @@ describe("OPS.2b review pipeline orchestration", () => {
     ]);
 
     expect(Object.keys(environment).every((name) => allowedNames.has(name))).toBe(true);
+    expect(Object.keys(HELPER_ENV).every((name) => allowedNames.has(name))).toBe(true);
     expect(environment.HOME).toBeUndefined();
+    expect(HELPER_ENV.HOME).toBeUndefined();
   });
 
   test("internal deploy actions refuse a caller without an orchestrated stage prefix", () => {

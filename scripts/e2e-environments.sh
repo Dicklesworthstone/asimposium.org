@@ -182,7 +182,8 @@ emit "select" "pass" "OK" "environment selected explicitly"
 # Phase 1 — toolchain.
 # ---------------------------------------------------------------------------
 command -v bun >/dev/null 2>&1 || fail_phase "toolchain" "BUN_MISSING" "bun is required to run the validators."
-emit "toolchain" "pass" "OK" "bun present"
+command -v python3 >/dev/null 2>&1 || fail_phase "toolchain" "PYTHON_MISSING" "python3 is required to validate structured receipts."
+emit "toolchain" "pass" "OK" "bun and python3 present"
 
 # ---------------------------------------------------------------------------
 # Phase 2 — static shape of the local Wrangler skeleton.
