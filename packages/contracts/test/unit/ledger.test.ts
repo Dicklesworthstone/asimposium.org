@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 
-import { LedgerContractsSchema, ProblemsIndexResponseSchema } from "../../src/ledger.ts";
+import {
+  LedgerContractsSchema,
+  ProblemIndexEntrySchema,
+  ProblemsIndexResponseSchema,
+} from "../../src/ledger.ts";
 
 const VALID_INDEX = new URL("../fixtures/valid/ledger-problems-index.json", import.meta.url);
 const INVALID_INDEX = new URL(
@@ -25,6 +29,14 @@ test("the problems index accepts the valid fixture and requires omitted[]", asyn
   expect(ProblemsIndexResponseSchema.safeParse(await fixture(INVALID_INDEX)).success).toBe(false);
 });
 
+test("the index rejects a hostile markdown-structural id (gfbc golden)", async () => {
+  const HOSTILE_INDEX = new URL(
+    "../fixtures/invalid/ledger-problems-index-hostile-id.json",
+    import.meta.url,
+  );
+  expect(ProblemsIndexResponseSchema.safeParse(await fixture(HOSTILE_INDEX)).success).toBe(false);
+});
+
 test("the index rejects extra fields and malformed entries", () => {
   expect(
     ProblemsIndexResponseSchema.safeParse({ problems: [], omitted: [], extra: true }).success,
@@ -35,6 +47,52 @@ test("the index rejects extra fields and malformed entries", () => {
       omitted: [],
     }).success,
   ).toBe(false);
+});
+
+test("every contract-valid entry has an unambiguous bounded markdown row", () => {
+  // The markdown face renders `- \`${id}\` — seq N, opened TS, updated TS`.
+  // Hostile scalars — newlines that would forge extra listing rows, backticks
+  // that would escape the id code span, control text, non-canonical
+  // timestamps — are contract-invalid, so the mounted reader refuses the row
+  // instead of interpolating it (asimposiumorg-gfbc).
+  const canonical = {
+    id: "P-4DSP",
+    public_seq: 1,
+    created_at: "2026-08-14T00:00:00.000Z",
+    updated_at: "2026-08-14T00:00:00.000Z",
+  };
+  expect(ProblemIndexEntrySchema.safeParse(canonical).success).toBe(true);
+  const hostileIds = [
+    "P-X\n- `P-FORGED` — forged row",
+    "P-X\rsecond row",
+    "P-X` — seq 9",
+    "`P-BACKTICK`",
+    "P-SPACE SPACE",
+    "P-Control\u0000NUL",
+    "P-ESC\u001B[31mred",
+    "",
+    ".leading-dot",
+    "-leading-dash",
+    "a".repeat(129),
+  ];
+  for (const id of hostileIds) {
+    expect(ProblemIndexEntrySchema.safeParse({ ...canonical, id }).success).toBe(false);
+  }
+  const hostileTimestamps = [
+    "2026-08-14T00:00:00Z",
+    "2026-08-14T00:00:00.000+00:00",
+    "not-a-timestamp",
+    "2026-08-14T00:00:00.000Z\nforged",
+    "x",
+    "",
+  ];
+  for (const field of ["created_at", "updated_at"] as const) {
+    for (const value of hostileTimestamps) {
+      expect(
+        ProblemIndexEntrySchema.safeParse({ ...canonical, [field]: value }).success,
+      ).toBe(false);
+    }
+  }
 });
 
 test("the ledger root schema carries the index pair", () => {

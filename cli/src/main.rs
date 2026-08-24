@@ -1,7 +1,7 @@
 //! Argument parsing and exit-code policy only. All behavior lives in the
 //! library so it stays offline-testable.
 
-use asimp::{build_url, fetch_text, problems_path, resolve_origin, Command, FetchError};
+use asimp::{Command, FetchError, build_url, fetch_text, problems_path, resolve_origin};
 use clap::Parser;
 
 fn main() {

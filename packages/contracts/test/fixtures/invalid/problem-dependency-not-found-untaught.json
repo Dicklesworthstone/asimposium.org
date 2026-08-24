@@ -5,7 +5,5 @@
   "code": "DEPENDENCY_NOT_FOUND",
   "detail": "No claim C-404 exists on this problem.",
   "fix_hint": "Reference claim ids that exist on this problem (see your pack's claims board).",
-  "missing_dependency_ids": [
-    "C-404"
-  ]
+  "missing_dependency_ids": ["C-404"]
 }

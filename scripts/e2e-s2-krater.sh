@@ -150,6 +150,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
   packages/contracts/src/sessions.ts
+  packages/contracts/src/health.ts
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
   # executed ones, and a listed file whose own imports escape the set leaves the
@@ -187,6 +188,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/disposition-read.ts
   apps/wire/src/ledger/evidence-class.ts
   apps/wire/src/ledger/dispositions.ts
+  # Reached through `sessions/router.ts` since the claim-relations slice; the
+  # mechanical walk flagged it on first run, which is this attestation working.
+  apps/wire/src/ledger/relations.ts
   apps/wire/src/krater/claim-version.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
   # (mintClaimVersion on the promote path); the mechanical walk flagged it the
@@ -208,6 +212,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/generated/problem.schema.json
   packages/contracts/generated/screening.schema.json
   packages/contracts/generated/sessions.schema.json
+  packages/contracts/generated/internal-health.schema.json
   packages/protocol/package.json
   packages/protocol/src/index.ts
   packages/protocol/src/errors.ts

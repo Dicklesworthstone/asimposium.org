@@ -8,8 +8,8 @@
 //! this CLI is a convenience, never a requirement (Fable §1).
 
 use clap::Parser;
-use std::io::{BufRead, Read};
-use ureq::Agent;
+use std::io::BufRead;
+use ureq::{Agent, AgentBuilder};
 
 /// Parsed command line for the optional `asimp` companion.
 #[derive(Debug, Parser)]
@@ -40,9 +40,7 @@ pub enum Command {
         json: bool,
     },
     /// GET an origin-relative path and print the body verbatim.
-    Get {
-        path: String,
-    },
+    Get { path: String },
 }
 
 pub const DEFAULT_ORIGIN: &str = "https://a.asimposium.org";
@@ -106,7 +104,7 @@ fn agent() -> Agent {
         .build()
 }
 
-fn read_capped(reader: impl Read) -> Result<String, String> {
+fn read_capped(reader: impl BufRead) -> Result<String, String> {
     reader
         .take(MAX_BODY_BYTES)
         .lines()
@@ -156,7 +154,10 @@ mod tests {
     #[test]
     fn empty_input_requests_help() {
         let error = Cli::try_parse_from(["asimp"]).expect_err("no args means help");
-        assert_eq!(error.kind(), ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
     }
 
     #[test]

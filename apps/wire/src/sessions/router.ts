@@ -748,6 +748,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row?.role;
   }
 
+
+  // ebts: one exact-path response policy for the four mounted Fellow POST
+  // routes. Every response class they can emit — fresh success, exact replay,
+  // auth refusal, contract refusal, policy refusal, idempotency conflict,
+  // typed exceptional refusal — carries session/workshop identifiers or error
+  // context, so no receipt may omit a retention prohibition. Setting the
+  // header here (after the handler resolves) keeps each handler's exact
+  // bytes, status, and content-type untouched, and the path list deliberately
+  // excludes the public /cursor and the sponsor-owned workshop route.
+  const FELLOW_WRITE_RECEIPT_PATHS = [
+    "/v1/sessions",
+    "/v1/sessions/:id/workshop",
+    "/v1/sessions/:id/promote",
+    "/v1/sessions/:id/close",
+  ] as const;
+  app.use(FELLOW_WRITE_RECEIPT_PATHS, async (c, next) => {
+    await next();
+    if (c.req.method === "POST") {
+      c.res.headers.set("cache-control", "private, no-store");
+    }
+  });
   // --- POST /v1/sessions -------------------------------------------------
   app.post("/v1/sessions", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -1218,7 +1239,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           `SELECT session_id, handback FROM sessions
            WHERE problem_id = ? AND fellow_id = ?
              AND closed_at IS NOT NULL AND handback IS NOT NULL
-           ORDER BY closed_at DESC LIMIT 1`,
+           ORDER BY closed_at DESC, session_id DESC LIMIT 1`,
         )
         .bind(session.problem_id, auth.binding.fellowId)
         .first<{ session_id: string; handback: string }>();

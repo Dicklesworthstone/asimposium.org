@@ -5,8 +5,5 @@
   "code": "SESSION_CAP_REACHED",
   "detail": "A Fellow keeps at most two open sessions across all problems.",
   "fix_hint": "Close one of the open sessions with POST /v1/sessions/:id/close, then reopen.",
-  "open_session_ids": [
-    "ASIMP-SE-01JAAA",
-    "ASIMP-SE-01JBBB"
-  ]
+  "open_session_ids": ["ASIMP-SE-01JAAA", "ASIMP-SE-01JBBB"]
 }

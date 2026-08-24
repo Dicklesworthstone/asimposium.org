@@ -6694,4 +6694,201 @@ describe("committed promotion outbox nudge", () => {
     expect(nudgePaths).toEqual(["/nudge"]);
     expect(await outboxRows()).toEqual({ count: 1 });
   });
+
+  test("PLANTED: prior-handback selection is a total order when closed_at ties (7llj)", async () => {
+    // Two closed sessions on the same problem sharing the EXACT same
+    // millisecond closed_at made `ORDER BY closed_at DESC LIMIT 1`
+    // storage-order-dependent: repeated packs could surface different
+    // handbacks, flipping pack bytes and ETags. The selector now carries a
+    // causal total order — closed_at DESC, then session_id DESC — so this
+    // plant proves repeated packs select the SAME specified session's bytes.
+    const { call, db } = await fixture();
+    const openSession = async (key: string) => {
+      const opened = await call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `7llj-open-${key}` },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      expect(opened.status).toBe(201);
+      return SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    };
+    const closeSession = async (sessionId: string, key: string, handback: string) => {
+      const closed = await call(`/v1/sessions/${sessionId}/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `7llj-close-${key}` },
+        body: JSON.stringify({ handback, promote: [] }),
+      });
+      expect(closed.status).toBe(201);
+    };
+    // The session-open cap forbids two concurrent opens for this Fellow, so
+    // the pair is created and closed sequentially.
+    const alpha = await openSession("alpha");
+    await closeSession(alpha, "alpha", "Alpha handback examines the boundary case.");
+    const beta = await openSession("beta");
+    await closeSession(beta, "beta", "Beta handback examines the boundary case.");
+
+    // Force an exact closed_at tie between the two eligible rows. The tie
+    // value is the pair's own MAX(opened_at), so the schema CHECK
+    // (closed_at >= opened_at) stays satisfied for both rows.
+    const tied = await db
+      .prepare(
+        `UPDATE sessions SET closed_at =
+           (SELECT MAX(opened_at) FROM sessions WHERE session_id IN (?, ?))
+         WHERE session_id IN (?, ?)`,
+      )
+      .bind(alpha, beta, alpha, beta)
+      .run();
+    expect(tied.meta.changes).toBe(2);
+
+    // A third OPEN session is only the vehicle for the pack call: it has no
+    // closed row of its own yet (closed_at IS NOT NULL excludes it), so only
+    // the tied alpha/beta pair competes under the total order.
+    const vehicle = await openSession("vehicle");
+    const firstPack = await call(`/v1/sessions/${vehicle}/pack?profile=working`);
+    expect(firstPack.status).toBe(200);
+    const secondPack = await call(`/v1/sessions/${vehicle}/pack?profile=working`);
+    expect(secondPack.status).toBe(200);
+    const firstBody = await firstPack.text();
+    expect(await secondPack.text()).toBe(firstBody);
+
+    // The winner is exactly the lexicographically greater session id; the
+    // loser's handback text appears nowhere in the face bytes.
+    const winner = beta > alpha ? beta : alpha;
+    expect(firstBody).toContain(`HB-${winner}`);
+    expect(firstBody).toContain(winner === beta ? "Beta handback" : "Alpha handback");
+    expect(firstBody).not.toContain(winner === beta ? "Alpha handback" : "Beta handback");
+  });
+
+  test("PLANTED: every Fellow write receipt class carries private, no-store (ebts)", async () => {
+    // One exact-path response policy over the four mounted Fellow POST
+    // routes: fresh success, exact replay, auth refusal, contract refusal,
+    // and idempotency conflict receipts all carry Cache-Control:
+    // private, no-store. Statuses, bytes, and content-types stay pinned by
+    // the existing suites; this table pins only the retention prohibition.
+    const { call, token } = await fixture();
+    const NO_STORE = "private, no-store";
+
+    const sessionOpen = async (
+      key: string,
+      body: string,
+      auth: string | undefined,
+    ): Promise<Response> =>
+      call("/v1/sessions", {
+        method: "POST",
+        headers: {
+          ...(auth === undefined ? {} : { authorization: `Bearer ${auth}` }),
+          "content-type": "application/json",
+          "idempotency-key": key,
+        },
+        body,
+      });
+
+    const openBody = JSON.stringify({ problem_id: "P-4DSP", intent: "prove" });
+    const fresh = await sessionOpen("ebts-open-1", openBody, token);
+    const replay = await sessionOpen("ebts-open-1", openBody, token);
+    const conflict = await sessionOpen(
+      "ebts-open-1",
+      JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+      token,
+    );
+    const authRefusal = await sessionOpen("ebts-open-2", openBody, "not-a-real-token");
+    const contractRefusal = await sessionOpen(
+      "ebts-open-3",
+      JSON.stringify({ problem_id: "P-4DSP" }),
+      token,
+    );
+    for (const [label, response] of [
+      ["fresh", fresh],
+      ["replay", replay],
+      ["conflict", conflict],
+      ["auth-refusal", authRefusal],
+      ["contract-refusal", contractRefusal],
+    ] as const) {
+      expect(response.status).toBeGreaterThanOrEqual(200);
+      expect(response.headers.get("cache-control"), `sessions ${label}`).toBe(NO_STORE);
+    }
+    expect(fresh.status).toBe(201);
+    expect(replay.status).toBe(201);
+    expect(conflict.status).toBe(409);
+    expect(authRefusal.status).toBe(401);
+    expect(contractRefusal.status).toBe(422);
+
+    const sessionId = SessionOpenResponseSchema.parse(await fresh.json()).session_id;
+    const pushBody = JSON.stringify({
+      type: "draft",
+      title: "Receipt cache discipline",
+      body_md: "Every write receipt prohibits retention.",
+      relates_to: [],
+    });
+    const push = async (key: string, body: string, auth: string | undefined) =>
+      call(`/v1/sessions/${sessionId}/workshop`, {
+        method: "POST",
+        headers: {
+          ...(auth === undefined ? {} : { authorization: `Bearer ${auth}` }),
+          "content-type": "application/json",
+          "idempotency-key": key,
+        },
+        body,
+      });
+    const pushFresh = await push("ebts-push-1", pushBody, token);
+    const pushReplay = await push("ebts-push-1", pushBody, token);
+    const pushAuth = await push("ebts-push-2", pushBody, "also-not-a-token");
+    const pushContract = await push("ebts-push-3", JSON.stringify({ type: "draft" }), token);
+    for (const [label, response] of [
+      ["fresh", pushFresh],
+      ["replay", pushReplay],
+      ["auth-refusal", pushAuth],
+      ["contract-refusal", pushContract],
+    ] as const) {
+      expect(response.headers.get("cache-control"), `workshop ${label}`).toBe(NO_STORE);
+    }
+    expect(pushFresh.status).toBe(201);
+    expect(pushReplay.status).toBe(201);
+    expect(pushAuth.status).toBe(401);
+    expect(pushContract.status).toBe(422);
+
+    const promote = async (key: string, body: string) =>
+      call(`/v1/sessions/${sessionId}/promote`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "idempotency-key": key,
+        },
+        body,
+      });
+    const promoteBody = JSON.stringify({
+      workshop_id: "W-4DSP-EBTS01",
+      kind: "conjecture",
+      statement: "Receipt retention is prohibited on every write path.",
+      falsifier: "A promoted receipt that a shared cache retains and serves stale.",
+      relates_to: [],
+    });
+    const promoteFresh = await promote("ebts-promote-1", promoteBody);
+    const promoteReplay = await promote("ebts-promote-1", promoteBody);
+    for (const response of [promoteFresh, promoteReplay]) {
+      expect(response.headers.get("cache-control")).toBe(NO_STORE);
+    }
+    expect(promoteFresh.status).toBe(201);
+    expect(promoteReplay.status).toBe(201);
+
+    const close = async (key: string) =>
+      call(`/v1/sessions/${sessionId}/close`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "idempotency-key": key,
+        },
+        body: JSON.stringify({ handback: "Receipts prohibit retention.", promote: [] }),
+      });
+    const closeFresh = await close("ebts-close-1");
+    const closeReplay = await close("ebts-close-1");
+    for (const response of [closeFresh, closeReplay]) {
+      expect(response.headers.get("cache-control")).toBe(NO_STORE);
+    }
+    expect(closeFresh.status).toBe(201);
+    expect(closeReplay.status).toBe(201);
+  });
 });
+

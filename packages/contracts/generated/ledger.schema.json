@@ -10,8 +10,8 @@
       "properties": {
         "id": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 80
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
         },
         "public_seq": {
           "type": "integer",
@@ -20,13 +20,11 @@
         },
         "created_at": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 40
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
         },
         "updated_at": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 40
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
         }
       },
       "required": [
@@ -48,8 +46,8 @@
             "properties": {
               "id": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 80
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
               },
               "public_seq": {
                 "type": "integer",
@@ -58,13 +56,11 @@
               },
               "created_at": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 40
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
               },
               "updated_at": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 40
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
               }
             },
             "required": [

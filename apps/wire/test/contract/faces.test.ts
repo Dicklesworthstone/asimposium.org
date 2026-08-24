@@ -912,6 +912,50 @@ describe("face wire format", () => {
     }
   });
 
+  test("PLANTED: a hostile index row is refused by the contract, never interpolated (gfbc)", async () => {
+    // A legacy/corrupt/direct fixture row whose scalars carry markdown
+    // structure — a newline forging a second listing row, or a backtick
+    // escaping the id code span — must fail closed at the mounted reader.
+    // The tightened ProblemIndexEntrySchema makes such a row
+    // contract-invalid, so loadIndex throws before either face renders a
+    // byte of it; the response must not leak the hostile bytes in any body.
+    const hostileRows = [
+      {
+        id: "P-EVIL\n- `P-FORGED` — forged listing row",
+        public_seq: 1,
+        created_at: "2026-08-14T00:00:00.000Z",
+        updated_at: "2026-08-14T00:00:00.000Z",
+      },
+      {
+        id: "P-EVIL` — seq 9",
+        public_seq: 1,
+        created_at: "2026-08-14T00:00:00.000Z",
+        updated_at: "2026-08-14T00:00:00.000Z",
+      },
+      {
+        id: "P-TS",
+        public_seq: 1,
+        created_at: "not-a-timestamp\n- `P-FORGED`",
+        updated_at: "2026-08-14T00:00:00.000Z",
+      },
+    ];
+    for (const row of hostileRows) {
+      const routes = createLedgerFaceRoutes();
+      const env = {
+        DB: {
+          prepare: () => ({ all: async () => ({ results: [row] }) }),
+        } as unknown as Env["DB"],
+      } as Env;
+      for (const path of ["/problems.json", "/problems.md"] as const) {
+        const response = await routes.fetch(new Request(`https://a.asimposium.org${path}`), env);
+        expect(response.status).toBe(500);
+        const body = await response.text();
+        expect(body).not.toContain("P-FORGED");
+        expect(body).not.toContain("P-EVIL");
+      }
+    }
+  });
+
   test("the retained event-tail experiment accepts only canonical decimal cursors", async () => {
     let prepares = 0;
     const env = {

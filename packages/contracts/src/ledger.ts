@@ -9,12 +9,32 @@ import { z } from "zod";
  * `omitted[]` is mandatory on the response so every reader can see what the
  * face deliberately left out.
  */
+/**
+ * Krater ingress identifier law (krater.ts `IDENTIFIER`), established here so
+ * the face contract — not storage trust — bounds every value the markdown
+ * face interpolates into `- \`${id}\``. The charset excludes backticks,
+ * whitespace, and control characters, so a row cannot escape its code span,
+ * gain listing lines, or forge renderer structure (asimposiumorg-gfbc).
+ */
+const PROBLEM_INDEX_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/**
+ * Krater ingress timestamp law (`validateKraterIngressTimestamp` /
+ * `CANONICAL_UTC_TIMESTAMP`): an exact canonical UTC instant at millisecond
+ * precision. Digits and delimiters only — no markdown metacharacters.
+ */
+const PROBLEM_INDEX_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+const ProblemIndexTimestampSchema = z
+  .string()
+  .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp");
+
 export const ProblemIndexEntrySchema = z
   .object({
-    id: z.string().min(1).max(80),
+    id: z.string().max(128).regex(PROBLEM_INDEX_ID_PATTERN, "invalid problem index id"),
     public_seq: z.number().int().min(0),
-    created_at: z.string().min(1).max(40),
-    updated_at: z.string().min(1).max(40),
+    created_at: ProblemIndexTimestampSchema,
+    updated_at: ProblemIndexTimestampSchema,
   })
   .strict();
 
