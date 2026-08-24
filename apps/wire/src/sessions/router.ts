@@ -120,8 +120,8 @@ const PACK_CLAIM_CANDIDATE_LIMIT = 128;
 export interface SessionRouterOptions {
   readonly service: EnrollmentService;
   readonly replayProtector: {
-    seal(plaintext: string): Promise<EncryptedEnrollmentReplay>;
-    open(encrypted: EncryptedEnrollmentReplay): Promise<string>;
+    seal(plaintext: string, context?: string): Promise<EncryptedEnrollmentReplay>;
+    open(encrypted: EncryptedEnrollmentReplay, context?: string): Promise<string>;
   };
   /** The same signed-envelope sponsor seam the enrollment router uses. */
   readonly verifiedSponsor?: (
@@ -840,6 +840,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => SessionOpenResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
       const decision = authorizeFellowWrite({
@@ -861,6 +863,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => SessionOpenResponseSchema.parse(JSON.parse(raw)),
         async () => {
           const problemRow = await db
             .prepare("SELECT id FROM problems WHERE id = ?")
@@ -1600,6 +1604,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => WorkshopPushResponseSchema.parse(JSON.parse(raw)),
       );
       if (replay !== undefined) return replay;
     } catch (error) {
@@ -1640,6 +1646,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.fellowId,
         key,
         digest,
+        c.req.path,
+        (raw) => WorkshopPushResponseSchema.parse(JSON.parse(raw)),
         async () => {
           const workshopId = mintId("W");
           const head = await db

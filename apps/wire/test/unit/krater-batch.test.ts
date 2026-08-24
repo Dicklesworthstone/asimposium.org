@@ -10,7 +10,7 @@ import {
 } from "../../src/krater/batch.ts";
 
 function member(tempId: string, causedBy: readonly string[] = []): BatchMember {
-  return { tempId, causedBy };
+  return { tempId, causedBy: [...causedBy] };
 }
 
 describe("batch commit planning (W2.2 / asimposiumorg-s96x)", () => {
@@ -108,10 +108,7 @@ describe("batch commit planning (W2.2 / asimposiumorg-s96x)", () => {
     });
 
     test("refuses invalid tempId in causedBy with BATCH_INVALID_TEMP_ID", () => {
-      const plan = planBatchCommit([
-        member("tmp:a", ["invalid-parent"]),
-        member("tmp:b"),
-      ]);
+      const plan = planBatchCommit([member("tmp:a", ["invalid-parent"]), member("tmp:b")]);
       expect(plan.ok).toBe(false);
       if (!plan.ok) {
         expect(plan.code).toBe("BATCH_INVALID_TEMP_ID");
@@ -151,10 +148,7 @@ describe("batch commit planning (W2.2 / asimposiumorg-s96x)", () => {
 
   test("exceeding MAX_CAUSED_BY_PER_MEMBER is refused with BATCH_TOO_LARGE", () => {
     const parents = Array.from({ length: 16 }, (_, i) => `tmp:p${i}`);
-    const members = [
-      ...parents.map((p) => member(p)),
-      member("tmp:child", parents),
-    ];
+    const members = [...parents.map((p) => member(p)), member("tmp:child", parents)];
     // Note: total members is 17 here, which is caught by BATCH_TOO_LARGE
     const plan = planBatchCommit(members);
     expect(plan.ok).toBe(false);
@@ -183,10 +177,7 @@ describe("batch commit planning (W2.2 / asimposiumorg-s96x)", () => {
   });
 
   test("a 2-cycle is refused with BATCH_CAUSAL_CYCLE and DAG (P10) citation", () => {
-    const plan = planBatchCommit([
-      member("tmp:a", ["tmp:b"]),
-      member("tmp:b", ["tmp:a"]),
-    ]);
+    const plan = planBatchCommit([member("tmp:a", ["tmp:b"]), member("tmp:b", ["tmp:a"])]);
     expect(plan.ok).toBe(false);
     if (!plan.ok) {
       expect(plan.code).toBe("BATCH_CAUSAL_CYCLE");
