@@ -1018,15 +1018,23 @@ export function assertS2TerminalDigestParity(
   if (
     write.seq !== event.seq ||
     write.seq !== stateResult.cursor ||
-    write.seq !== replay.cursor ||
-    write.row_digest !== event.row_digest ||
+    write.seq !== replay.cursor
+  ) {
+    fail("S2_TERMINAL_SEQUENCE_MISMATCH");
+  }
+  if (write.row_digest !== event.row_digest) fail("S2_V2_ROW_DIGEST_MISMATCH");
+  if (
     write.chain_digest !== event.chain_digest ||
     write.chain_digest !== stateResult.chain_digest ||
-    write.chain_digest !== replay.chain_digest ||
+    write.chain_digest !== replay.chain_digest
+  ) {
+    fail("S2_V2_CHAIN_DIGEST_MISMATCH");
+  }
+  if (
     write.checkpoint_digest !== stateResult.checkpoint_digest ||
     write.checkpoint_digest !== replay.checkpoint_digest
   ) {
-    fail("S2_INTEGRITY_DIGEST_MISMATCH");
+    fail("S2_V2_CHECKPOINT_DIGEST_MISMATCH");
   }
 }
 

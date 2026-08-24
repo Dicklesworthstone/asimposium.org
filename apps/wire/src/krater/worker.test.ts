@@ -581,6 +581,7 @@ describe("S2 local harness boundary", () => {
       matches: true,
       cursor: 1,
       event_count: 1,
+      chain_digest: v1Fixture.event.chainDigest,
       chain_version: 2,
       checkpoint_digest: v1Fixture.checkpointDigest,
     });
@@ -631,6 +632,7 @@ describe("S2 local harness boundary", () => {
       matches: false,
       cursor: 1,
       event_count: 1,
+      chain_digest: fixture.event.chainDigest,
       chain_version: 2,
       checkpoint_digest: fixture.checkpointDigest,
     });
@@ -697,6 +699,7 @@ describe("S2 local harness boundary", () => {
       matches: false,
       cursor: 1,
       event_count: 1,
+      chain_digest: drifted.event.chainDigest,
       chain_version: 2,
       checkpoint_digest: drifted.checkpointDigest,
     });

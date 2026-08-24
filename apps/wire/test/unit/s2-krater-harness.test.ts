@@ -19,10 +19,12 @@ import { join, resolve } from "node:path";
 import { S2_COST_RECEIPT_BINDINGS_KEYS, S2_COST_RECEIPT_ROOT_KEYS } from "@asimposium/contracts";
 
 import {
+  assertS2TerminalDigestParity,
   buildS2CostMeasurementReceipt,
   outboxAgeEvidence,
   parseS2EventPageResult,
   parseS2OutboxStatus,
+  parseS2ReplayResult,
   parseS2StateResult,
   parseS2WriteResult,
   S2_COST_RECEIPT_RELATIVE_PATH,
@@ -295,6 +297,18 @@ const FIRST_COST_WRITE = COST_WRITES[0];
 if (FIRST_COST_WRITE === undefined) {
   throw new Error("S2 cost fixture must contain at least one settled write");
 }
+const VALID_EVENT_DIGESTS = {
+  rowDigest: FIRST_COST_WRITE.row_digest,
+  chainDigest: FIRST_COST_WRITE.chain_digest,
+};
+const VALID_REPLAY = {
+  matches: true,
+  cursor: 1,
+  event_count: 1,
+  chain_digest: FIRST_COST_WRITE.chain_digest,
+  chain_version: 2,
+  checkpoint_digest: FIRST_COST_WRITE.checkpoint_digest,
+};
 
 interface Run {
   exitCode: number;
@@ -1028,11 +1042,11 @@ describe("S2 to S7 normalized cost receipt", () => {
     ).toMatchObject({ cursor: maximum });
     expect(
       parseS2EventPageResult({
-        events: [{ seq: maximum, chainVersion: 2 }],
+        events: [{ seq: maximum, chainVersion: 2, ...VALID_EVENT_DIGESTS }],
         next_cursor: maximum,
         has_more: false,
       }),
-    ).toEqual({ sequences: [maximum], nextCursor: maximum, hasMore: false });
+    ).toMatchObject({ sequences: [maximum], nextCursor: maximum, hasMore: false });
 
     for (const invalid of [maximum + 1, 1.5]) {
       expect(() => parseS2WriteResult({ ...validWrite, seq: invalid })).toThrow(
@@ -1055,7 +1069,7 @@ describe("S2 to S7 normalized cost receipt", () => {
       ).toThrow("S2_RESPONSE_INVALID");
       expect(() =>
         parseS2EventPageResult({
-          events: [{ seq: invalid, chainVersion: 2 }],
+          events: [{ seq: invalid, chainVersion: 2, ...VALID_EVENT_DIGESTS }],
           next_cursor: invalid,
           has_more: false,
         }),
@@ -1170,11 +1184,11 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(parseS2StateResult(validState).chain_version).toBe(2);
     expect(
       parseS2EventPageResult({
-        events: [{ seq: 1, chainVersion: 2 }],
+        events: [{ seq: 1, chainVersion: 2, ...VALID_EVENT_DIGESTS }],
         next_cursor: 1,
         has_more: false,
       }),
-    ).toEqual({ sequences: [1], nextCursor: 1, hasMore: false });
+    ).toMatchObject({ sequences: [1], nextCursor: 1, hasMore: false });
 
     for (const invalid of [undefined, null, 1, 3]) {
       expect(() =>
@@ -1185,11 +1199,51 @@ describe("S2 to S7 normalized cost receipt", () => {
       );
       expect(() =>
         parseS2EventPageResult({
-          events: [{ seq: 1, chainVersion: invalid }],
+          events: [{ seq: 1, chainVersion: invalid, ...VALID_EVENT_DIGESTS }],
           next_cursor: 1,
           has_more: false,
         }),
       ).toThrow("S2_CHAIN_VERSION_INVALID");
+    }
+
+    for (const invalid of ["A".repeat(64), "0".repeat(63), "g".repeat(64)]) {
+      for (const field of [
+        "payload_sha256",
+        "row_digest",
+        "build_digest",
+        "chain_digest",
+        "checkpoint_digest",
+      ] as const) {
+        expect(() => parseS2WriteResult({ ...FIRST_COST_WRITE, [field]: invalid })).toThrow(
+          "S2_RESPONSE_INVALID",
+        );
+      }
+      expect(() => parseS2StateResult({ ...validState, chain_digest: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+      expect(() => parseS2StateResult({ ...validState, checkpoint_digest: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+      expect(() =>
+        parseS2EventPageResult({
+          events: [{ seq: 1, chainVersion: 2, ...VALID_EVENT_DIGESTS, rowDigest: invalid }],
+          next_cursor: 1,
+          has_more: false,
+        }),
+      ).toThrow("S2_RESPONSE_INVALID");
+      expect(() =>
+        parseS2EventPageResult({
+          events: [{ seq: 1, chainVersion: 2, ...VALID_EVENT_DIGESTS, chainDigest: invalid }],
+          next_cursor: 1,
+          has_more: false,
+        }),
+      ).toThrow("S2_RESPONSE_INVALID");
+      expect(() => parseS2ReplayResult({ ...VALID_REPLAY, chain_digest: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+      expect(() => parseS2ReplayResult({ ...VALID_REPLAY, checkpoint_digest: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
     }
 
     for (const table of [
@@ -1211,6 +1265,46 @@ describe("S2 to S7 normalized cost receipt", () => {
         ).toThrow("S2_RESPONSE_INVALID");
       }
     }
+  });
+
+  test("PLANTED: S2 terminal digest parity refuses one valid-shaped disagreement per layer", () => {
+    const write = parseS2WriteResult({ ...FIRST_COST_WRITE });
+    const page = parseS2EventPageResult({
+      events: [{ seq: 1, chainVersion: 2, ...VALID_EVENT_DIGESTS }],
+      next_cursor: 1,
+      has_more: false,
+    });
+    const event = page.events[0];
+    if (event === undefined) throw new Error("positive-control event missing");
+    const state = parseS2StateResult({
+      cursor: 1,
+      counts: {
+        events: 1,
+        event_chain_v2: 1,
+        integrity_checkpoints: 1,
+        checkpoint_chain_v2: 1,
+      },
+      chain_digest: FIRST_COST_WRITE.chain_digest,
+      chain_version: 2,
+      checkpoint_digest: FIRST_COST_WRITE.checkpoint_digest,
+      checkpoint_mode: "unsigned-v0",
+    });
+    const replay = parseS2ReplayResult({ ...VALID_REPLAY });
+    expect(() => assertS2TerminalDigestParity(write, event, state, replay)).not.toThrow();
+
+    const changed = "6".repeat(64);
+    expect(() =>
+      assertS2TerminalDigestParity(write, { ...event, row_digest: changed }, state, replay),
+    ).toThrow("S2_V2_ROW_DIGEST_MISMATCH");
+    expect(() =>
+      assertS2TerminalDigestParity(write, event, { ...state, chain_digest: changed }, replay),
+    ).toThrow("S2_V2_CHAIN_DIGEST_MISMATCH");
+    expect(() =>
+      assertS2TerminalDigestParity(write, event, state, {
+        ...replay,
+        checkpoint_digest: changed,
+      }),
+    ).toThrow("S2_V2_CHECKPOINT_DIGEST_MISMATCH");
   });
 
   // 9yv2: `outbox_handoff` is the fourth union guard. Unlike its siblings it

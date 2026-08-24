@@ -663,12 +663,13 @@ web_deploy() {
   local project_receipt="$ARTIFACT_DIRECTORY/vercel-project.json"
   local preview_baseline_receipt="$ARTIFACT_DIRECTORY/vercel-preview-baseline.json"
   local deployment_url_file="$ARTIFACT_DIRECTORY/vercel-deployment-url.txt"
-  local raw_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
+  local inspect_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
   local api_receipt="$ARTIFACT_DIRECTORY/vercel-deployment-api.json"
   local worker_deployments_receipt="$ARTIFACT_DIRECTORY/cloudflare-deployments-after-web-ready.json"
   local worker_attestation_receipt="$ARTIFACT_DIRECTORY/worker-web-ready-deployment.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
-  local deployment_host deployment_id deployment_origin status version_id
+  local deployment_host deployment_id deployment_origin inspect_output status version_id
+  local -a pipeline_statuses=()
 
   require_bearer_token VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
@@ -687,24 +688,27 @@ web_deploy() {
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    --output "$project_receipt" \
-    "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID"
-  status=$?
-  [[ "$status" -eq 0 ]] || return "$status"
-  python3 - "$project_receipt" "$VERCEL_PROJECT_ID" <<'PY'
+    "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID" | \
+    python3 -c '
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    document = json.load(stream)
-if not isinstance(document, dict) or document.get("id") != sys.argv[2]:
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(1)
+if not isinstance(document, dict) or document.get("id") != sys.argv[1]:
     sys.exit(1)
 # A connected Git provider can deploy the web revision concurrently with this
 # ordered pipeline. Absence is the only provider state this gate treats as safe.
 if document.get("link") is not None:
     sys.exit(78)
-PY
-  status=$?
+print(json.dumps({"project_id": sys.argv[1], "git_linked": False}, separators=(",", ":")))
+' "$VERCEL_PROJECT_ID" > "$project_receipt"
+  pipeline_statuses=("${PIPESTATUS[@]}")
+  status="${pipeline_statuses[0]}"
+  [[ "$status" -eq 0 ]] || return "$status"
+  status="${pipeline_statuses[1]}"
   [[ "$status" -eq 0 ]] || return "$status"
 
   # Post-deploy target validation cannot undo an accidentally production-
@@ -715,17 +719,16 @@ PY
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
-    --output "$preview_baseline_receipt" \
-    "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=1"
-  status=$?
-  [[ "$status" -eq 0 ]] || return "$status"
-  python3 - "$preview_baseline_receipt" "$VERCEL_PROJECT_ID" <<'PY'
+    "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=1" | \
+    python3 -c '
 import json
 import re
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    document = json.load(stream)
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(1)
 if not isinstance(document, dict):
     sys.exit(1)
 deployments = document.get("deployments")
@@ -733,6 +736,8 @@ if not isinstance(deployments, list):
     sys.exit(1)
 if not deployments:
     sys.exit(78)
+if len(deployments) != 1:
+    sys.exit(1)
 baseline = deployments[0]
 if not isinstance(baseline, dict) or baseline.get("target") != "preview":
     sys.exit(1)
@@ -740,12 +745,20 @@ project_id = baseline.get("projectId")
 if project_id is None and isinstance(baseline.get("project"), dict):
     project_id = baseline["project"].get("id")
 deployment_id = baseline.get("id") or baseline.get("uid")
-if project_id != sys.argv[2]:
+if project_id != sys.argv[1]:
     sys.exit(1)
 if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
-PY
-  status=$?
+print(json.dumps({
+    "deployment_id": deployment_id,
+    "project_id": project_id,
+    "target": "preview",
+}, separators=(",", ":")))
+' "$VERCEL_PROJECT_ID" > "$preview_baseline_receipt"
+  pipeline_statuses=("${PIPESTATUS[@]}")
+  status="${pipeline_statuses[0]}"
+  [[ "$status" -eq 0 ]] || return "$status"
+  status="${pipeline_statuses[1]}"
   [[ "$status" -eq 0 ]] || return "$status"
 
   export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
@@ -777,47 +790,25 @@ PY
 )" || return 1
 
   export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
-  bunx --bun "vercel@$VERCEL_CLI_VERSION" inspect "$deployment_origin" --wait --timeout 25m --json > "$raw_receipt"
+  inspect_output="$(bunx --bun "vercel@$VERCEL_CLI_VERSION" inspect "$deployment_origin" --wait --timeout 25m --json)"
   status=$?
   export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"
-
-  deployment_host="${deployment_origin#https://}"
-  curl_with_bearer "$VERCEL_TOKEN" \
-    --fail --silent --show-error \
-    --user-agent "$USER_AGENT" \
-    --connect-timeout 5 --max-time 20 \
-    --output "$api_receipt" \
-    "https://api.vercel.com/v13/deployments/$deployment_host?teamId=$VERCEL_ORG_ID"
-  status=$?
-  [[ "$status" -eq 0 ]] || return "$status"
-
-  deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
-  version_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" version_id)" || return 1
-  observe_active_worker_deployment \
-    "$worker_deployments_receipt" "$version_id" "$deployment_id" "$worker_attestation_receipt"
-  status=$?
-  [[ "$status" -eq 0 ]] || return "$status"
-
-  python3 - "$raw_receipt" "$api_receipt" "$REVISION" "$VERCEL_PROJECT_ID" <<'PY' > "$safe_receipt"
-import datetime
+  printf '%s' "$inspect_output" | python3 -c '
 import json
 import re
 import sys
 from urllib.parse import urlsplit
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    document = json.load(stream)
-with open(sys.argv[2], encoding="utf-8") as stream:
-    api_document = json.load(stream)
-if not isinstance(document, dict):
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
     sys.exit(1)
-if not isinstance(api_document, dict):
+if not isinstance(document, dict):
     sys.exit(1)
 deployment_id = document.get("id") or document.get("uid") or document.get("deploymentId")
 url = document.get("url")
 state = document.get("readyState") or document.get("state") or document.get("status")
-target = document.get("target")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
 if not isinstance(url, str):
@@ -827,30 +818,116 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if not isinstance(state, str) or state.upper() != "READY":
+if not isinstance(state, str) or state.upper() != "READY" or document.get("target") != "preview":
     sys.exit(1)
-if target != "preview":
+print(json.dumps({
+    "deployment_id": deployment_id,
+    "origin": "https://" + parts.hostname,
+    "status": "ready",
+    "target": "preview",
+}, separators=(",", ":")))
+' > "$inspect_receipt"
+  status=$?
+  inspect_output=""
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  deployment_host="${deployment_origin#https://}"
+  curl_with_bearer "$VERCEL_TOKEN" \
+    --fail --silent --show-error \
+    --user-agent "$USER_AGENT" \
+    --connect-timeout 5 --max-time 20 \
+    "https://api.vercel.com/v13/deployments/$deployment_host?teamId=$VERCEL_ORG_ID" | \
+    python3 -c '
+import json
+import re
+import sys
+from urllib.parse import urlsplit
+
+try:
+    document = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
     sys.exit(1)
-if api_document.get("id") != deployment_id:
+if not isinstance(document, dict):
     sys.exit(1)
-api_url = api_document.get("url")
-if api_url != parts.hostname:
+deployment_id = document.get("id")
+url = document.get("url")
+state = document.get("readyState") or document.get("state") or document.get("status")
+if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
-api_state = api_document.get("readyState") or api_document.get("state") or api_document.get("status")
-if not isinstance(api_state, str) or api_state.upper() != "READY":
+if not isinstance(url, str):
     sys.exit(1)
-if api_document.get("target") != "preview":
+parts = urlsplit(url if "://" in url else "https://" + url)
+if parts.scheme != "https" or not parts.hostname or parts.port is not None or parts.path not in ("", "/") or parts.query or parts.fragment:
     sys.exit(1)
-project_id = api_document.get("projectId")
-if project_id is None and isinstance(api_document.get("project"), dict):
-    project_id = api_document["project"].get("id")
-if project_id != sys.argv[4]:
+if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-metadata = api_document.get("meta")
-if not isinstance(metadata, dict) or metadata.get("asimposiumRevision") != sys.argv[3]:
+if not isinstance(state, str) or state.upper() != "READY" or document.get("target") != "preview":
+    sys.exit(1)
+project_id = document.get("projectId")
+if project_id is None and isinstance(document.get("project"), dict):
+    project_id = document["project"].get("id")
+metadata = document.get("meta")
+if project_id != sys.argv[1] or not isinstance(metadata, dict) or metadata.get("asimposiumRevision") != sys.argv[2]:
+    sys.exit(1)
+print(json.dumps({
+    "deployment_id": deployment_id,
+    "origin": "https://" + parts.hostname,
+    "project_id": project_id,
+    "revision": sys.argv[2],
+    "status": "ready",
+    "target": "preview",
+}, separators=(",", ":")))
+' "$VERCEL_PROJECT_ID" "$REVISION" > "$api_receipt"
+  pipeline_statuses=("${PIPESTATUS[@]}")
+  status="${pipeline_statuses[0]}"
+  [[ "$status" -eq 0 ]] || return "$status"
+  status="${pipeline_statuses[1]}"
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
+  version_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" version_id)" || return 1
+  observe_active_worker_deployment \
+    "$worker_deployments_receipt" "$version_id" "$deployment_id" "$worker_attestation_receipt"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  python3 - "$inspect_receipt" "$api_receipt" "$REVISION" "$VERCEL_PROJECT_ID" "$deployment_origin" <<'PY' > "$safe_receipt"
+import datetime
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+with open(sys.argv[2], encoding="utf-8") as stream:
+    api_document = json.load(stream)
+if not isinstance(document, dict) or set(document) != {"deployment_id", "origin", "status", "target"}:
+    sys.exit(1)
+if not isinstance(api_document, dict) or set(api_document) != {
+    "deployment_id", "origin", "project_id", "revision", "status", "target"
+}:
+    sys.exit(1)
+if document != {
+    "deployment_id": api_document["deployment_id"],
+    "origin": api_document["origin"],
+    "status": "ready",
+    "target": "preview",
+}:
+    sys.exit(1)
+if (
+    api_document["status"] != "ready"
+    or api_document["target"] != "preview"
+    or api_document["project_id"] != sys.argv[4]
+    or api_document["revision"] != sys.argv[3]
+    or document["origin"] != sys.argv[5]
+):
     sys.exit(1)
 observed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-print(json.dumps({"deployment_id": deployment_id, "observed_at": observed_at, "status": "ready", "origin": "https://" + parts.hostname}, separators=(",", ":")))
+print(json.dumps({
+    "deployment_id": document["deployment_id"],
+    "observed_at": observed_at,
+    "status": "ready",
+    "origin": document["origin"],
+}, separators=(",", ":")))
 PY
 }
 

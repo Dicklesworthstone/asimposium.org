@@ -252,7 +252,10 @@ revision metadata.
 Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment
 IDs and UTC observations, and explicit delegated-suite status. Wrangler's own
-NDJSON receipt is captured with its supported output-file interface. The live
+NDJSON receipt is captured with its supported output-file interface. Vercel
+responses are reduced at the pipe boundary to exact project/deployment/status
+projections; full project, deployment-list, inspect, and deployment API objects
+are never written to artifacts. The live
 suite owners may supply only `pass`, `blocked`, `not-run`, or `stale`. Every
 non-`not-run` value requires a real UTC observation and the exact Git revision
 it describes; `pass` and `blocked` must name the current pipeline revision.
