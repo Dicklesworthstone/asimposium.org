@@ -153,8 +153,15 @@ function ensureProblemHarness(): {
         return statement;
       },
       all: async () => {
-        if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
-          return fakeD1Result([{ public_seq: 0, chain_digest: null, chain_version: null }]);
+        if (sql.includes("END AS terminal_v2_complete") && sql.includes("FROM problems WHERE id")) {
+          return fakeD1Result([
+            {
+              public_seq: 0,
+              chain_digest: null,
+              chain_version: null,
+              terminal_v2_complete: 1,
+            },
+          ]);
         }
         if (sql.includes("FROM krater_integrity_backfill")) return fakeD1Result();
         if (sql.includes("FROM events e") && sql.includes("WHERE e.problem_id")) {
@@ -239,7 +246,7 @@ function retryingWriteHarness(
         return statement;
       },
       all: async () => {
-        if (sql.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+        if (sql.includes("END AS terminal_v2_complete") && sql.includes("FROM problems WHERE id")) {
           return fakeD1Result([
             {
               public_seq: publicSeq,
@@ -1259,7 +1266,10 @@ describe("migration 0039 replays an exact completed v1 history into one v2 autho
     run(): Promise<{ meta: { rows_read: number; rows_written: number } }>;
   }
 
-  function localD1(sqlite: Database): Parameters<typeof backfillKraterIntegrity>[0] {
+  function localD1(
+    sqlite: Database,
+    options: { readonly failBatchStatementContaining?: string } = {},
+  ): Parameters<typeof backfillKraterIntegrity>[0] {
     const prepared = (query: string, values: readonly unknown[]): LocalPreparedStatement => ({
       query,
       values,
@@ -1279,6 +1289,12 @@ describe("migration 0039 replays an exact completed v1 history into one v2 autho
       }),
       batch: async (statements: readonly LocalPreparedStatement[]) =>
         sqlite.transaction(() => statements.map((statement) => {
+          if (
+            options.failBatchStatementContaining !== undefined &&
+            statement.query.includes(options.failBatchStatementContaining)
+          ) {
+            throw new Error("PLANTED_LATE_BACKFILL_BATCH_FAILURE");
+          }
           const result = sqlite.query(statement.query).run(...(statement.values as never));
           return {
             success: true,
@@ -1456,6 +1472,57 @@ describe("migration 0039 replays an exact completed v1 history into one v2 autho
           "UPDATE integrity_checkpoints SET checkpoint_digest = ? WHERE problem_id = ? AND checkpoint_seq = 1",
         )
         .run(legacyCheckpointDigest, problemId);
+
+      // Causal negative at the opposite end of the transaction: fail only
+      // after the sidecar/projection/head statements have executed. SQLite's
+      // batch transaction must roll every one of those writes back, and the
+      // recovery catch must not bless the still-required v1 state as a
+      // concurrent completion.
+      const beforeLateFailure = JSON.stringify({
+        problem: sqlite
+          .query("SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?")
+          .get(problemId),
+        backfill: sqlite
+          .query(
+            "SELECT state, legacy_event_count, completed_at, chain_version FROM krater_integrity_backfill WHERE problem_id = ?",
+          )
+          .get(problemId),
+        projection: sqlite
+          .query("SELECT build_digest, updated_at FROM claim_projections WHERE problem_id = ?")
+          .get(problemId),
+      });
+      const failedAt = "2026-08-24T18:45:00.000Z";
+      await expect(
+        backfillKraterIntegrity(
+          localD1(sqlite, {
+            failBatchStatementContaining: "UPDATE krater_integrity_backfill",
+          }),
+          problemId,
+          failedAt,
+          Date.parse(failedAt),
+        ),
+      ).rejects.toThrow("could not atomically complete");
+      expect(sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get()).toEqual({
+        count: 0,
+      });
+      expect(
+        sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get(),
+      ).toEqual({ count: 0 });
+      expect(
+        JSON.stringify({
+          problem: sqlite
+            .query("SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?")
+            .get(problemId),
+          backfill: sqlite
+            .query(
+              "SELECT state, legacy_event_count, completed_at, chain_version FROM krater_integrity_backfill WHERE problem_id = ?",
+            )
+            .get(problemId),
+          projection: sqlite
+            .query("SELECT build_digest, updated_at FROM claim_projections WHERE problem_id = ?")
+            .get(problemId),
+        }),
+      ).toBe(beforeLateFailure);
 
       const completedAt = "2026-08-24T19:00:00.000Z";
       const expectedRowDigest = await eventEnvelopeRowDigest({

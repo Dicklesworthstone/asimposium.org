@@ -611,6 +611,7 @@ PY
 
 web_deploy() {
   local project_receipt="$ARTIFACT_DIRECTORY/vercel-project.json"
+  local preview_baseline_receipt="$ARTIFACT_DIRECTORY/vercel-preview-baseline.json"
   local deployment_url_file="$ARTIFACT_DIRECTORY/vercel-deployment-url.txt"
   local raw_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
   local api_receipt="$ARTIFACT_DIRECTORY/vercel-deployment-api.json"
@@ -649,9 +650,51 @@ PY
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  # Post-deploy target validation cannot undo an accidentally production-
+  # classified first deployment. Require an existing Preview record for this
+  # exact project before mutation, so a new or ambiguously initialized project
+  # stops at a read-only provider check.
+  curl_with_bearer "$VERCEL_TOKEN" \
+    --fail --silent --show-error \
+    --user-agent "$USER_AGENT" \
+    --connect-timeout 5 --max-time 20 \
+    --output "$preview_baseline_receipt" \
+    "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=preview&limit=1"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+  python3 - "$preview_baseline_receipt" "$VERCEL_PROJECT_ID" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+if not isinstance(document, dict):
+    sys.exit(1)
+deployments = document.get("deployments")
+if not isinstance(deployments, list):
+    sys.exit(1)
+if not deployments:
+    sys.exit(78)
+baseline = deployments[0]
+if not isinstance(baseline, dict) or baseline.get("target") != "preview":
+    sys.exit(1)
+project_id = baseline.get("projectId")
+if project_id is None and isinstance(baseline.get("project"), dict):
+    project_id = baseline["project"].get("id")
+deployment_id = baseline.get("id") or baseline.get("uid")
+if project_id != sys.argv[2]:
+    sys.exit(1)
+if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
+    sys.exit(1)
+PY
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
   bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
     --yes \
     --target preview \
+    --skip-domain \
     --meta "asimposiumRevision=$REVISION" \
     --build-env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
     --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
@@ -735,7 +778,7 @@ if api_url != parts.hostname:
 api_state = api_document.get("readyState") or api_document.get("state") or api_document.get("status")
 if not isinstance(api_state, str) or api_state.upper() != "READY":
     sys.exit(1)
-if api_document.get("target") not in (None, "preview"):
+if api_document.get("target") != "preview":
     sys.exit(1)
 project_id = api_document.get("projectId")
 if project_id is None and isinstance(api_document.get("project"), dict):

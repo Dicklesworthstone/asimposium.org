@@ -235,6 +235,16 @@ operator assertion cannot bypass that provider-state check. This ordered CLI
 preview path supersedes the earlier native-Git preview plan. Launch promotion
 remains a separately owned gate.
 
+The web stage also requires a read-only API observation of at least one existing
+Preview deployment for the exact project before it mutates anything. This
+fails closed for a newly initialized project because a post-deploy target check
+cannot undo a first deployment that a provider classified as Production despite
+Preview intent. The CLI also uses `--skip-domain` as a second containment layer,
+so an incorrect provider classification cannot assign a production domain while
+the final check is pending. The new deployment is still checked independently
+through the v13 API for exact project, exact Preview target, ready state, and
+revision metadata.
+
 Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment
 IDs and UTC observations, and explicit delegated-suite status. Wrangler's own
