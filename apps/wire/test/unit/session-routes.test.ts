@@ -1756,11 +1756,13 @@ describe("session protocol routes", () => {
     // typed 409 naming the winner.
     const armed = { on: false };
     const gate = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
     let heldOnce = false;
     const { call, db } = await fixture({
       beforeBatch: async () => {
         if (!armed.on || heldOnce) return;
         heldOnce = true;
+        held.resolve();
         await gate.promise;
       },
     });
@@ -1797,6 +1799,10 @@ describe("session protocol routes", () => {
 
     armed.on = true;
     const suspended = attempt("race-a");
+    // Starting an async request does not prove it has reached beforeBatch.
+    // Observe the hold before starting race-b, so host scheduling can never
+    // swap the intended loser and committer.
+    await held.promise;
     const committedResponse = await attempt("race-b");
     expect(committedResponse.status).toBe(201);
     const committed = PromoteResponseSchema.parse(await committedResponse.json());
