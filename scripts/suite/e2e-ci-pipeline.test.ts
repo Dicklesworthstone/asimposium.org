@@ -334,6 +334,7 @@ describe("OPS.2b review pipeline orchestration", () => {
       "ASIMP_CI_PROCESS_PLANT_OUTCOME",
       "ASIMP_CI_PROCESS_TRACE",
       "ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY",
+      "ASIMP_CI_PROCESS_SCOPE_PLANT",
       "ASIMP_CI_ROOT_GATE_TIMEOUT_SECONDS",
       "ASIMP_CI_WORKER_DEPLOY_TIMEOUT_SECONDS",
       "ASIMP_CI_WORKER_READINESS_TIMEOUT_SECONDS",
@@ -407,6 +408,25 @@ describe("OPS.2b review pipeline orchestration", () => {
   test("stage subprocesses do not inherit an unrelated ambient value", () => {
     const run = runPipeline("smoke-gallery", "pass", false, {
       ASIMP_CI_PROCESS_AMBIENT_CANARY: "must-not-cross-stage-boundary",
+    });
+    expect(run.status).toBe(0);
+    expect(begunStages(run)).toEqual([...STAGES]);
+  });
+
+  test("stage subprocesses receive exactly their declared credential scope", () => {
+    // These are inert test sentinels, never copies of the caller's provider
+    // credentials. The planted pipeline checks presence and absence at every
+    // stage boundary before executing the ordinary pass plants.
+    const run = runPipeline("smoke-gallery", "pass", false, {
+      ASIMP_CI_PROCESS_SCOPE_PLANT: "1",
+      CLOUDFLARE_API_TOKEN: "scope-cloudflare-token",
+      CLOUDFLARE_ACCOUNT_ID: "scope-cloudflare-account",
+      ASIMP_D1_DATABASE_ID_STAGING: "scope-d1-id",
+      ASIMP_STAGING_SERVICE_ENVELOPE_KEYS: "scope-service-keys",
+      VERCEL_TOKEN: "scope-vercel-token",
+      VERCEL_ORG_ID: "scope-vercel-org",
+      VERCEL_PROJECT_ID: "scope-vercel-project",
+      ASIMPOSIUM_SMOKE_FELLOW_TOKEN: "scope-fellow-token",
     });
     expect(run.status).toBe(0);
     expect(begunStages(run)).toEqual([...STAGES]);

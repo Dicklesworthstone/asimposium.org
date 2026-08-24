@@ -1317,7 +1317,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       ...triggers,
     ].join("\n");
     if (normalizeSql(reconstructed) !== normalizeSql(source)) {
-      throw new Error("0040 statement splitter did not consume the exact migration bytes");
+      throw new Error("0040 statement splitter did not consume the exact executable SQL");
     }
     return [...prefix, ...triggers];
   }

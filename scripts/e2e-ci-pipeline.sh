@@ -352,6 +352,51 @@ plant_stage() {
   # clean-environment boundary. Seeing it here means an ambient value crossed
   # that boundary and the plant must fail closed.
   [[ -z "${ASIMP_CI_PROCESS_AMBIENT_CANARY:-}" ]] || return 97
+  if [[ "${ASIMP_CI_PROCESS_SCOPE_PLANT:-0}" == "1" ]]; then
+    case "$stage" in
+      root-gate | smoke-gallery)
+        [[ "${CLOUDFLARE_API_TOKEN+present}" != present ]] || return 98
+        [[ "${CLOUDFLARE_ACCOUNT_ID+present}" != present ]] || return 98
+        [[ "${ASIMP_D1_DATABASE_ID_STAGING+present}" != present ]] || return 98
+        [[ "${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS+present}" != present ]] || return 98
+        [[ "${VERCEL_TOKEN+present}" != present ]] || return 98
+        [[ "${VERCEL_ORG_ID+present}" != present ]] || return 98
+        [[ "${VERCEL_PROJECT_ID+present}" != present ]] || return 98
+        [[ "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN+present}" != present ]] || return 98
+        ;;
+      smoke-agent)
+        [[ "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}" == scope-fellow-token ]] || return 98
+        [[ "${CLOUDFLARE_API_TOKEN+present}" != present ]] || return 98
+        [[ "${CLOUDFLARE_ACCOUNT_ID+present}" != present ]] || return 98
+        [[ "${ASIMP_D1_DATABASE_ID_STAGING+present}" != present ]] || return 98
+        [[ "${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS+present}" != present ]] || return 98
+        [[ "${VERCEL_TOKEN+present}" != present ]] || return 98
+        [[ "${VERCEL_ORG_ID+present}" != present ]] || return 98
+        [[ "${VERCEL_PROJECT_ID+present}" != present ]] || return 98
+        ;;
+      worker-deploy | worker-readiness)
+        [[ "${CLOUDFLARE_API_TOKEN:-}" == scope-cloudflare-token ]] || return 98
+        [[ "${CLOUDFLARE_ACCOUNT_ID:-}" == scope-cloudflare-account ]] || return 98
+        [[ "${ASIMP_D1_DATABASE_ID_STAGING:-}" == scope-d1-id ]] || return 98
+        [[ "${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS:-}" == scope-service-keys ]] || return 98
+        [[ "${VERCEL_TOKEN+present}" != present ]] || return 98
+        [[ "${VERCEL_ORG_ID+present}" != present ]] || return 98
+        [[ "${VERCEL_PROJECT_ID+present}" != present ]] || return 98
+        [[ "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN+present}" != present ]] || return 98
+        ;;
+      web-deploy)
+        [[ "${CLOUDFLARE_API_TOKEN:-}" == scope-cloudflare-token ]] || return 98
+        [[ "${CLOUDFLARE_ACCOUNT_ID:-}" == scope-cloudflare-account ]] || return 98
+        [[ "${VERCEL_TOKEN:-}" == scope-vercel-token ]] || return 98
+        [[ "${VERCEL_ORG_ID:-}" == scope-vercel-org ]] || return 98
+        [[ "${VERCEL_PROJECT_ID:-}" == scope-vercel-project ]] || return 98
+        [[ "${ASIMP_D1_DATABASE_ID_STAGING+present}" != present ]] || return 98
+        [[ "${ASIMP_STAGING_SERVICE_ENVELOPE_KEYS+present}" != present ]] || return 98
+        [[ "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN+present}" != present ]] || return 98
+        ;;
+      *) return 98 ;;
+    esac
+  fi
   planted_stage="${ASIMP_CI_PROCESS_PLANT_STAGE:-}"
   outcome="${ASIMP_CI_PROCESS_PLANT_OUTCOME:-pass}"
   if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then
@@ -894,7 +939,7 @@ for name in $(builtin compgen -e); do
   case "$name" in
     PATH|HOME|TMPDIR|LANG|LC_ALL|TZ|CURL_HOME|BUN_VERSION|CI|WORKERS_CI|WORKERS_CI_BUILD_UUID|WORKERS_CI_COMMIT_SHA|USER|LOGNAME|SHELL|CARGO_HOME|RUSTUP_HOME|CARGO_TARGET_DIR|BUN_INSTALL|SSL_CERT_FILE|SSL_CERT_DIR)
       ;;
-    ASIMP_CI_PROCESS_TEST|ASIMP_CI_PROCESS_PLANT_STAGE|ASIMP_CI_PROCESS_PLANT_OUTCOME|ASIMP_CI_PROCESS_TRACE|ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY)
+    ASIMP_CI_PROCESS_TEST|ASIMP_CI_PROCESS_PLANT_STAGE|ASIMP_CI_PROCESS_PLANT_OUTCOME|ASIMP_CI_PROCESS_TRACE|ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY|ASIMP_CI_PROCESS_SCOPE_PLANT)
       ;;
     CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)
       [[ "$1" == worker-deploy || "$1" == worker-readiness || "$1" == web-deploy ]] || builtin unset "$name"

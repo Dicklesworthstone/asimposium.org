@@ -1135,6 +1135,12 @@ export async function backfillKraterIntegrity(
       db,
       `SELECT public_seq, chain_digest, chain_version,
               CASE
+                WHEN NOT EXISTS (
+                  SELECT 1 FROM krater_chain_v2_contiguity_migration_guard g
+                  WHERE g.migration = '0040'
+                    AND g.event_gap_count = 0
+                    AND g.checkpoint_gap_count = 0
+                ) THEN 0
                 WHEN public_seq = 0 THEN 1
                 WHEN EXISTS (
                   SELECT 1 FROM event_chain_v2 e
@@ -1177,9 +1183,10 @@ export async function backfillKraterIntegrity(
   // unchanged — the same three conditions in the same order — but the third is now asked as
   // an existence question, answered by the partial index migration 0005 adds (see
   // firstUndigestedEvent for the query plans on either side of it). Migration 0040 makes
-  // both immutable v2 sidecar streams predecessor-contiguous, so the two terminal sidecars
-  // above are bounded witnesses for complete 1..public_seq ranges rather than merely evidence
-  // that the last rows happen to exist.
+  // both immutable v2 sidecar streams predecessor-contiguous, and the query requires that
+  // migration's retained zero-gap witness. The two terminal sidecars are therefore bounded
+  // witnesses for complete 1..public_seq ranges rather than merely evidence that the last rows
+  // happen to exist.
   if (
     storedBackfill?.state === "complete" &&
     storedBackfill.chain_version === KRATER_CHAIN_VERSION &&
