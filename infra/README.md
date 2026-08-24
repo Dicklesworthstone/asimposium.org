@@ -154,27 +154,32 @@ artifact to an authorized deploy command and separately prove the remote plane.
 
 ### Hosted review pipeline (OPS.2b)
 
-The operator-accepted hosted runner is **Cloudflare Workers Builds with its
-native GitHub integration**. GitHub Actions remains unavailable and forbidden
-for this repository. The required `main` trigger uses the repository root and
-these commands:
+The selected hosted-runner design is **Cloudflare Workers Builds with its native
+GitHub integration**. GitHub Actions remains unavailable and forbidden for this
+repository. Source configuration does not prove that this trigger has been
+installed or is available. When installed, the required `main` trigger uses the
+repository root and these commands:
 
 ```text
 build command:  bash scripts/gates.sh --all
-deploy command: bash scripts/e2e-ci-pipeline.sh
+deploy command: ASIMP_CI_RUNNER=cloudflare-workers-builds bash scripts/e2e-ci-pipeline.sh
 root directory: /
 branches:       include main; exclude none
 ```
 
-The build command makes the canonical root gate the first provider result. The
+Set `BUN_VERSION=1.3.8`; the repository requires that version while the provider
+image's default can be older. The build command makes the canonical root gate
+the first provider result. The
 deploy command deliberately runs that gate again before any mutation; a stale
 or independently invoked deploy phase therefore cannot borrow another build's
 green result. It then performs, in order: staging Worker deploy; the existing
-environment rehearsal plus live health; capability-derived schema reads; a
-same-checkout Vercel preview tagged with the Git revision; `smoke-agent.sh`;
-and `smoke-gallery.sh`. A failure, blocked exit, timeout, or cancellation stops
-the sequence and records every later stage as `not-run`. The web deployment is
-never attempted before the Worker receipt and readiness checks pass.
+environment rehearsal, including two remote D1 migration applications and an
+R2 canary write/read/public-absence/delete cycle; live health;
+capability-derived schema reads; a same-checkout Vercel preview tagged with the
+Git revision; `smoke-agent.sh`; and `smoke-gallery.sh`. A failure, blocked exit,
+timeout, or cancellation stops the sequence and records every later stage as
+`not-run`. The web deployment is never attempted before the Worker receipt and
+readiness checks pass.
 
 Configure these Workers Builds variables. Provider credentials and the Fellow
 token are secrets; resource/project identifiers, the runner label, and public
@@ -182,7 +187,7 @@ verification-key records are not credentials but should still be scoped to
 this trigger:
 
 ```text
-ASIMP_CI_RUNNER=cloudflare-workers-builds
+BUN_VERSION=1.3.8
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_API_TOKEN                         (secret)
 ASIMP_D1_DATABASE_ID_STAGING
@@ -193,10 +198,18 @@ VERCEL_TOKEN                                 (secret)
 ASIMPOSIUM_SMOKE_FELLOW_TOKEN                (secret; required for full agent smoke)
 ```
 
+Workers Builds itself injects `CI=true`, `WORKERS_CI=1`,
+`WORKERS_CI_BUILD_UUID`, and `WORKERS_CI_COMMIT_SHA`. The pipeline refuses the
+hosted runner label unless those values are present and the provider commit SHA
+equals the checkout revision; the build UUID is retained in the run evidence.
+The Vercel CLI is invoked through Bun at the source-pinned `59.5.0` version, so
+the provider image does not need an ambient global `vercel` binary.
+
 Vercel's Preview environment must already hold its Auth.js and service-envelope
 secrets. The pipeline pins `STOA_ORIGIN` to the staging Worker at both build and
-runtime and waits for the preview deployment; it never promotes that preview to
-production. Before activating this trigger, disconnect the Vercel project's Git
+runtime, waits for the deployment, and checks Vercel's API for the exact project,
+Preview target, ready state, and requested revision metadata; it never promotes
+that preview to production. Before activating this trigger, disconnect the Vercel project's Git
 integration. Otherwise Vercel can start a web build directly from the push and
 race the Worker readiness gate. The pipeline queries the Vercel project before
 deploying and returns blocked exit 78 while a Git link remains; a configuration
