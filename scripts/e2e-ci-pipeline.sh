@@ -576,7 +576,7 @@ if not isinstance(document, dict) or document.get("id") != sys.argv[2]:
     sys.exit(1)
 # A connected Git provider can deploy the web revision concurrently with this
 # ordered pipeline. Absence is the only provider state this gate treats as safe.
-if "link" not in document or document["link"] is not None:
+if document.get("link") is not None:
     sys.exit(78)
 PY
   status=$?

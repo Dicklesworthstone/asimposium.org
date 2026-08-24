@@ -250,13 +250,43 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 5 (local only) — forward migration rehearsal (plan only, no database).
 # ---------------------------------------------------------------------------
+migration_receipt_matches() {
+  local mode="$1" environment="$2" receipt="$3"
+  printf '%s' "$receipt" | python3 -c '
+import json
+import sys
+
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if len(lines) != 1:
+    sys.exit(1)
+try:
+    document = json.loads(lines[0])
+except json.JSONDecodeError:
+    sys.exit(1)
+if not isinstance(document, dict):
+    sys.exit(1)
+if document.get("status") != "pass" or document.get("environment") != sys.argv[2]:
+    sys.exit(1)
+if sys.argv[1] == "plan":
+    if document.get("phase") != "plan":
+        sys.exit(1)
+elif sys.argv[1] in ("pass", "idempotent"):
+    if document.get("phase") != "apply" or document.get("second_plan_idempotent") is not True:
+        sys.exit(1)
+    if sys.argv[1] == "idempotent" and document.get("applied") != []:
+        sys.exit(1)
+else:
+    sys.exit(1)
+' "$mode" "$environment"
+}
+
 if [ "$ENVIRONMENT" = "local" ]; then
   # One invocation only: each planner run against a local environment performs a
   # real D1 round trip, so running it twice to capture output would double the
   # cost of every rehearsal.
   PLAN_STATUS=0
   PLAN_OUTPUT="$(bun infra/migrate.mjs --env "$ENVIRONMENT" 2>&1)" || PLAN_STATUS=$?
-  if [ "$PLAN_STATUS" -eq 0 ]; then
+  if [ "$PLAN_STATUS" -eq 0 ] && migration_receipt_matches plan local "$PLAN_OUTPUT"; then
     emit "migration-plan" "pass" "OK" "forward migration plan computed from db/migrations"
   else
     PLAN_STDERR="$PLAN_OUTPUT"
@@ -283,22 +313,21 @@ if [ "$ENVIRONMENT" = "local" ]; then
       "The local D1 integration contract failed."
   fi
 
-  if ! bun infra/migrate.mjs --env local --apply >/dev/null; then
+  FIRST_RUN_STATUS=0
+  FIRST_RUN="$(bun infra/migrate.mjs --env local --apply 2>&1)" || FIRST_RUN_STATUS=$?
+  if [ "$FIRST_RUN_STATUS" -ne 0 ] || ! migration_receipt_matches pass local "$FIRST_RUN"; then
     fail_phase "migrate-apply-first" "APPLY_FAILED" "The first local application failed."
   fi
   emit "migrate-apply-first" "pass" "OK" "migrations applied to the local D1"
 
   SECOND_RUN="$(bun infra/migrate.mjs --env local --apply)" \
     || fail_phase "migrate-apply-twice" "APPLY_FAILED" "The second local application failed."
-  case "$SECOND_RUN" in
-    *'"applied":[]'*)
-      emit "migrate-apply-twice" "pass" "OK" "second application applied nothing; idempotence observed against a real database"
-      ;;
-    *)
-      fail_phase "migrate-apply-twice" "NOT_IDEMPOTENT" \
-        "The second application was not a no-op."
-      ;;
-  esac
+  if migration_receipt_matches idempotent local "$SECOND_RUN"; then
+    emit "migrate-apply-twice" "pass" "OK" "second application applied nothing; idempotence observed against a real database"
+  else
+    fail_phase "migrate-apply-twice" "NOT_IDEMPOTENT" \
+      "The second application did not report an empty applied set and an idempotent second plan."
+  fi
 
   printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"summary","environment":"local","status":"pass","code":"OK","detail":"Local rehearsal complete: topology validated and migrations applied twice against a real local D1.","reproduce":"scripts/e2e-environments.sh local"}\n'
   exit 0
@@ -343,8 +372,8 @@ fi
 
 # The remote migration CLI's receipt contract is frozen and test-pinned
 # (infra/migrate.test.mjs): a plan/apply run prints one compact JSON receipt
-# with phase/status, and a second apply against a fully-migrated target is
-# idempotent with an empty to_apply. The remote bootstrap completed on
+# with phase/status, and a second apply against a fully-migrated target reports
+# an empty applied set plus an idempotent second plan. The remote bootstrap completed on
 # 2026-08-17 (operator-authorized); what follows exercises that contract.
 
 # ---------------------------------------------------------------------------
@@ -355,7 +384,29 @@ fi
 # precedence so an operator-set ASIMP_ACCOUNT_ID always wins.
 export ASIMP_ACCOUNT_ID="${ASIMP_ACCOUNT_ID:-$CLOUDFLARE_ACCOUNT_ID}"
 RESOLVE_OUTPUT="$(bun infra/resolve-wrangler-deploy.mjs --env staging --write 2>&1)" || RESOLVE_STATUS=$?
-if [ "${RESOLVE_STATUS:-0}" -eq 0 ] && [ "$RESOLVE_OUTPUT" != "${RESOLVE_OUTPUT#*'"status":"pass"'}" ]; then
+if [ "${RESOLVE_STATUS:-0}" -eq 0 ] && printf '%s' "$RESOLVE_OUTPUT" | python3 -c '
+import json
+import sys
+
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if len(lines) != 1:
+    sys.exit(1)
+try:
+    document = json.loads(lines[0])
+except json.JSONDecodeError:
+    sys.exit(1)
+if not isinstance(document, dict):
+    sys.exit(1)
+if (
+    document.get("suite") != "staging-wrangler-deploy-resolution"
+    or document.get("status") != "pass"
+    or document.get("environment") != "staging"
+    or document.get("mode") != "write"
+    or (document.get("published"), document.get("idempotent"))
+    not in ((True, False), (False, True))
+):
+    sys.exit(1)
+'; then
   emit "resolve-staging-config" "pass" "OK" "staging deploy config resolved from the topology and the three declared inputs"
 else
   fail_phase "resolve-staging-config" "STAGING_RESOLVE_FAILED" \
@@ -368,18 +419,16 @@ fi
 # The runner's observation deadline is deliberately tight (a never-settling
 # transport must fail fast); on a heavily loaded operator machine one provider
 # round-trip can exceed it, so each apply gets a small bounded retry before
-# the phase reports failure.
+# the phase reports failure. A structurally valid pass receipt is required;
+# diagnostic prose containing the word "pass" is never evidence.
 migrate_apply_once() {
-  local attempt
+  local attempt output
   for attempt in 1 2 3; do
-    local output
-    output="$(bun infra/migrate.mjs --env staging --resolved-database-id "$ASIMP_D1_DATABASE_ID_STAGING" --apply 2>&1)" || true
-    case "$output" in
-      *'"status":"pass"'*)
-        printf '%s' "$output"
-        return 0
-        ;;
-    esac
+    if output="$(bun infra/migrate.mjs --env staging --resolved-database-id "$ASIMP_D1_DATABASE_ID_STAGING" --apply 2>&1)" && \
+      migration_receipt_matches pass staging "$output"; then
+      printf '%s' "$output"
+      return 0
+    fi
     sleep 10
   done
   printf '%s' "$output"
@@ -394,7 +443,7 @@ migration_budget_exhausted() {
   esac
   return 1
 }
-if [ "${MIGRATE_FIRST_STATUS:-0}" -ne 0 ] || [ "$MIGRATE_FIRST" = "${MIGRATE_FIRST#*'"status":"pass"'}" ]; then
+if [ "${MIGRATE_FIRST_STATUS:-0}" -ne 0 ]; then
   # A hard observation budget that cannot fit this machine's provider latency
   # is an environmental state, not a migration defect: report it blocked so a
   # quiet window runs the same phase to green.
@@ -408,16 +457,14 @@ if [ "${MIGRATE_FIRST_STATUS:-0}" -ne 0 ] || [ "$MIGRATE_FIRST" = "${MIGRATE_FIR
   fail_phase "migrate-apply-twice" "MIGRATION_FIRST_APPLY_FAILED" \
     "The first remote migration run did not pass; re-run infra/migrate.mjs directly for the diagnostic."
 fi
-MIGRATE_SECOND="$(migrate_apply_once)" || true
-case "$MIGRATE_SECOND" in
-  *'"status":"pass"'*'"idempotent":true'*'"to_apply":[]'*)
-    emit "migrate-apply-twice" "pass" "OK" "second remote apply observed idempotent with an empty plan"
-    ;;
-  *)
-    fail_phase "migrate-apply-twice" "MIGRATION_IDEMPOTENCE_UNPROVEN" \
-      "The second remote migration run did not pass; idempotence was not observed."
-    ;;
-esac
+MIGRATE_SECOND_STATUS=0
+MIGRATE_SECOND="$(migrate_apply_once)" || MIGRATE_SECOND_STATUS=$?
+if [ "$MIGRATE_SECOND_STATUS" -eq 0 ] && migration_receipt_matches idempotent staging "$MIGRATE_SECOND"; then
+  emit "migrate-apply-twice" "pass" "OK" "second remote apply observed an empty applied set and an idempotent second plan"
+else
+  fail_phase "migrate-apply-twice" "MIGRATION_IDEMPOTENCE_UNPROVEN" \
+    "The second remote migration run did not prove an empty applied set and an idempotent second plan."
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 9 (staging) — deployed health and origin coherence over HTTP.
