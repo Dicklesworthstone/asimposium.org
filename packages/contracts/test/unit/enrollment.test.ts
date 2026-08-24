@@ -209,7 +209,7 @@ test("generated enrollment types keep fragment-secret parsing internals private"
   const excluded: import("../../generated/enrollment.types.ts").ParsedStoaJoinUrl = {
     origin: "https://a.asimposium.org",
     enrollmentId: "ASIMP-EN-0123456789ABCDEF",
-    secret: "v1.secret",
+    secret: "v1.secret", // ubs:ignore — synthetic type-test placeholder, not a credential
   };
   expect(excluded.origin).toBe("https://a.asimposium.org");
 });
@@ -654,6 +654,7 @@ test("a Fellow cursor is versioned, length-prefixed, and accepts only its canoni
 
   // Padding creates the same decoded bytes but must not become a second cursor spelling.
   expect(SponsorFellowCursorSchema.safeParse(`${cursor}=`).success).toBe(false);
+  // ubs:ignore — cursor is narrowed by the preceding null-return guard.
   expect(parseSponsorFellowCursor(`f1.${cursor.slice(3)}A`)).toBeUndefined();
 });
 
@@ -668,6 +669,7 @@ test("the generated cursor schema names its runtime-only canonical-frame boundar
   // This matches the public transport schema but not the runtime's decoded
   // frame. Freezing that difference prevents a published schema from silently
   // claiming equivalence that Zod's JSON Schema renderer cannot express.
+  // ubs:ignore — cursor is narrowed by the preceding undefined-return guard.
   expect(new RegExp(cursor.pattern ?? "").test("f1.not-a-canonical-cursor")).toBe(true);
   expect(SponsorFellowCursorSchema.safeParse("f1.not-a-canonical-cursor").success).toBe(false);
   expect(cursor.description).toContain("deliberate superset");

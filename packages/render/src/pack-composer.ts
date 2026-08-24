@@ -884,6 +884,13 @@ export function composePack(input: PackComposerInput): ComposedPack {
   let anchorSignature = "";
   let anchorBytes = -1;
   let anchorWidth = 1;
+  // prepare refuses a projection with no items AND no omitted[] entry, so an
+  // empty-omitted anchor borrows the same budget_exceeded marker the legacy
+  // envelope floor uses; its exact byte cost is subtracted back out in
+  // quickEstimate.
+  const BUDGET_EXCEEDED_MARKER_BYTES =
+    byteLength(stableStringify([omission("budget_exceeded")])) - 2;
+  let anchorSubstitutedMarker = false;
   const ensureAnchor = (
     signature: string,
     omitted: readonly OmittedEntry[],
@@ -894,8 +901,16 @@ export function composePack(input: PackComposerInput): ComposedPack {
     if (anchorSignature === nextSignature) return;
     anchorSignature = nextSignature;
     anchorWidth = String(floorEstimate).length;
+    anchorSubstitutedMarker = omitted.length === 0;
     anchorBytes = renderProjection(
-      packProjection({ ...contentsWith(omitted), items: [] }, floorEstimate),
+      packProjection(
+        {
+          ...contentsWith(omitted),
+          items: [],
+          omitted: omitted.length === 0 ? [omission("budget_exceeded")] : omitted,
+        },
+        floorEstimate,
+      ),
       "json",
     ).bytes;
   };
@@ -916,6 +931,7 @@ export function composePack(input: PackComposerInput): ComposedPack {
     while (true) {
       const bytes =
         anchorBytes +
+        (anchorSubstitutedMarker ? -BUDGET_EXCEEDED_MARKER_BYTES : 0) +
         includedItemBytes -
         (items.length > 0 ? 1 : 0) +
         (String(estimate).length - anchorWidth);
