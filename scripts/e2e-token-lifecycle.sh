@@ -41,6 +41,7 @@ readonly CLEANUP_GRACE_SECONDS=10
 readonly SCRIPT_DEADLINE=$((SECONDS + TOTAL_DEADLINE_SECONDS))
 readonly HTTP_TIMEOUT_MS=3000
 readonly SESSION_PROBLEM_ID="P-TOKENLIFECYCLE"
+readonly PACK_MEASUREMENT_PROBLEM_ID="P-PACKMEASURE"
 readonly -a EXPECTED_MIGRATIONS=(
   "0001_krater_v0.sql"
   "0002_enrollment_g0.sql"
@@ -1035,7 +1036,7 @@ assert_migration_journal() {
 }
 
 seed_session_problem() {
-  local genesis now
+  local genesis pack_genesis now
   genesis="$(TOKEN_LIFECYCLE_SESSION_PROBLEM_ID="${SESSION_PROBLEM_ID}" "${BUN}" --eval '
     import { genesisChainDigest } from "./apps/wire/src/krater/krater.ts";
     const problemId = process.env.TOKEN_LIFECYCLE_SESSION_PROBLEM_ID;
@@ -1049,18 +1050,31 @@ seed_session_problem() {
     fail "TOKEN_LIFECYCLE_SESSION_GENESIS_INVALID"
     return 1
   }
+  pack_genesis="$(TOKEN_LIFECYCLE_SESSION_PROBLEM_ID="${PACK_MEASUREMENT_PROBLEM_ID}" "${BUN}" --eval '
+    import { genesisChainDigest } from "./apps/wire/src/krater/krater.ts";
+    const problemId = process.env.TOKEN_LIFECYCLE_SESSION_PROBLEM_ID;
+    if (problemId === undefined) process.exit(1);
+    console.log(await genesisChainDigest(problemId));
+  ')" || {
+    fail "TOKEN_LIFECYCLE_PACK_MEASUREMENT_GENESIS_UNAVAILABLE"
+    return 1
+  }
+  [[ "${pack_genesis}" =~ ^[a-f0-9]{64}$ ]] || {
+    fail "TOKEN_LIFECYCLE_PACK_MEASUREMENT_GENESIS_INVALID"
+    return 1
+  }
   now="$("${BUN}" --eval 'console.log(new Date().toISOString())')"
   [[ "${now}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]] || {
     fail "TOKEN_LIFECYCLE_SESSION_TIME_INVALID"
     return 1
   }
   "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-    --command "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}'); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at) VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}');" \
+    --command "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}'); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at) VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}'); INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 130, '${now}', '${now}', '${pack_genesis}'); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at) VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 'complete', 0, '${now}'); WITH RECURSIVE claim_numbers(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM claim_numbers WHERE value < 130) INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) SELECT 'C-' || value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || value, printf('%064x', value), value, '${now}' FROM claim_numbers;" \
     --json >"${SESSION_SEED_LOG}" 2>"${SESSION_SEED_ERROR_LOG}" || {
     fail "TOKEN_LIFECYCLE_SESSION_SEED_FAILED"
     return 1
   }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"real_d1_session_problem_seeded_with_genesis_head\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"real_d1_session_and_130_claim_pack_measurement_problems_seeded\",\"status\":\"pass\"}"
 }
 
 assert_post_stop_d1_counts() {
@@ -1102,7 +1116,7 @@ assert_post_stop_d1_counts() {
       row?.session_rows !== 1 ||
       row?.closed_session_rows !== 1 ||
       row?.workshop_rows !== 1 ||
-      row?.session_replays !== 4 ||
+      row?.session_replays !== 6 ||
       row?.session_open_replays !== 1 ||
       row?.workshop_push_replays !== 1 ||
       row?.promote_replays !== 1 ||
@@ -2018,6 +2032,7 @@ import {
   EnrollmentClaimResponseSchema,
   EnrollmentHelloResponseSchema,
   MintEnrollmentResponseSchema,
+  PackResponseSchema,
   ProblemDocumentSchema,
   PromoteResponseSchema,
   type RequestedScope,
@@ -2039,15 +2054,20 @@ const origin = process.env.TOKEN_LIFECYCLE_ORIGIN;
 const privateJwk = process.env.TOKEN_LIFECYCLE_PRIVATE_JWK;
 const barrierCapability = process.env.TOKEN_LIFECYCLE_BARRIER_CAPABILITY;
 const authorizationEvidenceCanary = process.env.TOKEN_LIFECYCLE_AUTHZ_EVIDENCE_CANARY;
+const packMeasurementProblemId = process.env.TOKEN_LIFECYCLE_PACK_PROBLEM_ID;
 if (
   origin === undefined ||
   privateJwk === undefined ||
   barrierCapability === undefined ||
-  authorizationEvidenceCanary === undefined
+  authorizationEvidenceCanary === undefined ||
+  packMeasurementProblemId === undefined
 ) {
   throw new Error("local configuration unavailable");
 }
 if (!/^[a-f0-9]{64}$/.test(barrierCapability)) throw new Error("local barrier capability unavailable");
+if (packMeasurementProblemId !== "P-PACKMEASURE") {
+  throw new Error("local pack-measurement problem unavailable");
+}
 const httpTimeoutMs = Number(process.env.TOKEN_LIFECYCLE_HTTP_TIMEOUT_MS ?? "3000");
 if (!Number.isSafeInteger(httpTimeoutMs) || httpTimeoutMs < 1) {
   throw new Error("invalid local HTTP timeout");

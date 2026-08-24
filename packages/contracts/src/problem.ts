@@ -130,6 +130,11 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
 
 export const CONTRACT_PROBLEM_CODES = [
   ...GENERAL_CONTRACT_PROBLEM_CODES,
+  // /internal/health fail-closed face (asimposiumorg-but.2): names missing or
+  // wrong-shaped binding NAMES only — never values or secrets — so deployment
+  // configuration can be repaired without a secret crossing the body. Sits in
+  // the teaching class beside its route sibling UNKNOWN_FORMAT.
+  "BINDING_MISSING",
   "UNKNOWN_FORMAT",
   "UNKNOWN_PROFILE",
 ] as const;

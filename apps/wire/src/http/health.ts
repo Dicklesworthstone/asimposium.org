@@ -69,14 +69,21 @@ export function handleHealth(request: HealthRequest): Response {
   // Fail closed: a Worker that cannot reach its system of record reports
   // unavailable rather than serving a cheerful 200 it cannot back up.
   if (missing.length > 0) {
-    return problem({
+    // but.2: the face must satisfy ProblemDocumentSchema exactly — BINDING_MISSING
+    // is cataloged teaching vocabulary, so the refusal is validated, not hand-built.
+    return validatedProblem({
       status: 503,
       code: "BINDING_MISSING",
       title: "Required Worker bindings are not configured",
       detail: `Missing or wrong-shaped bindings: ${missing.join(", ")}.`,
       fixHint:
         "Bind every name in `missing` in the Worker configuration for this environment, then redeploy.",
-      extensions: { missing, bindings },
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/problem.v1.json",
+        example: { method: "GET", path: "/internal/health?format=json" },
+        missing,
+        bindings,
+      },
       headers: { "cache-control": "no-store" },
     });
   }
