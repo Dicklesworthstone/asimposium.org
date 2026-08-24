@@ -1130,6 +1130,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
+    let workshopHeadsTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1366,7 +1367,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // are composed (workshop_seq DESC, deterministic); when a sixth exists,
       // the pack must say so via candidate_limit instead of silently dropping
       // the tail.
-      const workshopHeadsTruncated = headRows.length > 5;
+      workshopHeadsTruncated = headRows.length > 5;
       const emittedHeads = headRows.slice(0, 5);
       if (headRows.length === 0) {
         candidates.push({

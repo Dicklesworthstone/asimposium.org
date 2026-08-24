@@ -6892,4 +6892,83 @@ describe("committed promotion outbox nudge", () => {
     expect(closeFresh.status).toBe(201);
     expect(closeReplay.status).toBe(200);
   });
+
+  test("PLANTED: working packs disclose workshop-head truncation at six rows (j9hw)", async () => {
+    // The working-profile workshop query reads one row past the emitted five
+    // purely to decide disclosure: five heads compose with no truncation
+    // marker, six heads compose the newest five plus a candidate_limit
+    // omission naming workshop heads — never a silently incomplete pack.
+    const openSession = async (
+      callFn: (path: string, init?: RequestInit) => Promise<Response>,
+      key: string,
+    ): Promise<string> => {
+      const opened = await callFn("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `j9hw-open-${key}` },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      expect(opened.status).toBe(201);
+      return SessionOpenResponseSchema.parse(await opened.json()).session_id;
+    };
+    const pushDraft = async (
+      callFn: (path: string, init?: RequestInit) => Promise<Response>,
+      sessionId: string,
+      key: string,
+      title: string,
+    ) => {
+      const pushed = await callFn(`/v1/sessions/${sessionId}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `j9hw-push-${key}` },
+        body: JSON.stringify({
+          type: "draft",
+          title,
+          body_md: `${title} body.`,
+          relates_to: [],
+        }),
+      });
+      expect(pushed.status).toBe(201);
+    };
+
+    // Five-row case: no omission — the pack is complete.
+    const five = await fixture();
+    const fiveSession = await openSession(five.call, "five");
+    for (let n = 1; n <= 5; n += 1)
+      await pushDraft(five.call, fiveSession, `five-${n}`, `J9HW Title ${n}`);
+    const packFiveResponse = await five.call(`/v1/sessions/${fiveSession}/pack?profile=working`);
+    expect(packFiveResponse.status).toBe(200);
+    const packFive = PackResponseSchema.parse(await packFiveResponse.json());
+    expect(packFive.items.filter((item) => item.kind === "workshop-head")).toHaveLength(5);
+    expect(packFive.omitted).not.toContainEqual({
+      reason: "candidate_limit",
+      detail: "workshop-heads",
+    });
+
+    // Six-row case: newest five compose; the sixth discloses the tail.
+    const six = await fixture();
+    const sixSession = await openSession(six.call, "six");
+    for (let n = 1; n <= 6; n += 1)
+      await pushDraft(six.call, sixSession, `six-${n}`, `J9HW Title ${n}`);
+    const packSixResponse = await six.call(`/v1/sessions/${sixSession}/pack?profile=working`);
+    expect(packSixResponse.status).toBe(200);
+    const packSixText = await packSixResponse.text();
+    const packSix = PackResponseSchema.parse(JSON.parse(packSixText));
+    const headItems = packSix.items.filter((item) => item.kind === "workshop-head");
+    expect(headItems).toHaveLength(5);
+    expect(packSix.omitted).toContainEqual({
+      reason: "candidate_limit",
+      detail: "workshop-heads",
+    });
+    // Newest five in deterministic workshop_seq DESC order: Title 6 leads and
+    // Title 1 (the dropped oldest) appears nowhere in the face bytes.
+    const headBodies = headItems.map((item) => item.body);
+    expect(headBodies[0]).toContain("J9HW Title 6");
+    expect(headBodies).toEqual([
+      "[draft] J9HW Title 6",
+      "[draft] J9HW Title 5",
+      "[draft] J9HW Title 4",
+      "[draft] J9HW Title 3",
+      "[draft] J9HW Title 2",
+    ]);
+    expect(packSixText).not.toContain("J9HW Title 1");
+  });
 });
