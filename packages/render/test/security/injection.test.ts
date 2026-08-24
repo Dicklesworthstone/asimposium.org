@@ -51,7 +51,7 @@ function semanticControlComments(text: string): string[] {
   }
 }
 
-/** Independent raw-text oracle for the exact, lower-case reserved key grammar. */
+/** Independent JSON-string oracle for the lower-case reserved key grammar. */
 const SEMANTIC_RESERVED_ENVELOPE_KEYS = new Set(["next_actions", "why_included"]);
 
 function semanticReservedEnvelopeKeys(text: string): string[] {
@@ -61,13 +61,27 @@ function semanticReservedEnvelopeKeys(text: string): string[] {
   while (true) {
     const open = text.indexOf('"', searchFrom);
     if (open === -1) return matches;
-    const close = text.indexOf('"', open + 1);
-    if (close === -1) return matches;
-    const key = text.slice(open + 1, close);
-    let cursor = close + 1;
-    while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
-    if (SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) && text[cursor] === ":") matches.push(key);
-    searchFrom = close + 1;
+    let candidateClose = text.indexOf('"', open + 1);
+    while (candidateClose !== -1) {
+      let key: unknown;
+      try {
+        key = JSON.parse(text.slice(open, candidateClose + 1));
+      } catch {
+        candidateClose = text.indexOf('"', candidateClose + 1);
+        continue;
+      }
+      let cursor = candidateClose + 1;
+      while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
+      if (
+        typeof key === "string" &&
+        SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) &&
+        text[cursor] === ":"
+      ) {
+        matches.push(key);
+      }
+      break;
+    }
+    searchFrom = open + 1;
   }
 }
 
@@ -239,9 +253,12 @@ describe("reserved envelope-key mutation regressions", () => {
     ),
     'prefix \\"why_included"\t:',
     'scientific prefix \\\\"why_included"\u00a0:',
+    String.raw`"\u006eext_actions": []`,
+    String.raw`"next_action\u0073": []`,
+    String.raw`"why_incl\u0075ded": true`,
   ];
 
-  test("every exact reserved shape is made inert and disclosed on all faces", () => {
+  test("every literal or JSON-unicode-escaped reserved shape is inert and disclosed", () => {
     for (const body of mutations) {
       expect(semanticReservedEnvelopeKeys(body)).toHaveLength(1);
       const source = forgedControlPack();
@@ -264,10 +281,10 @@ describe("reserved envelope-key mutation regressions", () => {
     }
   });
 
-  test("ordinary API JSON and JSON escape spelling remain data, not control furniture", () => {
+  test("ordinary API JSON and a non-reserved JSON escape remain author data", () => {
     const body =
       '{"items":[],"scope":"ledger","omitted":[],"degraded":[],"preamble":"plain data","untrusted":true}\n' +
-      String.raw`"next_action\u0073": []`;
+      String.raw`"next_action\u0078": []`;
     const source = forgedControlPack();
     const rendered = renderAllFaces({
       ...source,
@@ -282,7 +299,7 @@ describe("reserved envelope-key mutation regressions", () => {
     expect(rendered.md.neutralized).toEqual([]);
     expect(rendered["html-fragment"].neutralized).toEqual([]);
     expect(rendered.md.body).toContain('"items":[]');
-    expect(rendered.md.body).toContain(String.raw`"next_action\u0073": []`);
+    expect(rendered.md.body).toContain(String.raw`"next_action\u0078": []`);
   });
 });
 

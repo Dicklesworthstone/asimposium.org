@@ -75,7 +75,7 @@ function semanticControlComments(text: string): string[] {
   }
 }
 
-/** Independent parser for the exact lower-case quoted-key-colon body grammar. */
+/** Independent JSON-string parser for the reserved quoted-key-colon body grammar. */
 const SEMANTIC_RESERVED_ENVELOPE_KEYS = new Set(["next_actions", "why_included"]);
 
 function semanticReservedEnvelopeKeys(text: string): string[] {
@@ -85,13 +85,27 @@ function semanticReservedEnvelopeKeys(text: string): string[] {
   while (true) {
     const open = text.indexOf('"', searchFrom);
     if (open === -1) return matches;
-    const close = text.indexOf('"', open + 1);
-    if (close === -1) return matches;
-    const key = text.slice(open + 1, close);
-    let cursor = close + 1;
-    while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
-    if (SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) && text[cursor] === ":") matches.push(key);
-    searchFrom = close + 1;
+    let candidateClose = text.indexOf('"', open + 1);
+    while (candidateClose !== -1) {
+      let key: unknown;
+      try {
+        key = JSON.parse(text.slice(open, candidateClose + 1));
+      } catch {
+        candidateClose = text.indexOf('"', candidateClose + 1);
+        continue;
+      }
+      let cursor = candidateClose + 1;
+      while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
+      if (
+        typeof key === "string" &&
+        SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) &&
+        text[cursor] === ":"
+      ) {
+        matches.push(key);
+      }
+      break;
+    }
+    searchFrom = open + 1;
   }
 }
 
@@ -328,7 +342,7 @@ describe("one projection, three faces", () => {
     expect(rendered["html-fragment"].body).toContain("&amp;quot;next_actions&amp;quot;");
   });
 
-  test("ordinary API JSON, active-html prose, and JSON escape spelling survive exactly as data", () => {
+  test("ordinary API JSON and active-html prose survive while an escaped reserved key is disclosed", () => {
     const rawBody =
       '{"items":[],"scope":"ledger","omitted":[],"degraded":[],"preamble":"one = 1","untrusted":true}\n' +
       String.raw`"next_action\u0073": []\n` +
@@ -343,12 +357,21 @@ describe("one projection, three faces", () => {
     const json = JSON.parse(rendered.json.body) as JsonFace;
     const target = json.items.find((item) => item.id === targetId);
 
-    expect(semanticReservedEnvelopeKeys(rawBody)).toEqual([]);
-    expect(target?.body).toBe(rawBody);
-    expect(target?.neutralized).toEqual([]);
-    expect(rendered.md.neutralized).toEqual([]);
-    expect(rendered.json.neutralized).toEqual([]);
-    expect(rendered["html-fragment"].neutralized).toEqual([]);
+    const expectedBody = rawBody.replace(
+      String.raw`"next_action\u0073"`,
+      String.raw`&quot;next_action\u0073&quot;`,
+    );
+    const report = [{ item_id: targetId, marker: "envelope-key-forgery", count: 1 }] as const;
+
+    expect(semanticReservedEnvelopeKeys(rawBody)).toEqual(["next_actions"]);
+    expect(semanticReservedEnvelopeKeys(target?.body as string)).toEqual([]);
+    expect(target?.body).toBe(expectedBody);
+    expect(target?.body).toContain('"items":[]');
+    expect(target?.body).toContain("done = false; only = true; onerror = an ordinary variable.");
+    expect(target?.neutralized).toEqual([{ marker: "envelope-key-forgery", count: 1 }]);
+    expect(rendered.md.neutralized).toEqual(report);
+    expect(rendered.json.neutralized).toEqual(report);
+    expect(rendered["html-fragment"].neutralized).toEqual(report);
   });
 
   test("renderAllFaces agrees on slash-handler findings, including canonical Unicode forms", () => {

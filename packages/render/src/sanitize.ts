@@ -11,8 +11,9 @@
  *     that came out of an untrusted body. Our machine-readable delimiters are
  *     exactly those comments, so a body cannot forge one.
  *  2. No rendered face carries a JSON-shaped pack-envelope key (`"next_actions":`)
- *     that came out of an untrusted body. `next_actions` are server-authored
- *     (Fable §7.3), and a body may not look like it is authoring one.
+ *     that came out of an untrusted body, including a JSON `\uXXXX` spelling
+ *     that decodes to the same key. `next_actions` are server-authored (Fable
+ *     §7.3), and a body may not look like it is authoring one.
  *  3. Markdown fences are always longer than the longest backtick run in the
  *     body they wrap, so a body cannot break out of its quarantine fence.
  *  4. Script-bearing HTML is recorded and never emitted live: the markdown face
@@ -55,8 +56,42 @@ const CANONICAL_MARK_OR_FORMAT = /[\p{M}\p{Cf}]/gu;
 const CANONICAL_IGNORABLE = /^[\p{M}\p{Cf}]$/u;
 const CONTROL_COMMENT_NAMESPACE = "asimp";
 
-/** Exact lower-case reserved `"key"\s*:` envelope shapes, at any text prefix. */
-const ENVELOPE_KEY = new RegExp(String.raw`"(${RESERVED_ENVELOPE_KEYS.join("|")})"(\s*):`, "g");
+const RESERVED_ENVELOPE_KEY_SET = new Set(RESERVED_ENVELOPE_KEYS);
+const LONGEST_RESERVED_ENVELOPE_KEY = Math.max(...RESERVED_ENVELOPE_KEYS.map((key) => key.length));
+const JSON_UNICODE_ESCAPE_SOURCE = String.raw`\\u[0-9A-Fa-f]{4}`;
+const JSON_UNICODE_ESCAPE = /\\u([0-9A-Fa-f]{4})/g;
+/**
+ * A reserved key contains only ASCII identifier characters. Each decoded
+ * character may instead use one exact JSON Unicode escape; the decoded-length
+ * bound and disjoint alternatives keep the scan linear on hostile input.
+ */
+const ENVELOPE_KEY_CANDIDATE = new RegExp(
+  String.raw`"((?:[A-Za-z0-9_]|${JSON_UNICODE_ESCAPE_SOURCE}){1,${LONGEST_RESERVED_ENVELOPE_KEY}})"(\s*):`,
+  "g",
+);
+
+function decodeJsonUnicodeEscapes(value: string): string {
+  return value.replace(JSON_UNICODE_ESCAPE, (_escape, digits: string) =>
+    String.fromCharCode(Number.parseInt(digits, 16)),
+  );
+}
+
+/** Encode only the two quotes, preserving the author's exact key escape bytes. */
+function neutralizeReservedEnvelopeKeys(text: string): {
+  readonly text: string;
+  readonly count: number;
+} {
+  let count = 0;
+  const neutralized = text.replace(
+    ENVELOPE_KEY_CANDIDATE,
+    (candidate, encodedKey: string, gap: string) => {
+      if (!RESERVED_ENVELOPE_KEY_SET.has(decodeJsonUnicodeEscapes(encodedKey))) return candidate;
+      count += 1;
+      return `&quot;${encodedKey}&quot;${gap}:`;
+    },
+  );
+  return { text: neutralized, count };
+}
 
 const ACTIVE_HTML_TAGS = new Set([
   "script",
@@ -235,16 +270,6 @@ const COMMONMARK_HTML_START_TAG_NAME = /^[a-z][a-z0-9-]*$/;
 const BACKTICK_RUN = /`+/g;
 const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const WORKER_URL_ORIGIN = "https://a.asimposium.org";
-
-function countMatches(text: string, pattern: RegExp): number {
-  const scan = new RegExp(
-    pattern.source,
-    pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`,
-  );
-  let count = 0;
-  while (scan.exec(text) !== null) count += 1;
-  return count;
-}
 
 function isHtmlAsciiWhitespace(character: string | undefined): boolean {
   return character !== undefined && HTML_ASCII_WHITESPACE.test(character);
@@ -1411,13 +1436,10 @@ export function neutralizeUntrustedBody(body: string): NeutralizedBody {
     findings.push({ marker: "asimp-control-comment", count: controlComments.count });
   }
 
-  const envelopeKeys = countMatches(text, ENVELOPE_KEY);
-  text = text.replace(
-    ENVELOPE_KEY,
-    (_match, key: string, gap: string) => `&quot;${key}&quot;${gap}:`,
-  );
-  if (envelopeKeys > 0) {
-    findings.push({ marker: "envelope-key-forgery", count: envelopeKeys });
+  const envelopeKeys = neutralizeReservedEnvelopeKeys(text);
+  text = envelopeKeys.text;
+  if (envelopeKeys.count > 0) {
+    findings.push({ marker: "envelope-key-forgery", count: envelopeKeys.count });
   }
 
   const activeHtml = countActiveHtml(text);

@@ -291,7 +291,7 @@ describe("neutralizeUntrustedBody", () => {
     const markers = [
       String.raw`"\u006eext_actions": []`,
       String.raw`"next_\u0061ctions" : []`,
-      String.raw`"\u004Eext_actions": []`,
+      String.raw`"\u006Eext_actions": []`,
       String.raw`"why_incl\u0075ded": true`,
       String.raw`"\u0077\u0068\u0079\u005fincluded": null`,
     ];
