@@ -186,6 +186,18 @@ describe("capsule executable URLs follow the configured origin", () => {
     },
   );
 
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "PLANTED: %s capsule faces never advertise the unmounted reports write",
+    (origin) => {
+      const projection = enrollmentCapsuleProjection(capsule, origin);
+      const faces = [JSON.stringify(projection), enrollmentCapsuleMarkdown(projection)];
+      for (const face of faces) {
+        expect(face).not.toContain("/v1/reports");
+        expect(face).toContain("tell your sponsor through your own harness");
+      }
+    },
+  );
+
   test("PLANTED: an untrusted origin cannot construct a projection, so no face can render it", () => {
     // The schema parses the origin, so the refusal happens before Markdown,
     // JSON, or HTML exists — there is no face left to leak a bad endpoint.

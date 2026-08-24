@@ -2478,6 +2478,31 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
     const final = await this.proposalByFlow(attempt.flowHandleHash);
     if (final !== null && final.token_hash !== null) return { kind: "already-issued" };
+    // nzee: both pacing CAS attempts can lose when three or more polls of one
+    // flow handle race (an agent retrying on timeout is enough). If the final
+    // read shows the row still healthy and pending — evidence intact, not
+    // expired, device mapping unbroken, sponsor panic absent — the handle is
+    // VALID and the honest answer is coarse back-pressure at the current
+    // interval, never a 400 that calls a legitimate poller's handle invalid.
+    // Anything suspicious below keeps the original FLOW_INVALID semantics.
+    if (
+      final !== null &&
+      final.status === "pending" &&
+      proposalEvidenceIsValid(final) &&
+      attempt.now < final.expires_at &&
+      final.sponsor_panic_at === null &&
+      (final.enrollment_kind !== "device" ||
+        (final.device_record_expires_at !== null &&
+          attempt.now < final.device_record_expires_at &&
+          (final.device_mapping_expires_at !== null ||
+            (final.device_mapping_reclaimed_at !== null &&
+              attempt.now >= final.device_mapping_reclaimed_at))))
+    ) {
+      return {
+        kind: "slow-down",
+        retryAfterSeconds: Math.max(1, final.poll_interval_seconds),
+      };
+    }
     throw new EnrollmentError("FLOW_INVALID");
   }
 
