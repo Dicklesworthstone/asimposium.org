@@ -6,6 +6,7 @@ import {
   EnrollmentIdSchema,
   encodeOperatorFellowCapAuditCursor,
   encodeSponsorFellowCursor,
+  FellowTokenSchema,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
   OperatorFellowCapAuditPageResponseSchema,
@@ -878,10 +879,13 @@ function bearerToken(request: Request): string | undefined {
   if (authorization === null) return undefined;
   // Bound before hashing: bearer input is untrusted header data and a large
   // value must not create avoidable hashing work or a diagnostic surface.
-  const match = /^([A-Za-z]+) +(asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43})$/.exec(
-    authorization,
-  );
-  return match?.[1]?.toLowerCase() === "bearer" ? match[2] : undefined;
+  const match = /^([A-Za-z]+) +(\S+)$/.exec(authorization);
+  const token = match?.[2];
+  return match?.[1]?.toLowerCase() === "bearer" &&
+    token !== undefined &&
+    FellowTokenSchema.safeParse(token).success
+    ? token
+    : undefined;
 }
 
 function idempotencyOptions(request: Request): { readonly idempotencyKey: string } | Response {

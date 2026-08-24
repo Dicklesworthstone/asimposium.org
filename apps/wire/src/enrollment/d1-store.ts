@@ -18,6 +18,7 @@ import {
 // the public scope vocabulary and resource bounds when it is read back.
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
+import { constantTimeEqual } from "../auth/canonical.ts";
 import {
   type ClaimAttempt,
   type CredentialRevokeAttempt,
@@ -40,6 +41,7 @@ import {
   FELLOW_TOKEN_TTL_MS,
   type FellowCredentialBinding,
   type FellowLifecycleAttempt,
+  fellowLifecycleTransitionAllowed,
   type IdempotencyAttempt,
   isStrictEnrollmentScopeReduction,
   type LifecycleCommandResult,
@@ -256,17 +258,6 @@ const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedSta
  * window a client was promised. Named here rather than inlined twice below.
  */
 const IDEMPOTENCY_RETENTION_MS = 24 * 60 * 60 * 1_000;
-
-function secretSafeEqual(left: string, right: string): boolean {
-  const leftBytes = new TextEncoder().encode(left);
-  const rightBytes = new TextEncoder().encode(right);
-  const width = Math.max(leftBytes.length, rightBytes.length);
-  let difference = leftBytes.length ^ rightBytes.length;
-  for (let index = 0; index < width; index += 1) {
-    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
-  }
-  return difference === 0;
-}
 
 function parseScopes(encoded: string): readonly RequestedScope[] {
   try {
@@ -503,19 +494,6 @@ function lifecycleLeaseRetryDelay(eventId: string, attempt: number): number {
   return Math.min(50, 10 + attempt * 3 + jitter);
 }
 
-function d1LifecycleTransitionAllowed(
-  from: FellowLifecycleStatus,
-  to: Exclude<FellowLifecycleStatus, "pending">,
-): boolean {
-  return (
-    (from === "pending" && to === "active") ||
-    (from === "active" && ["paused", "revoked", "compromised", "suspicious_review"].includes(to)) ||
-    (from === "paused" && ["active", "revoked", "compromised", "suspicious_review"].includes(to)) ||
-    (from === "suspicious_review" && ["active", "paused", "revoked", "compromised"].includes(to)) ||
-    ((from === "revoked" || from === "compromised") && to === "archived")
-  );
-}
-
 /**
  * D1 implementation of the S-1 transition seam. All state-changing paths use
  * conditional statements or a D1 batch; no route receives a raw SQL error or
@@ -694,7 +672,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     // is operational state, never a pairing oracle or an authorization input.
     requestedRecordWithEvidence(row);
     if (
-      !secretSafeEqual(row.secret_hash, secretHash) ||
+      !constantTimeEqual(row.secret_hash, secretHash) ||
       row.invalidated === 1 ||
       now >= row.secret_expires_at ||
       row.secret_consumed_at !== null
@@ -1877,7 +1855,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
       if (
         attempt.effectiveAt < current.created_at ||
-        !d1LifecycleTransitionAllowed(current.status, attempt.toStatus)
+        !fellowLifecycleTransitionAllowed(current.status, attempt.toStatus)
       ) {
         throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
       }
@@ -2916,7 +2894,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentPersistenceError();
     }
     if (row === null) return undefined;
-    if (!secretSafeEqual(row.request_digest, attempt.digest)) {
+    if (!constantTimeEqual(row.request_digest, attempt.digest)) {
       throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
     }
     return {

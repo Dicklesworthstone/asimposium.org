@@ -16,6 +16,7 @@ import {
   FellowNameSchema,
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
+  FellowTokenSchema,
   isTrustedAgoraOrigin,
   isTrustedStoaOrigin,
   type MintEnrollmentRequest,
@@ -51,6 +52,7 @@ import {
   stoaHelloUrl,
 } from "@asimposium/contracts";
 import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
+import { constantTimeEqual } from "../auth/canonical.ts";
 import { SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS } from "../auth/envelope.ts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -140,7 +142,7 @@ function followsFellowCursor(record: SponsorFellowRecord, after: SponsorFellowCu
   );
 }
 
-function fellowLifecycleTransitionAllowed(
+export function fellowLifecycleTransitionAllowed(
   from: FellowLifecycleStatus,
   to: Exclude<FellowLifecycleStatus, "pending">,
 ): boolean {
@@ -1286,17 +1288,6 @@ async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function constantTimeEqual(left: string, right: string): boolean {
-  const leftBytes = new TextEncoder().encode(left);
-  const rightBytes = new TextEncoder().encode(right);
-  const width = Math.max(leftBytes.length, rightBytes.length);
-  let difference = leftBytes.length ^ rightBytes.length;
-  for (let index = 0; index < width; index += 1) {
-    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
-  }
-  return difference === 0;
 }
 
 const RESERVED_FELLOW_NAMES = new Set([
@@ -3723,7 +3714,7 @@ export class EnrollmentService {
    * flaky assertion about the host and not about this code.
    */
   async credentialBinding(rawToken: string): Promise<FellowCredentialBinding | undefined> {
-    if (!/^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$/.test(rawToken)) return undefined;
+    if (!FellowTokenSchema.safeParse(rawToken).success) return undefined;
     const tokenHash = await sha256Hex(rawToken);
     return this.#store.authenticateCredential(tokenHash, this.#clock.now(), "bearer");
   }
