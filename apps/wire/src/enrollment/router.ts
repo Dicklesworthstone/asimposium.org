@@ -167,7 +167,7 @@ function problem(
     status,
     headers: {
       "content-type": "application/problem+json; charset=utf-8",
-      "cache-control": "no-store",
+      "cache-control": "private, no-store",
     },
   });
 }
@@ -1060,7 +1060,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         { ...idempotency, trustedClientAddress },
       );
       return c.json(DeviceCodeStartResponseSchema.parse(started), 201, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const ingress = enrollmentRequestIngressFailure(error);
@@ -1123,7 +1123,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       const result = EnrollmentClaimResponseSchema.parse({
         flow_handle: claim.flowHandle,
       });
-      return c.json(result, 202, { "cache-control": "no-store" });
+      return c.json(result, 202, { "cache-control": "private, no-store" });
     } catch (error) {
       const ingress = enrollmentRequestIngressFailure(error);
       if (ingress !== undefined) return ingress;
@@ -1179,7 +1179,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         status: 200,
         headers: {
           "content-type": "application/json; charset=utf-8",
-          "cache-control": "no-store",
+          "cache-control": "private, no-store",
         },
       });
     } catch (error) {
@@ -1278,7 +1278,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
             : []),
         ],
       });
-      return c.json(response, 200, { "cache-control": "no-store" });
+      return c.json(response, 200, { "cache-control": "private, no-store" });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       return operational ?? enrollmentUnavailableResponse();
@@ -1530,7 +1530,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           sponsor_seq: state.sponsorSeq,
         }),
         200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1587,7 +1587,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
               : encodeOperatorFellowCapAuditCursor(page.nextCursor),
         }),
         200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1652,7 +1652,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
               : encodeOperatorFellowCapAuditCursor(page.nextCursor),
         }),
         200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1713,7 +1713,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         idempotency,
       );
       return c.json(OperatorFellowCapOverrideResponseSchema.parse(response), 200, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1766,7 +1766,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       });
       // The one time the fragment secret ever crosses a response body: TLS, to
       // the authenticated sponsor, never logged (Fable §14.3 never-log list).
-      return c.json(response, 201, { "cache-control": "no-store" });
+      return c.json(response, 201, { "cache-control": "private, no-store" });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
@@ -1794,7 +1794,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           proposals: cards.map(contractCard),
         }),
         200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1860,7 +1860,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       if (idempotency instanceof Response) return idempotency;
       await options.service.decide(authenticated.principal, enrollmentId, parsed.data, idempotency);
       return c.json(SponsorEnrollmentDecisionResponseSchema.parse({ acknowledged: true }), 200, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1886,7 +1886,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
             page.nextCursor === undefined ? null : encodeSponsorFellowCursor(page.nextCursor),
         }),
         200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1919,7 +1919,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
             page.nextCursor === undefined ? null : encodeSponsorFellowCursor(page.nextCursor),
         }),
         200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -1977,7 +1977,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         idempotency,
       );
       return c.json(SponsorCredentialRevokeResponseSchema.parse(response), 200, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -2035,7 +2035,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         idempotency,
       );
       return c.json(SponsorFellowLifecycleResponseSchema.parse(response), 200, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -2091,7 +2091,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         idempotency,
       );
       return c.json(SponsorPanicResponseSchema.parse(response), 200, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -2148,7 +2148,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           bootstrapped_at: result.at,
         }),
         result.created ? 201 : 200,
-        { "cache-control": "no-store" },
+        { "cache-control": "private, no-store" },
       );
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -2191,7 +2191,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       }
       const card = await options.service.deviceLookup(authenticated.principal, lookupBody);
       return c.json(DeviceLookupResponseSchema.parse({ card: contractCard(card) }), 200, {
-        "cache-control": "no-store",
+        "cache-control": "private, no-store",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);

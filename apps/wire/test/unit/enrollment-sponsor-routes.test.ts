@@ -535,7 +535,7 @@ describe("sponsor enrollment routes", () => {
       envelopeRequest("/v1/enrollments/proposals", proposalHeaders, "GET"),
     );
     expect(proposalSuccess.status).toBe(200);
-    expect(proposalSuccess.headers.get("cache-control")).toBe("no-store");
+    expect(proposalSuccess.headers.get("cache-control")).toBe("private, no-store");
     expect(SponsorProposalListResponseSchema.parse(await proposalSuccess.json())).toEqual({
       proposals: [],
     });
@@ -553,7 +553,7 @@ describe("sponsor enrollment routes", () => {
       envelopeRequest(`/v1/operators/sponsors/${SPONSOR}/fellow-cap`, operatorHeaders, "GET"),
     );
     expect(operatorSuccess.status).toBe(200);
-    expect(operatorSuccess.headers.get("cache-control")).toBe("no-store");
+    expect(operatorSuccess.headers.get("cache-control")).toBe("private, no-store");
     expect(OperatorFellowCapStateResponseSchema.parse(await operatorSuccess.json())).toMatchObject({
       sponsor_id: SPONSOR,
       sponsor_seq: 0,
@@ -597,7 +597,7 @@ describe("sponsor enrollment routes", () => {
         new Request(`${origin}/v1/enrollments/proposals`, { method: "GET" }),
       );
       expect(response.status, `sponsor ${cause}`).toBe(503);
-      expect(response.headers.get("cache-control"), `sponsor ${cause}`).toBe("no-store");
+      expect(response.headers.get("cache-control"), `sponsor ${cause}`).toBe("private, no-store");
       expect(await response.json(), `sponsor ${cause}`).toMatchObject({
         code: "SPONSOR_AUTH_UNAVAILABLE",
       });
@@ -608,7 +608,7 @@ describe("sponsor enrollment routes", () => {
         new Request(`${origin}/v1/operators/sponsors/${SPONSOR}/fellow-cap`, { method: "GET" }),
       );
       expect(response.status, `operator ${cause}`).toBe(503);
-      expect(response.headers.get("cache-control"), `operator ${cause}`).toBe("no-store");
+      expect(response.headers.get("cache-control"), `operator ${cause}`).toBe("private, no-store");
       expect(await response.json(), `operator ${cause}`).toMatchObject({
         code: "OPERATOR_AUTH_UNAVAILABLE",
       });
@@ -1772,7 +1772,7 @@ describe("sponsor enrollment routes", () => {
     expect(response.headers.get("ratelimit-limit")).toBe("10");
     expect(response.headers.get("ratelimit-remaining")).toBe("0");
     expect(response.headers.get("ratelimit-reset")).toBe("90001");
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("content-type")).toContain("application/problem+json");
     const payload = await response.json();
     expect(OpaqueProblemSchema.parse(payload)).toMatchObject({

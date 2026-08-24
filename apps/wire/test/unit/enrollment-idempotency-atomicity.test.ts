@@ -1134,7 +1134,7 @@ describe("device enrollment first-decider SQL", () => {
     const refused = await poll();
     expect(refused.status).toBe(409);
     expect(refused.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
-    expect(refused.headers.get("cache-control")).toBe("no-store");
+    expect(refused.headers.get("cache-control")).toBe("private, no-store");
     const refusedText = await refused.text();
     expect(JSON.parse(refusedText)).toEqual({
       type: "https://asimposium.org/errors/FELLOW_CREDENTIAL_CAP_REACHED",

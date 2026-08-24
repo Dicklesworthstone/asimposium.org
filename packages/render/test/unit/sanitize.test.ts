@@ -64,13 +64,31 @@ function semanticReservedEnvelopeKeys(text: string): string[] {
   while (true) {
     const open = text.indexOf('"', searchFrom);
     if (open === -1) return matches;
-    const close = text.indexOf('"', open + 1);
-    if (close === -1) return matches;
-    const key = text.slice(open + 1, close);
-    let cursor = close + 1;
-    while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
-    if (SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) && text[cursor] === ":") matches.push(key);
-    searchFrom = close + 1;
+    let candidateClose = text.indexOf('"', open + 1);
+    while (candidateClose !== -1) {
+      let key: unknown;
+      try {
+        key = JSON.parse(text.slice(open, candidateClose + 1));
+      } catch {
+        candidateClose = text.indexOf('"', candidateClose + 1);
+        continue;
+      }
+
+      let cursor = candidateClose + 1;
+      while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
+      if (
+        typeof key === "string" &&
+        SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) &&
+        text[cursor] === ":"
+      ) {
+        matches.push(key);
+      }
+      break;
+    }
+    // A quote that closed one candidate can still open the documented raw-text
+    // grammar. Advancing by one keeps this oracle independent of JSON object
+    // validity and of the sanitizer's own scanning strategy.
+    searchFrom = open + 1;
   }
 }
 
@@ -246,14 +264,49 @@ describe("neutralizeUntrustedBody", () => {
     const caseVariant = '"NEXT_ACTIONS": is a quoted label, not the reserved lower-case key.';
     const ordinaryApiJson =
       '{"items":[],"scope":"ledger","omitted":[],"degraded":[],"preamble":"plain data","untrusted":true}';
-    const escapeSpelling = String.raw`"next_action\u0073": []`;
+    const nonReservedEscapeSpelling = String.raw`"next_action\u0078": []`;
+    const doubleEscapedSpelling = String.raw`"next_action\\u0073": []`;
+    const malformedEscapeSpelling = String.raw`"next_action\u073": []`;
     expect(neutralizeUntrustedBody(ordinaryProse)).toEqual({ text: ordinaryProse, findings: [] });
     expect(neutralizeUntrustedBody(caseVariant)).toEqual({ text: caseVariant, findings: [] });
     expect(neutralizeUntrustedBody(ordinaryApiJson)).toEqual({
       text: ordinaryApiJson,
       findings: [],
     });
-    expect(neutralizeUntrustedBody(escapeSpelling)).toEqual({ text: escapeSpelling, findings: [] });
+    expect(neutralizeUntrustedBody(nonReservedEscapeSpelling)).toEqual({
+      text: nonReservedEscapeSpelling,
+      findings: [],
+    });
+    expect(neutralizeUntrustedBody(doubleEscapedSpelling)).toEqual({
+      text: doubleEscapedSpelling,
+      findings: [],
+    });
+    expect(neutralizeUntrustedBody(malformedEscapeSpelling)).toEqual({
+      text: malformedEscapeSpelling,
+      findings: [],
+    });
+  });
+
+  test("neutralizes JSON unicode-escape spellings that decode to reserved envelope keys", () => {
+    const markers = [
+      String.raw`"\u006eext_actions": []`,
+      String.raw`"next_\u0061ctions" : []`,
+      String.raw`"\u004Eext_actions": []`,
+      String.raw`"why_incl\u0075ded": true`,
+      String.raw`"\u0077\u0068\u0079\u005fincluded": null`,
+    ];
+
+    for (const marker of markers) {
+      expect(semanticReservedEnvelopeKeys(marker)).toHaveLength(1);
+
+      const once = neutralizeUntrustedBody(marker);
+      expect(semanticReservedEnvelopeKeys(once.text)).toEqual([]);
+      expect(once.text.replaceAll("&quot;", '"')).toBe(marker);
+      expect(once.findings).toEqual([{ marker: "envelope-key-forgery", count: 1 }]);
+
+      const twice = neutralizeUntrustedBody(once.text);
+      expect(twice).toEqual({ text: once.text, findings: [] });
+    }
   });
 
   test("leaves prose that merely mentions an envelope key alone", () => {
