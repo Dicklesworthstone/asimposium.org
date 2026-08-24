@@ -298,12 +298,18 @@ function rawBrowserTokenizerScanText(value: string): string {
   return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
+const NON_ASCII = /[^\x00-\x7f]/;
+
 /**
  * The compatibility pass may reveal an obfuscated token, but is a second
  * interpretation rather than an input rewrite for the raw pass. Its source map
  * makes any finding deduplicate against the original source occurrence.
  */
 function canonicalizeSourceCodePoint(sourceCodePoint: string): string {
+  const code = sourceCodePoint.charCodeAt(0);
+  if (sourceCodePoint.length === 1 && code <= 0x7f) {
+    return code >= 65 && code <= 90 ? String.fromCharCode(code + 32) : sourceCodePoint;
+  }
   return sourceCodePoint.normalize("NFKD").replace(CANONICAL_MARK_OR_FORMAT, "").toLowerCase();
 }
 
@@ -319,6 +325,9 @@ function unicodeCanonicalTokenizerScanText(value: string): string {
 }
 
 function unicodeCanonicalSourceMappedScanText(value: string): string {
+  if (!NON_ASCII.test(value)) {
+    return rawBrowserTokenizerScanText(value);
+  }
   // NFKD already exposes every compatibility spelling the ASCII-shaped
   // tokenizer recognizes. After marks and format controls are removed, a
   // whole-string NFKC pass can only recompose non-ASCII sequences (not create
@@ -355,6 +364,9 @@ function canonicalFindingsAtSourceOffsets(
   canonicalFindings: readonly ActiveHtmlFinding[],
 ): ActiveHtmlFinding[] {
   if (canonicalFindings.length === 0) return [];
+  if (!NON_ASCII.test(value)) {
+    return canonicalFindings as ActiveHtmlFinding[];
+  }
 
   const pending = canonicalFindings
     .map((finding, index) => ({ canonicalOffset: finding.offset, index }))
