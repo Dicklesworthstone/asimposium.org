@@ -449,12 +449,16 @@ else
   fail_phase "r2-private-canary" "R2_CANARY_WRITE_FAILED" "The private staging bucket refused the canary write."
 fi
 CANARY_READ="$(bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)"
-bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1 || true
+# Probe while the canary still exists. Deleting it first would make a 404
+# inevitable and turn the public-absence assertion into a vacuous green.
+PUBLIC_CANARY_STATUS="$(curl --silent --output /dev/null --max-time 15 --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null || printf '000')"
+STAGING_DOMAINS_STATUS=0
+STAGING_DOMAINS="$(bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)" || STAGING_DOMAINS_STATUS=$?
+CANARY_DELETE_STATUS=0
+bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1 || CANARY_DELETE_STATUS=$?
 if [ "$CANARY_READ" != "$CANARY_BODY" ]; then
   fail_phase "r2-private-canary" "R2_CANARY_READ_MISMATCH" "The canary read back through the binding did not match the write."
 fi
-PUBLIC_CANARY_STATUS="$(curl --silent --output /dev/null --max-time 15 --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null || printf '000')"
-STAGING_DOMAINS="$(bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)"
 case "$PUBLIC_CANARY_STATUS" in
   000|404) ;;
   *)
@@ -462,8 +466,16 @@ case "$PUBLIC_CANARY_STATUS" in
       "The private canary was reachable over HTTP ($PUBLIC_CANARY_STATUS)."
     ;;
 esac
+if [ "$STAGING_DOMAINS_STATUS" -ne 0 ]; then
+  fail_phase "r2-private-canary" "R2_DOMAIN_OBSERVATION_FAILED" \
+    "The staging bucket domain state could not be observed."
+fi
 if [ "$STAGING_DOMAINS" != "${STAGING_DOMAINS#*no custom domains}" ] || [ -z "$STAGING_DOMAINS" ]; then
-  emit "r2-private-canary" "pass" "OK" "private canary round-tripped through the owner binding; no public hostname serves it"
+  if [ "$CANARY_DELETE_STATUS" -ne 0 ]; then
+    fail_phase "r2-private-canary" "R2_CANARY_DELETE_FAILED" \
+      "The private staging canary was verified but could not be removed."
+  fi
+  emit "r2-private-canary" "pass" "OK" "private canary round-tripped through the owner binding, remained absent at the public hostname while it existed, and was removed"
 else
   fail_phase "r2-private-canary" "R2_PRIVATE_BUCKET_HAS_DOMAIN" \
     "The private staging bucket carries a custom domain; the topology forbids that."
