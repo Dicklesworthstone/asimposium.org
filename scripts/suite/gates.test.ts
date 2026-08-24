@@ -61,10 +61,9 @@ interface GateRun {
   readonly commands: readonly string[];
 }
 
-function runAll(checkStatus: number): GateRun {
-  console.log("CONFIG:", { GATES, REPO_ROOT, BIN, LOG, exists: require("node:fs").existsSync(GATES) });
+async function runAll(checkStatus: number): Promise<GateRun> {
   closeSync(openSync(LOG, "w", 0o600));
-  const child = Bun.spawnSync(["/bin/bash", "-c", `"${GATES}" --all`], {
+  const child = Bun.spawn(["bash", GATES, "--all"], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
@@ -72,21 +71,32 @@ function runAll(checkStatus: number): GateRun {
       ASIMPOSIUM_GATES_TEST_LOG: LOG,
       ASIMPOSIUM_GATES_TEST_CHECK_STATUS: String(checkStatus),
     },
+    stdout: "pipe",
+    stderr: "pipe",
   });
-  const res = {
+  await child.exited;
+  const stdout = await new Response(child.stdout).text();
+  const stderr = await new Response(child.stderr).text();
+  if (child.exitCode !== checkStatus) {
+    console.error("DEBUG runAll failed:", {
+      status: child.exitCode,
+      signal: child.signalCode,
+      stdout,
+      stderr,
+    });
+  }
+  return {
     status: child.exitCode,
     signal: child.signalCode ?? null,
-    stdout: child.stdout ? new TextDecoder().decode(child.stdout) : "",
-    stderr: child.stderr ? new TextDecoder().decode(child.stderr) : "",
+    stdout,
+    stderr,
     commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean),
   };
-  console.log("RUNALL RES:", res);
-  return res;
 }
 
 describe("provider-neutral full gate", () => {
-  test("--all invokes the canonical complete dispatcher before the Rust gate", () => {
-    const run = runAll(0);
+  test("--all invokes the canonical complete dispatcher before the Rust gate", async () => {
+    const run = await runAll(0);
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
@@ -105,8 +115,8 @@ describe("provider-neutral full gate", () => {
   test.each([
     ["ordinary failure", 23],
     ["blocked proof", 78],
-  ] as const)("PLANTED: canonical %s stays non-green and stops later work", (_label, status) => {
-    const run = runAll(status);
+  ] as const)("PLANTED: canonical %s stays non-green and stops later work", async (_label, status) => {
+    const run = await runAll(status);
 
     expect(run.signal).toBeNull();
     expect(run.status).toBe(status);
