@@ -90,13 +90,15 @@ delegated_value() {
     restore:observed) printf '%s\n' "${ASIMP_CI_RESTORE_OBSERVED_AT:-}" ;;
     launch:status) printf '%s\n' "${ASIMP_CI_LAUNCH_STATUS:-not-run}" ;;
     launch:observed) printf '%s\n' "${ASIMP_CI_LAUNCH_OBSERVED_AT:-}" ;;
+    release:status) printf '%s\n' "${ASIMP_CI_RELEASE_STATUS:-not-run}" ;;
+    release:observed) printf '%s\n' "${ASIMP_CI_RELEASE_OBSERVED_AT:-}" ;;
     *) return 64 ;;
   esac
 }
 
 validate_delegated_statuses() {
   local name status observed
-  for name in cold-agent-gauntlet human-playwright load restore launch; do
+  for name in cold-agent-gauntlet human-playwright load restore launch release; do
     status="$(delegated_value "$name" status)" || return 64
     observed="$(delegated_value "$name" observed)" || return 64
     case "$status" in
@@ -113,7 +115,7 @@ validate_delegated_statuses() {
 
 record_delegated_statuses() {
   local force_not_run="${1:-0}" name status observed observed_json record
-  for name in cold-agent-gauntlet human-playwright load restore launch; do
+  for name in cold-agent-gauntlet human-playwright load restore launch release; do
     if [[ "$force_not_run" == "1" ]]; then
       status="not-run"
       observed=""
@@ -396,9 +398,10 @@ PY
 }
 
 web_deploy() {
-  local raw_receipt="$ARTIFACT_DIRECTORY/vercel-output.json"
+  local deployment_url_file="$ARTIFACT_DIRECTORY/vercel-deployment-url.txt"
+  local raw_receipt="$ARTIFACT_DIRECTORY/vercel-inspect.json"
   local safe_receipt="$ARTIFACT_DIRECTORY/web-deployment.json"
-  local status
+  local deployment_origin status
 
   require_live_variable VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
@@ -407,11 +410,29 @@ web_deploy() {
   vercel deploy "$repository_root" \
     --yes \
     --target preview \
-    --json \
     --meta "asimposiumRevision=$REVISION" \
     --build-env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
     --env "STOA_ORIGIN=$STAGING_WORKER_ORIGIN" \
-    > "$raw_receipt"
+    > "$deployment_url_file"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
+
+  deployment_origin="$(python3 - "$deployment_url_file" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = stream.read().strip()
+parts = urlsplit(value if "://" in value else "https://" + value)
+if parts.scheme != "https" or not parts.hostname or parts.port is not None or parts.path not in ("", "/") or parts.query or parts.fragment:
+    sys.exit(1)
+if not parts.hostname.endswith(".vercel.app"):
+    sys.exit(1)
+print("https://" + parts.hostname)
+PY
+)" || return 1
+
+  vercel inspect "$deployment_origin" --wait --timeout 25m --json > "$raw_receipt"
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
@@ -424,9 +445,11 @@ from urllib.parse import urlsplit
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     document = json.load(stream)
-deployment_id = document.get("id") or document.get("deploymentId")
+if not isinstance(document, dict):
+    sys.exit(1)
+deployment_id = document.get("id") or document.get("uid") or document.get("deploymentId")
 url = document.get("url")
-state = document.get("readyState") or document.get("state") or document.get("status") or "READY"
+state = document.get("readyState") or document.get("state") or document.get("status")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"dpl_[A-Za-z0-9]{8,128}", deployment_id):
     sys.exit(1)
 if not isinstance(url, str):
@@ -436,7 +459,7 @@ if parts.scheme != "https" or not parts.hostname or parts.port is not None or pa
     sys.exit(1)
 if not parts.hostname.endswith(".vercel.app"):
     sys.exit(1)
-if str(state).upper() not in ("READY", "SUCCEEDED"):
+if not isinstance(state, str) or state.upper() not in ("READY", "SUCCEEDED"):
     sys.exit(1)
 observed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 print(json.dumps({"deployment_id": deployment_id, "observed_at": observed_at, "status": "ready", "origin": "https://" + parts.hostname}, separators=(",", ":")))
@@ -527,7 +550,7 @@ run_stage() {
 
   case "$status" in
     0) record_stage "$stage" "pass" 0 "$CURRENT_STAGE_STARTED" "$finished_at" || return 1 ;;
-    78) record_stage "$stage" "blocked" 78 "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
+    75 | 78) record_stage "$stage" "blocked" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
     124) record_stage "$stage" "timeout" 124 "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
     129 | 130 | 143) record_stage "$stage" "cancelled" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
     *) record_stage "$stage" "fail" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;

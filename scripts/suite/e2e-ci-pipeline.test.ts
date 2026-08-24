@@ -82,6 +82,7 @@ function plantedEnvironment(
     ASIMP_CI_LOAD_STATUS: "not-run",
     ASIMP_CI_RESTORE_STATUS: "not-run",
     ASIMP_CI_LAUNCH_STATUS: "not-run",
+    ASIMP_CI_RELEASE_STATUS: "not-run",
   };
   for (const name of [
     "ASIMP_CI_GAUNTLET_OBSERVED_AT",
@@ -89,6 +90,7 @@ function plantedEnvironment(
     "ASIMP_CI_LOAD_OBSERVED_AT",
     "ASIMP_CI_RESTORE_OBSERVED_AT",
     "ASIMP_CI_LAUNCH_OBSERVED_AT",
+    "ASIMP_CI_RELEASE_OBSERVED_AT",
   ]) {
     delete environment[name];
   }
@@ -116,18 +118,40 @@ function runPipeline(stage: Stage, outcome: string, timeout = false): PipelineRu
   const paths = fixture(`${stage}-${outcome}`);
   const environment = plantedEnvironment(stage, outcome, paths);
   if (timeout) environment[timeoutVariable(stage)] = "1";
-  const result = spawnSync("bash", [PIPELINE, "--run-id", paths.runId], {
-    cwd: REPO_ROOT,
-    env: environment,
+  const resultPath = join(paths.artifactDirectory, "result.json");
+  const helperSource = `
+    import { spawnSync } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    const child = spawnSync("bash", [${JSON.stringify(PIPELINE)}, "--run-id", ${JSON.stringify(paths.runId)}], {
+      cwd: ${JSON.stringify(REPO_ROOT)},
+      env: ${JSON.stringify(environment)},
+      encoding: "utf8",
+      timeout: 20000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    writeFileSync(
+      ${JSON.stringify(resultPath)},
+      JSON.stringify({
+        status: child.status,
+        signal: child.signal,
+        stdout: child.stdout ?? "",
+        stderr: child.stderr ?? "",
+      }) + "\\n",
+    );
+  `;
+  const helper = spawnSync(process.execPath, ["-e", helperSource], {
     encoding: "utf8",
-    timeout: 20_000,
-    maxBuffer: 4 * 1024 * 1024,
+    timeout: 30000,
   });
+  if (helper.status !== 0) {
+    throw new Error(`helper failed: ${helper.stderr}`);
+  }
+  const parsed = JSON.parse(readFileSync(resultPath, "utf8"));
   return {
-    status: result.status,
-    signal: result.signal,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
+    status: parsed.status,
+    signal: parsed.signal,
+    stdout: parsed.stdout,
+    stderr: parsed.stderr,
     tracePath: paths.tracePath,
   };
 }
@@ -171,7 +195,7 @@ function expectStoppedAt(run: PipelineRun, stage: Stage, status: string, exitCod
     }
   }
   const delegated = evidence.filter((record) => record.record === "delegated-suite");
-  expect(delegated).toHaveLength(5);
+  expect(delegated).toHaveLength(6);
   expect(delegated.every((record) => record.status === "not-run")).toBe(true);
   expect(evidence.some((record) => record.code === "PIPELINE_COMPLETE")).toBe(false);
   expect(evidence.some((record) => record.code === "PROCESS_TEST_COMPLETE")).toBe(false);
@@ -224,11 +248,6 @@ async function cancelPipeline(stage: Stage): Promise<PipelineRun> {
 describe("OPS.2b review pipeline orchestration", () => {
   test("the all-pass process control runs each stage in doctrine order", () => {
     const run = runPipeline("smoke-gallery", "pass");
-    if (run.status !== 0) {
-      console.log("RUN FAILED STDOUT:", run.stdout);
-      console.log("RUN FAILED STDERR:", run.stderr);
-      console.log("RUN FAILED STATUS:", run.status);
-    }
 
     expect(run.status).toBe(0);
     expect(run.signal).toBeNull();
@@ -237,14 +256,14 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(
       evidence.filter((record) => record.stage !== undefined).map((record) => record.status),
     ).toEqual(STAGES.map(() => "pass"));
-    expect(evidence.filter((record) => record.record === "delegated-suite")).toHaveLength(5);
+    expect(evidence.filter((record) => record.record === "delegated-suite")).toHaveLength(6);
     expect(evidence.at(-1)).toMatchObject({
       record: "summary",
       status: "pass",
       code: "PROCESS_TEST_COMPLETE",
       runner: "process-test",
     });
-  });
+  }, 60_000);
 
   for (const planted of [17, 23, 78] as const) {
     test(`PLANTED: exit ${planted} propagates unchanged and suppresses every downstream stage`, () => {
@@ -252,42 +271,34 @@ describe("OPS.2b review pipeline orchestration", () => {
         const run = runPipeline(stage, String(planted));
         expectStoppedAt(run, stage, planted === 78 ? "blocked" : "fail", planted);
       }
-    });
+    }, 60_000);
   }
 
-  test(
-    "PLANTED: timeout at every stage returns 124, kills descendants, and suppresses success",
-    async () => {
-      const runs: PipelineRun[] = [];
-      for (const stage of STAGES) {
-        const run = runPipeline(stage, "hang", true);
-        expectStoppedAt(run, stage, "timeout", 124);
-        runs.push(run);
-      }
-      await Bun.sleep(3_500);
-      for (const run of runs) {
-        const trace = readFileSync(run.tracePath, "utf8");
-        expect(trace).not.toContain("descendant-survived:");
-      }
-    },
-    30_000,
-  );
+  test("PLANTED: timeout at every stage returns 124, kills descendants, and suppresses success", async () => {
+    const runs: PipelineRun[] = [];
+    for (const stage of STAGES) {
+      const run = runPipeline(stage, "hang", true);
+      expectStoppedAt(run, stage, "timeout", 124);
+      runs.push(run);
+    }
+    await Bun.sleep(3_500);
+    for (const run of runs) {
+      const trace = readFileSync(run.tracePath, "utf8");
+      expect(trace).not.toContain("descendant-survived:");
+    }
+  }, 60_000);
 
-  test(
-    "PLANTED: TERM cancellation at every stage returns 143, cleans descendants, and stops",
-    async () => {
-      const runs: PipelineRun[] = [];
-      for (const stage of STAGES) {
-        const run = await cancelPipeline(stage);
-        expectStoppedAt(run, stage, "cancelled", 143);
-        runs.push(run);
-      }
-      await Bun.sleep(3_500);
-      for (const run of runs) {
-        const trace = readFileSync(run.tracePath, "utf8");
-        expect(trace).not.toContain("descendant-survived:");
-      }
-    },
-    30_000,
-  );
+  test("PLANTED: TERM cancellation at every stage returns 143, cleans descendants, and stops", async () => {
+    const runs: PipelineRun[] = [];
+    for (const stage of STAGES) {
+      const run = await cancelPipeline(stage);
+      expectStoppedAt(run, stage, "cancelled", 143);
+      runs.push(run);
+    }
+    await Bun.sleep(3_500);
+    for (const run of runs) {
+      const trace = readFileSync(run.tracePath, "utf8");
+      expect(trace).not.toContain("descendant-survived:");
+    }
+  }, 60_000);
 });
