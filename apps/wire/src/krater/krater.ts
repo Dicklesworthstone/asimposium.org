@@ -1453,14 +1453,33 @@ export async function backfillKraterIntegrity(
     recordD1Results(cost, batchResults);
   } catch (_error) {
     const rechecked = await readIntegrityBackfill(db, problemId, cost);
-    if (
-      rechecked?.state !== "complete" ||
-      rechecked.chain_version !== KRATER_CHAIN_VERSION
-    ) {
-      backfillRequired(
-        "the integrity replay could not atomically complete; no digest was defaulted.",
-      );
+    if (rechecked?.state === "complete" && rechecked.chain_version === KRATER_CHAIN_VERSION) {
+      try {
+        const [recheckedEvents, recheckedCheckpoints, recheckedIntegrity] = await Promise.all([
+          readAllEvents(db, problemId),
+          readCheckpoints(db, problemId),
+          readIntegrityState(db, problemId),
+        ]);
+        const terminalRoot =
+          recheckedEvents[recheckedEvents.length - 1]?.chainDigest ??
+          (await genesisChainDigest(problemId));
+        if (
+          recheckedEvents.length === legacyEvents.length &&
+          recheckedCheckpoints.length === legacyEvents.length &&
+          recheckedIntegrity.chainVersion === KRATER_CHAIN_VERSION &&
+          recheckedIntegrity.chainDigest === terminalRoot &&
+          (await eventChainMatches(recheckedEvents))
+        ) {
+          return settleCost(cost, preflightStartedAt, false);
+        }
+      } catch {
+        // Fall through to the one refusal below. A concurrent "complete" row
+        // is not sufficient authority unless every v2 surface re-verifies.
+      }
     }
+    backfillRequired(
+      "the integrity replay could not atomically complete and exact v2 authority did not re-verify.",
+    );
   }
   return settleCost(cost, preflightStartedAt, false);
 }

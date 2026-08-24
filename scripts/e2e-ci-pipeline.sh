@@ -828,8 +828,6 @@ stage_environment_prefix() {
   # process table.
   local stage="$1"
   printf '%s\0' /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /bin/bash --noprofile --norc -c '
-stage="$1"
-builtin shift
 for function_name in $(builtin compgen -A function); do
   builtin unset -f "$function_name"
 done
@@ -840,21 +838,21 @@ for name in $(builtin compgen -e); do
     ASIMP_CI_PROCESS_TEST|ASIMP_CI_PROCESS_PLANT_STAGE|ASIMP_CI_PROCESS_PLANT_OUTCOME|ASIMP_CI_PROCESS_TRACE|ASIMP_CI_PROCESS_ARTIFACT_DIRECTORY)
       ;;
     CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID)
-      [[ "$stage" == worker-deploy || "$stage" == worker-readiness || "$stage" == web-deploy ]] || builtin unset "$name"
+      [[ "$1" == worker-deploy || "$1" == worker-readiness || "$1" == web-deploy ]] || builtin unset "$name"
       ;;
     ASIMP_D1_DATABASE_ID_STAGING|ASIMP_STAGING_SERVICE_ENVELOPE_KEYS)
-      [[ "$stage" == worker-deploy || "$stage" == worker-readiness ]] || builtin unset "$name"
+      [[ "$1" == worker-deploy || "$1" == worker-readiness ]] || builtin unset "$name"
       ;;
     VERCEL_TOKEN|VERCEL_ORG_ID|VERCEL_PROJECT_ID)
-      [[ "$stage" == web-deploy ]] || builtin unset "$name"
+      [[ "$1" == web-deploy ]] || builtin unset "$name"
       ;;
     ASIMPOSIUM_SMOKE_FELLOW_TOKEN)
-      [[ "$stage" == smoke-agent ]] || builtin unset "$name"
+      [[ "$1" == smoke-agent ]] || builtin unset "$name"
       ;;
     *) builtin unset "$name" ;;
   esac
 done
-builtin exec "$@"
+builtin exec "${@:2}"
 ' bash "$stage"
 }
 
