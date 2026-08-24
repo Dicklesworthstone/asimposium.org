@@ -476,6 +476,30 @@ export async function genesisChainDigest(problemId: string): Promise<string> {
   );
 }
 
+/** Frozen v1 derivations used only to validate immutable pre-0039 bytes. */
+async function legacyGenesisChainDigestV1(problemId: string): Promise<string> {
+  requireIdentifier("problemId", problemId);
+  return sha256Hex(canonicalJson({ kind: "krater.v0.genesis", problem_id: problemId }));
+}
+
+async function legacyEventChainDigestV1(
+  problemId: string,
+  seq: number,
+  payloadSha256: string,
+  previousChainDigest: string,
+): Promise<string> {
+  requireIdentifier("problemId", problemId);
+  requireInputSequence(seq, "legacy chain sequence", false);
+  return sha256Hex(
+    canonicalJson({
+      payload_sha256: payloadSha256,
+      previous_chain_digest: previousChainDigest,
+      problem_id: problemId,
+      seq,
+    }),
+  );
+}
+
 export async function eventChainDigest(
   problemId: string,
   seq: number,
@@ -544,6 +568,7 @@ export async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): 
   requireInputSequence(envelope.seq, "event envelope sequence", false);
   return sha256Hex(
     canonicalJson({
+      chain_version: KRATER_CHAIN_VERSION,
       created_at: envelope.createdAt,
       actor_fellow_id: envelope.actorFellowId,
       actor_session_id: envelope.actorSessionId,
@@ -559,6 +584,25 @@ export async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): 
       seq: envelope.seq,
       type: envelope.type,
       writer_credential_id: envelope.writerCredentialId,
+    }),
+  );
+}
+
+async function legacyEventEnvelopeRowDigestV1(
+  envelope: EventEnvelopeForDigest,
+): Promise<string> {
+  requireInputSequence(envelope.seq, "legacy event envelope sequence", false);
+  return sha256Hex(
+    canonicalJson({
+      created_at: envelope.createdAt,
+      event_id: envelope.eventId,
+      object_id: envelope.objectId,
+      object_kind: envelope.objectKind,
+      object_version: envelope.objectVersion,
+      payload_sha256: envelope.payloadSha256,
+      problem_id: envelope.problemId,
+      seq: envelope.seq,
+      type: envelope.type,
     }),
   );
 }
@@ -1073,11 +1117,26 @@ export async function backfillKraterIntegrity(
   ) {
     backfillRequired("the legacy integrity columns are partial; refusing to infer authority.");
   }
+  if (storedBackfill === null) {
+    backfillRequired("the legacy integrity state is absent; refusing to infer authority.");
+  }
+  const everyLegacyEventWasDigested = legacyEvents.every(
+    (event) => event.stored_row_digest !== null && event.stored_chain_digest !== null,
+  );
+  const everyLegacyEventWasUndigested = legacyEvents.every(
+    (event) => event.stored_row_digest === null && event.stored_chain_digest === null,
+  );
+  const legacyWasComplete = rawHead.chain_digest !== null && everyLegacyEventWasDigested;
+  const legacyWasUndigested = rawHead.chain_digest === null && everyLegacyEventWasUndigested;
+  if (!legacyWasComplete && !legacyWasUndigested) {
+    backfillRequired("the legacy head, replay state, and event digests disagree.");
+  }
   if (publicSeq !== legacyEvents.length) {
     backfillRequired("the legacy cursor does not match a complete contiguous envelope history.");
   }
 
   let priorChainDigest = await genesisChainDigest(problemId);
+  let priorLegacyChainDigest = await legacyGenesisChainDigestV1(problemId);
   const updates: D1PreparedStatement[] = [
     statement(
       db,
@@ -1101,7 +1160,7 @@ export async function backfillKraterIntegrity(
         "the legacy event stream is not a contiguous canonical envelope history.",
       );
     }
-    const rowDigest = await eventEnvelopeRowDigest({
+    const envelope: EventEnvelopeForDigest = {
       eventId: event.id,
       problemId: event.problem_id,
       seq: event.seq,
@@ -1117,7 +1176,22 @@ export async function backfillKraterIntegrity(
       modelStringSelfDeclared: event.model_string_self_declared,
       harness: event.harness,
       writerCredentialId: event.writer_credential_id,
-    });
+    };
+    const rowDigest = await eventEnvelopeRowDigest(envelope);
+    const legacyRowDigest = await legacyEventEnvelopeRowDigestV1(envelope);
+    const legacyChainDigest = await legacyEventChainDigestV1(
+      event.problem_id,
+      event.seq,
+      event.payload_sha256,
+      priorLegacyChainDigest,
+    );
+    if (
+      legacyWasComplete &&
+      (event.stored_row_digest !== legacyRowDigest ||
+        event.stored_chain_digest !== legacyChainDigest)
+    ) {
+      backfillRequired("the stored v1 integrity bytes disagree with their immutable event history.");
+    }
     const chainDigest = await eventChainDigest(
       event.problem_id,
       event.seq,
@@ -1170,6 +1244,18 @@ export async function backfillKraterIntegrity(
       ),
       statement(
         db,
+        `UPDATE claim_projections
+         SET build_digest = ?, updated_at = ?
+         WHERE problem_id = ? AND claim_id = ? AND source_seq = ? AND build_digest = ?`,
+        rowDigest,
+        completedAt,
+        event.problem_id,
+        event.object_id,
+        event.seq,
+        legacyRowDigest,
+      ),
+      statement(
+        db,
         `INSERT INTO checkpoint_chain_v2
            (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, chain_version)
          VALUES (?, ?, ?, ?, 2)
@@ -1181,6 +1267,10 @@ export async function backfillKraterIntegrity(
       ),
     );
     priorChainDigest = chainDigest;
+    priorLegacyChainDigest = legacyChainDigest;
+  }
+  if (legacyWasComplete && rawHead.chain_digest !== priorLegacyChainDigest) {
+    backfillRequired("the stored v1 problem head disagrees with its verified event chain.");
   }
   updates.push(
     statement(

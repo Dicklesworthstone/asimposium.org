@@ -26,6 +26,21 @@ CREATE TABLE event_chain_v2 (
 CREATE INDEX event_chain_v2_problem_seq_idx
   ON event_chain_v2 (problem_id, seq);
 
+-- Backfill inserts the sidecar directly, so its event identity must be bound
+-- at the table boundary as tightly as the after-insert copy used by new
+-- writes. A valid digest cannot be attached to another problem or sequence.
+CREATE TRIGGER event_chain_v2_binding_before_insert
+BEFORE INSERT ON event_chain_v2
+WHEN NOT EXISTS (
+  SELECT 1 FROM events e
+  WHERE e.id = NEW.event_id
+    AND e.problem_id = NEW.problem_id
+    AND e.seq = NEW.seq
+)
+BEGIN
+  SELECT RAISE(ABORT, 'KRATER_CHAIN_V2_EVENT_BINDING_MISMATCH');
+END;
+
 CREATE TABLE checkpoint_chain_v2 (
   problem_id TEXT NOT NULL,
   checkpoint_seq INTEGER NOT NULL CHECK (checkpoint_seq > 0),
@@ -36,6 +51,22 @@ CREATE TABLE checkpoint_chain_v2 (
   FOREIGN KEY (problem_id, checkpoint_seq)
     REFERENCES integrity_checkpoints(problem_id, checkpoint_seq)
 );
+
+-- The sidecar root is meaningful only when it names the exact v2 event link
+-- at the same problem sequence. This also constrains direct replay inserts;
+-- the legacy-checkpoint trigger below covers only the new-write copy path.
+CREATE TRIGGER checkpoint_chain_v2_binding_before_insert
+BEFORE INSERT ON checkpoint_chain_v2
+WHEN NOT EXISTS (
+  SELECT 1 FROM event_chain_v2 c
+  WHERE c.problem_id = NEW.problem_id
+    AND c.seq = NEW.checkpoint_seq
+    AND c.chain_version = 2
+    AND c.chain_digest = NEW.root_chain_digest
+)
+BEGIN
+  SELECT RAISE(ABORT, 'KRATER_CHECKPOINT_CHAIN_V2_BINDING_MISMATCH');
+END;
 
 -- Applying the schema never invents v2 digests. Each problem remains refused
 -- until the Worker replays its immutable envelopes and atomically installs the

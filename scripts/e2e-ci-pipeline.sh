@@ -12,15 +12,16 @@ source "$repository_root/e2e/lib/run-diagnostics.sh"
 readonly SUITE="ci-pipeline"
 readonly USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 readonly STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
+readonly STAGING_AGORA_ORIGIN="https://staging.asimposium.org"
 readonly VERCEL_CLI_VERSION="59.5.0"
 readonly PIPELINE_TEST_MODE="${ASIMP_CI_PROCESS_TEST:-0}"
 readonly -a STAGES=(
   "root-gate"
+  "smoke-agent"
+  "smoke-gallery"
   "worker-deploy"
   "worker-readiness"
   "web-deploy"
-  "smoke-agent"
-  "smoke-gallery"
 )
 
 RUN_ID=""
@@ -217,9 +218,15 @@ trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
 
 run_bounded() {
-  local timeout_seconds="$1" status
+  local timeout_seconds="$1" termination_grace_seconds=10 status
   shift
-  python3 - "$timeout_seconds" "$@" <<'PY' &
+  # Process controls use a short grace so the planted matrix stays fast. Live
+  # stages get enough bounded time for their own failure traps to retire remote
+  # canaries and local descendants before group-wide escalation.
+  if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
+    termination_grace_seconds=1
+  fi
+  python3 - "$timeout_seconds" "$termination_grace_seconds" "$@" <<'PY' &
 import os
 import signal
 import subprocess
@@ -227,7 +234,8 @@ import sys
 import time
 
 timeout_seconds = int(sys.argv[1])
-command = sys.argv[2:]
+termination_grace_seconds = int(sys.argv[2])
+command = sys.argv[3:]
 child = subprocess.Popen(command, start_new_session=True)
 caught = None
 
@@ -246,7 +254,7 @@ def terminate_group(first_signal: int) -> None:
         os.killpg(child.pid, first_signal)
     except ProcessLookupError:
         return
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + termination_grace_seconds
     while group_exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     if group_exists():
@@ -755,7 +763,7 @@ PY
 }
 
 stage_command() {
-  local stage="$1" web_origin
+  local stage="$1"
   if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
     printf '%s\0' bash "$repository_root/scripts/e2e-ci-pipeline.sh" __plant "$stage"
     return 0
@@ -782,9 +790,8 @@ stage_command() {
         bash "$repository_root/scripts/smoke-agent.sh" --write-artifacts --run-id "smoke-agent-${REVISION:0:12}-$$"
       ;;
     smoke-gallery)
-      web_origin="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" origin)" || return 1
       printf '%s\0' env \
-        ASIMPOSIUM_STAGING_AGORA_BASE_URL="$web_origin" \
+        ASIMPOSIUM_STAGING_AGORA_BASE_URL="$STAGING_AGORA_ORIGIN" \
         bash "$repository_root/scripts/smoke-gallery.sh" --write-artifacts --run-id "smoke-gallery-${REVISION:0:12}-$$"
       ;;
     *) return 64 ;;
@@ -873,15 +880,15 @@ internal_entrypoint() {
       assert_revision_unchanged || return $?
       case "$action" in
         __worker_deploy)
-          require_stage_prefix "root-gate" || return $?
+          require_stage_prefix "root-gate,smoke-agent,smoke-gallery" || return $?
           worker_deploy
           ;;
         __worker_readiness)
-          require_stage_prefix "root-gate,worker-deploy" || return $?
+          require_stage_prefix "root-gate,smoke-agent,smoke-gallery,worker-deploy" || return $?
           worker_readiness
           ;;
         __web_deploy)
-          require_stage_prefix "root-gate,worker-deploy,worker-readiness" || return $?
+          require_stage_prefix "root-gate,smoke-agent,smoke-gallery,worker-deploy,worker-readiness" || return $?
           web_deploy
           ;;
       esac

@@ -16,8 +16,9 @@
 import {
   checkpointDigest,
   eventChainDigest,
-  eventRowDigest,
+  eventEnvelopeRowDigest,
   genesisChainDigest,
+  KRATER_CHAIN_VERSION,
   type KraterCheckpoint,
   type KraterEvent,
 } from "./krater.ts";
@@ -26,7 +27,7 @@ import {
 export const EXPORT_LICENSE = "CC BY 4.0";
 
 /** The export format version, so a consumer can reject a future shape. */
-export const EXPORT_FORMAT = "asimposium.problem-export.v1";
+export const EXPORT_FORMAT = "asimposium.problem-export.v2";
 
 /** The `control` value of the first record. Named so the scan cannot drift. */
 export const EXPORT_HEADER_CONTROL = "export_header";
@@ -45,6 +46,7 @@ const EXPORT_HEADER_KEYS = [
 ] as const;
 
 const EXPORT_CHECKPOINT_KEYS = [
+  "chain_version",
   "checkpoint_digest",
   "checkpoint_mode",
   "checkpoint_seq",
@@ -54,14 +56,23 @@ const EXPORT_CHECKPOINT_KEYS = [
 ] as const;
 
 const EXPORT_EVENT_KEYS = [
+  "actor_fellow_id",
+  "actor_session_id",
+  "actor_sponsor_id",
   "chain_digest",
+  "chain_version",
   "created_at",
   "event_id",
+  "harness",
+  "model_string_self_declared",
   "object_id",
+  "object_kind",
+  "object_version",
   "payload_sha256",
   "row_digest",
   "seq",
   "type",
+  "writer_credential_id",
 ] as const;
 
 const EXPORT_TRAILER_KEYS = ["control", "event_count", "final_cursor", "problem"] as const;
@@ -85,11 +96,20 @@ interface ParsedHeader {
 interface ParsedEvent {
   readonly eventId: string;
   readonly seq: number;
+  readonly type: string;
+  readonly objectKind: string;
   readonly objectId: string;
+  readonly objectVersion: number;
   readonly payloadSha256: string;
   readonly rowDigest: string;
   readonly chainDigest: string;
   readonly createdAt: string;
+  readonly actorFellowId: string | null;
+  readonly actorSponsorId: string | null;
+  readonly actorSessionId: string | null;
+  readonly modelStringSelfDeclared: string | null;
+  readonly harness: string | null;
+  readonly writerCredentialId: string | null;
 }
 
 interface ParsedTrailer {
@@ -130,6 +150,13 @@ function hasExactKeys(record: Record<string, unknown>, expected: readonly string
 
 function boundedNonBlankString(value: unknown, maximum: number): value is string {
   return typeof value === "string" && value.length <= maximum && value.trim().length > 0;
+}
+
+function nullableBoundedNonBlankString(
+  value: unknown,
+  maximum: number,
+): value is string | null {
+  return value === null || boundedNonBlankString(value, maximum);
 }
 
 function isProblemId(value: unknown): value is string {
@@ -198,6 +225,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
       root_chain_digest: c.rootChainDigest,
       checkpoint_digest: c.checkpointDigest,
       checkpoint_version: c.checkpointVersion,
+      chain_version: c.chainVersion,
       checkpoint_mode: c.checkpointMode,
       problem: c.problemId,
     })),
@@ -207,11 +235,20 @@ export function serializeProblemExport(input: ProblemExportInput): string {
       event_id: event.eventId,
       seq: event.seq,
       type: event.type,
+      object_kind: event.objectKind,
       object_id: event.objectId,
+      object_version: event.objectVersion,
       payload_sha256: event.payloadSha256,
       row_digest: event.rowDigest,
       chain_digest: event.chainDigest,
+      chain_version: event.chainVersion,
       created_at: event.createdAt,
+      actor_fellow_id: event.actorFellowId,
+      actor_sponsor_id: event.actorSponsorId,
+      actor_session_id: event.actorSessionId,
+      model_string_self_declared: event.modelStringSelfDeclared,
+      harness: event.harness,
+      writer_credential_id: event.writerCredentialId,
     }),
   );
   const trailer = {
@@ -229,7 +266,7 @@ function parseCheckpoint(
   index: number,
 ): ParseResult<ParsedCheckpoint> {
   if (!isRecord(value) || !hasExactKeys(value, EXPORT_CHECKPOINT_KEYS)) {
-    return { ok: false, reason: `header checkpoint ${index} does not have the exact v1 shape` };
+    return { ok: false, reason: `header checkpoint ${index} does not have the exact v2 shape` };
   }
   if (value.problem !== problem) {
     return { ok: false, reason: `header checkpoint ${index} is not bound to the header problem` };
@@ -238,10 +275,11 @@ function parseCheckpoint(
     !positiveInteger(value.checkpoint_seq) ||
     !isSha256Hex(value.root_chain_digest) ||
     !isSha256Hex(value.checkpoint_digest) ||
+    value.chain_version !== KRATER_CHAIN_VERSION ||
     value.checkpoint_version !== 1 ||
     value.checkpoint_mode !== "unsigned-v0"
   ) {
-    return { ok: false, reason: `header checkpoint ${index} carries invalid v1 fields` };
+    return { ok: false, reason: `header checkpoint ${index} carries invalid v2 fields` };
   }
   return {
     ok: true,
@@ -258,7 +296,7 @@ function parseHeaderRecord(line: string): ParseResult<ParsedHeader> {
   if (!parsed.ok) return parsed;
   const record = parsed.value;
   if (!hasExactKeys(record, EXPORT_HEADER_KEYS)) {
-    return { ok: false, reason: "header does not have the exact v1 shape" };
+    return { ok: false, reason: "header does not have the exact v2 shape" };
   }
   if (record.control !== EXPORT_HEADER_CONTROL) {
     return { ok: false, reason: "first line is not the export header" };
@@ -296,7 +334,7 @@ function parseHeaderRecord(line: string): ParseResult<ParsedHeader> {
   return { ok: true, value: { problem: record.problem, checkpoints } };
 }
 
-/** Parse an exact v1 header record for consumers that read it independently. */
+/** Parse an exact v2 header record for consumers that read it independently. */
 export function parseExportHeader(line: string):
   | {
       readonly ok: true;
@@ -320,7 +358,7 @@ function parseTrailerRecord(line: string): ParseResult<ParsedTrailer> {
   if (!parsed.ok) return parsed;
   const record = parsed.value;
   if (!hasExactKeys(record, EXPORT_TRAILER_KEYS)) {
-    return { ok: false, reason: "terminal record does not have the exact v1 shape" };
+    return { ok: false, reason: "terminal record does not have the exact v2 shape" };
   }
   if (record.control !== EXPORT_TRAILER_CONTROL) {
     return { ok: false, reason: "last line is not the export trailer" };
@@ -344,7 +382,7 @@ function parseTrailerRecord(line: string): ParseResult<ParsedTrailer> {
   };
 }
 
-/** Parse an exact v1 terminal record for consumers that read it independently. */
+/** Parse an exact v2 terminal record for consumers that read it independently. */
 export function parseExportTrailer(line: string):
   | {
       readonly ok: true;
@@ -373,16 +411,25 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
   if (
     !boundedNonBlankString(event.event_id, MAX_IDENTIFIER_LENGTH) ||
     !positiveInteger(event.seq) ||
-    event.type !== "claim.created" ||
+    !boundedNonBlankString(event.type, MAX_IDENTIFIER_LENGTH) ||
+    !boundedNonBlankString(event.object_kind, MAX_IDENTIFIER_LENGTH) ||
     !boundedNonBlankString(event.object_id, MAX_IDENTIFIER_LENGTH) ||
+    !positiveInteger(event.object_version) ||
     !isSha256Hex(event.payload_sha256) ||
     !isSha256Hex(event.row_digest) ||
     !isSha256Hex(event.chain_digest) ||
-    !isUtcTimestamp(event.created_at)
+    event.chain_version !== KRATER_CHAIN_VERSION ||
+    !isUtcTimestamp(event.created_at) ||
+    !nullableBoundedNonBlankString(event.actor_fellow_id, MAX_IDENTIFIER_LENGTH) ||
+    !nullableBoundedNonBlankString(event.actor_sponsor_id, MAX_IDENTIFIER_LENGTH) ||
+    !nullableBoundedNonBlankString(event.actor_session_id, MAX_IDENTIFIER_LENGTH) ||
+    !nullableBoundedNonBlankString(event.model_string_self_declared, MAX_IDENTIFIER_LENGTH) ||
+    !nullableBoundedNonBlankString(event.harness, MAX_IDENTIFIER_LENGTH) ||
+    !nullableBoundedNonBlankString(event.writer_credential_id, MAX_IDENTIFIER_LENGTH)
   ) {
     return {
       ok: false,
-      reason: "event line carries invalid field types or an unsupported event type",
+      reason: "event line carries invalid v2 envelope fields",
     };
   }
   return {
@@ -390,11 +437,20 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
     value: {
       eventId: event.event_id,
       seq: event.seq,
+      type: event.type,
+      objectKind: event.object_kind,
       objectId: event.object_id,
+      objectVersion: event.object_version,
       payloadSha256: event.payload_sha256,
       rowDigest: event.row_digest,
       chainDigest: event.chain_digest,
       createdAt: event.created_at,
+      actorFellowId: event.actor_fellow_id,
+      actorSponsorId: event.actor_sponsor_id,
+      actorSessionId: event.actor_session_id,
+      modelStringSelfDeclared: event.model_string_self_declared,
+      harness: event.harness,
+      writerCredentialId: event.writer_credential_id,
     },
   };
 }
@@ -411,11 +467,11 @@ function splitExactLfRecords(ndjson: string): ParseResult<readonly string[]> {
 }
 
 /**
- * The sole v1 grammar: exact LF framing, then exact header, event, and trailer
+ * The sole v2 grammar: exact LF framing, then exact header, event, and trailer
  * records. It parses every record before integrity work so malformed,
  * reordered, appended, or blank records cannot become a tolerated prefix.
  */
-function parseProblemExportV1(ndjson: string): ExportParseResult {
+function parseProblemExportV2(ndjson: string): ExportParseResult {
   const framed = splitExactLfRecords(ndjson);
   if (!framed.ok) return { ok: false, brokenAtSeq: null, detail: framed.reason };
   if (framed.value.length < 2) {

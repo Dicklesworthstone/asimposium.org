@@ -26,11 +26,11 @@ const HELPER_ENV: NodeJS.ProcessEnv = {
 };
 const STAGES = [
   "root-gate",
+  "smoke-agent",
+  "smoke-gallery",
   "worker-deploy",
   "worker-readiness",
   "web-deploy",
-  "smoke-agent",
-  "smoke-gallery",
 ] as const;
 type Stage = (typeof STAGES)[number];
 

@@ -172,15 +172,17 @@ image's default can be older. The build command makes the canonical root gate
 the first provider result. The
 deploy command deliberately runs that gate again before any mutation; a stale
 or independently invoked deploy phase therefore cannot borrow another build's
-green result. It then performs, in order: staging Worker deploy; the existing
-environment rehearsal, including two remote D1 migration applications whose
-second receipt must report an empty applied set and an idempotent second plan,
-plus an R2 canary write/read/public-absence/delete cycle; live health;
-capability-derived schema reads; a same-checkout Vercel preview tagged with the
-Git revision; `smoke-agent.sh`; and `smoke-gallery.sh`. A failure, blocked exit,
-timeout, or cancellation stops the sequence and records every later stage as
-`not-run`. The web deployment is never attempted before the Worker receipt and
-readiness checks pass.
+green result. It then performs, in order: `smoke-agent.sh` against the canonical
+staging Worker; `smoke-gallery.sh` against the canonical staging Agora; staging
+Worker deploy; the existing environment rehearsal, including two remote D1
+migration applications whose second receipt must report an empty applied set
+and an idempotent second plan, plus an R2 canary
+write/read/public-absence/delete cycle; live health; capability-derived schema
+reads; and a same-checkout Vercel preview tagged with the Git revision. A
+failure, blocked exit, timeout, or cancellation stops the sequence and records
+every later stage as `not-run`. Preview smoke therefore gates all deployment,
+and web deployment cannot start before the Worker receipt and readiness checks
+pass.
 
 Configure these Workers Builds variables. Provider credentials and the Fellow
 token are secrets; resource/project identifiers, the runner label, and public
