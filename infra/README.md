@@ -209,13 +209,17 @@ Vercel's Preview environment must already hold its Auth.js and service-envelope
 secrets. The pipeline pins `STOA_ORIGIN` to the staging Worker at both build and
 runtime, waits for the deployment, and checks Vercel's API for the exact project,
 Preview target, ready state, and requested revision metadata; it never promotes
-that preview to production. Before activating this trigger, disconnect the Vercel project's Git
-integration. Otherwise Vercel can start a web build directly from the push and
-race the Worker readiness gate. The pipeline queries the Vercel project before
-deploying and returns blocked exit 78 while a Git link remains; a configuration
-label or operator assertion cannot bypass that provider-state check. This
-ordered CLI preview path supersedes the earlier native-Git preview plan. Launch
-promotion remains a separately owned gate.
+that preview to production. It also re-observes Cloudflare's active deployment,
+including the expected Worker version and revision message, after Worker
+readiness and again after the Vercel preview reaches ready.
+
+Before activating this trigger, disconnect the Vercel project's Git integration.
+Otherwise Vercel can start a web build directly from the push and race the
+Worker readiness gate. The pipeline queries the Vercel project before deploying
+and returns blocked exit 78 while a Git link remains; a configuration label or
+operator assertion cannot bypass that provider-state check. This ordered CLI
+preview path supersedes the earlier native-Git preview plan. Launch promotion
+remains a separately owned gate.
 
 Each run retains ignored evidence under `e2e/artifacts/<run-id>/`: the exact Git
 revision, runner label, ordered stage statuses, safe Cloudflare/Vercel deployment

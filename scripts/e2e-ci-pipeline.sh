@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -u -o pipefail
 
-# OPS.2b review pipeline. Cloudflare Workers Builds is the hosted runner; this
-# entry point remains provider-neutral at the command boundary and delegates
-# product assertions to their existing suites.
+# OPS.2b review pipeline. Cloudflare Workers Builds is the selected hosted-runner
+# design; this entry point remains provider-neutral at the command boundary and
+# delegates product assertions to their existing suites.
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
@@ -346,11 +346,14 @@ if any(not isinstance(value, dict) for value in deployments):
 def timestamp(value: object) -> datetime.datetime:
     if not isinstance(value, str):
         raise ValueError
-    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError
+    return parsed.astimezone(datetime.timezone.utc)
 
 try:
     active = max(deployments, key=lambda value: timestamp(value.get("created_on")))
-except (TypeError, ValueError):
+except (OverflowError, TypeError, ValueError):
     sys.exit(1)
 deployment_id = active.get("id")
 if not isinstance(deployment_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", deployment_id):
@@ -587,7 +590,9 @@ PY
   deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
   version_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" version_id)" || return 1
   observe_active_worker_deployment \
-    "$worker_deployments_receipt" "$version_id" "$deployment_id" "$worker_attestation_receipt" || return $?
+    "$worker_deployments_receipt" "$version_id" "$deployment_id" "$worker_attestation_receipt"
+  status=$?
+  [[ "$status" -eq 0 ]] || return "$status"
 
   python3 - "$raw_receipt" "$api_receipt" "$REVISION" "$VERCEL_PROJECT_ID" <<'PY' > "$safe_receipt"
 import datetime
@@ -658,11 +663,13 @@ if not isinstance(value, str):
     sys.exit(1)
 patterns = {
     "deployment_id": r"[A-Za-z0-9._-]{1,128}",
+    "version_id": r"[A-Za-z0-9._-]{1,128}",
     "observed_at": r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z",
     "status": r"ready",
     "origin": r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)+",
 }
-if not re.fullmatch(patterns[sys.argv[2]], value):
+pattern = patterns.get(sys.argv[2])
+if pattern is None or not re.fullmatch(pattern, value):
     sys.exit(1)
 print(value)
 PY
@@ -726,6 +733,35 @@ run_stage() {
     assert_revision_unchanged || status=$?
   fi
 
+  if [[ "$status" -eq 0 && "$PIPELINE_TEST_MODE" != "1" ]]; then
+    case "$stage" in
+      worker-deploy)
+        deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || status=1
+        if [[ "$status" -eq 0 ]]; then
+          observed_at="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" observed_at)" || status=1
+        fi
+        if [[ "$status" -eq 0 ]]; then
+          deployment_status="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" status)" || status=1
+        fi
+        if [[ "$status" -eq 0 ]]; then
+          record_deployment cloudflare "$deployment_id" "$observed_at" "$deployment_status" || status=1
+        fi
+        ;;
+      web-deploy)
+        deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" deployment_id)" || status=1
+        if [[ "$status" -eq 0 ]]; then
+          observed_at="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" observed_at)" || status=1
+        fi
+        if [[ "$status" -eq 0 ]]; then
+          deployment_status="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" status)" || status=1
+        fi
+        if [[ "$status" -eq 0 ]]; then
+          record_deployment vercel "$deployment_id" "$observed_at" "$deployment_status" || status=1
+        fi
+        ;;
+    esac
+  fi
+
   case "$status" in
     0) record_stage "$stage" "pass" 0 "$CURRENT_STAGE_STARTED" "$finished_at" || return 1 ;;
     75 | 78) record_stage "$stage" "blocked" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
@@ -733,23 +769,6 @@ run_stage() {
     129 | 130 | 143) record_stage "$stage" "cancelled" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
     *) record_stage "$stage" "fail" "$status" "$CURRENT_STAGE_STARTED" "$finished_at" || true ;;
   esac
-
-  if [[ "$status" -eq 0 && "$PIPELINE_TEST_MODE" != "1" ]]; then
-    case "$stage" in
-      worker-deploy)
-        deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
-        observed_at="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" observed_at)" || return 1
-        deployment_status="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" status)" || return 1
-        record_deployment cloudflare "$deployment_id" "$observed_at" "$deployment_status" || return 1
-        ;;
-      web-deploy)
-        deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" deployment_id)" || return 1
-        observed_at="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" observed_at)" || return 1
-        deployment_status="$(safe_receipt_field "$ARTIFACT_DIRECTORY/web-deployment.json" status)" || return 1
-        record_deployment vercel "$deployment_id" "$observed_at" "$deployment_status" || return 1
-        ;;
-    esac
-  fi
 
   CURRENT_STAGE=""
   CURRENT_STAGE_STARTED=""

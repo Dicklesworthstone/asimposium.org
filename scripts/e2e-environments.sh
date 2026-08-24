@@ -38,6 +38,7 @@ fi
 BLOCKED_EXIT_CODE=78
 STARTED_AT_NS=$(date +%s000000000 2>/dev/null || echo 0)
 BLOCKERS=()
+readonly WEB_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 
 now_ms() { echo $(( $(date +%s) * 1000 )); }
 
@@ -429,9 +430,17 @@ if [ -z "$STAGING_WORKER_ORIGIN" ]; then
   fail_phase "health-and-smoke" "STAGING_ORIGIN_NOT_IN_TOPOLOGY" \
     "The validated topology does not declare the staging worker origin."
 fi
-HEALTH_BODY="$(curl --silent --max-time 20 "$STAGING_WORKER_ORIGIN/internal/health" 2>/dev/null)"
-CAPABILITIES_BODY="$(curl --silent --max-time 20 "$STAGING_WORKER_ORIGIN/capabilities" 2>/dev/null)"
-if [ "$HEALTH_BODY" != "${HEALTH_BODY#*'"ok":true'}" ] && [ "$CAPABILITIES_BODY" != "${CAPABILITIES_BODY#*'"origin":"https://a-staging.asimposium.org"'}" ]; then
+HEALTH_STATUS=0
+HEALTH_BODY="$(curl --fail --silent --show-error --location \
+  --user-agent "$WEB_USER_AGENT" --connect-timeout 5 --max-time 20 \
+  "$STAGING_WORKER_ORIGIN/internal/health" 2>/dev/null)" || HEALTH_STATUS=$?
+CAPABILITIES_STATUS=0
+CAPABILITIES_BODY="$(curl --fail --silent --show-error --location \
+  --user-agent "$WEB_USER_AGENT" --connect-timeout 5 --max-time 20 \
+  "$STAGING_WORKER_ORIGIN/capabilities" 2>/dev/null)" || CAPABILITIES_STATUS=$?
+if [ "$HEALTH_STATUS" -eq 0 ] && [ "$CAPABILITIES_STATUS" -eq 0 ] && \
+  [ "$HEALTH_BODY" != "${HEALTH_BODY#*'"ok":true'}" ] && \
+  [ "$CAPABILITIES_BODY" != "${CAPABILITIES_BODY#*'"origin":"https://a-staging.asimposium.org"'}" ]; then
   emit "health-and-smoke" "pass" "OK" "staging worker health ok and capabilities origin matches the topology"
 else
   fail_phase "health-and-smoke" "STAGING_HEALTH_FAILED" \
@@ -448,19 +457,35 @@ if printf '%s' "$CANARY_BODY" | bunx --bun wrangler r2 object put "asimposium-ar
 else
   fail_phase "r2-private-canary" "R2_CANARY_WRITE_FAILED" "The private staging bucket refused the canary write."
 fi
-CANARY_READ="$(bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)"
+CANARY_READ_STATUS=0
+CANARY_READ="$(bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)" || CANARY_READ_STATUS=$?
 # Probe while the canary still exists. Deleting it first would make a 404
 # inevitable and turn the public-absence assertion into a vacuous green.
-PUBLIC_CANARY_STATUS="$(curl --silent --output /dev/null --max-time 15 --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null || printf '000')"
+PUBLIC_CANARY_CURL_STATUS=0
+PUBLIC_CANARY_STATUS="$(curl --silent --show-error --output /dev/null \
+  --user-agent "$WEB_USER_AGENT" --connect-timeout 5 --max-time 15 \
+  --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null)" || PUBLIC_CANARY_CURL_STATUS=$?
 STAGING_DOMAINS_STATUS=0
 STAGING_DOMAINS="$(bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)" || STAGING_DOMAINS_STATUS=$?
 CANARY_DELETE_STATUS=0
 bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1 || CANARY_DELETE_STATUS=$?
+if [ "$CANARY_DELETE_STATUS" -ne 0 ]; then
+  fail_phase "r2-private-canary" "R2_CANARY_DELETE_FAILED" \
+    "The private staging canary could not be removed after the observation attempts."
+fi
+if [ "$CANARY_READ_STATUS" -ne 0 ]; then
+  fail_phase "r2-private-canary" "R2_CANARY_READ_FAILED" \
+    "The private staging canary could not be read back through the owner binding."
+fi
 if [ "$CANARY_READ" != "$CANARY_BODY" ]; then
   fail_phase "r2-private-canary" "R2_CANARY_READ_MISMATCH" "The canary read back through the binding did not match the write."
 fi
+if [ "$PUBLIC_CANARY_CURL_STATUS" -ne 0 ]; then
+  fail_phase "r2-private-canary" "R2_PUBLIC_CANARY_UNOBSERVED" \
+    "The public hostname could not be observed while the private canary existed."
+fi
 case "$PUBLIC_CANARY_STATUS" in
-  000|404) ;;
+  404) ;;
   *)
     fail_phase "r2-private-canary" "R2_PRIVATE_CANARY_PUBLIC" \
       "The private canary was reachable over HTTP ($PUBLIC_CANARY_STATUS)."
@@ -470,11 +495,11 @@ if [ "$STAGING_DOMAINS_STATUS" -ne 0 ]; then
   fail_phase "r2-private-canary" "R2_DOMAIN_OBSERVATION_FAILED" \
     "The staging bucket domain state could not be observed."
 fi
-if [ "$STAGING_DOMAINS" != "${STAGING_DOMAINS#*no custom domains}" ] || [ -z "$STAGING_DOMAINS" ]; then
-  if [ "$CANARY_DELETE_STATUS" -ne 0 ]; then
-    fail_phase "r2-private-canary" "R2_CANARY_DELETE_FAILED" \
-      "The private staging canary was verified but could not be removed."
-  fi
+if [ -z "$STAGING_DOMAINS" ]; then
+  fail_phase "r2-private-canary" "R2_DOMAIN_RESPONSE_INVALID" \
+    "The staging bucket domain query returned an empty response."
+fi
+if [ "$STAGING_DOMAINS" != "${STAGING_DOMAINS#*no custom domains}" ]; then
   emit "r2-private-canary" "pass" "OK" "private canary round-tripped through the owner binding, remained absent at the public hostname while it existed, and was removed"
 else
   fail_phase "r2-private-canary" "R2_PRIVATE_BUCKET_HAS_DOMAIN" \
