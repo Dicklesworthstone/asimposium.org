@@ -676,30 +676,44 @@ function estimatePackTokens(pack: PackContents): number {
  * individual bounds conservative for a multi-item `items` array as well as
  * for the one-item case.
  */
+/**
+ * The exact per-item object the canonical JSON face embeds: the composer's
+ * replication of prepare's untrusted-body neutralization (text, findings, and
+ * the fence-extended marker). Single source of truth for BOTH the per-item
+ * token upper bound and the incremental face-byte accounting, so the two can
+ * never drift (asimposiumorg-ye45).
+ */
+function preparedFaceItemObject(
+  item: Omit<ComposedPackItem, "tokens">,
+  effectiveEstimate: number,
+): Record<string, unknown> {
+  const neutralized = item.untrusted
+    ? neutralizeUntrustedBody(item.body)
+    : { text: item.body, findings: [] };
+  const findings =
+    item.untrusted && fenceFor(neutralized.text).extended
+      ? [...neutralized.findings, { marker: "fence-extended" as const, count: 1 }]
+      : neutralized.findings;
+  return {
+    kind: item.kind,
+    id: item.id,
+    scope: item.scope,
+    untrusted: item.untrusted,
+    why_included: item.why_included,
+    tokens: effectiveEstimate,
+    body: neutralized.text,
+    neutralized: findings,
+  };
+}
+
 function wholeItemTokenUpperBound(
   item: Omit<ComposedPackItem, "tokens">,
   suppliedEstimate: number,
 ): number {
   let effectiveEstimate = suppliedEstimate;
   while (true) {
-    const neutralized = item.untrusted
-      ? neutralizeUntrustedBody(item.body)
-      : { text: item.body, findings: [] };
-    const findings =
-      item.untrusted && fenceFor(neutralized.text).extended
-        ? [...neutralized.findings, { marker: "fence-extended" as const, count: 1 }]
-        : neutralized.findings;
     const serializedBytes = byteLength(
-      stableStringify({
-        kind: item.kind,
-        id: item.id,
-        scope: item.scope,
-        untrusted: item.untrusted,
-        why_included: item.why_included,
-        tokens: effectiveEstimate,
-        body: neutralized.text,
-        neutralized: findings,
-      }),
+      stableStringify(preparedFaceItemObject(item, effectiveEstimate)),
     );
     const nextEstimate = Math.max(suppliedEstimate, Math.ceil((serializedBytes + 1) / 4));
     if (nextEstimate === effectiveEstimate) return effectiveEstimate;
@@ -847,6 +861,72 @@ export function composePack(input: PackComposerInput): ComposedPack {
     next_actions: nextActions,
   });
 
+  const omissions = (): OmittedEntry[] => {
+    const result = [...staticOmitted];
+    if (budgetExcluded > 0) result.push(omission("budget_exceeded"));
+    if (items.length === 0 && result.length === 0) result.push(omission("no_items_available"));
+    return result;
+  };
+
+  // ye45: O(1) incremental face-byte accounting. The canonical JSON face
+  // embeds each included item's prepared serialization verbatim and carries
+  // the tokens_estimate literal exactly once, so total face bytes are affine
+  // in the included-item byte sum plus one digit-width adjustment — anchored
+  // to a single full render per omitted[] state instead of a full face
+  // re-render per accepted candidate (which made selection quadratic).
+  let includedItemBytes = 0;
+  let runningItemTokens = 0;
+  const includedDeltas: number[] = [];
+  // The anchor render itself must satisfy prepare's tokens_estimate law
+  // (>= every item's tokens, <= the bucket), so it re-anchors whenever the
+  // floor's digit width or the omitted[] phase changes — O(log) times per
+  // composition, not once per candidate.
+  let anchorSignature = "";
+  let anchorBytes = -1;
+  let anchorWidth = 1;
+  const ensureAnchor = (
+    signature: string,
+    omitted: readonly OmittedEntry[],
+    tokenSum: number,
+  ): void => {
+    const floorEstimate = Math.max(1, tokenSum);
+    const nextSignature = `${signature}:${String(floorEstimate).length}`;
+    if (anchorSignature === nextSignature) return;
+    anchorSignature = nextSignature;
+    anchorWidth = String(floorEstimate).length;
+    anchorBytes = renderProjection(
+      packProjection({ ...contentsWith(omitted), items: [] }, floorEstimate),
+      "json",
+    ).bytes;
+  };
+  const envelopeFloorTokens = estimatePackTokens({
+    ...contentsWith(staticOmitted),
+    items: [],
+    omitted: staticOmitted.length === 0 ? [omission("budget_exceeded")] : staticOmitted,
+  });
+  const quickEstimate = (
+    signature: string,
+    omitted: readonly OmittedEntry[],
+    tokenSum: number,
+  ): number => {
+    const floor = tokenSum + envelopeFloorTokens;
+    let estimate = Math.max(1, floor);
+    if (estimate > budgetTokens) return estimate;
+    ensureAnchor(signature, omitted, tokenSum);
+    while (true) {
+      const bytes =
+        anchorBytes +
+        includedItemBytes -
+        (items.length > 0 ? 1 : 0) +
+        (String(estimate).length - anchorWidth);
+      const renderedEstimate = Math.max(floor, Math.ceil(bytes / 4));
+      if (renderedEstimate > budgetTokens || renderedEstimate === estimate) {
+        return renderedEstimate;
+      }
+      estimate = renderedEstimate;
+    }
+  };
+
   for (const [index, candidate] of visible.entries()) {
     const itemWithoutTokens: Omit<ComposedPackItem, "tokens"> = {
       kind: candidate.value.kind,
@@ -860,25 +940,35 @@ export function composePack(input: PackComposerInput): ComposedPack {
       ...itemWithoutTokens,
       tokens: wholeItemTokenUpperBound(itemWithoutTokens, candidate.value.tokens),
     };
+    const candidateByteDelta =
+      byteLength(stableStringify(preparedFaceItemObject(itemWithoutTokens, item.tokens))) + 1;
     items.push(item);
-    if (estimatePackTokens(contentsWith(staticOmitted)) <= budgetTokens) continue;
+    includedItemBytes += candidateByteDelta;
+    includedDeltas.push(candidateByteDelta);
+    runningItemTokens += item.tokens;
+    if (quickEstimate("static", staticOmitted, runningItemTokens) <= budgetTokens) continue;
     items.pop();
+    includedItemBytes -= candidateByteDelta;
+    includedDeltas.pop();
+    runningItemTokens -= item.tokens;
     budgetExcluded = visible.length - index;
     break;
   }
 
-  const omissions = (): OmittedEntry[] => {
-    const result = [...staticOmitted];
-    if (budgetExcluded > 0) result.push(omission("budget_exceeded"));
-    if (items.length === 0 && result.length === 0) result.push(omission("no_items_available"));
-    return result;
-  };
-
   // The `budget_exceeded` marker is mandatory data too. If its own envelope
   // bytes put a boundary-case result over budget, drop only the tail until the
   // final, published estimate is honest. The selected items remain a prefix.
-  while (estimatePackTokens(contentsWith(omissions())) > budgetTokens && items.length > 0) {
-    items.pop();
+  while (items.length > 0) {
+    if (
+      quickEstimate(`tail:${items.length === 0}`, omissions(), runningItemTokens) <= budgetTokens
+    ) {
+      break;
+    }
+    const dropped = items.pop();
+    const droppedDelta = includedDeltas.pop();
+    if (dropped === undefined || droppedDelta === undefined) break;
+    includedItemBytes -= droppedDelta;
+    runningItemTokens -= dropped.tokens;
     budgetExcluded = visible.length - items.length;
   }
 
