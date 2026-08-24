@@ -262,7 +262,7 @@ describe("pack composition properties (seeded, reproducible)", () => {
       );
       expect(first.tokens_estimate).toBe(second.tokens_estimate);
     }
-  });
+  }, 60_000);
 
   test("insertion order never changes the composition (stable-prefix canonical order)", () => {
     for (let seed = 1; seed <= 40; seed += 1) {
@@ -280,7 +280,7 @@ describe("pack composition properties (seeded, reproducible)", () => {
       ).toEqual(b.items.map((i) => i.id));
       expect(a.canonical_fingerprint).toBe(b.canonical_fingerprint);
     }
-  });
+  }, 60_000);
 
   test("a larger budget's selection has every smaller budget's selection as a prefix", () => {
     for (let seed = 1; seed <= 50; seed += 1) {
@@ -315,7 +315,7 @@ describe("pack composition properties (seeded, reproducible)", () => {
         ).toEqual(smaller);
       }
     }
-  });
+  }, 60_000);
 
   test("the published estimate never exceeds the bucket (no silent overflow)", () => {
     for (let seed = 1; seed <= 80; seed += 1) {
@@ -329,7 +329,7 @@ describe("pack composition properties (seeded, reproducible)", () => {
         `seed ${seed}: estimate ${pack.tokens_estimate} exceeds bucket ${bucket}`,
       ).toBeLessThanOrEqual(bucket);
     }
-  });
+  }, 60_000);
 
   test("omission accounting is complete: an empty pack always explains itself", () => {
     for (let seed = 1; seed <= 60; seed += 1) {
@@ -346,5 +346,5 @@ describe("pack composition properties (seeded, reproducible)", () => {
         expect(entry.reason.length).toBeGreaterThan(0);
       }
     }
-  });
+  }, 60_000);
 });

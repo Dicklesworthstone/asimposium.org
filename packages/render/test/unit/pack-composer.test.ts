@@ -1,6 +1,5 @@
-/** Pure S-5 pack composition: bucketization, stable-prefix selection and trust boundaries. */
-
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   bucketizePackBudget,
   composedPackToProjection,
@@ -279,17 +278,16 @@ describe("stable-prefix composition", () => {
       });
       process.stdout.write(pack.canonical_json);
     `;
-    const child = Bun.spawnSync({
-      cmd: [process.execPath, "-e", source],
-      stdout: "pipe",
-      stderr: "pipe",
+    const child = spawnSync(process.execPath, ["-e", source], {
+      encoding: "utf8",
       env: process.env,
     });
-    const stdout = new TextDecoder().decode(child.stdout);
-    const stderr = new TextDecoder().decode(child.stderr);
-    if (child.exitCode !== 0 || stdout.length === 0) {
+    const stdout = child.stdout ?? "";
+    const stderr = child.stderr ?? "";
+    const exitCode = child.status ?? 1;
+    if (exitCode !== 0 || stdout.length === 0) {
       throw new Error(
-        `fresh composer failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`,
+        `fresh composer failed (exit ${exitCode}): stderr=${stderr} stdout=${stdout}`,
       );
     }
 

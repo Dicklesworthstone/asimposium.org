@@ -19,6 +19,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { composePack, renderProjection } from "../../src/index.ts";
 import type { PackCandidate, PackComposerInput } from "../../src/pack-composer.ts";
 import type { Projection } from "../../src/types.ts";
@@ -149,18 +150,15 @@ describe("determinism across process restarts", () => {
       };
       process.stdout.write(renderProjection(projection, ${JSON.stringify(format)}).body);
     `;
-    const child = Bun.spawnSync({
-      cmd: [process.execPath, "-e", source],
-      stdout: "pipe",
-      stderr: "pipe",
+    const child = spawnSync(process.execPath, ["-e", source], {
+      encoding: "utf8",
       env: process.env,
     });
-    const stdout = new TextDecoder().decode(child.stdout);
-    const stderr = new TextDecoder().decode(child.stderr);
-    if (child.exitCode !== 0 || stdout.length === 0) {
-      throw new Error(
-        `child render failed (exit ${child.exitCode}): stderr=${stderr} stdout=${stdout}`,
-      );
+    const stdout = child.stdout ?? "";
+    const stderr = child.stderr ?? "";
+    const exitCode = child.status ?? 1;
+    if (exitCode !== 0 || stdout.length === 0) {
+      throw new Error(`child render failed (exit ${exitCode}): stderr=${stderr} stdout=${stdout}`);
     }
     return stdout;
   }
