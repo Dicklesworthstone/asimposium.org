@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import {
   eventChainDigest,
@@ -375,7 +376,7 @@ describe("S2 local harness boundary", () => {
     });
   });
 
-  test("a matching token reaches the route even when Host is not loopback", async () => {
+  test("a matching token reaches the local route, whose diagnostic dialect stays non-public", async () => {
     const response = await worker.fetch(
       harnessRequest("/__s2/cursor?problem_id=P-example"),
       harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID }),
@@ -385,7 +386,14 @@ describe("S2 local harness boundary", () => {
     // The proxy throws on D1 access. A 400 proves the request passed the token gate rather than
     // treating a client-controlled Host value as the access-control decision.
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
+    expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+    const diagnostic: unknown = await response.json();
+    expect(diagnostic).toMatchObject({
+      code: "KRATER_READ_INVALID",
+      rule: "K-S2-READ",
+      schema: "krater.v0.read",
+    });
+    expect(ProblemDocumentSchema.safeParse(diagnostic).success).toBe(false);
   });
 
   test("cursor ingress rejects lossy decimals and unsafe integers before D1", async () => {
@@ -638,7 +646,46 @@ describe("S2 local harness boundary", () => {
       "apps/wire/src/krater/wrangler.s2.toml",
     ]);
     for (const config of configs) {
-      expect(readFileSync(join(REPOSITORY_ROOT, config), "utf8")).not.toContain("S2_HARNESS_TOKEN");
+      const source = readFileSync(join(REPOSITORY_ROOT, config), "utf8");
+      expect(source).not.toContain("S2_HARNESS_TOKEN");
+      if (capabilityConfigs.includes(config)) {
+        expect(source).toContain('main = "worker.ts"');
+      }
+    }
+
+    const runner = readFileSync(join(REPOSITORY_ROOT, "scripts", "e2e-s2-krater.sh"), "utf8");
+    expect(runner).toContain('readonly S2_BIND_IP="127.0.0.1"');
+    expect(runner).toContain('token="$(random_hex 32)" || return 1'); // ubs:ignore — shell-source assertion proves fresh randomness; it contains no token value.
+    expect(runner).toContain(`env "\${S2_WRANGLER}" dev apps/wire/src/krater/worker.ts`);
+    expect(runner).toContain(`--ip "\${S2_BIND_IP}"`);
+    expect(runner).toContain(`--var "S2_HARNESS_TOKEN:\${token}"`);
+  });
+
+  test("PLANTED: every deployable remote config and production entrypoint excludes the S2 worker", () => {
+    const environmentConfigs = wranglerConfigs(
+      join(REPOSITORY_ROOT, "infra", "environments"),
+    ).sort();
+    const deployedConfigs = environmentConfigs.filter(
+      (config) => config !== "infra/environments/local.wrangler.toml",
+    );
+    expect(deployedConfigs).toEqual([
+      "infra/environments/production.deploy.wrangler.toml",
+      "infra/environments/production.wrangler.toml",
+      "infra/environments/staging.wrangler.toml",
+    ]);
+    for (const config of deployedConfigs) {
+      const source = readFileSync(join(REPOSITORY_ROOT, config), "utf8");
+      expect(source).toContain('main = "../../apps/wire/src/index.ts"');
+      expect(source).not.toContain("S2_LOCAL_HARNESS");
+      expect(source).not.toContain("krater/worker");
+      expect(source).not.toContain('main = "worker.ts"');
+    }
+
+    for (const pathname of ["apps/wire/src/index.ts", "apps/wire/src/app.ts"]) {
+      const source = readFileSync(join(REPOSITORY_ROOT, pathname), "utf8");
+      expect(source).not.toContain("krater/worker");
+      expect(source).not.toContain("/__s2/");
+      expect(source).not.toContain("S2_LOCAL_HARNESS");
     }
   });
 

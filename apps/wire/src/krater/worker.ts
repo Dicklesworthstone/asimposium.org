@@ -157,7 +157,14 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-function contractProblem(
+/**
+ * RFC 7807-shaped diagnostics for the loopback S2 harness only.
+ *
+ * The `K-S2-*` rules, `krater.v0.read` schema label, and harness-only codes are
+ * deliberately outside `ProblemDocumentSchema`; this worker is not a second
+ * public error catalog. Production mounts `src/index.ts`, never this module.
+ */
+function localHarnessProblem(
   status: number,
   code: string,
   rule: string,
@@ -405,7 +412,7 @@ function errorResponse(error: unknown, surface: "read" | "write"): Response {
   if (error instanceof KraterReplayError) return response({ code: error.code }, 409);
   if (error instanceof KraterSequenceExhaustedError) return response({ code: error.code }, 409);
   if (error instanceof KraterIntegrityBackfillRequiredError) {
-    return contractProblem(
+    return localHarnessProblem(
       409,
       error.code,
       "K-S2-INTEGRITY",
@@ -415,7 +422,7 @@ function errorResponse(error: unknown, surface: "read" | "write"): Response {
     );
   }
   if (error instanceof KraterOutboxBindingError) {
-    return contractProblem(
+    return localHarnessProblem(
       503,
       error.code,
       "K-S2-OUTBOX",
@@ -425,7 +432,7 @@ function errorResponse(error: unknown, surface: "read" | "write"): Response {
     );
   }
   if (error instanceof KraterReadError || surface === "read") {
-    return contractProblem(
+    return localHarnessProblem(
       400,
       "KRATER_READ_INVALID",
       "K-S2-READ",
@@ -822,7 +829,7 @@ async function handleHarnessRequest(
       if (abortBeforeCommit) recordAbortBeforeCommitObservation(harnessRequestId(body));
       if (preCommitDelayMs > 0) await waitForHarnessDelay(preCommitDelayMs);
       if (abortBeforeCommit || request.signal.aborted) {
-        return contractProblem(
+        return localHarnessProblem(
           499,
           "KRATER_REQUEST_ABORTED",
           "K-S2-IDEMPOTENCY",
@@ -1084,7 +1091,7 @@ async function handleHarnessRequest(
       try {
         await attemptEnvelopeTamper(env.DB, requiredString(body, "event_id"), operation);
       } catch (_error) {
-        return contractProblem(
+        return localHarnessProblem(
           409,
           "EVENT_ENVELOPE_IMMUTABLE",
           "K-S2-APPEND-ONLY",
