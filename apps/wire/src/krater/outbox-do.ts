@@ -1003,12 +1003,22 @@ export class KraterOutboxDrainer {
       const active = (await this.state.storage.get<number>("active")) ?? 0;
       const recovered = active > 0;
       await this.state.storage.put("active", 1);
-      await this.updateCounters((current) => ({
-        ...current,
-        owner_acquisitions: saturatingCounterAdd(current.owner_acquisitions),
-        max_active: Math.max(current.max_active, 1),
-        recovered_ownerships: saturatingCounterAdd(current.recovered_ownerships, recovered ? 1 : 0),
-      }));
+      try {
+        await this.updateCounters((current) => ({
+          ...current,
+          owner_acquisitions: saturatingCounterAdd(current.owner_acquisitions),
+          max_active: Math.max(current.max_active, 1),
+          recovered_ownerships: saturatingCounterAdd(
+            current.recovered_ownerships,
+            recovered ? 1 : 0,
+          ),
+        }));
+      } catch (_ownerCounterError) {
+        // This record is derived observability, while D1 is the authoritative
+        // delivery queue. Losing one owner-acquisition increment must not keep
+        // a valid D1 row pending; later successful counter writes rebuild a
+        // coherent snapshot from the last durable diagnostic state.
+      }
 
       try {
         let reclaimNeedsAlarm = false;

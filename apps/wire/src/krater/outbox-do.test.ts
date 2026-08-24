@@ -106,6 +106,7 @@ interface OutboxHarness {
   readonly alarmAt: () => number | null;
   readonly alarmScheduledAt: () => number | null;
   readonly storageValue: (key: string) => unknown;
+  readonly storageFailuresInjected: () => number;
   readonly storageKeys: () => readonly string[];
   readonly pendingRows: () => number;
   readonly statusSnapshotQueries: () => number;
@@ -229,6 +230,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
   let alarmScheduledAt: number | null = null;
   let statusSnapshotQueries = 0;
   let storageFailureInjected = false;
+  let storageFailuresInjected = 0;
   let pendingPageQueries = 0;
   let failAttemptSnapshot = options.failAttemptSnapshotOnce ?? false;
   let eventsBlocked = false;
@@ -240,6 +242,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
       storageFailureInjected = true;
     }
     if (failOnce || options.failStorageAlways?.(operation) === true) {
+      storageFailuresInjected += 1;
       throw new Error(`PLANTED_STORAGE_${operation.kind.toUpperCase()}_FAILURE:${operation.key}`);
     }
   };
@@ -589,6 +592,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
     alarmAt: () => alarmAt,
     alarmScheduledAt: () => alarmScheduledAt,
     storageValue: (key) => storage.get(key),
+    storageFailuresInjected: () => storageFailuresInjected,
     storageKeys: () => [...storage.keys()].sort(),
     pendingRows: () =>
       rows.filter((row) => row.state === "pending" && row.quarantined_at === null).length,
@@ -1274,6 +1278,33 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(rows[0]?.state).toBe("delivered");
     expect(harness.storageValue(attemptKey)).toBeUndefined();
     await drainScheduledAlarms(harness);
+  });
+
+  test("PLANTED: preamble counter failure cannot abort authoritative D1 delivery", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, {
+      failStorageOnce: ({ kind, key }) => kind === "put" && key === "counters",
+    });
+
+    const delivered = await harness.drainer.fetch(drainRequest());
+
+    expect(delivered.status).toBe(200);
+    expect(await delivered.json()).toMatchObject({ delivered: 1, quarantined: 0 });
+    expect(harness.storageFailuresInjected()).toBe(1);
+    expect(rows[0]?.state).toBe("delivered");
+    expect(harness.storageValue("active")).toBe(0);
+    expect(harness.storageValue("counters")).toMatchObject({
+      owner_acquisitions: 0,
+      max_active: 0,
+      recovered_ownerships: 0,
+      delivery_attempts: 1,
+      delivered: 1,
+      quarantined: 0,
+      failures: 0,
+      last_backoff_ms: null,
+      last_phase: "delivered",
+    });
+    expect(harness.storageKeys()).not.toContain(`attempt:${rows[0]?.event_id}`);
   });
 
   test("PLANTED: a post-delivery counter failure is followed by bounded D1-backed reclamation", async () => {
