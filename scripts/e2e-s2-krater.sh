@@ -5095,11 +5095,94 @@ stop_legacy_worker_or_fail() {
 # retained legacy row, and only then given the named raw SQL file. A database born with 0004
 # already applied would exercise none of this: the backfill would have nothing legacy to refuse.
 #
-# Each stage owns its own persistence directory and its own dynamically chosen
-# port, so it can neither read nor collide with the primary run's state.
+# Each stage owns its own persistence directory, so it can neither read nor
+# collide with the primary run's state. The current v2 Worker is intentionally
+# absent here: exact-0004 and exact-0005 schemas predate its required columns
+# and sidecar tables. Worker replay belongs only to the full-journal lane below.
+assert_raw_legacy_schema() {
+  local dir="$1" phase="$2" expected_events="$3" expected_index="$4"
+  local state_path state_stderr plan_path plan_stderr
+  state_path="${dir}/${phase}-schema.json"
+  state_stderr="${dir}/${phase}-schema.stderr"
+  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+    --persist-to "${dir}" --json \
+    --command "SELECT
+      (SELECT COUNT(*) FROM pragma_table_info('problems') WHERE name = 'chain_digest') AS problem_chain_digest,
+      (SELECT COUNT(*) FROM pragma_table_info('problems') WHERE name = 'chain_version') AS problem_chain_version,
+      (SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'row_digest') AS event_row_digest,
+      (SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'chain_digest') AS event_chain_digest,
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'event_chain_v2') AS event_chain_v2,
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'checkpoint_chain_v2') AS checkpoint_chain_v2,
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'events_undigested_idx') AS undigested_index,
+      (SELECT COUNT(*) FROM events) AS event_count,
+      (SELECT COUNT(*) FROM krater_integrity_backfill) AS backfill_rows,
+      (SELECT COALESCE(SUM(legacy_event_count), 0) FROM krater_integrity_backfill) AS legacy_event_count" \
+    >"${state_path}" 2>"${state_stderr}"; then
+    emit_legacy_failure "${phase}" "S2_RAW_SCHEMA_QUERY_FAILED" "${state_stderr}"
+    return 1
+  fi
+  if ! S2_RAW_SCHEMA_PATH="${state_path}" \
+    S2_RAW_EXPECTED_EVENTS="${expected_events}" \
+    S2_RAW_EXPECTED_INDEX="${expected_index}" \
+    s2_run_owned_deadline bun --eval '
+      import { readFileSync } from "node:fs";
+      const payload = JSON.parse(readFileSync(process.env.S2_RAW_SCHEMA_PATH, "utf8"));
+      const rows = Array.isArray(payload)
+        ? payload.flatMap((entry) => Array.isArray(entry?.results) ? entry.results : [])
+        : Array.isArray(payload?.results) ? payload.results : [];
+      const row = rows[0];
+      const expectedEvents = Number(process.env.S2_RAW_EXPECTED_EVENTS);
+      const expectedIndex = Number(process.env.S2_RAW_EXPECTED_INDEX);
+      if (row === undefined || !Number.isSafeInteger(expectedEvents) || !Number.isSafeInteger(expectedIndex)) process.exit(1);
+      const expected = {
+        problem_chain_digest: 1,
+        problem_chain_version: 0,
+        event_row_digest: 1,
+        event_chain_digest: 1,
+        event_chain_v2: 0,
+        checkpoint_chain_v2: 0,
+        undigested_index: expectedIndex,
+        event_count: expectedEvents,
+        backfill_rows: expectedEvents === 0 ? 0 : 1,
+        legacy_event_count: expectedEvents,
+      };
+      for (const [key, value] of Object.entries(expected)) {
+        if (row[key] !== value) process.exit(1);
+      }
+    ' >"${dir}/${phase}-schema-validation.log" 2>"${dir}/${phase}-schema-validation.stderr"; then
+    emit_legacy_failure "${phase}" "S2_RAW_SCHEMA_STATE_INVALID" "${dir}/${phase}-schema-validation.stderr"
+    return 1
+  fi
+
+  if [[ "${expected_index}" -eq 1 ]]; then
+    plan_path="${dir}/${phase}-plan.json"
+    plan_stderr="${dir}/${phase}-plan.stderr"
+    if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+      --persist-to "${dir}" --json \
+      --command "EXPLAIN QUERY PLAN SELECT id FROM events WHERE problem_id = 'P-upgrade-existing' AND (row_digest IS NULL OR chain_digest IS NULL) ORDER BY seq ASC LIMIT 1" \
+      >"${plan_path}" 2>"${plan_stderr}"; then
+      emit_legacy_failure "${phase}" "S2_RAW_INDEX_PLAN_QUERY_FAILED" "${plan_stderr}"
+      return 1
+    fi
+    if ! S2_RAW_PLAN_PATH="${plan_path}" s2_run_owned_deadline bun --eval '
+      import { readFileSync } from "node:fs";
+      const payload = JSON.parse(readFileSync(process.env.S2_RAW_PLAN_PATH, "utf8"));
+      const rows = Array.isArray(payload)
+        ? payload.flatMap((entry) => Array.isArray(entry?.results) ? entry.results : [])
+        : Array.isArray(payload?.results) ? payload.results : [];
+      if (rows.length !== 1 || typeof rows[0]?.detail !== "string" || !rows[0].detail.includes("events_undigested_idx")) process.exit(1);
+    ' >"${dir}/${phase}-plan-validation.log" 2>"${dir}/${phase}-plan-validation.stderr"; then
+      emit_legacy_failure "${phase}" "S2_RAW_INDEX_PLAN_INVALID" "${dir}/${phase}-plan-validation.stderr"
+      return 1
+    fi
+  fi
+
+  emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"scenario\":\"${phase}\",\"schema_only\":true,\"v2_worker_started\":false,\"event_count\":${expected_events},\"undigested_index_present\":$([[ "${expected_index}" -eq 1 ]] && printf true || printf false),\"status\":\"pass\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+}
+
 run_legacy_upgrade() {
   local phase="$1" fixture="$2" index_phase="${3:-}"
-  local dir port log status
+  local dir expected_events=0
 
   dir="$(create_evidence_subdir legacy)"
   if [[ ! -d "${dir}" || -L "${dir}" ]]; then
@@ -5108,8 +5191,6 @@ run_legacy_upgrade() {
   fi
   # Retained, never removed: an upgrade failure keeps the database that caused it.
   S2_LEGACY_STATE_DIRS+=("${dir}")
-  log="${dir}/wrangler.log"
-
   if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_LEGACY_CONFIG}" --local \
     --persist-to "${dir}" >"${dir}/legacy-migration.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_LEGACY_BASE_MIGRATION_FAILED" "${dir}/legacy-migration.log"
@@ -5117,6 +5198,7 @@ run_legacy_upgrade() {
   fi
 
   if [[ -n "${fixture}" ]]; then
+    expected_events=1
     if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
       --persist-to "${dir}" --file "${fixture}" >"${dir}/legacy-fixture.log" 2>&1; then
       emit_legacy_failure "${phase}" "S2_LEGACY_FIXTURE_LOAD_FAILED" "${dir}/legacy-fixture.log"
@@ -5124,66 +5206,31 @@ run_legacy_upgrade() {
     fi
   fi
 
-  # This is intentionally raw SQL, not `d1 migrations apply`; the JSONL emitted by the client
-  # labels it `raw-sql-0004`. The migration-journal lane below covers the deploy mechanism.
+  # This is intentionally raw SQL, not `d1 migrations apply`. It proves the
+  # exact historical schema state only; the migration-journal lane below owns
+  # all current-Worker backfill, write, and replay evidence.
   if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
     --persist-to "${dir}" --file "${S2_FORWARD_MIGRATION}" >"${dir}/forward-migration.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_LEGACY_FORWARD_MIGRATION_FAILED" "${dir}/forward-migration.log"
     return 1
   fi
 
-  if ! port="$(choose_available_port)"; then
-    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"scenario\":\"${phase}\",\"status\":\"fail\",\"code\":\"S2_LEGACY_PORT_UNAVAILABLE\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
-    return 1
-  fi
-
-  if ! start_worker "${S2_LEGACY_CONFIG}" "${dir}" "${port}" "${log}"; then
-    emit_legacy_failure "${phase}" "S2_LEGACY_WORKER_UNAVAILABLE" "${log}"
-    S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
-    return 1
-  fi
-
-  if run_legacy_phase "${phase}" "${log}"; then
-    status=0
-  else
-    status=$?
-  fi
-  stop_legacy_worker_or_fail || return 1
+  assert_raw_legacy_schema "${dir}" "${phase}" "${expected_events}" 0 || return 1
 
   # Second raw schema stage: 0004 -> 0005 on the database the first stage just used, rows and all.
   #
-  # This is the only 0004-era database in the run. Without this the forward-migration evidence
-  # stopped at 0004 and the index was only ever seen on a database born with it, so nothing
-  # here observes the index transition without claiming it exercised the deployed migration
-  # runner. The Worker is restarted because the first stage must observe the schema before the
-  # index exists.
-  if [[ "${status}" -eq 0 && -n "${index_phase}" ]]; then
+  # This is the only 0004-era database in the run. Observe 0005 on the same
+  # retained bytes without booting code that requires the later v2 schema.
+  if [[ -n "${index_phase}" ]]; then
     if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
       --persist-to "${dir}" --file "${S2_INDEX_MIGRATION}" >"${dir}/index-migration.log" 2>&1; then
       emit_legacy_failure "${index_phase}" "S2_LEGACY_INDEX_MIGRATION_FAILED" "${dir}/index-migration.log"
       return 1
     fi
 
-    if ! port="$(choose_available_port)"; then
-      emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"scenario\":\"${index_phase}\",\"status\":\"fail\",\"code\":\"S2_LEGACY_PORT_UNAVAILABLE\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
-      return 1
-    fi
-
-    log="${dir}/wrangler-indexed.log"
-    if ! start_worker "${S2_LEGACY_CONFIG}" "${dir}" "${port}" "${log}"; then
-      emit_legacy_failure "${index_phase}" "S2_LEGACY_WORKER_UNAVAILABLE" "${log}"
-      S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
-      return 1
-    fi
-
-    if run_legacy_phase "${index_phase}" "${log}"; then
-      :
-    else
-      status=$?
-    fi
-    stop_legacy_worker_or_fail || return 1
+    assert_raw_legacy_schema "${dir}" "${index_phase}" "${expected_events}" 1 || return 1
   fi
-  return "${status}"
+  return 0
 }
 
 assert_current_migration_journal() {

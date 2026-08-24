@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   backfillKraterIntegrity,
@@ -1241,5 +1241,286 @@ describe("migration 0005 forward-applies onto an exact 0004 database", () => {
     expect(() => db.run(sql)).not.toThrow();
     expect(indexNames(db).filter((name) => name === UNDIGESTED_EVENT_INDEX)).toHaveLength(1);
     db.close();
+  });
+});
+
+describe("migration 0039 replays an exact completed v1 history into one v2 authority", () => {
+  const MIGRATIONS = resolve(import.meta.dir, "..", "..", "..", "..", "db", "migrations");
+
+  interface LocalPreparedStatement {
+    readonly query: string;
+    readonly values: readonly unknown[];
+    all<T>(): Promise<{
+      results: T[];
+      meta: { rows_read: number; rows_written: number };
+    }>;
+    first<T>(): Promise<T | null>;
+    run(): Promise<{ meta: { rows_read: number; rows_written: number } }>;
+  }
+
+  function localD1(sqlite: Database): Parameters<typeof backfillKraterIntegrity>[0] {
+    const prepared = (query: string, values: readonly unknown[]): LocalPreparedStatement => ({
+      query,
+      values,
+      all: async <T>() => {
+        const results = sqlite.query(query).all(...(values as never)) as T[];
+        return { results, meta: { rows_read: results.length, rows_written: 0 } };
+      },
+      first: async <T>() => (sqlite.query(query).get(...(values as never)) as T) ?? null,
+      run: async () => {
+        const result = sqlite.query(query).run(...(values as never));
+        return { meta: { rows_read: 0, rows_written: result.changes } };
+      },
+    });
+    return {
+      prepare: (query: string) => ({
+        bind: (...values: unknown[]) => prepared(query, values),
+      }),
+      batch: async (statements: readonly LocalPreparedStatement[]) =>
+        sqlite.transaction(() => statements.map((statement) => {
+          const result = sqlite.query(statement.query).run(...(statement.values as never));
+          return {
+            success: true,
+            results: [],
+            meta: { rows_read: 0, rows_written: result.changes },
+          };
+        }))(),
+    } as never;
+  }
+
+  test("preserves verified v1 bytes and atomically installs exact v2 sidecars and projection authority", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      const migrations = readdirSync(MIGRATIONS)
+        .filter((name) => /^00(?:0[1-9]|[12][0-9]|3[0-8])_.*\.sql$/u.test(name))
+        .sort();
+      expect(migrations.at(-1)).toBe("0038_events_writer_credential.sql");
+      for (const migration of migrations) {
+        sqlite.run(readFileSync(join(MIGRATIONS, migration), "utf8"));
+      }
+
+      const problemId = "P-v1-complete-upgrade";
+      const eventId = "E-v1-complete-upgrade-1";
+      const claimId = "C-v1-complete-upgrade-1";
+      const payloadSha256 = "ab".repeat(32);
+      const createdAt = "2026-08-24T18:00:00.000Z";
+      const actorFellowId = "F-v1-upgrade";
+      const actorSponsorId = "S-v1-upgrade";
+      const actorSessionId = "SE-v1-upgrade";
+      const modelStringSelfDeclared = "gpt-5.6-sol";
+      const harness = "codex-cli";
+      const writerCredentialId = "FC-v1-upgrade";
+      const legacyGenesis = await sha256Hex(
+        canonicalJson({ kind: "krater.v0.genesis", problem_id: problemId }),
+      );
+      const legacyRowDigest = await sha256Hex(
+        canonicalJson({
+          created_at: createdAt,
+          event_id: eventId,
+          object_id: claimId,
+          object_kind: "claim",
+          object_version: 1,
+          payload_sha256: payloadSha256,
+          problem_id: problemId,
+          seq: 1,
+          type: "claim.created",
+        }),
+      );
+      const legacyChainDigest = await sha256Hex(
+        canonicalJson({
+          payload_sha256: payloadSha256,
+          previous_chain_digest: legacyGenesis,
+          problem_id: problemId,
+          seq: 1,
+        }),
+      );
+      const legacyCheckpointDigest = await sha256Hex(
+        canonicalJson({
+          checkpoint_version: 1,
+          problem_id: problemId,
+          root_chain_digest: legacyChainDigest,
+          seq: 1,
+        }),
+      );
+
+      sqlite
+        .query(
+          `INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest)
+           VALUES (?, 1, ?, ?, ?)`,
+        )
+        .run(problemId, createdAt, createdAt, legacyChainDigest);
+      sqlite
+        .query(
+          `INSERT INTO krater_integrity_backfill
+             (problem_id, state, legacy_event_count, completed_at)
+           VALUES (?, 'complete', 1, ?)`,
+        )
+        .run(problemId, createdAt);
+      sqlite
+        .query(
+          `INSERT INTO claims
+             (id, problem_id, statement, payload_sha256, source_seq, created_at, norm_hash)
+           VALUES (?, ?, 'completed v1 claim', ?, 1, ?, ?)`,
+        )
+        .run(claimId, problemId, payloadSha256, createdAt, "cd".repeat(32));
+      sqlite
+        .query(
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version,
+              payload_sha256, created_at, row_digest, chain_digest,
+              actor_fellow_id, actor_sponsor_id, actor_session_id,
+              model_string_self_declared, harness, writer_credential_id)
+           VALUES (?, ?, 1, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          eventId,
+          problemId,
+          claimId,
+          payloadSha256,
+          createdAt,
+          legacyRowDigest,
+          legacyChainDigest,
+          actorFellowId,
+          actorSponsorId,
+          actorSessionId,
+          modelStringSelfDeclared,
+          harness,
+          writerCredentialId,
+        );
+      sqlite
+        .query(
+          `INSERT INTO claim_projections
+             (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+           VALUES (?, ?, 1, 1, ?, 0, ?)`,
+        )
+        .run(claimId, problemId, legacyRowDigest, createdAt);
+      sqlite
+        .query(
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
+              checkpoint_version, checkpoint_mode, created_at)
+           VALUES (?, 1, ?, ?, 1, 'unsigned-v0', ?)`,
+        )
+        .run(problemId, legacyChainDigest, legacyCheckpointDigest, createdAt);
+
+      sqlite.run(readFileSync(join(MIGRATIONS, "0039_krater_chain_v2.sql"), "utf8"));
+      expect(
+        sqlite
+          .query(
+            "SELECT state, completed_at, chain_version FROM krater_integrity_backfill WHERE problem_id = ?",
+          )
+          .get(problemId),
+      ).toEqual({ state: "required", completed_at: null, chain_version: null });
+      expect(
+        sqlite.query("SELECT row_digest, chain_digest FROM events WHERE id = ?").get(eventId),
+      ).toEqual({ row_digest: legacyRowDigest, chain_digest: legacyChainDigest });
+      expect(
+        sqlite
+          .query(
+            "SELECT root_chain_digest, checkpoint_digest FROM integrity_checkpoints WHERE problem_id = ? AND checkpoint_seq = 1",
+          )
+          .get(problemId),
+      ).toEqual({
+        root_chain_digest: legacyChainDigest,
+        checkpoint_digest: legacyCheckpointDigest,
+      });
+
+      const completedAt = "2026-08-24T19:00:00.000Z";
+      const expectedRowDigest = await eventEnvelopeRowDigest({
+        eventId,
+        problemId,
+        seq: 1,
+        type: "claim.created",
+        objectKind: "claim",
+        objectId: claimId,
+        objectVersion: 1,
+        payloadSha256,
+        createdAt,
+        actorFellowId,
+        actorSponsorId,
+        actorSessionId,
+        modelStringSelfDeclared,
+        harness,
+        writerCredentialId,
+      });
+      const expectedChainDigest = await eventChainDigest(
+        problemId,
+        1,
+        payloadSha256,
+        expectedRowDigest,
+        await genesisChainDigest(problemId),
+      );
+      const expectedCheckpointDigest = await checkpointDigest(
+        problemId,
+        1,
+        expectedChainDigest,
+      );
+      await backfillKraterIntegrity(
+        localD1(sqlite),
+        problemId,
+        completedAt,
+        Date.parse(completedAt),
+      );
+
+      expect(
+        sqlite
+          .query(
+            "SELECT row_digest, chain_digest, chain_version FROM event_chain_v2 WHERE event_id = ?",
+          )
+          .get(eventId),
+      ).toEqual({
+        row_digest: expectedRowDigest,
+        chain_digest: expectedChainDigest,
+        chain_version: 2,
+      });
+      expect(
+        sqlite
+          .query(
+            "SELECT root_chain_digest, checkpoint_digest, chain_version FROM checkpoint_chain_v2 WHERE problem_id = ? AND checkpoint_seq = 1",
+          )
+          .get(problemId),
+      ).toEqual({
+        root_chain_digest: expectedChainDigest,
+        checkpoint_digest: expectedCheckpointDigest,
+        chain_version: 2,
+      });
+      expect(
+        sqlite
+          .query("SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?")
+          .get(problemId),
+      ).toEqual({ public_seq: 1, chain_digest: expectedChainDigest, chain_version: 2 });
+      expect(
+        sqlite
+          .query(
+            "SELECT state, legacy_event_count, completed_at, chain_version FROM krater_integrity_backfill WHERE problem_id = ?",
+          )
+          .get(problemId),
+      ).toEqual({
+        state: "complete",
+        legacy_event_count: 1,
+        completed_at: completedAt,
+        chain_version: 2,
+      });
+      expect(
+        sqlite
+          .query("SELECT build_digest, updated_at FROM claim_projections WHERE problem_id = ?")
+          .get(problemId),
+      ).toEqual({ build_digest: expectedRowDigest, updated_at: completedAt });
+      expect(
+        sqlite.query("SELECT row_digest, chain_digest FROM events WHERE id = ?").get(eventId),
+      ).toEqual({ row_digest: legacyRowDigest, chain_digest: legacyChainDigest });
+      expect(
+        sqlite
+          .query(
+            "SELECT root_chain_digest, checkpoint_digest FROM integrity_checkpoints WHERE problem_id = ? AND checkpoint_seq = 1",
+          )
+          .get(problemId),
+      ).toEqual({
+        root_chain_digest: legacyChainDigest,
+        checkpoint_digest: legacyCheckpointDigest,
+      });
+    } finally {
+      sqlite.close();
+    }
   });
 });
