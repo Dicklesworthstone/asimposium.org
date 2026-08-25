@@ -2597,7 +2597,7 @@ self_test() {
   if [[ -n "$resistant_dir" ]]; then
     resistant_ready="${resistant_dir}/ready"
     run_bounded 2 "$bounded_out" - \
-      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do sleep 30; done' \
       _ "$resistant_ready" || resistant_status=$?
   fi
   [[ -f "${resistant_ready:-}" ]] && resistant_ready_value="$(cat "$resistant_ready" 2>/dev/null || printf '')"
@@ -3803,6 +3803,7 @@ main() {
     local hold_fifo="${ready_marker}.hold"
     trap '' HUP
     trap 'printf term-observed > "$terminated_marker"; exit 0' TERM
+    rm -f "$hold_fifo" 2>/dev/null || true
     mkfifo -m 600 "$hold_fifo" || exit "$EX_FAIL"
     # A builtin read keeps the acknowledgement shell itself interruptible. A
     # foreground `sleep` would enter a fresh job-control group and defer Bash's
@@ -3902,7 +3903,7 @@ main() {
     local multi_ready="${3:?ready marker required}"
     REAP_GRACE_SECONDS=2
     run_bounded 45 /dev/null - \
-      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do sleep 30; done' \
       _ "$multi_ready" || true
     exit 0
   fi
