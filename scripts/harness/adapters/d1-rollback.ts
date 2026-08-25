@@ -38,8 +38,11 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
+  D1_ARTIFACT_CAPABILITY_ENV,
+  type D1ArtifactWriterCapability,
   assertRetainedD1StateDirectory,
   assertRetainedIntegrationCapacity,
+  assertD1ArtifactWriterCapability,
   MAX_D1_ADAPTER_STATE_BYTES,
   realFilesystemRetentionPreflight,
   repositoryRoot,
@@ -187,6 +190,83 @@ function parseStateDirectory(argv: readonly string[]): {
   }
 }
 
+function parseArtifactWriterCapability(
+  raw: string | undefined,
+  stateDir: string,
+  artifactNamespace: string,
+): D1ArtifactWriterCapability {
+  if (raw === undefined) {
+    say({
+      status: "fail",
+      code: "D1_ARTIFACT_CAPABILITY_REQUIRED",
+      detail:
+        "The D1 adapter is executable only as a child of the retained harness run that owns its artifact writer lease. No D1 state was created.",
+    });
+    process.exit(2);
+  }
+  if (Buffer.byteLength(raw, "utf8") > 8_192) {
+    say({
+      status: "fail",
+      code: "D1_ARTIFACT_CAPABILITY_INVALID",
+      detail: "The inherited artifact capability exceeded its fixed bound. No D1 state was created.",
+    });
+    process.exit(2);
+  }
+  try {
+    return assertD1ArtifactWriterCapability(
+      JSON.parse(raw),
+      REPOSITORY_ROOT,
+      artifactNamespace,
+      dirname(stateDir),
+    );
+  } catch {
+    say({
+      status: "fail",
+      code: "D1_ARTIFACT_CAPABILITY_INVALID",
+      detail:
+        "The inherited artifact root, namespace, run, or writer lease no longer matches its owning harness run. No D1 state was created.",
+    });
+    process.exit(2);
+  }
+}
+
+function artifactCapabilityMatches(
+  capability: D1ArtifactWriterCapability,
+  stateDir: string,
+  artifactNamespace: string,
+): boolean {
+  try {
+    assertD1ArtifactWriterCapability(
+      capability,
+      REPOSITORY_ROOT,
+      artifactNamespace,
+      dirname(stateDir),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function artifactCapabilityFailure(executed: boolean): ExecResult {
+  return {
+    ok: false,
+    executed,
+    errorClass: "artifact_capability_invalid",
+  };
+}
+
+function emitArtifactCapabilityFailure(executed: boolean): number {
+  say({
+    status: "fail",
+    code: "D1_ARTIFACT_CAPABILITY_INVALID",
+    command_executed: executed,
+    detail:
+      "The owning artifact root, namespace, run, maintenance boundary, or writer lease changed; no further D1 mutation was attempted.",
+  });
+  return 2;
+}
+
 /**
  * Count retained D1 bytes without following a symlink or disclosing a path.
  *
@@ -235,7 +315,7 @@ function stateUsage(directory: string): {
 }
 
 /** Create exactly the already-authorized state leaf, never an arbitrary parent. */
-function prepareStateDirectory(stateDir: string): void {
+function prepareStateDirectory(stateDir: string, capabilityIntact: () => boolean): void {
   const parent = dirname(stateDir);
   if (
     !existsSync(parent) ||
@@ -251,6 +331,7 @@ function prepareStateDirectory(stateDir: string): void {
       "the retained D1 state directory already exists and will not be reused or overwritten",
     );
   }
+  if (!capabilityIntact()) throw new Error("artifact_capability_invalid");
   mkdirSync(stateDir);
 }
 
@@ -297,11 +378,15 @@ async function wrangler(
   stateDir: string,
   configPath: string,
   sql: string,
+  capabilityIntact: () => boolean,
 ): Promise<WranglerRun> {
   // Narrowed to the stdio shape actually requested below, so `child.stdout` and
   // `child.stderr` are ReadableStreams rather than the general union that also
   // admits a file descriptor number or undefined.
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  if (!capabilityIntact()) {
+    return { ...artifactCapabilityFailure(false), stdout: "" };
+  }
   try {
     child = Bun.spawn({
       cmd: [
@@ -352,6 +437,9 @@ async function wrangler(
     child.exited,
   ]);
   clearTimeout(watchdog);
+  if (!capabilityIntact()) {
+    return { ...artifactCapabilityFailure(true), stdout: "" };
+  }
   const succeeded = exitCode === 0 && !/"error"/.test(stdout);
   return {
     ok: succeeded,
@@ -366,8 +454,9 @@ async function execute(
   stateDir: string,
   configPath: string,
   sql: string,
+  capabilityIntact: () => boolean,
 ): Promise<ExecResult> {
-  const run = await wrangler(entry, stateDir, configPath, sql);
+  const run = await wrangler(entry, stateDir, configPath, sql, capabilityIntact);
   return { ok: run.ok, executed: run.executed, errorClass: run.errorClass };
 }
 
@@ -375,27 +464,43 @@ async function readRows(
   entry: string,
   stateDir: string,
   configPath: string,
-): Promise<{ readonly executed: boolean; readonly rows: string[] }> {
+  capabilityIntact: () => boolean,
+): Promise<{
+  readonly executed: boolean;
+  readonly rows: string[];
+  readonly errorClass: string | undefined;
+}> {
   const run = await wrangler(
     entry,
     stateDir,
     configPath,
     `SELECT label FROM ${TABLE} ORDER BY id;`,
+    capabilityIntact,
   );
   try {
     const parsed = JSON.parse(run.stdout) as { results?: { label?: string }[] }[];
     return {
       executed: run.executed,
       rows: (parsed[0]?.results ?? []).map((row) => String(row.label)),
+      errorClass: run.errorClass,
     };
   } catch {
-    return { executed: run.executed, rows: [] };
+    return { executed: run.executed, rows: [], errorClass: run.errorClass };
   }
 }
 
 async function main(): Promise<number> {
+  const rawArtifactCapability = process.env[D1_ARTIFACT_CAPABILITY_ENV];
+  delete process.env[D1_ARTIFACT_CAPABILITY_ENV];
   const mode = parseMode(process.argv.slice(2));
   const { stateDir, artifactNamespace } = parseStateDirectory(process.argv.slice(2));
+  const artifactCapability = parseArtifactWriterCapability(
+    rawArtifactCapability,
+    stateDir,
+    artifactNamespace,
+  );
+  const capabilityIntact = () =>
+    artifactCapabilityMatches(artifactCapability, stateDir, artifactNamespace);
 
   // The adapter repeats the write-free real-authority/capacity preflight so a
   // copied command cannot bypass its parent runner and create state at a cap.
@@ -445,8 +550,9 @@ async function main(): Promise<number> {
   }
 
   try {
-    prepareStateDirectory(stateDir);
+    prepareStateDirectory(stateDir, capabilityIntact);
   } catch (error) {
+    if (!capabilityIntact()) return emitArtifactCapabilityFailure(false);
     say({
       status: "fail",
       code: "D1_STATE_DIRECTORY_INVALID",
@@ -456,6 +562,7 @@ async function main(): Promise<number> {
   }
   const configPath = join(stateDir, "wrangler.toml");
   try {
+    if (!capabilityIntact()) return emitArtifactCapabilityFailure(false);
     writeFileSync(
       configPath,
       [
@@ -486,7 +593,11 @@ async function main(): Promise<number> {
     configPath,
     `CREATE TABLE ${TABLE} (id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE);` +
       ` INSERT INTO ${TABLE} (id, label) VALUES (1, 'sentinel');`,
+    capabilityIntact,
   );
+  if (seeded.errorClass === "artifact_capability_invalid") {
+    return emitArtifactCapabilityFailure(seeded.executed);
+  }
   if (!seeded.ok) {
     // No database means the adapter cannot run at all — a blocker, not a failure.
     say({
@@ -506,9 +617,21 @@ async function main(): Promise<number> {
       ? `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');` +
         ` INSERT INTO ${TABLE} (id, label) VALUES (3, 'sentinel');`
       : `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');`;
-  const batch = await execute(wranglerEntry, stateDir, configPath, doomedBatch);
+  const batch = await execute(
+    wranglerEntry,
+    stateDir,
+    configPath,
+    doomedBatch,
+    capabilityIntact,
+  );
+  if (batch.errorClass === "artifact_capability_invalid") {
+    return emitArtifactCapabilityFailure(batch.executed);
+  }
 
-  const postRead = await readRows(wranglerEntry, stateDir, configPath);
+  const postRead = await readRows(wranglerEntry, stateDir, configPath, capabilityIntact);
+  if (postRead.errorClass === "artifact_capability_invalid") {
+    return emitArtifactCapabilityFailure(postRead.executed);
+  }
   const labels = postRead.rows;
   const doomedSurvived = labels.includes("doomed");
   const sentinelIntact = labels.includes("sentinel");
