@@ -24,8 +24,6 @@ import {
   ARTIFACT_MAINTENANCE_FENCE_NAME,
   ARTIFACT_WRITER_LEASE_CLOSED_NAME,
   ARTIFACT_WRITER_LEASES_NAME,
-  D1_ARTIFACT_CAPABILITY_ENV,
-  type D1ArtifactWriterCapability,
   ArtifactStore,
   adapterProbePath,
   artifactCapacityReport,
@@ -39,6 +37,8 @@ import {
   countArtifactNamespaces,
   countBlobStagingArtifacts,
   createMemoryArtifactStorage,
+  D1_ARTIFACT_CAPABILITY_ENV,
+  type D1ArtifactWriterCapability,
   DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
   deterministicSeed,
   exceedsArtifactNamespaceBudget,
@@ -1677,10 +1677,7 @@ test("the inherited D1 writer capability binds one exact open retained run", () 
     namespace,
     fencedStorage,
   );
-  fencedStorage.writeExclusive(
-    join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
-    "maintenance\n",
-  );
+  fencedStorage.writeExclusive(join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME), "maintenance\n");
   expect(() =>
     assertD1ArtifactWriterCapability(
       fencedCapability,
@@ -1853,12 +1850,7 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     requireRealFilesystemIntegration();
     const child = Bun.spawn({
-      cmd: [
-        process.execPath,
-        join(ADAPTERS, file),
-        "--mode",
-        mode,
-      ],
+      cmd: [process.execPath, join(ADAPTERS, file), "--mode", mode],
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",

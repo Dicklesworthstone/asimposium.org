@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   containsCredentialShape,
   redactCredentials,
@@ -3859,7 +3859,11 @@ export function assertD1ArtifactWriterCapability(
   let runDirectory: string;
   let leaseDirectory: string;
   try {
-    root = realDirectory(resolve(expectedRepositoryRoot), "D1_ARTIFACT_CAPABILITY_INVALID", storage);
+    root = realDirectory(
+      resolve(expectedRepositoryRoot),
+      "D1_ARTIFACT_CAPABILITY_INVALID",
+      storage,
+    );
     artifactRoot = realDirectory(
       join(root, "e2e", "artifacts"),
       "D1_ARTIFACT_CAPABILITY_INVALID",

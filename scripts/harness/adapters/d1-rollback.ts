@@ -45,11 +45,11 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import {
-  D1_ARTIFACT_CAPABILITY_ENV,
-  type D1ArtifactWriterCapability,
+  assertD1ArtifactWriterCapability,
   assertRetainedD1StateDirectory,
   assertRetainedIntegrationCapacity,
-  assertD1ArtifactWriterCapability,
+  D1_ARTIFACT_CAPABILITY_ENV,
+  type D1ArtifactWriterCapability,
   MAX_D1_ADAPTER_STATE_BYTES,
   realFilesystemRetentionPreflight,
   repositoryRoot,
@@ -215,7 +215,8 @@ function parseArtifactWriterCapability(
     say({
       status: "fail",
       code: "D1_ARTIFACT_CAPABILITY_INVALID",
-      detail: "The inherited artifact capability exceeded its fixed bound. No D1 state was created.",
+      detail:
+        "The inherited artifact capability exceeded its fixed bound. No D1 state was created.",
     });
     process.exit(2);
   }
@@ -512,11 +513,7 @@ async function main(): Promise<number> {
   // The adapter repeats the write-free real-authority/capacity preflight so a
   // copied command cannot bypass its parent runner and create state at a cap.
   // This runs before the namespace leaf or any state/config file is created.
-  const capacity = realFilesystemRetentionPreflight(
-    REPOSITORY_ROOT,
-    undefined,
-    artifactNamespace,
-  );
+  const capacity = realFilesystemRetentionPreflight(REPOSITORY_ROOT, undefined, artifactNamespace);
   if (capacity.exceeded) {
     say({
       status: "blocked",
@@ -629,13 +626,7 @@ async function main(): Promise<number> {
       ? `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');` +
         ` INSERT INTO ${TABLE} (id, label) VALUES (3, 'sentinel');`
       : `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');`;
-  const batch = await execute(
-    wranglerEntry,
-    stateDir,
-    configPath,
-    doomedBatch,
-    capabilityIntact,
-  );
+  const batch = await execute(wranglerEntry, stateDir, configPath, doomedBatch, capabilityIntact);
   if (batch.errorClass === "artifact_capability_invalid") {
     return emitArtifactCapabilityFailure(batch.executed);
   }
