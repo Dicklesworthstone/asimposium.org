@@ -17,7 +17,6 @@ emit() {
 for self_test in \
   "$repository_root/scripts/smoke-agent.sh" \
   "$repository_root/scripts/smoke-gallery.sh" \
-  "$repository_root/e2e/run-playwright.sh" \
   "$repository_root/e2e/gauntlet/run.sh"; do
   if ! "$self_test" --self-test --write-artifacts >/dev/null; then
     emit "fail" "ENTRYPOINT_SELF_TEST_FAILED"
@@ -36,7 +35,7 @@ for artifact_entrypoint in \
   if ! awk '
     /e2e_close_artifact_writer_leases_on_exit/ && exit_trap == 0 { exit_trap = NR }
     /^run_id="\$\(e2e_resolve_run_id / { resolved = NR }
-    resolved > 0 && /&& ! e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
+    resolved > 0 && /e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
     resolved > 0 && /e2e_validate_staging_origin / && first_validation == 0 {
       first_validation = NR
     }
@@ -52,6 +51,36 @@ for artifact_entrypoint in \
     exit 1
   fi
 done
+
+if ! awk '
+  /e2e_validate_staging_origin / && validation == 0 { validation = NR }
+  /command -v bunx/ && dependency == 0 { dependency = NR }
+  /if ! e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
+  /ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_DIRECTORY="artifacts\/\$run_id\/playwright"/ {
+    output = NR
+  }
+  /bunx --no-install playwright test/ { launch = NR }
+  END {
+    exit(!(validation > 0 && dependency > validation && claim > dependency &&
+      output > claim && launch >= output))
+  }
+' "$repository_root/e2e/run-playwright.sh"; then
+  emit "fail" "PLAYWRIGHT_ARTIFACT_NAMESPACE_NOT_CLAIMED"
+  exit 1
+fi
+if ! awk '
+  /const artifactDirectory = process\.env\.ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_DIRECTORY/ {
+    source = NR
+  }
+  index($0, "!/^artifacts\\/") > 0 && index($0, "\\/playwright$/.test") > 0 {
+    validation = NR
+  }
+  /outputDir: artifactDirectory/ { output = NR }
+  END { exit(!(source > 0 && validation > source && output > validation)) }
+' "$repository_root/e2e/playwright.config.ts"; then
+  emit "fail" "PLAYWRIGHT_ARTIFACT_DIRECTORY_VALIDATION_MISSING"
+  exit 1
+fi
 
 # Every production shell writer that adopts the shared artifact claim must arm
 # its lease closer immediately after sourcing the helper and before its first

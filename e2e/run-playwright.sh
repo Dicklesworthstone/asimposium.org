@@ -49,12 +49,6 @@ run_id="$(e2e_resolve_run_id "$suite" "$explicit_run_id")" || {
   e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_INVALID" "$reproduce"
   exit 64
 }
-if [[ "$write_artifacts" -eq 1 ]] \
-  && ! e2e_claim_artifact_run_at_root "$repository_root" "$run_id"; then
-  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "ARTIFACT_RUN_ALREADY_EXISTS" "$reproduce"
-  exit 78
-fi
-
 for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGORA_BASE_URL; do
   if e2e_validate_staging_origin "$origin_variable"; then
     :
@@ -64,19 +58,29 @@ for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGOR
       2) code="STAGING_SURFACE_BASE_URL_MISSING" ;;
       *) code="STAGING_SURFACE_BASE_URL_INVALID" ;;
     esac
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "$code" "$reproduce"
+    e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "$code" "$reproduce"
     exit 78
   fi
 done
 
 if ! command -v bunx >/dev/null 2>&1; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "BUNX_UNAVAILABLE" "$reproduce"
+  e2e_emit_diagnostic "$suite" "$started_ms" "fail" "BUNX_UNAVAILABLE" "$reproduce"
   exit 69
+fi
+
+# Playwright writes failure output even when the caller does not request the
+# shell diagnostic JSONL. Claim its fresh namespace after write-free preflight
+# and before launch so Playwright may clean only its new run-scoped child.
+if ! e2e_claim_artifact_run_at_root "$repository_root" "$run_id"; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "ARTIFACT_RUN_ALREADY_EXISTS" "$reproduce"
+  exit 78
 fi
 
 cd "$repository_root/e2e"
 set +e
-ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 bunx --no-install playwright test --config playwright.config.ts
+ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
+  ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_DIRECTORY="artifacts/$run_id/playwright" \
+  bunx --no-install playwright test --config playwright.config.ts
 playwright_status=$?
 set -e
 

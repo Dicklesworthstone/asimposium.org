@@ -58,7 +58,10 @@ points require explicit HTTPS origins through `ASIMPOSIUM_STAGING_AGENT_BASE_URL
 applicable, `ASIMPOSIUM_STAGING_AGORA_BASE_URL`; S-6 uses the two `ASIMP_S6_*_URL` inputs named
 above. No shell runner infers or prints a target. Playwright failure artifacts
 can retain requests to the public staging origins, including their URLs, and
-must be handled accordingly. Curl calls routed through the shared E2E helper
+must be handled accordingly. Every real Playwright launch claims a fresh run
+namespace and confines Playwright's own cleanup/output to its `playwright/`
+child; `--write-artifacts` additionally retains the shell diagnostic JSONL.
+Curl calls routed through the shared E2E helper
 send the exact `OpenAI File Downloader, XaiImageApiFetch/1.0` User-Agent, disable automatic
 redirects, and refuse response bodies larger than 1 MiB before they can accumulate in a shell
 variable. The wrapper disables implicit curl config, and callers cannot override or reset those

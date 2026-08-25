@@ -408,13 +408,6 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
   ) {
     throw new RunnerFailure("STAGING_CORPUS_IDENTITY_MISMATCH", 1);
   }
-  // Staging must attest the SAME scope this runner submitted. A deployment that
-  // echoes a partial submission as a full-corpus run (or the reverse) would let
-  // a legitimate-only measurement be filed as the 200-body G0 pass, which is
-  // false-green hazard (1) on this spike. Bind it before anything is reported.
-  if (screening.partial_run !== partial) {
-    throw new RunnerFailure("STAGING_PARTIAL_RUN_SCOPE_MISMATCH", 1);
-  }
   const identity: ScreeningRunIdentity = {
     corpus_revision: screening.corpus_revision,
     corpus_digest: screening.corpus_digest,
@@ -426,6 +419,13 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
     assertScreeningRunIdentity(identity);
   } catch {
     throw new RunnerFailure("STAGING_RUN_IDENTITY_INVALID", 1);
+  }
+  // Staging must attest the SAME scope this runner submitted. A deployment that
+  // echoes a partial submission as a full-corpus run (or the reverse) would let
+  // a legitimate-only measurement be filed as the 200-body G0 pass, which is
+  // false-green hazard (1) on this spike. Bind it before anything is reported.
+  if (screening.partial_run !== partial) {
+    throw new RunnerFailure("STAGING_PARTIAL_RUN_SCOPE_MISMATCH", 1);
   }
   try {
     verifyObservationBodyBindings(submitted, screening.observations);

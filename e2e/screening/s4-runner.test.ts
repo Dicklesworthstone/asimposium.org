@@ -159,6 +159,9 @@ describe("S-4 frozen corpus", () => {
         return {
           corpus_revision: identity.corpus_revision,
           corpus_digest: identity.corpus_digest,
+          // This corpus is READY, so the runner submits the whole of it; staging
+          // attests that scope back and the runner binds the two.
+          partial_run: false,
           model_version: "staging-model-v1",
           policy_version: "staging-policy-v1",
           configuration_digest: STAGING_CONFIGURATION_DIGEST,
@@ -274,6 +277,41 @@ describe("S-4 frozen corpus", () => {
           write: (line) => writes.push(line),
         }),
       ).rejects.toMatchObject({ code: "STAGING_RUN_IDENTITY_INVALID", exit_code: 1 });
+      expect(writes).toEqual([]);
+    }
+  });
+
+  test("PLANTED NEGATIVE: staging misreporting the run scope is refused before any record is written", async () => {
+    // The corpus ships with protected hard-reject bodies absent, so this run is
+    // PARTIAL. A staging deployment that attests `partial_run: false` would let a
+    // legitimate-only measurement be filed as the full 200-body G0 pass. Bind it.
+    const corpus = await createS4Corpus();
+    const submitted = corpus.filter((example) => example.source.availability === "available");
+    const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(submitted);
+    const safeIdentity: ScreeningRunIdentity = {
+      ...corpusIdentity,
+      model_version: "staging-model-v1",
+      policy_version: "staging-policy-v1",
+      configuration_digest: STAGING_CONFIGURATION_DIGEST,
+    };
+
+    // Case 1: staging claims the run was complete when it was not.
+    // Case 2: staging omits the attestation entirely (an older deployment).
+    for (const scope of [{ partial_run: false }, {}] as const) {
+      const writes: string[] = [];
+      await expect(
+        runLiveScreening({
+          corpus,
+          screening_url: new URL("https://screening.example.test/v1/s4"),
+          bearer: "test-bearer-token-with-sufficient-length",
+          fetch_live_json: async () => ({
+            ...safeIdentity,
+            ...scope,
+            observations: validObservations(submitted, safeIdentity),
+          }),
+          write: (line) => writes.push(line),
+        }),
+      ).rejects.toMatchObject({ code: "STAGING_PARTIAL_RUN_SCOPE_MISMATCH", exit_code: 1 });
       expect(writes).toEqual([]);
     }
   });
