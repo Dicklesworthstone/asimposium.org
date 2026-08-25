@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import { readFileSync } from "node:fs";
 
 import {
@@ -122,7 +124,7 @@ test("the public face cannot claim trusted items, unsafe actions, or composer-on
   expect(ProblemFaceResponseSchema.safeParse(duplicate).success).toBe(false);
 });
 
-test("the published ledger schema preserves the public face safety boundary", () => {
+test("the published ledger schema preserves the public face safety boundary", async () => {
   const generated = JSON.parse(
     readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
   ) as {
@@ -201,6 +203,87 @@ test("the published ledger schema preserves the public face safety boundary", ()
   expect(publishedTimestamp.test("2026-08-14T23:59:59.999Z")).toBe(true);
   expect(publishedTimestamp.test("2026-99-14T00:00:00.000Z")).toBe(false);
   expect(publishedTimestamp.test("2026-08-14T24:00:00.000Z")).toBe(false);
+
+  // Differentially pin every safety rule representable in Draft 2020-12.
+  // The Zod-only real-instant round trip and uniqueness-by-item-id refinements
+  // remain covered by the runtime cases above; standard JSON Schema cannot
+  // compare two array members' id properties.
+  const index = (await fixture(VALID_INDEX)) as { problems: unknown[] };
+  const problemFace = await fixture(VALID_PROBLEM_FACE);
+  const valid = {
+    problem_index_entry: index.problems[0],
+    problems_index_response: index,
+    problem_face_response: problemFace,
+  };
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validatePublished = ajv.compile(generated as object);
+  expect(LedgerContractsSchema.safeParse(valid).success).toBe(true);
+  expect(validatePublished(valid), JSON.stringify(validatePublished.errors)).toBe(true);
+
+  const expectBothReject = (candidate: unknown, label: string): void => {
+    expect(LedgerContractsSchema.safeParse(candidate).success, `Zod: ${label}`).toBe(false);
+    expect(validatePublished(candidate), `JSON Schema: ${label}`).toBe(false);
+  };
+  const withFace = (faceValue: unknown): Record<string, unknown> => ({
+    ...valid,
+    problem_face_response: faceValue,
+  });
+
+  expectBothReject(withFace(await fixture(INVALID_WORKSHOP_FACE)), "workshop item");
+  for (const [label, mutate] of [
+    [
+      "trusted item",
+      (face: { items: Array<Record<string, unknown>> }) => {
+        if (face.items[0] !== undefined) face.items[0].untrusted = false;
+      },
+    ],
+    [
+      "composer token field",
+      (face: { items: Array<Record<string, unknown>> }) => {
+        if (face.items[0] !== undefined) face.items[0].tokens = 1;
+      },
+    ],
+    [
+      "non-claim item id",
+      (face: { items: Array<Record<string, unknown>> }) => {
+        if (face.items[0] !== undefined) face.items[0].id = "H-7@2";
+      },
+    ],
+    [
+      "POST action",
+      (face: { next_actions: Array<Record<string, unknown>> }) => {
+        if (face.next_actions[0] !== undefined) face.next_actions[0].method = "POST";
+      },
+    ],
+    [
+      "external action",
+      (face: { next_actions: Array<Record<string, unknown>> }) => {
+        if (face.next_actions[0] !== undefined) {
+          face.next_actions[0].url = "https://attacker.example/collect";
+        }
+      },
+    ],
+  ] as const) {
+    const face = structuredClone(problemFace) as {
+      items: Array<Record<string, unknown>>;
+      next_actions: Array<Record<string, unknown>>;
+    };
+    mutate(face);
+    expectBothReject(withFace(face), label);
+  }
+
+  const unsafeProblem = structuredClone(valid) as {
+    problem_index_entry: Record<string, unknown>;
+  };
+  unsafeProblem.problem_index_entry.id = "P-X--FORGED";
+  expectBothReject(unsafeProblem, "renderer-unsafe problem id");
+
+  const invalidTimestamp = structuredClone(valid) as {
+    problem_index_entry: Record<string, unknown>;
+  };
+  invalidTimestamp.problem_index_entry.created_at = "2026-99-14T00:00:00.000Z";
+  expectBothReject(invalidTimestamp, "out-of-range timestamp");
 });
 
 test("the public ledger id grammar is renderer-safe without rewriting Krater's full ingress law", () => {

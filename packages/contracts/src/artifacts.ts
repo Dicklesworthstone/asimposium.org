@@ -407,6 +407,8 @@ function generatedLedgerJsonSchema(): string {
     title: "ASImposium public ledger read faces",
     description:
       "W6.1 public read faces. The problems index mirrors the Krater projection; the per-problem JSON digest is a bounded public-claim projection. omitted[] is mandatory so readers see what either face left out.",
+    $comment:
+      "Runtime Zod additionally requires timestamps to round-trip as real canonical UTC instants and items[].id values to be unique. Standard Draft 2020-12 cannot express uniqueness by one property across array members.",
     ...z.toJSONSchema(LedgerContractsSchema),
   };
   return formatJson(document);
