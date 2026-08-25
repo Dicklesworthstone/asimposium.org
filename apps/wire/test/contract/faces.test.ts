@@ -923,12 +923,57 @@ describe("face wire format", () => {
     expect(prepares).toBe(1);
   });
 
-  test("a future claim row is refused instead of leaking beyond the frozen problem cursor", async () => {
+  test("the mounted snapshot query excludes a future claim beyond the frozen problem cursor", async () => {
+    const visibleClaim = "VISIBLE-AT-FROZEN-CURSOR";
+    const secretFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
+    const db = new Database(":memory:");
+    try {
+      db.run("CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL)");
+      db.run(
+        "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL)",
+      );
+      db.prepare("INSERT INTO problems (id, public_seq) VALUES (?, ?)").run("P-4DSP", 7);
+      const insertClaim = db.prepare(
+        "INSERT INTO claims (id, problem_id, statement, source_seq) VALUES (?, ?, ?, ?)",
+      );
+      insertClaim.run("C-7", "P-4DSP", visibleClaim, 7);
+      insertClaim.run("C-8", "P-4DSP", secretFuture, 8);
+
+      let capturedSql: string | undefined;
+      const env = trustedStoaEnv();
+      env.DB = {
+        prepare(query: string) {
+          capturedSql = query;
+          return {
+            bind: (problemId: string) => ({
+              all: async () => ({ results: db.query(query).all(problemId) }),
+            }),
+          };
+        },
+      } as unknown as Env["DB"];
+      const response = await wireEntrypoint.fetch(
+        new Request("https://a.asimposium.org/p/P-4DSP.json"),
+        env,
+        executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2],
+      );
+
+      expect(capturedSql).toContain("c.source_seq <= p.public_seq");
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
+      expect(face.items.map((item) => item.id)).toEqual(["C-7"]);
+      expect(body).toContain(visibleClaim);
+      expect(body).not.toContain(secretFuture);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a malformed future row from the D1 seam fails closed without leaking its body", async () => {
     const secretFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
     const env = trustedStoaEnv();
     env.DB = {
-      prepare(query: string) {
-        expect(query).toContain("c.source_seq <= p.public_seq");
+      prepare() {
         return {
           bind: () => ({
             all: async () => ({
@@ -951,6 +996,7 @@ describe("face wire format", () => {
       env,
       executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2],
     );
+
     expect(response.status).toBe(500);
     const body = await response.text();
     expect(body).toContain('"code":"INTERNAL_ERROR"');
