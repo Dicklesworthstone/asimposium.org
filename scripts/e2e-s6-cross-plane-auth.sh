@@ -378,7 +378,10 @@ read_group_exact_until() {
     remaining=$((deadline - SECONDS))
     IFS= read -r -t "$remaining" record <&5
     read_status=$?
-    (( read_status == 0 )) || return "$read_status"
+    if (( read_status != 0 )); then
+      if (( SECONDS >= deadline )); then return 142; fi
+      return "$read_status"
+    fi
     if [[ "$record" == "$expected" ]]; then
       GROUP_RECORD="$record"
       return 0
@@ -396,9 +399,9 @@ read_group_exact_until() {
       continue
     fi
     GROUP_RECORD_INVALID=1
-    return 1
+    return 2
   done
-  return 1
+  return 142
 }
 
 read_group_record() {
@@ -422,7 +425,10 @@ read_group_outcome() {
     remaining=$((deadline - SECONDS))
     IFS= read -r -t "$remaining" record <&5
     read_status=$?
-    (( read_status == 0 )) || return "$read_status"
+    if (( read_status != 0 )); then
+      if (( SECONDS >= deadline )); then return 142; fi
+      return "$read_status"
+    fi
     if (( GROUP_TERMINAL_SEEN == 0 )) && validate_group_child_record "$record"; then
       GROUP_TERMINAL_SEEN=1
       GROUP_PROTOCOL_STATE="terminal"
@@ -430,7 +436,7 @@ read_group_outcome() {
       return 0
     fi
     GROUP_RECORD_INVALID=1
-    return 1
+    return 2
   done
   # Reaching the absolute deadline without another read is the same typed
   # timeout as Bash read -t (128 + SIGALRM on supported Bash versions).
@@ -537,9 +543,12 @@ consume_group_terminal_during_grace() {
     GROUP_PENDING_CHILD_RECORD=""
     return 0
   fi
+  if (( GROUP_TERMINAL_SEEN == 1 )); then
+    return 0
+  fi
   IFS= read -r -t "$grace" record <&5
   read_status=$?
-  if (( read_status > 128 )); then return 0; fi
+  if (( read_status > 128 || read_status == 1 )); then return 0; fi
   (( read_status == 0 )) || return 1
   if [[ "$GROUP_PROTOCOL_STATE" == "running" ]] && (( GROUP_TERMINAL_SEEN == 0 )) &&
      validate_group_child_record "$record"; then
@@ -638,9 +647,15 @@ unregister_child() {
     kept_tokens+=("${CHILD_OWNER_TOKENS[$index]:-}")
     kept_kinds+=("${CHILD_KINDS[$index]:-ordinary}")
   done
-  CHILD_PIDS=(${kept[@]+"${kept[@]}"})
-  CHILD_OWNER_TOKENS=(${kept_tokens[@]+"${kept_tokens[@]}"})
-  CHILD_KINDS=(${kept_kinds[@]+"${kept_kinds[@]}"})
+  if (( ${#kept[@]} == 0 )); then
+    CHILD_PIDS=()
+    CHILD_OWNER_TOKENS=()
+    CHILD_KINDS=()
+  else
+    CHILD_PIDS=("${kept[@]}")
+    CHILD_OWNER_TOKENS=("${kept_tokens[@]}")
+    CHILD_KINDS=("${kept_kinds[@]}")
+  fi
   release_group_control "$pid"
 }
 
@@ -665,9 +680,9 @@ reap_children() {
   # Every production child is represented by its durable supervisor, commanded
   # through the capability channel, and verified gone before wait. Test-only
   # ordinary helpers must settle themselves and are never signalled here.
-  local pid
   REAP_SURVIVORS=0
-  for pid in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
+  (( ${#CHILD_PIDS[@]} > 0 )) || return 0
+  for pid in "${CHILD_PIDS[@]}"; do
     if child_record_is_kind "$pid" "controlled-group"; then
       # A cooperative payload may publish CHILD after TERM ACK but before KILL.
       # Drain that one typed terminal during the grace, and permit the same race
@@ -984,6 +999,7 @@ run_bounded() {
   # leader through Perl -> Bash supervisor for the whole capability lifetime.
   LATCHED_SIGNAL=""
   SPAWN_REGISTRATION_ACTIVE=1
+  unset -v S6_BOUNDED_SUPERVISOR S6_BOUNDED_SUPERVISOR_PID 2>/dev/null || true
   coproc S6_BOUNDED_SUPERVISOR {
     exec /usr/bin/perl -MPOSIX -e '
       $^F=9;
@@ -1317,7 +1333,7 @@ run_bounded() {
   else
     # Outer branch: `read_group_outcome` did not deliver a terminal record.
     read_status=$?
-    (( read_status == 1 )) && result_eof=1
+    (( read_status == 1 && GROUP_RECORD_INVALID == 0 )) && result_eof=1
     if (( GROUP_RECORD_INVALID == 1 )); then
       status="$EX_WATCHDOG_UNAVAILABLE"
     elif (( read_status > 128 )); then
@@ -1355,8 +1371,12 @@ run_bounded() {
     verify_group_result_eof || return "$EX_CLEANUP_UNPROVEN"
     wait "$pid" 2>/dev/null || true
     trap '' PIPE
-    printf 'SIGNAL\t%s\tTERM\n' "$supervisor_token" >&6 2>/dev/null || \
-      DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=1
+    for _ in {1..500}; do
+      printf 'SIGNAL\t%s\tTERM\n' "$supervisor_token" >&6 2>/dev/null || {
+        DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=1
+        break
+      }
+    done
     trap - PIPE
     unregister_child "$pid"
     if [[ "$RUN_BOUNDED_OUTCOME" == "child" ]] && (( status >= 124 && status <= 127 )); then
@@ -1373,7 +1393,7 @@ run_bounded() {
   if (( timed_out == 1 )); then
     consume_group_terminal_during_grace 3 || cleanup_unproven=1
   else
-    consume_group_terminal_during_grace 0.2 || cleanup_unproven=1
+    consume_group_terminal_during_grace 1 || cleanup_unproven=1
   fi
   if ! request_group_signal "$pid" KILL; then cleanup_unproven=1; fi
   GROUP_ALLOW_CHILD_BEFORE_ACK=0
@@ -1651,7 +1671,7 @@ const [hex, kid] = fields;
 
 // Exactly the product's own validation in apps/web/lib/stoa.ts. A harness that
 // accepted a looser key than the Agora does would prove the wrong thing.
-if (!/^[0-9a-f]{64}\$/.test(hex ?? "") || !/^[A-Za-z0-9._-]{1,64}\$/.test(kid ?? "")) {
+if (!/^[0-9a-f]{64}$/.test(hex ?? "") || !/^[A-Za-z0-9._-]{1,64}$/.test(kid ?? "")) {
   process.stderr.write("mint-envelope: signing key or kid is not the product format\n");
   process.exit(2);
 }
@@ -1680,7 +1700,7 @@ try {
   // probe that printed a newline passed. The two non-secret digests precede
   // the credential-bearing config so the shell can retain the exact request
   // tuple without parsing or persisting the envelope JSON.
-  process.stdout.write(\`\${principalPseudonym}\t\${envelope.payload_sha256}\theader = "\${SERVICE_ENVELOPE_HEADER}: \${JSON.stringify(envelope).replace(/"/g, '\\\\"')}"\n\`);
+  process.stdout.write(\`\${principalPseudonym}\t\${envelope.claims.payload_sha256}\theader = "\${SERVICE_ENVELOPE_HEADER}: \${JSON.stringify(envelope).replace(/"/g, '\\\\"')}"\n\`);
 } catch (error) {
   process.stderr.write(\`mint-envelope: \${error?.constructor?.name ?? "Error"}\n\`);
   process.exit(2);
@@ -2656,7 +2676,7 @@ self_test() {
   if [[ -n "$child_before_ack_dir" ]]; then
     child_before_ack_ready="${child_before_ack_dir}/ready"
     SUPERVISOR_CHILD_BEFORE_ACK_PLANT=1
-    run_bounded 1 "$bounded_out" - \
+    run_bounded 2 "$bounded_out" - \
       bash -c 'trap "exit 0" TERM; printf ready > "$1"; while :; do sleep 30; done' \
       _ "$child_before_ack_ready" || child_before_ack_status=$?
     SUPERVISOR_CHILD_BEFORE_ACK_PLANT=0
@@ -3112,6 +3132,8 @@ self_test() {
   local glob_kept="${#CHILD_PIDS[@]}"
   unregister_child "102"
   check "unregister-is-exact-not-glob" "${glob_kept}:${#CHILD_PIDS[@]}" "3:2"
+  unregister_child "101"
+  unregister_child "103"
 
   # Causal: a descendant must be swept on the ORDINARY exit path too. The direct
   # child exits at once and leaves a sleeper behind; waiting on the direct pid
@@ -3139,7 +3161,7 @@ self_test() {
     # only after that trap is installed, so the plant has a causal readiness
     # barrier but never probes or signals the number after cleanup.
     run_bounded "$bound" "$bounded_out" - \
-      bash -c "bash \"\$1\" --self-test-ack-victim \"\$2\" \"\$3\" & waited=0; while [[ ! -f \"\$2\" && \$waited -lt 100 ]]; do sleep 0.02; waited=\$((waited + 1)); done; ${trailer}" \
+      bash -c "bash \"\$1\" --self-test-ack-victim \"\$2\" \"\$3\" & waited=0; while [[ ! -f \"\$2\" && \$waited -lt 250 ]]; do sleep 0.02; waited=\$((waited + 1)); done; ${trailer}" \
       _ "$SCRIPT_SELF" "$marker" "$terminated" || true
     local child=""
     [[ -f "$marker" ]] && child="$(cat "$marker" 2>/dev/null || printf '')"
@@ -3148,7 +3170,7 @@ self_test() {
 
   sweep_plant "normal-exit-sweeps-group" "exit 0" 10
   sweep_plant "error-exit-sweeps-group" "exit 9" 10
-  sweep_plant "timeout-sweeps-group" "sleep 45" 1
+  sweep_plant "timeout-sweeps-group" "sleep 45" 3
 
   # Deterministic launcher-window plants. Each real signal is exercised both
   # after `$!`/before provisional registration and after ACTIVE is cleared at

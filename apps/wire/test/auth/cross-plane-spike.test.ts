@@ -453,7 +453,7 @@ class OuterSupervisorProtocol {
       return;
     }
     if (this.expected !== undefined) {
-      this.fail("socket " + reason + " before expected acknowledgement");
+      this.fail("socket " + reason + " before expected acknowledgement: " + this.expected.record);
       return;
     }
     if (!this.closureExpected) this.fail("socket " + reason + " unexpectedly");
@@ -734,10 +734,12 @@ const OUTER_SUPERVISOR_PROGRAM = [
   '        printf "outer-ack:%s:KILL\\n" "$token" >&7 || kill -KILL 0',
   '        [[ "$extra_kill_record" == "1" ]] && printf "outer-ack:%s:EXTRA\\n" "$token" >&7',
   '        [[ "$kill_hold_delay" == "0" ]] || { IFS= read -r -t "$kill_hold_delay" _ <&8 || :; }',
+  "        exec 7>&- 7<&- 2>/dev/null || :",
   "        kill -KILL 0",
   "        ;;",
   '      "DIE:")',
   '        printf "outer-closed:%s\\n" "$token" >&7 || kill -KILL 0',
+  "        exec 7>&- 7<&- 2>/dev/null || :",
   "        kill -KILL 0",
   "        ;;",
   "      *) kill -KILL 0 ;;",
@@ -1129,7 +1131,8 @@ async function runShell(
     } else if (options.supervisorExitBeforeConnect === true) {
       supervisorProgram = OUTER_EXIT_BEFORE_CONNECT_PROGRAM;
     }
-    deadlineAt = Date.now() + runTimeoutMs;
+    deadlineAt =
+      Date.now() + (options.armAfterFileExists !== undefined ? OUTER_CONTROL_STEP_MS : runTimeoutMs);
     const supervisorProcess = Bun.spawn({
       cmd: [
         "/usr/bin/perl",
@@ -1217,10 +1220,10 @@ async function runShell(
     if (!(await protocol.bootstrap(deadlineAt))) {
       throw new Error("cleanup unproven: outer supervisor BOOT/READY failed at " + stdoutPath);
     }
-    capabilityEstablished = true;
     if (!(await protocol.start(deadlineAt))) {
       throw new Error("cleanup unproven: outer supervisor START/STARTED failed at " + stdoutPath);
     }
+    capabilityEstablished = true;
     const liveProtocol = protocol;
     // The parent's descriptors are held until the child has EXITED.
     //
@@ -1541,7 +1544,10 @@ async function runShell(
     }
     const lateProtocolFailure = controlListener?.protocolFailure() ?? protocol?.protocolFailure();
     if (lateProtocolFailure !== undefined) {
-      noteTeardownFailure(lateProtocolFailure, "outer supervisor protocol failed during close");
+      noteTeardownFailure(
+        new Error(`cleanup unproven: ${lateProtocolFailure.message}`),
+        "outer supervisor protocol failed during close",
+      );
     }
     if (supervisorExited !== undefined && !supervisorSettled) {
       try {
@@ -1563,7 +1569,7 @@ async function runShell(
       controlListener?.protocolFailure() ?? protocol?.protocolFailure();
     if (postSettlementProtocolFailure !== undefined) {
       noteTeardownFailure(
-        postSettlementProtocolFailure,
+        new Error(`cleanup unproven: ${postSettlementProtocolFailure.message}`),
         "outer supervisor protocol failed after settlement",
       );
     }
@@ -4176,6 +4182,7 @@ printf '%s\\n' '{"plant":"started"}'
           const second = createConnection({ host: "127.0.0.1", port });
           try {
             await once(second, "connect");
+            await new Promise((resolve) => setTimeout(resolve, 25));
           } finally {
             second.destroy();
           }
