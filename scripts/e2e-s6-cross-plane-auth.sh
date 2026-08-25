@@ -2333,6 +2333,7 @@ write_evidence_bundle() {
   umask 077
   (
     set -C
+    s6_artifact_writer_boundary_is_open || exit "$EX_CLEANUP_UNPROVEN"
     {
       printf '{"suite":"%s","schema_version":4,"bead":"asimposiumorg-vw3",' "$SUITE"
       printf '"revision":{"value":"%s","source":"required_harness_input","verification":"format_only"},' \
@@ -4092,6 +4093,12 @@ main() {
      evidence_directory_has_symlink_component; then
     blocked_record "EVIDENCE_DIR_INVALID" "ASIMP_S6_EVIDENCE_DIR must be exactly e2e/artifacts/s6-cross-plane-auth with no symlink component"
     CLEANED_UP=1; exit "$EX_CONFIG"
+  fi
+
+  if ! s6_claim_artifact_run; then
+    blocked_record "ARTIFACT_RUN_CLAIM_FAILED" \
+      "the exclusive S-6 run directory and artifact-root writer lease could not be claimed before product work"
+    exit "$EX_CONFIG"
   fi
 
   RUN_STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/s6-cross-plane.XXXXXX")" || {
