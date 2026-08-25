@@ -812,7 +812,8 @@ publish_lifecycle_settled() {
   (( LIFECYCLE_TERMINAL_PUBLISHED == 0 )) || return 0
   (( REAP_SURVIVORS == 0 && ${#CHILD_PIDS[@]} == 0 )) || return 1
   [[ -z "$GROUP_CONTROL_PID" ]] || return 1
-  emit "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}"
+  (( S6_ARTIFACT_WRITER_LEASE_OWNED == 0 )) || return 1
+  emit "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\",\"artifact_writer_lease\":\"closed-or-not-acquired\"}"
   LIFECYCLE_TERMINAL_PUBLISHED=1
 }
 
@@ -2507,6 +2508,11 @@ finish() {
   if [[ -z "$EVIDENCE_PATH" ]]; then
     fail_record "evidence-present-before-pass" "the mandatory evidence bundle was not sealed; refusing to publish a pass terminal"
   fi
+  if ! s6_close_artifact_writer_lease_after_settlement; then
+    blocked_record "CLEANUP_UNPROVEN" \
+      "child groups settled, but the exact artifact writer boundary could not be revalidated and closed after final evidence publication"
+    exit "$EX_CLEANUP_UNPROVEN"
+  fi
   [[ -n "$EVIDENCE_PATH" ]] && log "${SUITE}: evidence at ${EVIDENCE_PATH}"
   if (( FAILURES > 0 )); then
     emit "{\"suite\":\"${SUITE}\",\"status\":\"fail\",\"assertions\":${ASSERTIONS},\"failures\":${FAILURES},\"reproduce\":\"${REPRODUCE}\"}"
@@ -4137,6 +4143,11 @@ main() {
     CLEANED_UP=1
     assert_no_secret_escaped
     write_evidence_bundle
+    if ! s6_close_artifact_writer_lease_after_settlement; then
+      blocked_record "CLEANUP_UNPROVEN" \
+        "child groups settled, but the exact artifact writer boundary could not be revalidated and closed after the blocked browser path"
+      exit "$EX_CLEANUP_UNPROVEN"
+    fi
     [[ -n "$EVIDENCE_PATH" ]] && log "${SUITE}: evidence at ${EVIDENCE_PATH}"
     if (( FAILURES > 0 )); then
       emit "{\"suite\":\"${SUITE}\",\"status\":\"fail\",\"assertions\":${ASSERTIONS},\"failures\":${FAILURES},\"reproduce\":\"${REPRODUCE}\"}"

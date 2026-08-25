@@ -1800,7 +1800,14 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     expect(rawCleanup).toContain('kill -TERM -- "-${pgid}"');
     expect(rawCleanup).toContain('kill -KILL -- "-${pgid}"');
-    expect(rawCleanup).toContain('s2_raw_inherited_child_command_is_exact "${pid}"');
+    expect(rawCleanup).toContain(
+      's2_raw_inherited_child_command_is_exact "${pid}" || return 1\n' +
+        '      kill -TERM -- "-${pgid}"',
+    );
+    expect(rawCleanup).toContain(
+      's2_raw_inherited_child_command_is_exact "${pid}" || return 1\n' +
+        '      kill -KILL -- "-${pgid}"',
+    );
     expect(rawCleanup).not.toContain('kill -TERM "${pid}"');
     expect(rawCleanup.indexOf('kill -KILL -- "-${pgid}"')).toBeLessThan(
       rawCleanup.indexOf("S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN=1"),
@@ -1811,7 +1818,10 @@ describe("S2 to S7 normalized cost receipt", () => {
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "parent-loss-child" ]]'),
     );
-    expect(preArmOwnerLoss).toContain('kill -KILL -- "-${parent_loss_child}"');
+    expect(preArmOwnerLoss).toContain(
+      's2_raw_inherited_child_command_is_exact "${parent_loss_child}" || return 1\n' +
+        '    kill -KILL -- "-${parent_loss_child}"',
+    );
     expect(preArmOwnerLoss).not.toContain('kill -KILL "${parent_loss_child}"');
     expect(onExit.indexOf("e2e_close_artifact_writer_lease")).toBeLessThan(
       onExit.indexOf(
