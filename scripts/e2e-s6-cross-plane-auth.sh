@@ -2696,8 +2696,12 @@ self_test() {
   else
     child_before_ack_status="$EX_WATCHDOG_UNAVAILABLE"
   fi
-  [[ -n "${child_before_ack_ready:-}" && -f "$child_before_ack_ready" ]] && \
-    child_before_ack_ready_value="$(cat "$child_before_ack_ready" 2>/dev/null || printf '')"
+  if await_marker_value "$child_before_ack_ready" "ready"; then
+    child_before_ack_ready_value="ready"
+  else
+    [[ -n "${child_before_ack_ready:-}" && -f "$child_before_ack_ready" ]] && \
+      child_before_ack_ready_value="$(cat "$child_before_ack_ready" 2>/dev/null || printf '')"
+  fi
   check "child-terminal-before-control-ack-ready" "$child_before_ack_ready_value" "ready"
   check "child-terminal-before-control-ack-is-retained" \
     "${child_before_ack_status}:$((GROUP_QUEUED_CHILD_RECORDS - child_queue_before))" "124:1"
