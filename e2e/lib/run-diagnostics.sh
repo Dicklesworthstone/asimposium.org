@@ -31,6 +31,12 @@ declare -a ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS=()
 declare -a ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES=()
 ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH=""
 ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY=""
+ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT=""
+ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY=""
+ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY=""
+ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY=""
+ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY=""
+ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY=""
 
 e2e_ascii_lower() {
   LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
@@ -555,6 +561,53 @@ e2e_artifact_claim_matches() {
         "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[$index]-}" \
         "${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[$index]-}" \
         && return 0
+    fi
+  done
+  return 1
+}
+
+e2e_select_artifact_claim_at_root() {
+  local repository_root="$1"
+  local run_id="$2"
+  local physical_artifacts_root
+  local root_identity
+  local run_directory
+  local physical_run_directory
+  local run_identity
+  local index
+
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT=""
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY=""
+  ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY=""
+  ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY=""
+  ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY=""
+  ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY=""
+
+  e2e_validate_run_id "$run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+  root_identity="$(e2e_artifact_directory_identity "$physical_artifacts_root")" || return 1
+  run_directory="$physical_artifacts_root/$run_id"
+  physical_run_directory="$(e2e_physical_directory "$run_directory")" || return 1
+  [[ "$physical_run_directory" == "$run_directory" && ! -L "$run_directory" ]] || return 1
+  run_identity="$(e2e_artifact_directory_identity "$physical_run_directory")" || return 1
+
+  for ((index = 0; index < ${#ASIMPOSIUM_E2E_CLAIM_RUN_IDS[@]}; index++)); do
+    if [[ "${ASIMPOSIUM_E2E_CLAIM_ROOTS[$index]}" == "$physical_artifacts_root" \
+      && "${ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES[$index]}" == "$root_identity" \
+      && "${ASIMPOSIUM_E2E_CLAIM_RUN_IDS[$index]}" == "$run_id" \
+      && "${ASIMPOSIUM_E2E_CLAIM_IDENTITIES[$index]}" == "$run_identity" ]] \
+      && e2e_artifact_writer_lease_is_open \
+        "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[$index]-}" \
+        "${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[$index]-}"; then
+      e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+      ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT="$physical_artifacts_root"
+      ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY="$root_identity"
+      ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY="$physical_run_directory"
+      ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY="$run_identity"
+      ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY="${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[$index]}"
+      ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY="${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[$index]}"
+      return 0
     fi
   done
   return 1

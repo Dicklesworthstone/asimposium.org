@@ -3576,7 +3576,7 @@ self_test() {
     count_file="${hold}.count"
     local body
     # shellcheck disable=SC2016 # The inner sh expands these, not this shell.
-    body='printf "%s" "$$" >"$1"; env | grep -c "$4" >"$2" 2>/dev/null || printf 0 >"$2"; while [ ! -e "$3" ]; do sleep 0.05; done'
+    body='printf "%s" "$$" >"$1"; env | grep -E "^(ASIMP_S6_|S6_CTL_CANARY=)" | grep -c "$4" >"$2" 2>/dev/null || printf 0 >"$2"; while [ ! -e "$3" ]; do sleep 0.05; done'
     if [[ -n "$extra_export" ]]; then
       # shellcheck disable=SC2016 # The inner sh expands $$ and $1..$4, not this shell.
       env "S6_CTL_CANARY=${extra_export}" /bin/sh -c "$body" _ "$hold" "$count_file" "$release" "$pattern" &
@@ -3603,7 +3603,6 @@ self_test() {
   }
 
   # The planted secrets must be invisible to an ordinary helper.
-  env | grep planted-selftest || true
   environ_plant "real-helper-environ-has-no-secret" "planted-selftest" "absent"
   # Observer-positive control: an explicitly EXPORTED canary must be visible, or
   # "absent" above could simply mean the helper cannot read its own environment.

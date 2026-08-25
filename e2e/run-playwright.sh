@@ -75,11 +75,20 @@ if ! e2e_claim_artifact_run_at_root "$repository_root" "$run_id"; then
   e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "ARTIFACT_RUN_ALREADY_EXISTS" "$reproduce"
   exit 78
 fi
+if ! e2e_select_artifact_claim_at_root "$repository_root" "$run_id"; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "ARTIFACT_CLAIM_INVALID" "$reproduce"
+  exit 78
+fi
 
 cd "$repository_root/e2e"
 set +e
 ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
-  ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_DIRECTORY="artifacts/$run_id/playwright" \
+  ASIMPOSIUM_PLAYWRIGHT_REPOSITORY_ROOT="$repository_root" \
+  ASIMPOSIUM_PLAYWRIGHT_RUN_ID="$run_id" \
+  ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_ROOT_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY" \
+  ASIMPOSIUM_PLAYWRIGHT_RUN_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY" \
+  ASIMPOSIUM_PLAYWRIGHT_LEASE_DIRECTORY="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY" \
+  ASIMPOSIUM_PLAYWRIGHT_LEASE_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY" \
   bunx --no-install playwright test --config playwright.config.ts
 playwright_status=$?
 set -e
