@@ -253,6 +253,7 @@ publish_buffered_browser_blocked() {
 # ---------------------------------------------------------------------------
 
 CLEANED_UP=0
+SELF_TEST_BOUNDED_OUT=""
 CLEANUP_IN_PROGRESS=0
 CLEANUP_SECOND_SIGNAL=0
 SIGNAL_CLEANUP_MARKER=""
@@ -732,6 +733,9 @@ publish_lifecycle_settled() {
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 on_exit() {
   local status=$?
+  # The per-run bounded-supervisor stdout capture leaks on every early
+  # self_test exit, so retire it here where all exit paths converge.
+  [[ -z "${SELF_TEST_BOUNDED_OUT:-}" ]] || rm -f "$SELF_TEST_BOUNDED_OUT" 2>/dev/null || true
   if (( CLEANED_UP == 1 )); then
     publish_lifecycle_settled || {
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"no-child-survivors\",\"status\":\"fail\",\"detail\":\"owned process-group settlement was not proven\",\"reproduce\":\"${REPRODUCE}\"}"
@@ -2535,6 +2539,7 @@ self_test() {
   clear_child_records
   local bounded_status=0 bounded_start bounded_elapsed
   local bounded_out="${TMPDIR:-/tmp}/s6-bounded.$$"
+  SELF_TEST_BOUNDED_OUT="$bounded_out"
   bounded_start="$(date +%s)"
   run_bounded 2 "$bounded_out" - sleep 30 || bounded_status=$?
   bounded_elapsed=$(( $(date +%s) - bounded_start ))
@@ -3696,10 +3701,6 @@ self_test() {
   check "env-inspection-detects-inheritance" "$inherit_seen" "1"
 
   reap_children
-  # The bounded-supervisor stdout capture is per-PID and was never removed,
-  # leaking one 0-byte $TMPDIR/s6-bounded.<pid> per self-test run. Drop it here:
-  # this point precedes every self_test exit path.
-  rm -f "$bounded_out" 2>/dev/null || true
   if (( REAP_SURVIVORS != 0 || ${#CHILD_PIDS[@]} != 0 )); then
     emit "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"CLEANUP_UNPROVEN\",\"self_test\":true}"
     exit "$EX_CLEANUP_UNPROVEN"

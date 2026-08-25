@@ -71,7 +71,10 @@ For entry points that expose `--write-artifacts --run-id <id>`, evidence writes 
 adopt a missing run directory: Smoke Agent, Smoke Gallery, Playwright,
 Gauntlet, device enrollment, and the CI pipeline atomically claim that
 directory before product work and refuse a reused ID, so two ordinary attempts
-cannot blend evidence under one name. This namespace claim is not yet a
+cannot blend evidence under one name. The TypeScript OPS harness likewise uses
+an exclusive `mkdir` for both a top-level new run and a new run inside its
+retained integration namespace; only an explicit resume may reopen an existing
+directory, after its immutable run-identity record is checked. These namespace claims are not yet a
 whole-root maintenance lease: the active artifact root still lacks a universal
 epoch/device/inode identity and an archive locator, so moving or rotating
 `e2e/artifacts` remains unsafe while any writer may exist. S-6 has a separate fixed contract: it requires
