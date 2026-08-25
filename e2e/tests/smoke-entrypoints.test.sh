@@ -56,27 +56,32 @@ if ! awk '
   /e2e_validate_staging_origin / && validation == 0 { validation = NR }
   /command -v bunx/ && dependency == 0 { dependency = NR }
   /if ! e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
-  /ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_DIRECTORY="artifacts\/\$run_id\/playwright"/ {
-    output = NR
-  }
+  /e2e_select_artifact_claim_at_root / && selected == 0 { selected = NR }
+  /ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_ROOT_IDENTITY=/ { capability = NR }
   /bunx --no-install playwright test/ { launch = NR }
   END {
     exit(!(validation > 0 && dependency > validation && claim > dependency &&
-      output > claim && launch >= output))
+      selected > claim && capability > selected && launch >= capability))
   }
 ' "$repository_root/e2e/run-playwright.sh"; then
   emit "fail" "PLAYWRIGHT_ARTIFACT_NAMESPACE_NOT_CLAIMED"
   exit 1
 fi
 if ! awk '
-  /const artifactDirectory = process\.env\.ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_DIRECTORY/ {
+  /const claimedRepositoryRoot = process\.env\.ASIMPOSIUM_PLAYWRIGHT_REPOSITORY_ROOT/ {
     source = NR
   }
-  index($0, "!/^artifacts\\/") > 0 && index($0, "\\/playwright$/.test") > 0 {
-    validation = NR
-  }
+  /directDirectoryIdentity\(artifactRoot\) !== artifactRootIdentity/ { root_identity = NR }
+  /directDirectoryIdentity\(runDirectory\) !== runIdentity/ { run_identity = NR }
+  /directDirectoryIdentity\(leaseDirectory\) !== leaseIdentity/ { lease_identity = NR }
+  /anyNodeExists\(join\(leaseDirectory, "closed"\)\)/ { open_lease = NR }
+  /anyNodeExists\(join\(runDirectory, "playwright"\)\)/ { fresh_child = NR }
   /outputDir: artifactDirectory/ { output = NR }
-  END { exit(!(source > 0 && validation > source && output > validation)) }
+  END {
+    exit(!(source > 0 && root_identity > source && run_identity >= root_identity &&
+      lease_identity > run_identity && open_lease >= lease_identity &&
+      fresh_child > open_lease && output > fresh_child))
+  }
 ' "$repository_root/e2e/playwright.config.ts"; then
   emit "fail" "PLAYWRIGHT_ARTIFACT_DIRECTORY_VALIDATION_MISSING"
   exit 1
@@ -263,12 +268,48 @@ direct_playwright_output="$(
 direct_playwright_status=$?
 set -e
 if [[ "$direct_playwright_status" -eq 0 \
-  || "$direct_playwright_output" != *"must be an HTTPS origin"* ]]; then
-  emit "fail" "DIRECT_PLAYWRIGHT_PRODUCTION_ORIGIN_ACCEPTED"
+  || "$direct_playwright_output" != *"bind this exact repository root"* ]]; then
+  emit "fail" "DIRECT_PLAYWRIGHT_WITHOUT_CLAIM_ACCEPTED"
   exit 1
 fi
 if [[ "$direct_playwright_output" == *"https://"* ]]; then
   emit "fail" "DIRECT_PLAYWRIGHT_PRODUCTION_ORIGIN_LEAKED"
+  exit 1
+fi
+
+forged_playwright_run_id="direct-unclaimed-$$"
+forged_playwright_run="$repository_root/e2e/artifacts/$forged_playwright_run_id"
+if [[ -e "$forged_playwright_run" || -L "$forged_playwright_run" ]]; then
+  emit "fail" "DIRECT_PLAYWRIGHT_CLAIM_FIXTURE_COLLISION"
+  exit 1
+fi
+playwright_artifact_root_identity="$(e2e_artifact_directory_identity "$repository_root/e2e/artifacts")" || {
+  emit "fail" "DIRECT_PLAYWRIGHT_CLAIM_FIXTURE_UNAVAILABLE"
+  exit 1
+}
+playwright_lease_epoch="$(e2e_artifact_writer_lease_epoch_name "$playwright_artifact_root_identity")" || {
+  emit "fail" "DIRECT_PLAYWRIGHT_CLAIM_FIXTURE_UNAVAILABLE"
+  exit 1
+}
+set +e
+forged_playwright_output="$(
+  cd "$repository_root/e2e" \
+    && ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
+      ASIMPOSIUM_PLAYWRIGHT_REPOSITORY_ROOT="$repository_root" \
+      ASIMPOSIUM_PLAYWRIGHT_RUN_ID="$forged_playwright_run_id" \
+      ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_ROOT_IDENTITY="$playwright_artifact_root_identity" \
+      ASIMPOSIUM_PLAYWRIGHT_RUN_IDENTITY="0:0" \
+      ASIMPOSIUM_PLAYWRIGHT_LEASE_DIRECTORY="$repository_root/e2e/.artifact-writer-leases/$playwright_lease_epoch/lease-1-1-1-1" \
+      ASIMPOSIUM_PLAYWRIGHT_LEASE_IDENTITY="0:0" \
+      bunx --no-install playwright test --config playwright.config.ts --list 2>&1
+)"
+forged_playwright_status=$?
+set -e
+if [[ "$forged_playwright_status" -eq 0 \
+  || "$forged_playwright_output" != *"artifact root or run claim is not current"* \
+  || -e "$forged_playwright_run" \
+  || -L "$forged_playwright_run" ]]; then
+  emit "fail" "DIRECT_PLAYWRIGHT_FORGED_CLAIM_ACCEPTED"
   exit 1
 fi
 

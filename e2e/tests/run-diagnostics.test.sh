@@ -88,6 +88,41 @@ if [[ -n "$second_claim_output" ]]; then
   fail "REUSED_ARTIFACT_RUN_LEAKED"
 fi
 
+lease_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-lease-fence.XXXXXX")" \
+  || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
+mkdir -p "$lease_fence_root/e2e" || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
+e2e_artifact_writer_after_lease_acquired_hook() {
+  : > "$1/e2e/.artifact-maintenance"
+}
+if e2e_claim_artifact_run_at_root "$lease_fence_root" "lease-fenced-run" >/dev/null 2>&1; then
+  fail "LEASE_FENCE_RACE_ACCEPTED"
+fi
+unset -f e2e_artifact_writer_after_lease_acquired_hook
+lease_fence_identity="$(e2e_artifact_directory_identity "$lease_fence_root/e2e/artifacts")" \
+  || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
+if [[ -e "$lease_fence_root/e2e/artifacts/lease-fenced-run" ]] \
+  || ! e2e_artifact_writer_leases_quiescent_at_root "$lease_fence_root" "$lease_fence_identity"; then
+  fail "LEASE_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
+fi
+
+run_claim_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-run-claim-fence.XXXXXX")" \
+  || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+mkdir -p "$run_claim_fence_root/e2e" || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+e2e_artifact_writer_after_run_claim_hook() {
+  : > "$1/e2e/.artifact-maintenance"
+}
+if e2e_claim_artifact_run_at_root "$run_claim_fence_root" "run-claim-fenced" >/dev/null 2>&1; then
+  fail "RUN_CLAIM_FENCE_RACE_ACCEPTED"
+fi
+unset -f e2e_artifact_writer_after_run_claim_hook
+run_claim_fence_identity="$(e2e_artifact_directory_identity "$run_claim_fence_root/e2e/artifacts")" \
+  || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+if [[ ! -d "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" \
+  || -n "$(find "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" -mindepth 1 -print -quit)" \
+  || ! e2e_artifact_writer_leases_quiescent_at_root "$run_claim_fence_root" "$run_claim_fence_identity" ]]; then
+  fail "RUN_CLAIM_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
+fi
+
 fenced_before_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-fenced-before.XXXXXX")" \
   || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$fenced_before_root/e2e" || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
