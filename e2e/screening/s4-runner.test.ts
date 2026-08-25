@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import worker from "../../apps/wire/src/index";
 import type {
   ScreeningCorpusExample,
@@ -26,6 +28,34 @@ import {
 const root = resolve(import.meta.dir, "../..");
 const STAGING_CONFIGURATION_DIGEST = `sha256:${"f".repeat(64)}`;
 const MOUNTED_SCREENING_BEARER = "s4-mounted-runner-bearer-0123456789";
+
+function runCaptured(args: string[], env: Record<string, string> = {}) {
+  const logDir = mkdtempSync(join(tmpdir(), "s4-runner-test-"));
+  const stdoutPath = join(logDir, "stdout.log");
+  const stderrPath = join(logDir, "stderr.log");
+  const child = spawnSync(
+    "bash",
+    [
+      "-c",
+      'stdout_path="$1"; stderr_path="$2"; shift 2; exec "$@" >>"$stdout_path" 2>>"$stderr_path"',
+      "s4-log-runner",
+      stdoutPath,
+      stderrPath,
+      process.execPath,
+      ...args,
+    ],
+    {
+      cwd: root,
+      env: { ...process.env, ...env },
+      timeout: 10000,
+    },
+  );
+  return {
+    exitCode: child.status ?? 1,
+    stdout: readFileSync(stdoutPath, "utf8"),
+    stderr: readFileSync(stderrPath, "utf8"),
+  };
+}
 
 function scoreBands(): ScreeningObservation["category_score_bands"] {
   return {
@@ -211,11 +241,10 @@ describe("S-4 frozen corpus", () => {
     const expectedIdentity = await deriveS4EvaluatedCorpusIdentity(
       corpus.filter((example) => example.source.availability === "available"),
     );
-    const { stdout, stderr, status: exitCode } = spawnSync(
-      process.execPath,
-      [resolve(import.meta.dir, "s4-runner.ts"), "self-test"],
-      { cwd: root, encoding: "utf8", env: process.env },
-    );
+    const { stdout, stderr, exitCode } = runCaptured([
+      resolve(import.meta.dir, "s4-runner.ts"),
+      "self-test",
+    ]);
     const records = stdout
       .split("\n")
       .filter((line) => line.length > 0)
@@ -361,11 +390,10 @@ describe("S-4 live-response bounds", () => {
   });
 
   test("PLANTED NEGATIVE: an invalid command emits exactly one typed terminal diagnostic", async () => {
-    const { stdout, stderr, status: exitCode } = spawnSync(
-      process.execPath,
-      [resolve(import.meta.dir, "s4-runner.ts"), "not-a-command"],
-      { cwd: root, encoding: "utf8", env: process.env },
-    );
+    const { stdout, stderr, exitCode } = runCaptured([
+      resolve(import.meta.dir, "s4-runner.ts"),
+      "not-a-command",
+    ]);
     const lines = stderr.split("\n").filter((line) => line.length > 0);
 
     expect(exitCode).toBe(64);

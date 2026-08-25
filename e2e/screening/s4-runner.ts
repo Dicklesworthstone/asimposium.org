@@ -1,3 +1,4 @@
+import { writeSync } from "node:fs";
 import {
   aggregateScreeningRun,
   assertScreeningRunIdentity,
@@ -246,7 +247,7 @@ export interface S4TerminalDiagnostic {
 }
 
 function emitLiveRecord(record: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify(record)}\n`);
+  writeSync(1, `${JSON.stringify(record)}\n`);
 }
 
 /** One typed, redacted terminal outcome instead of an Error stack or prose. */
@@ -264,7 +265,7 @@ export function s4TerminalDiagnostic(
 }
 
 function emitTerminalDiagnostic(error: unknown, exitCode: TerminalExitCode): void {
-  process.stderr.write(`${JSON.stringify(s4TerminalDiagnostic(error, exitCode))}\n`);
+  writeSync(2, `${JSON.stringify(s4TerminalDiagnostic(error, exitCode))}\n`);
 }
 
 function phaseFailure(error: unknown): RunnerFailure {
@@ -533,9 +534,10 @@ async function runSelfTest(): Promise<number> {
   });
   // Preserve the measured, typed evidence even if the never-green contract
   // itself catches a future report-shape regression.
-  process.stdout.write(`${partialRunOpsJsonl(report)}\n`);
+  writeSync(1, `${partialRunOpsJsonl(report)}\n`);
   assertPartialRunNotGreen(report);
-  process.stdout.write(
+  writeSync(
+    1,
     `${JSON.stringify({
       record_type: "screening-self-test-summary",
       suite: "s4-screening-oauth",
