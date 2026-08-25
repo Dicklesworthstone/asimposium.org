@@ -8,6 +8,7 @@ set -u -o pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
+trap 'e2e_close_artifact_writer_leases_on_exit' EXIT
 
 readonly SUITE="ci-pipeline"
 readonly USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"

@@ -37,6 +37,7 @@ unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
+trap 'e2e_close_artifact_writer_leases_on_exit' EXIT
 
 suite="smoke-agent"
 reproduce="scripts/smoke-agent.sh --self-test"

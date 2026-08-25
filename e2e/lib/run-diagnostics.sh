@@ -10,18 +10,27 @@ ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES=1048576
 readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES
 ASIMPOSIUM_E2E_ARTIFACT_MAINTENANCE_FENCE=".artifact-maintenance"
 readonly ASIMPOSIUM_E2E_ARTIFACT_MAINTENANCE_FENCE
+ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASES=".artifact-writer-leases"
+readonly ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASES
+ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASE_CLOSED="closed"
+readonly ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASE_CLOSED
 
 # Successful artifact namespace claims are process capabilities. Bash arrays
 # survive the command-substitution subshells used by the writer helpers, but
 # they are not exported to an independently started shell. Binding the claim to
 # the directory's device/inode rejects a replacement observed before a helper
-# publishes. This is not an atomic maintenance lease: pathname replacement can
-# still race the final append, so whole-root rotation remains forbidden.
+# publishes. Every claim also owns an append-only lifetime lease outside the
+# rotatable artifact root. Maintenance can therefore fence new claims and wait
+# for the matching root epoch to contain only closed leases before moving it.
 # Top-level declarations are global without Bash 4's non-portable `declare -g`.
 declare -a ASIMPOSIUM_E2E_CLAIM_ROOTS=()
 declare -a ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES=()
 declare -a ASIMPOSIUM_E2E_CLAIM_RUN_IDS=()
 declare -a ASIMPOSIUM_E2E_CLAIM_IDENTITIES=()
+declare -a ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS=()
+declare -a ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES=()
+ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH=""
+ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY=""
 
 e2e_ascii_lower() {
   LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
@@ -276,6 +285,220 @@ e2e_artifact_directory_identity() {
   printf '%s\n' "$identity"
 }
 
+e2e_artifact_writer_lease_epoch_name() {
+  local root_identity="$1"
+  local device
+  local inode
+
+  [[ "$root_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  device="${root_identity%%:*}"
+  inode="${root_identity##*:}"
+  printf 'dev-%s-ino-%s\n' "$device" "$inode"
+}
+
+e2e_artifact_writer_lease_root_at_root() {
+  local repository_root="$1"
+  local create_if_missing="${2:-0}"
+  local physical_repository_root
+  local physical_e2e_root
+  local lease_root
+  local physical_lease_root
+
+  physical_repository_root="$(e2e_physical_directory "$repository_root")" || return 1
+  physical_e2e_root="$(e2e_physical_directory "$physical_repository_root/e2e")" || return 1
+  [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
+  lease_root="$physical_e2e_root/$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASES"
+  if [[ -e "$lease_root" || -L "$lease_root" ]]; then
+    [[ -d "$lease_root" && ! -L "$lease_root" ]] || return 1
+  else
+    [[ "$create_if_missing" == "1" ]] || return 1
+    mkdir "$lease_root" 2>/dev/null || return 1
+  fi
+  physical_lease_root="$(e2e_physical_directory "$lease_root")" || return 1
+  [[ "$physical_lease_root" == "$lease_root" ]] || return 1
+  printf '%s\n' "$physical_lease_root"
+}
+
+e2e_artifact_writer_lease_epoch_at_root() {
+  local repository_root="$1"
+  local root_identity="$2"
+  local create_if_missing="${3:-0}"
+  local lease_root
+  local epoch_name
+  local epoch_directory
+  local physical_epoch_directory
+
+  lease_root="$(e2e_artifact_writer_lease_root_at_root "$repository_root" "$create_if_missing")" || return 1
+  epoch_name="$(e2e_artifact_writer_lease_epoch_name "$root_identity")" || return 1
+  epoch_directory="$lease_root/$epoch_name"
+  if [[ -e "$epoch_directory" || -L "$epoch_directory" ]]; then
+    [[ -d "$epoch_directory" && ! -L "$epoch_directory" ]] || return 1
+  else
+    [[ "$create_if_missing" == "1" ]] || return 1
+    mkdir "$epoch_directory" 2>/dev/null || return 1
+  fi
+  physical_epoch_directory="$(e2e_physical_directory "$epoch_directory")" || return 1
+  [[ "$physical_epoch_directory" == "$epoch_directory" ]] || return 1
+  printf '%s\n' "$physical_epoch_directory"
+}
+
+e2e_acquire_artifact_writer_lease_at_root() {
+  local repository_root="$1"
+  local root_identity="$2"
+  local epoch_directory
+  local lease_directory
+  local physical_lease_directory
+  local lease_identity
+  local opened_at
+  local counter=0
+
+  ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH=""
+  ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY=""
+  epoch_directory="$(e2e_artifact_writer_lease_epoch_at_root "$repository_root" "$root_identity" 1)" \
+    || return 1
+  opened_at="$(date -u +%s 2>/dev/null)" || return 1
+  [[ "$opened_at" =~ ^[0-9]+$ ]] || return 1
+
+  while ((counter < 100)); do
+    lease_directory="$epoch_directory/lease-$$-$opened_at-$counter-$RANDOM"
+    if mkdir "$lease_directory" 2>/dev/null; then
+      physical_lease_directory="$(e2e_physical_directory "$lease_directory")" || return 1
+      [[ "$physical_lease_directory" == "$lease_directory" ]] || return 1
+      lease_identity="$(e2e_artifact_directory_identity "$physical_lease_directory")" || return 1
+      ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH="$physical_lease_directory"
+      ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY="$lease_identity"
+      return 0
+    fi
+    counter=$((counter + 1))
+  done
+  return 1
+}
+
+e2e_artifact_writer_lease_is_open() {
+  local lease_directory="$1"
+  local expected_identity="$2"
+  local physical_lease_directory
+  local closed_marker
+
+  [[ -d "$lease_directory" && ! -L "$lease_directory" ]] || return 1
+  physical_lease_directory="$(e2e_physical_directory "$lease_directory")" || return 1
+  [[ "$physical_lease_directory" == "$lease_directory" ]] || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_lease_directory")" == "$expected_identity" ]] \
+    || return 1
+  closed_marker="$physical_lease_directory/$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASE_CLOSED"
+  [[ ! -e "$closed_marker" && ! -L "$closed_marker" ]]
+}
+
+e2e_close_artifact_writer_lease() {
+  local lease_directory="$1"
+  local expected_identity="$2"
+  local physical_lease_directory
+  local closed_marker
+  local physical_closed_marker
+
+  [[ -d "$lease_directory" && ! -L "$lease_directory" ]] || return 1
+  physical_lease_directory="$(e2e_physical_directory "$lease_directory")" || return 1
+  [[ "$physical_lease_directory" == "$lease_directory" ]] || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_lease_directory")" == "$expected_identity" ]] \
+    || return 1
+  closed_marker="$physical_lease_directory/$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASE_CLOSED"
+  if [[ -e "$closed_marker" || -L "$closed_marker" ]]; then
+    [[ -d "$closed_marker" && ! -L "$closed_marker" ]] || return 1
+  else
+    mkdir "$closed_marker" 2>/dev/null || return 1
+  fi
+  physical_closed_marker="$(e2e_physical_directory "$closed_marker")" || return 1
+  [[ "$physical_closed_marker" == "$closed_marker" ]]
+}
+
+e2e_close_artifact_writer_leases() {
+  local index
+  local close_status=0
+
+  for ((index = 0; index < ${#ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[@]}; index++)); do
+    e2e_close_artifact_writer_lease \
+      "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[$index]}" \
+      "${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[$index]-}" \
+      || close_status=1
+  done
+  return "$close_status"
+}
+
+e2e_close_artifact_writer_leases_on_exit() {
+  local original_status=$?
+
+  trap - EXIT
+  if ! e2e_close_artifact_writer_leases; then
+    [[ "$original_status" -ne 0 ]] || original_status=76
+  fi
+  exit "$original_status"
+}
+
+# Read-only maintenance census for one physical artifact-root epoch. It never
+# reclaims a lease based on PID, age, or mtime: a crash leaves an open lease and
+# therefore a permanent safe refusal until an operator explicitly adjudicates
+# the append-only record. Malformed nodes anywhere in the registry also fail
+# closed; valid open leases block only the root epoch they name.
+e2e_artifact_writer_leases_quiescent_at_root() (
+  local repository_root="$1"
+  local root_identity="$2"
+  local lease_root
+  local wanted_epoch
+  local epoch_directory
+  local epoch_name
+  local lease_directory
+  local lease_name
+  local child
+  local child_name
+  local -a epoch_entries=()
+  local -a lease_entries=()
+  local -a child_entries=()
+  local -a closed_entries=()
+
+  wanted_epoch="$(e2e_artifact_writer_lease_epoch_name "$root_identity")" || return 1
+  if ! lease_root="$(e2e_artifact_writer_lease_root_at_root "$repository_root")"; then
+    local physical_repository_root
+    local physical_e2e_root
+    physical_repository_root="$(e2e_physical_directory "$repository_root")" || return 1
+    physical_e2e_root="$(e2e_physical_directory "$physical_repository_root/e2e")" || return 1
+    [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
+    [[ ! -e "$physical_e2e_root/$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASES" \
+      && ! -L "$physical_e2e_root/$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASES" ]]
+    return
+  fi
+
+  shopt -s nullglob dotglob
+  epoch_entries=("$lease_root"/*)
+  for epoch_directory in "${epoch_entries[@]}"; do
+    epoch_name="${epoch_directory##*/}"
+    [[ "$epoch_name" =~ ^dev-[0-9]+-ino-[0-9]+$ ]] || return 1
+    [[ -d "$epoch_directory" && ! -L "$epoch_directory" ]] || return 1
+    [[ "$(e2e_physical_directory "$epoch_directory")" == "$epoch_directory" ]] || return 1
+
+    lease_entries=("$epoch_directory"/*)
+    for lease_directory in "${lease_entries[@]}"; do
+      lease_name="${lease_directory##*/}"
+      [[ "$lease_name" =~ ^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$ ]] || return 1
+      [[ -d "$lease_directory" && ! -L "$lease_directory" ]] || return 1
+      [[ "$(e2e_physical_directory "$lease_directory")" == "$lease_directory" ]] || return 1
+
+      child_entries=("$lease_directory"/*)
+      if ((${#child_entries[@]} == 0)); then
+        [[ "$epoch_name" != "$wanted_epoch" ]] || return 1
+        continue
+      fi
+      ((${#child_entries[@]} == 1)) || return 1
+      child="${child_entries[0]}"
+      child_name="${child##*/}"
+      [[ "$child_name" == "$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASE_CLOSED" ]] || return 1
+      [[ -d "$child" && ! -L "$child" ]] || return 1
+      [[ "$(e2e_physical_directory "$child")" == "$child" ]] || return 1
+      closed_entries=("$child"/*)
+      ((${#closed_entries[@]} == 0)) || return 1
+    done
+  done
+)
+
 e2e_artifact_maintenance_absent_at_root() {
   local repository_root="$1"
   local physical_repository_root
@@ -303,7 +526,10 @@ e2e_artifact_claim_matches() {
       && "${ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES[$index]}" == "$root_identity" \
       && "${ASIMPOSIUM_E2E_CLAIM_RUN_IDS[$index]}" == "$run_id" \
       && "${ASIMPOSIUM_E2E_CLAIM_IDENTITIES[$index]}" == "$identity" ]]; then
-      return 0
+      e2e_artifact_writer_lease_is_open \
+        "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[$index]-}" \
+        "${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[$index]-}" \
+        && return 0
     fi
   done
   return 1
@@ -345,6 +571,8 @@ e2e_claim_artifact_run_at_root() {
   local artifact_directory
   local physical_artifact_directory
   local artifact_identity
+  local lease_directory
+  local lease_identity
 
   e2e_validate_run_id "$run_id" || return 1
   e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
@@ -352,19 +580,48 @@ e2e_claim_artifact_run_at_root() {
   root_identity="$(e2e_artifact_directory_identity "$physical_artifacts_root")" || return 1
   artifact_directory="$physical_artifacts_root/$run_id"
   [[ ! -e "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
-  mkdir "$artifact_directory" 2>/dev/null || return 1
-  physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
-  [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
-  artifact_identity="$(e2e_artifact_directory_identity "$physical_artifact_directory")" || return 1
-  # Close the claim/fence ordering window before the caller starts product
-  # work. If maintenance won after the first check, leave the empty namespace
-  # retained and refuse to mint a writer capability for it.
-  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
-  [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root")" == "$root_identity" ]] || return 1
+  e2e_acquire_artifact_writer_lease_at_root "$repository_root" "$root_identity" || return 1
+  lease_directory="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH"
+  lease_identity="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY"
+
+  # The lease is visible before the exclusive run claim. If maintenance won
+  # the fence race, close the lease without doing product work. If this writer
+  # won, maintenance observes the open matching-epoch lease and cannot move the
+  # artifact root until the entry point marks it closed after child reaping.
+  if ! e2e_artifact_maintenance_absent_at_root "$repository_root" \
+    || [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root" 2>/dev/null || true)" != "$root_identity" ]] \
+    || ! e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity"; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! mkdir "$artifact_directory" 2>/dev/null; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+  physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  if [[ "$physical_artifact_directory" != "$physical_artifacts_root/$run_id" ]]; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+  artifact_identity="$(e2e_artifact_directory_identity "$physical_artifact_directory")" || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  if ! e2e_artifact_maintenance_absent_at_root "$repository_root" \
+    || [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root" 2>/dev/null || true)" != "$root_identity" ]] \
+    || ! e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity"; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
   ASIMPOSIUM_E2E_CLAIM_ROOTS+=("$physical_artifacts_root")
   ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES+=("$root_identity")
   ASIMPOSIUM_E2E_CLAIM_RUN_IDS+=("$run_id")
   ASIMPOSIUM_E2E_CLAIM_IDENTITIES+=("$artifact_identity")
+  ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS+=("$lease_directory")
+  ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES+=("$lease_identity")
 }
 
 e2e_write_artifact_diagnostic_at_root() {
@@ -386,7 +643,8 @@ e2e_write_artifact_diagnostic_at_root() {
     return 1
   fi
 
-  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  [[ "$(e2e_artifact_directory_at_root "$repository_root" "$run_id" 2>/dev/null || true)" \
+    == "$physical_artifact_directory" ]] || return 1
   e2e_format_diagnostic "$suite" "$started_ms" "$status" "$code" "$reproduce" >> "$diagnostic_path" 2>/dev/null || return 1
   printf 'e2e/artifacts/%s/diagnostics.jsonl\n' "$run_id"
 }
@@ -412,7 +670,8 @@ e2e_append_artifact_jsonl_at_root() {
   if [[ -e "$artifact_path" && ! -f "$artifact_path" ]]; then
     return 1
   fi
-  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  [[ "$(e2e_artifact_directory_at_root "$repository_root" "$run_id" 2>/dev/null || true)" \
+    == "$physical_artifact_directory" ]] || return 1
   printf '%s\n' "$record" >> "$artifact_path" 2>/dev/null || return 1
   printf 'e2e/artifacts/%s/%s\n' "$run_id" "$file_name"
 }

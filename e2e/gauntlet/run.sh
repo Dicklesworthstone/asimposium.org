@@ -4,6 +4,7 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
+trap 'e2e_close_artifact_writer_leases_on_exit' EXIT
 
 suite="cold-agent-gauntlet"
 reproduce="bash e2e/gauntlet/run.sh"
