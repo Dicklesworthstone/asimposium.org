@@ -37,11 +37,18 @@ export type PublicLedgerProblemId = z.infer<typeof PublicLedgerProblemIdSchema>;
  * `CANONICAL_UTC_TIMESTAMP`): an exact canonical UTC instant at millisecond
  * precision. Digits and delimiters only — no markdown metacharacters.
  */
-const PROBLEM_INDEX_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const PROBLEM_INDEX_TIMESTAMP_PATTERN =
+  /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
+
+function isRealCanonicalUtcInstant(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isSafeInteger(parsed) && new Date(parsed).toISOString() === value;
+}
 
 const ProblemIndexTimestampSchema = z
   .string()
-  .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp");
+  .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp")
+  .refine(isRealCanonicalUtcInstant, "invalid real canonical UTC instant");
 
 export const ProblemIndexEntrySchema = z
   .object({

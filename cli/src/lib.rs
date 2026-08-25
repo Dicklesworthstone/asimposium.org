@@ -92,8 +92,12 @@ fn validate_origin(origin: &str) -> Result<&str, String> {
         || authority.contains('/')
         || authority.contains('?')
         || authority.contains('#')
+        || authority.contains('@')
     {
-        return Err("origin must contain only an https authority with no trailing slash".to_string());
+        return Err(
+            "origin must contain only an https authority with no user information or trailing slash"
+                .to_string(),
+        );
     }
     let parsed = Url::parse(origin).map_err(|_| "origin must be a valid https URL".to_string())?;
     if parsed.scheme() != "https" || parsed.host().is_none() {
@@ -316,6 +320,7 @@ mod tests {
     fn resolve_origin_rejects_authority_confusion_and_non_origin_components() {
         for bad in [
             "https://user@example.test",
+            "https://@example.test",
             "https://example.test/path",
             "https://example.test/.",
             "https://example.test/%2e",

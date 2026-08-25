@@ -166,6 +166,13 @@ test("every contract-valid entry has an unambiguous bounded markdown row", () =>
     updated_at: "2026-08-14T00:00:00.000Z",
   };
   expect(ProblemIndexEntrySchema.safeParse(canonical).success).toBe(true);
+  expect(
+    ProblemIndexEntrySchema.safeParse({
+      ...canonical,
+      created_at: "2024-02-29T23:59:59.999Z",
+      updated_at: "2024-02-29T23:59:59.999Z",
+    }).success,
+  ).toBe(true);
   const hostileIds = [
     "P-X\n- `P-FORGED` — forged row",
     "P-X\rsecond row",
@@ -185,6 +192,10 @@ test("every contract-valid entry has an unambiguous bounded markdown row", () =>
   const hostileTimestamps = [
     "2026-08-14T00:00:00Z",
     "2026-08-14T00:00:00.000+00:00",
+    "2026-99-14T00:00:00.000Z",
+    "2026-08-14T24:00:00.000Z",
+    "2026-02-30T00:00:00.000Z",
+    "2025-02-29T00:00:00.000Z",
     "not-a-timestamp",
     "2026-08-14T00:00:00.000Z\nforged",
     "x",
