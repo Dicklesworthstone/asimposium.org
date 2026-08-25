@@ -156,14 +156,14 @@ describe("buildGateRecord", () => {
         exitCode: 78,
         durationMs: 0,
         repro: "bun run --filter @asimposium/web test:security",
-        blockedOn: "asimposiumorg-233",
+        blockedOn: "external: synthetic fixture dependency",
         note: "No mocks of D1 or R2 are permitted as a substitute.",
       },
       RUNTIME,
     );
     expect(record.status).toBe("not_implemented");
     expect(record.exitCode).not.toBe(0);
-    expect(record.blockedOn).toBe("asimposiumorg-233");
+    expect(record.blockedOn).toBe("external: synthetic fixture dependency");
   });
 
   test("scrubs secret-shaped content that reaches a record field", () => {

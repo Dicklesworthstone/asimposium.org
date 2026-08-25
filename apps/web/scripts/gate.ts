@@ -9,7 +9,7 @@
  * status, and a reproduction command.
  *
  * A suite this package owes but cannot yet honestly run exits non-zero with
- * `status:"not_implemented"` and the bead that must land first. It is excluded
+ * `status:"not_implemented"` and the named unfinished work that must land. It is excluded
  * from the default `bun run test` aggregate: a red gate that nothing can turn
  * green is noise, and a green gate that ran nothing is a lie. `test:security`
  * tells the truth when asked directly.
@@ -94,8 +94,9 @@ const GATES: Record<string, GateSpec> = {
   security: {
     kind: "not_implemented",
     tool: "none",
-    blockedOn: "asimposiumorg-233",
-    note: "Web security suite (CSP, XSS corpus, cache-leak paired tests — Fable §14.3) needs rendered pages and a session; W8/W10.",
+    blockedOn:
+      "asimposiumorg-fjp (W8.3), asimposiumorg-3zn (W10.8), and asimposiumorg-mbp (W8.1)",
+    note: "The rendered problem page, paired-principal cache-leak E2E, and browser-facing CSP/XSS corpus are not implemented yet.",
   },
 };
 

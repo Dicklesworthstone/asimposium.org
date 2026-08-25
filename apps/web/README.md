@@ -40,7 +40,7 @@ bun run lint             # eslint, --max-warnings 0
 bun run test             # unit + contract
 bun run test:unit        # validator rules, each proven able to fail; redaction layer
 bun run test:contract    # the same rules pointed at this package's real tree
-bun run test:security    # owed, unimplemented, exits 2 with its blocker
+bun run test:security    # owed, unimplemented, exits 78 with current blockers
 bun run build            # next build
 ```
 
@@ -63,10 +63,11 @@ stderr is not evidence. Record fields pass through the redaction layer in
 env assignments, absolute paths), which is unit-tested against planted
 secret-shaped inputs rather than trusted.
 
-`test:security` exists and **exits 2** with `status:"not_implemented"`, naming
-the bead that unblocks it. It is excluded from the `test` aggregate on purpose:
-a red gate nothing can turn green is noise, and a green gate that ran nothing is
-a lie. Asked directly, it tells the truth.
+`test:security` exists and **exits 78** (`EX_CONFIG`) with
+`status:"not_implemented"`. Its diagnostic names the unfinished rendered problem page (W8.3),
+paired-principal cache-leak E2E (W10.8), and browser-facing CSP/XSS corpus (W8.1). It is excluded
+from the `test` aggregate on purpose: a red gate nothing can turn green is noise, and a green gate
+that ran nothing is a lie. Asked directly, it tells the truth.
 
 ## Environment
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { GATE_PREFIX, type GateRecord } from "../../scripts/gate-record.ts";
@@ -15,12 +16,43 @@ import { GATE_PREFIX, type GateRecord } from "../../scripts/gate-record.ts";
  * These spawn the real gate runner. Nothing is mocked.
  */
 const PACKAGE_DIR = dirname(dirname(import.meta.dir));
+const BEADS_LEDGER = join(PACKAGE_DIR, "..", "..", ".beads", "issues.jsonl");
+const WEB_SECURITY_BLOCKERS = [
+  "asimposiumorg-fjp",
+  "asimposiumorg-3zn",
+  "asimposiumorg-mbp",
+] as const;
+
+function beadStatuses(): ReadonlyMap<string, string> {
+  const statuses = new Map<string, string>();
+  for (const line of readFileSync(BEADS_LEDGER, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    const issue = JSON.parse(line) as { id?: unknown; status?: unknown };
+    if (typeof issue.id === "string" && typeof issue.status === "string") {
+      statuses.set(issue.id, issue.status);
+    }
+  }
+  return statuses;
+}
 
 interface GateRun {
   exitCode: number;
   stdout: string;
   stderr: string;
   record: GateRecord | undefined;
+}
+
+function parseGateRecord(stdout: string): GateRecord | undefined {
+  const lines = stdout
+    .split("\n")
+    .filter((entry) => entry.startsWith(`${GATE_PREFIX} `));
+  if (lines.length > 1) {
+    throw new Error(`gate emitted ${lines.length} ${GATE_PREFIX} records; expected at most one`);
+  }
+  const line = lines[0];
+  return line === undefined
+    ? undefined
+    : (JSON.parse(line.slice(GATE_PREFIX.length + 1)) as GateRecord);
 }
 
 async function runGate(...args: string[]): Promise<GateRun> {
@@ -34,15 +66,11 @@ async function runGate(...args: string[]): Promise<GateRun> {
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
-  const line = stdout.split("\n").find((entry) => entry.startsWith(`${GATE_PREFIX} `));
   return {
     exitCode: await child.exited,
     stdout,
     stderr,
-    record:
-      line === undefined
-        ? undefined
-        : (JSON.parse(line.slice(GATE_PREFIX.length + 1)) as GateRecord),
+    record: parseGateRecord(stdout),
   };
 }
 
@@ -53,15 +81,37 @@ describe("blocked gates are distinguishable from failures", () => {
     expect(run.exitCode).toBe(78);
     expect(run.record?.status).toBe("not_implemented");
     expect(run.record?.exitCode).toBe(78);
-    expect(run.record?.blockedOn).toBe("asimposiumorg-233");
+    expect(run.record?.blockedOn).toBe(
+      "asimposiumorg-fjp (W8.3), asimposiumorg-3zn (W10.8), and asimposiumorg-mbp (W8.1)",
+    );
+    expect((run.record?.blockedOn ?? "").length).toBeLessThanOrEqual(400);
     // 78 is EX_CONFIG. 1 and 2 belong to tools reporting real findings.
     expect([0, 1, 2]).not.toContain(run.exitCode);
   });
 
   test("the blocker also reaches stderr, not only the machine record", async () => {
     const run = await runGate("security");
-    expect(run.stderr).toContain("asimposiumorg-233");
+    for (const blocker of WEB_SECURITY_BLOCKERS) expect(run.stderr).toContain(blocker);
     expect(run.stderr).toContain("no implementation");
+  });
+
+  test("every named Web security blocker exists and remains unfinished", async () => {
+    const run = await runGate("security");
+    const statuses = beadStatuses();
+    const named =
+      run.record?.blockedOn?.match(/\basimposiumorg-[a-z0-9]+(?:\.[a-z0-9]+)*\b/g) ?? [];
+
+    expect([...named]).toEqual([...WEB_SECURITY_BLOCKERS]);
+    for (const blocker of named) {
+      expect(statuses.has(blocker)).toBe(true);
+      const status = statuses.get(blocker);
+      expect(status === "open" || status === "in_progress").toBe(true);
+    }
+  });
+
+  test("the parser refuses duplicate or conflicting gate records", () => {
+    const duplicate = `${GATE_PREFIX} {}\n${GATE_PREFIX} {"status":"pass"}\n`;
+    expect(() => parseGateRecord(duplicate)).toThrow("expected at most one");
   });
 
   test("a passing suite still exits 0", async () => {
