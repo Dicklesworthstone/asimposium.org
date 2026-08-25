@@ -2462,6 +2462,7 @@ self_test() {
     fi
     wait "$pid" 2>/dev/null || true
     unregister_child "$pid"
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$name")\",\"status\":\"pass\",\"detail\":\"self-test\"}"
     return 0
   }
 
