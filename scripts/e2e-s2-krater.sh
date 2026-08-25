@@ -6124,6 +6124,7 @@ run_s2_shell_regression_test() {
     child_run_id="s2c-$(random_hex 24)" || return 1
     s2_prepare_inherited_child_run "${child_run_id}" || return 1
     child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
+    s2_begin_raw_inherited_child_owner "${child_run_id}" "${child_run_identity}" || return 1
     env \
       S2_RUN_ID="${child_run_id}" \
       S2_INHERIT_WRITER_LEASE=1 \
@@ -6134,8 +6135,11 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=parent-loss-child \
       S2_PARENT_LOSS_RECORD="${parent_loss_record}" \
-      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+      bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
+        "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     parent_loss_child=$!
+    s2_register_raw_inherited_child "${parent_loss_child}" || return 1
     if wait "${parent_loss_child}" 2>/dev/null; then
       parent_loss_status=0
     else
@@ -6173,6 +6177,7 @@ run_s2_shell_regression_test() {
     read -r watchdog_state watchdog_health_pid < <(tail -n 1 "${supervisor_watchdog_health}") || return 1
     [[ "${watchdog_state}" == "owner-lost" && \
       "${watchdog_health_pid}" == "${supervisor_watchdog_pid}" ]] || return 1
+    cleanup_raw_inherited_child || return 1
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"planted-controller-loss-terminates-its-own-pinned-group-without-parent-pid-fallback","reproduce":"S2_SHELL_REGRESSION_TEST=parent-loss scripts/e2e-s2-krater.sh"}'
     return 0
   fi
