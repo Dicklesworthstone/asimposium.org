@@ -88,16 +88,15 @@ fn validate_origin(origin: &str) -> Result<&str, String> {
     let authority = origin
         .strip_prefix("https://")
         .ok_or_else(|| "origin must be an https URL with a non-empty host".to_string())?;
+    if authority.contains('@') {
+        return Err("origin must not contain user information".to_string());
+    }
     if authority.is_empty()
         || authority.contains('/')
         || authority.contains('?')
         || authority.contains('#')
-        || authority.contains('@')
     {
-        return Err(
-            "origin must contain only an https authority with no user information or trailing slash"
-                .to_string(),
-        );
+        return Err("origin must contain only an https authority with no trailing slash".to_string());
     }
     let parsed = Url::parse(origin).map_err(|_| "origin must be a valid https URL".to_string())?;
     if parsed.scheme() != "https" || parsed.host().is_none() {
