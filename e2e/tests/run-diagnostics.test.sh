@@ -5,6 +5,32 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
 
+# Race fixtures override the already-sourced checker only inside this test
+# process. With injection disabled this is the production predicate verbatim;
+# a selected invocation plants the fence immediately before that check. This
+# exercises the post-lease and post-run-claim checks without exposing a
+# production callback that an inherited Bash function could trigger.
+e2e_test_maintenance_check_count=0
+e2e_test_fence_on_maintenance_check=0
+e2e_artifact_maintenance_absent_at_root() {
+  local checked_repository_root="$1"
+  local physical_repository_root
+  local physical_e2e_root
+  local fence
+
+  physical_repository_root="$(e2e_physical_directory "$checked_repository_root")" || return 1
+  physical_e2e_root="$(e2e_physical_directory "$physical_repository_root/e2e")" || return 1
+  [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
+  fence="$physical_e2e_root/$ASIMPOSIUM_E2E_ARTIFACT_MAINTENANCE_FENCE"
+  if ((e2e_test_fence_on_maintenance_check > 0)); then
+    e2e_test_maintenance_check_count=$((e2e_test_maintenance_check_count + 1))
+    if ((e2e_test_maintenance_check_count == e2e_test_fence_on_maintenance_check)); then
+      : > "$fence" || return 1
+    fi
+  fi
+  [[ ! -e "$fence" && ! -L "$fence" ]]
+}
+
 suite="run-diagnostics-unit"
 started_ms="$(e2e_now_ms)"
 reproduce="bash e2e/tests/run-diagnostics.test.sh"
@@ -91,13 +117,12 @@ fi
 lease_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-lease-fence.XXXXXX")" \
   || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$lease_fence_root/e2e" || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
-e2e_artifact_writer_after_lease_acquired_hook() {
-  : > "$1/e2e/.artifact-maintenance"
-}
+e2e_test_maintenance_check_count=0
+e2e_test_fence_on_maintenance_check=2
 if e2e_claim_artifact_run_at_root "$lease_fence_root" "lease-fenced-run" >/dev/null 2>&1; then
   fail "LEASE_FENCE_RACE_ACCEPTED"
 fi
-unset -f e2e_artifact_writer_after_lease_acquired_hook
+e2e_test_fence_on_maintenance_check=0
 lease_fence_identity="$(e2e_artifact_directory_identity "$lease_fence_root/e2e/artifacts")" \
   || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
 if [[ -e "$lease_fence_root/e2e/artifacts/lease-fenced-run" ]] \
@@ -108,18 +133,18 @@ fi
 run_claim_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-run-claim-fence.XXXXXX")" \
   || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$run_claim_fence_root/e2e" || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
-e2e_artifact_writer_after_run_claim_hook() {
-  : > "$1/e2e/.artifact-maintenance"
-}
+e2e_test_maintenance_check_count=0
+e2e_test_fence_on_maintenance_check=3
 if e2e_claim_artifact_run_at_root "$run_claim_fence_root" "run-claim-fenced" >/dev/null 2>&1; then
   fail "RUN_CLAIM_FENCE_RACE_ACCEPTED"
 fi
-unset -f e2e_artifact_writer_after_run_claim_hook
+e2e_test_fence_on_maintenance_check=0
 run_claim_fence_identity="$(e2e_artifact_directory_identity "$run_claim_fence_root/e2e/artifacts")" \
   || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
 if [[ ! -d "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" \
-  || -n "$(find "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" -mindepth 1 -print -quit)" \
-  || ! e2e_artifact_writer_leases_quiescent_at_root "$run_claim_fence_root" "$run_claim_fence_identity" ]]; then
+  || -n "$(find "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" -mindepth 1 -print -quit)" ]] \
+  || ! e2e_artifact_writer_leases_quiescent_at_root \
+    "$run_claim_fence_root" "$run_claim_fence_identity"; then
   fail "RUN_CLAIM_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 

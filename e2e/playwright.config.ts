@@ -19,7 +19,13 @@ const leaseIdentity = process.env.ASIMPOSIUM_PLAYWRIGHT_LEASE_IDENTITY;
 const directDirectoryIdentity = (path: string): string | undefined => {
   try {
     const stat = lstatSync(path, { bigint: true });
-    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(path) !== path) return undefined;
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      realpathSync(path) !== path
+    ) {
+      return undefined;
+    }
     return `${stat.dev}:${stat.ino}`;
   } catch {
     return undefined;
@@ -91,8 +97,8 @@ if (
   throw new Error("The Playwright artifact writer lease is not open.");
 }
 
-const artifactDirectory = `artifacts/${runId}/playwright`;
-if (anyNodeExists(join(runDirectory, "playwright"))) {
+const artifactDirectory = join(runDirectory, "playwright");
+if (anyNodeExists(artifactDirectory)) {
   throw new Error("The Playwright output child already exists; a fresh claim is required.");
 }
 

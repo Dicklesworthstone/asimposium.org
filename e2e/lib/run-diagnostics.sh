@@ -661,13 +661,6 @@ e2e_claim_artifact_run_at_root() {
   e2e_acquire_artifact_writer_lease_at_root "$repository_root" "$root_identity" || return 1
   lease_directory="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH"
   lease_identity="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY"
-  if declare -F e2e_artifact_writer_after_lease_acquired_hook >/dev/null 2>&1; then
-    e2e_artifact_writer_after_lease_acquired_hook \
-      "$repository_root" "$root_identity" "$lease_directory" || {
-      e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
-      return 1
-    }
-  fi
 
   # The lease is visible before the exclusive run claim. If maintenance won
   # the fence race, close the lease without doing product work. If this writer
@@ -682,13 +675,6 @@ e2e_claim_artifact_run_at_root() {
   if ! mkdir "$artifact_directory" 2>/dev/null; then
     e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
     return 1
-  fi
-  if declare -F e2e_artifact_writer_after_run_claim_hook >/dev/null 2>&1; then
-    e2e_artifact_writer_after_run_claim_hook \
-      "$repository_root" "$root_identity" "$artifact_directory" || {
-      e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
-      return 1
-    }
   fi
   physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || {
     e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true

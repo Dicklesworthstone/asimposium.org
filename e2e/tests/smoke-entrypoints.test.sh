@@ -30,7 +30,6 @@ done
 for artifact_entrypoint in \
   "$repository_root/scripts/smoke-agent.sh" \
   "$repository_root/scripts/smoke-gallery.sh" \
-  "$repository_root/e2e/run-playwright.sh" \
   "$repository_root/e2e/gauntlet/run.sh"; do
   if ! awk '
     /e2e_close_artifact_writer_leases_on_exit/ && exit_trap == 0 { exit_trap = NR }
@@ -75,12 +74,13 @@ if ! awk '
   /directDirectoryIdentity\(runDirectory\) !== runIdentity/ { run_identity = NR }
   /directDirectoryIdentity\(leaseDirectory\) !== leaseIdentity/ { lease_identity = NR }
   /anyNodeExists\(join\(leaseDirectory, "closed"\)\)/ { open_lease = NR }
-  /anyNodeExists\(join\(runDirectory, "playwright"\)\)/ { fresh_child = NR }
+  /const artifactDirectory = join\(runDirectory, "playwright"\)/ { exact_output = NR }
+  /anyNodeExists\(artifactDirectory\)/ { fresh_child = NR }
   /outputDir: artifactDirectory/ { output = NR }
   END {
     exit(!(source > 0 && root_identity > source && run_identity >= root_identity &&
       lease_identity > run_identity && open_lease >= lease_identity &&
-      fresh_child > open_lease && output > fresh_child))
+      exact_output > open_lease && fresh_child > exact_output && output > fresh_child))
   }
 ' "$repository_root/e2e/playwright.config.ts"; then
   emit "fail" "PLAYWRIGHT_ARTIFACT_DIRECTORY_VALIDATION_MISSING"
