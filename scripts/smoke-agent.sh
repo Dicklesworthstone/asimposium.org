@@ -403,7 +403,7 @@ if [[ "$split_index_status" != "200" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PROBLEM_INDEX_HTTP_FAILURE" "$reproduce"
   exit 87
 fi
-if [[ "${split_index_content_type,,}" != "application/json; charset=utf-8" ]]; then
+if [[ "$(printf '%s' "$split_index_content_type" | e2e_ascii_lower)" != "application/json; charset=utf-8" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PROBLEM_INDEX_MEDIA_TYPE_INVALID" "$reproduce"
   exit 87
 fi
@@ -457,7 +457,7 @@ workshop_anonymous_content_type="${workshop_anonymous_meta#*$'\t'}"
 }
 case "$workshop_anonymous_status" in
   401)
-    if [[ "${workshop_anonymous_content_type,,}" != "application/problem+json; charset=utf-8" ]] \
+    if [[ "$(printf '%s' "$workshop_anonymous_content_type" | e2e_ascii_lower)" != "application/problem+json; charset=utf-8" ]] \
       || ! printf '%s' "$workshop_anonymous_body" | smoke_agent_check_unauthorized_problem 2>/dev/null; then
       e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SPONSOR_AUTH_BOUNDARY_UNPROVEN" "$reproduce"
       exit 87

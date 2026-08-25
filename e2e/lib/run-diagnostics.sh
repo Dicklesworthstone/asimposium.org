@@ -20,13 +20,17 @@ declare -a ASIMPOSIUM_E2E_CLAIM_ROOTS=()
 declare -a ASIMPOSIUM_E2E_CLAIM_RUN_IDS=()
 declare -a ASIMPOSIUM_E2E_CLAIM_IDENTITIES=()
 
+e2e_ascii_lower() {
+  LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
+}
+
 e2e_curl_header_preserves_user_agent() {
   local header_value="$1"
 
   header_value="${header_value#"${header_value%%[![:space:]]*}"}"
   [[ "$header_value" != @* ]] || return 1
   [[ "$header_value" != *$'\n'* && "$header_value" != *$'\r'* ]] || return 1
-  [[ ! "${header_value,,}" =~ ^user-agent[[:space:]]*[:\;] ]]
+  [[ ! "$header_value" =~ ^[Uu][Ss][Ee][Rr]-[Aa][Gg][Ee][Nn][Tt][[:space:]]*[:\;] ]]
 }
 
 e2e_curl_policy_arguments_valid() {
@@ -185,7 +189,7 @@ e2e_validate_staging_origin() {
   # and a DNS-equivalent trailing dot.
   hostname="${authority%%:*}"
   hostname="${hostname%.}"
-  hostname="${hostname,,}"
+  hostname="$(printf '%s' "$hostname" | e2e_ascii_lower)" || return 1
   case "$hostname" in
     a.asimposium.org | artifacts.asimposium.org | asimposium.org | www.asimposium.org)
       return 1

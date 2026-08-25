@@ -2709,7 +2709,7 @@ self_test() {
   SIGNAL_TERM_FAILURE_PLANT=1
   SIGNAL_KILL_FAILURE_PLANT=1
   run_bounded 10 "$bounded_out" - \
-    bash -c 'trap "exit 0" TERM; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
+    bash -c 'trap "exit 0" TERM; while :; do sleep 30; done' \
     || reaper_child_before_ack_status=$?
   reaper_child_before_ack_records="${#CHILD_PIDS[@]}"
   SIGNAL_TERM_FAILURE_PLANT=0
