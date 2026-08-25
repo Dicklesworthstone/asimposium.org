@@ -92,6 +92,8 @@ fn unknown_command_exits_nonzero_with_a_useful_stderr_hint() {
     );
     let stderr = String::from_utf8_lossy(&invocation.output.stderr);
 
+    assert_eq!(invocation.output.status.code(), Some(2), "{context}");
+    assert!(invocation.output.stdout.is_empty(), "{context}");
     assert!(
         stderr.contains("unrecognized subcommand 'unknown-command'"),
         "{context}"

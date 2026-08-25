@@ -166,6 +166,16 @@ pub enum FetchError {
     InvalidUtf8,
 }
 
+/// Fully rendered result of one CLI invocation. Keeping this boundary pure
+/// makes it possible to prove that failed reads cannot leak partial bodies to
+/// stdout before `main` writes a byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 fn agent_with_timeout(timeout: std::time::Duration) -> Agent {
     AgentBuilder::new()
         .user_agent(OUTBOUND_USER_AGENT)
@@ -214,8 +224,45 @@ fn fetch_text_with_agent(agent: &Agent, url: &str) -> Result<Fetched, FetchError
     Ok(Fetched { status, body })
 }
 
+/// Bound the entire blocking ureq operation, including DNS resolution.
+///
+/// ureq 2.x applies its request deadline after the standard resolver returns,
+/// and the resolver API cannot cancel `ToSocketAddrs`. Running the complete
+/// request and capped body read on a private worker gives this one-shot client
+/// an actual caller-visible deadline. On timeout no worker-owned response
+/// bytes cross the channel; the CLI reports the typed network failure and
+/// exits, which retires any still-blocked resolver thread with the process.
+fn fetch_text_with_deadline(
+    agent: Agent,
+    url: String,
+    timeout: std::time::Duration,
+) -> Result<Fetched, FetchError> {
+    let started = std::time::Instant::now();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("asimp-read".to_string())
+        .spawn(move || {
+            let _ = sender.send(fetch_text_with_agent(&agent, &url));
+        })
+        .map_err(|_| FetchError::Network)?;
+
+    match receiver.recv_timeout(timeout.saturating_sub(started.elapsed())) {
+        Ok(result) => result,
+        Err(
+            std::sync::mpsc::RecvTimeoutError::Timeout
+            | std::sync::mpsc::RecvTimeoutError::Disconnected,
+        ) => Err(FetchError::Network),
+    }
+}
+
 pub fn fetch_text(url: &str) -> Result<Fetched, FetchError> {
-    fetch_text_with_agent(&agent(), url)
+    let started = std::time::Instant::now();
+    let agent = agent();
+    fetch_text_with_deadline(
+        agent,
+        url.to_string(),
+        READ_TIMEOUT.saturating_sub(started.elapsed()),
+    )
 }
 
 /// The path for a `problems` invocation.
@@ -224,6 +271,75 @@ pub fn problems_path(json: bool) -> &'static str {
         "/problems.json"
     } else {
         "/problems.md"
+    }
+}
+
+/// Resolve one parsed invocation through an injected read seam and render its
+/// exact process-facing result. Production passes `fetch_text`; tests can
+/// inject a causal capped reader without opening a socket or mutating global
+/// environment state.
+pub fn run_cli_with_fetch(
+    cli: &Cli,
+    fetch: impl FnOnce(&str) -> Result<Fetched, FetchError>,
+) -> CliOutput {
+    let origin = match resolve_origin(cli.origin.as_ref()) {
+        Ok(origin) => origin,
+        Err(error) => {
+            return CliOutput {
+                exit_code: 2,
+                stdout: String::new(),
+                stderr: format!("asimp: {error}\n"),
+            };
+        }
+    };
+
+    let (path, label) = match &cli.command {
+        Command::Capabilities => ("/capabilities".to_string(), "/capabilities".to_string()),
+        Command::Problems { json } => {
+            let path = problems_path(*json).to_string();
+            let label = path.clone();
+            (path, label)
+        }
+        Command::Get { path } => (path.clone(), "GET request".to_string()),
+    };
+
+    let url = match build_url(&origin, &path) {
+        Ok(url) => url,
+        Err(error) => {
+            return CliOutput {
+                exit_code: 2,
+                stdout: String::new(),
+                stderr: format!("asimp: {error}\n"),
+            };
+        }
+    };
+
+    match fetch(&url) {
+        Ok(fetched) => CliOutput {
+            exit_code: 0,
+            stdout: fetched.body,
+            stderr: String::new(),
+        },
+        Err(FetchError::Status(status)) => CliOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("asimp: {label} returned HTTP {status}\n"),
+        },
+        Err(FetchError::Network) => CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: format!("asimp: {label} failed: network or response read error\n"),
+        },
+        Err(FetchError::InvalidUtf8) => CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: format!("asimp: {label} failed: response body is not valid UTF-8\n"),
+        },
+        Err(FetchError::BodyTooLarge { limit_bytes }) => CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: format!("asimp: {label} failed: response exceeds the {limit_bytes}-byte limit\n"),
+        },
     }
 }
 
@@ -438,6 +554,72 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "elapsed={elapsed:?}"
         );
+    }
+
+    #[test]
+    fn the_global_deadline_causally_bounds_a_stalled_dns_resolver() {
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(1);
+        let resolver = move |_: &str| {
+            entered_sender.send(()).unwrap();
+            thread::sleep(std::time::Duration::from_millis(200));
+            finished_sender.send(()).unwrap();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "planted resolver stall",
+            ))
+        };
+        let agent = AgentBuilder::new()
+            .resolver(resolver)
+            .timeout(std::time::Duration::from_secs(1))
+            .redirects(0)
+            .build();
+
+        let started = std::time::Instant::now();
+        let result = fetch_text_with_deadline(
+            agent,
+            "http://resolver-stall.invalid/read".to_string(),
+            std::time::Duration::from_millis(20),
+        );
+        let elapsed = started.elapsed();
+
+        entered_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the planted resolver must run");
+        assert!(matches!(result, Err(FetchError::Network)));
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
+        finished_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the planted resolver worker must retire");
+    }
+
+    #[test]
+    fn over_limit_bodies_never_cross_the_cli_stdout_boundary() {
+        for command in [
+            Command::Capabilities,
+            Command::Problems { json: true },
+            Command::Get {
+                path: "/protocol.md".to_string(),
+            },
+        ] {
+            let cli = Cli {
+                origin: Some("https://example.test".to_string()),
+                command,
+            };
+            let oversized = vec![b'x'; MAX_BODY_BYTES as usize + 1];
+            let output = run_cli_with_fetch(&cli, move |_| {
+                let body = read_capped(oversized.as_slice())?;
+                Ok(Fetched { status: 200, body })
+            });
+
+            assert_eq!(output.exit_code, 2);
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.contains("response exceeds the 8388608-byte limit"));
+            assert!(!output.stderr.contains("xxxx"));
+        }
     }
 
     #[test]
