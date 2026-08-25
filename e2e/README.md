@@ -40,7 +40,9 @@ Current scope:
   repository-local evidence destination. Missing inputs exit 78 as
   `REQUIRED_HARNESS_INPUTS_MISSING`, an external execution prerequisite; that result does not say
   whether provider resources are provisioned. Supplying configuration also is not proof: only the
-  completed live run and its validated schema-v4 evidence establish the cross-plane claims.
+  completed live run and its validated schema-v4 evidence establish the cross-plane claims. The
+  current revision remains red: its output is diagnostic only until the focused and aggregate
+  low-load RCH acceptance lanes pass.
 - `gauntlet/run.sh` and the direct `gauntlet/run-gauntlet.ts` entry both fail
   closed as `GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED` when a join-URL file is
   supplied. The adapters, transcript stage scanner, orchestrator, and strict
@@ -71,7 +73,7 @@ attempts cannot be blended. S-6 has a separate fixed contract: it requires
 `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and accepts neither
 of those command-line flags.
 
-No current-revision automated smoke, Playwright, or Cold-Agent Gauntlet product
+No current-revision automated smoke, Playwright, S-6 cross-plane, or Cold-Agent Gauntlet product
 flow has passed from these entry points yet.
 
 ## Device-enrollment staging runner

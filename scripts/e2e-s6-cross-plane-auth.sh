@@ -1142,7 +1142,7 @@ run_bounded() {
               }
               die "close-from unavailable" unless $fd_dir_found;
               POSIX::close($_) for grep { $_ > 2 } @fds;
-              exec {$ARGV[0]} @ARGV or die $!;
+              exec @ARGV or die $!;
             '"'"' -- "$@" >"$stdout_file"
           ) || command_status=$?
           if [[ -n "$child_status_plant" ]]; then command_status="$child_status_plant"; fi
@@ -2533,7 +2533,7 @@ self_test() {
   local bounded_status=0 bounded_start bounded_elapsed
   local bounded_out="${TMPDIR:-/tmp}/s6-bounded.$$"
   bounded_start="$(date +%s)"
-  run_bounded 1 "$bounded_out" - sleep 30 || bounded_status=$?
+  run_bounded 2 "$bounded_out" - sleep 30 || bounded_status=$?
   bounded_elapsed=$(( $(date +%s) - bounded_start ))
   check "run-bounded-times-out" "$bounded_status" "124"
 
@@ -2569,7 +2569,7 @@ self_test() {
   if [[ -n "$deadline_plant_dir" ]]; then
     deadline_ready="${deadline_plant_dir}/ready"
     deadline_term="${deadline_plant_dir}/term-observed"
-    run_bounded 1 "$bounded_out" - \
+    run_bounded 2 "$bounded_out" - \
       bash -c "trap 'printf term-observed > \"\$2\"; exit 0' TERM; printf ready > \"\$1\"; while :; do sleep 30; done" \
       _ "$deadline_ready" "$deadline_term" || deadline_status=$?
   fi
@@ -2588,7 +2588,7 @@ self_test() {
   resistant_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-resistant-plant.XXXXXX" 2>/dev/null)" || resistant_dir=""
   if [[ -n "$resistant_dir" ]]; then
     resistant_ready="${resistant_dir}/ready"
-    run_bounded 1 "$bounded_out" - \
+    run_bounded 2 "$bounded_out" - \
       bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _ || true; done' \
       _ "$resistant_ready" || resistant_status=$?
   fi
@@ -2605,7 +2605,7 @@ self_test() {
   clear_child_records
   local kill_failure_status=0 kill_failure_started=$SECONDS kill_failure_elapsed
   SIGNAL_KILL_FAILURE_PLANT=1
-  run_bounded 1 "$bounded_out" - sleep 30 || kill_failure_status=$?
+  run_bounded 2 "$bounded_out" - sleep 30 || kill_failure_status=$?
   kill_failure_elapsed=$((SECONDS - kill_failure_started))
   local kill_failure_records_after_bound="${#CHILD_PIDS[@]}"
   # Both reaps below target a TERM-resistant supervisor specifically to reach
@@ -3510,7 +3510,7 @@ self_test() {
   # the caller discards the output rather than greening on it.
   clear_child_records
   local liar_status=0
-  run_bounded 1 "$bounded_out" - \
+  run_bounded 2 "$bounded_out" - \
     bash -c 'printf "%s\n" "{\"suite\":\"s6-cross-plane-browser\",\"status\":\"pass\"}"; sleep 45' \
     || liar_status=$?
   check "convincing-output-then-timeout-is-not-success" "$liar_status" "124"
