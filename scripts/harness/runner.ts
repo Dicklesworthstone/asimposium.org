@@ -67,6 +67,8 @@ export const MAX_D1_ADAPTER_STATE_BYTES = 2 * 1024 * 1024;
  * worse failure.
  */
 export const MAX_ARTIFACT_NAMESPACES = 5_000;
+/** Reserved sibling fence that closes artifact claims and publications. */
+export const ARTIFACT_MAINTENANCE_FENCE_NAME = ".artifact-maintenance";
 /** Reserved directory holding content-addressed failure blobs; never a run. */
 export const ARTIFACT_BLOB_DIRECTORY = "blobs";
 /** Per-run manifest naming the blobs a run produced. */
@@ -372,6 +374,9 @@ export class ArtifactStore {
   private failureArtifactCount: number;
   /** `<root>/e2e/artifacts`, parent of both run namespaces and the blob store. */
   private readonly artifactsDirectory: string;
+  /** Physical top-level artifact root whose device/inode this writer claimed. */
+  private readonly topLevelArtifactsDirectory: string;
+  private readonly artifactRootIdentity: string;
   /** Present only for the explicit retained integration lane. */
   private readonly retainedIntegrationDirectory: string | undefined;
   /** Manifest-relative base for the selected artifact namespace. */
@@ -406,8 +411,12 @@ export class ArtifactStore {
 
     const resolvedRoot = resolve(root);
     this.physicalRoot = realDirectory(resolvedRoot, "REPOSITORY_ROOT_INVALID", storage);
+    assertArtifactMaintenanceAbsent(this.physicalRoot, storage);
     const e2e = ensureDirectDirectory(this.physicalRoot, "e2e", storage);
     const topLevelArtifacts = ensureDirectDirectory(e2e, "artifacts", storage);
+    this.topLevelArtifactsDirectory = topLevelArtifacts;
+    this.artifactRootIdentity = storage.directoryIdentity(topLevelArtifacts);
+    this.assertWritableArtifactRoot();
     const artifacts =
       artifactNamespace === undefined
         ? topLevelArtifacts
@@ -473,6 +482,7 @@ export class ArtifactStore {
             storage,
           )
         : reserveNewRetainedIntegrationDirectory(artifacts, runId, storage, 1);
+    this.assertWritableArtifactRoot();
     this.jsonl = join(this.directory, "events.jsonl");
     assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
     this.identityPath = join(this.directory, RUN_IDENTITY_NAME);
@@ -481,8 +491,12 @@ export class ArtifactStore {
     // suite, seed, or step set is a different run wearing the same id, and its
     // appended events would describe work the earlier events never did.
     if (!storage.exists(this.identityPath)) this.assertRetainedCapacity(MAX_EVENT_BYTES);
+    this.assertWritableArtifactRoot();
     reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted, storage);
-    if (!storage.exists(this.jsonl)) storage.writeExclusive(this.jsonl, "");
+    if (!storage.exists(this.jsonl)) {
+      this.assertWritableArtifactRoot();
+      storage.writeExclusive(this.jsonl, "");
+    }
 
     this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
     assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE", storage);
@@ -525,6 +539,7 @@ export class ArtifactStore {
       );
     }
     this.assertRetainedCapacity(eventBytes);
+    this.assertWritableArtifactRoot();
     this.storage.append(this.jsonl, serialized);
   }
 
@@ -554,6 +569,7 @@ export class ArtifactStore {
     // names. Reserve both, the two manifest records, and the three store
     // directories before the intent makes an attempt durable.
     this.assertRetainedCapacity(bytes * 2 + MAX_EVENT_BYTES, 3);
+    this.assertWritableArtifactRoot();
     const path = this.blobPath(digest);
 
     const describe = (record: string) => ({
@@ -571,11 +587,13 @@ export class ArtifactStore {
     // and before publication leaves a dangling intent, which the next
     // construction reports and which keeps the budget honest; counting only
     // completed blobs let a crash loop spend one slot arbitrarily often.
+    this.assertWritableArtifactRoot();
     this.storage.append(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_INTENT))}\n`);
     this.failureArtifactCount += 1;
 
     this.publishBlob(digest, stored);
 
+    this.assertWritableArtifactRoot();
     this.storage.append(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_STORED))}\n`);
     // One blob is one entry. Identical output from two steps resolves to the
     // same path, and a list that repeated it would report one file as several
@@ -612,6 +630,7 @@ export class ArtifactStore {
       attempt: this.stagingCounter,
       storage: this.storage,
       retainedIntegrationDirectory: this.retainedIntegrationDirectory,
+      expectedArtifactRootIdentity: this.artifactRootIdentity,
     });
   }
 
@@ -622,6 +641,15 @@ export class ArtifactStore {
     assertRetainedIntegrationCapacity(
       this.retainedIntegrationDirectory,
       { additionalBytes, additionalDirectories },
+      this.storage,
+    );
+  }
+
+  private assertWritableArtifactRoot(): void {
+    assertArtifactWriterBoundary(
+      this.physicalRoot,
+      this.topLevelArtifactsDirectory,
+      this.artifactRootIdentity,
       this.storage,
     );
   }
@@ -653,6 +681,7 @@ export class ArtifactStore {
       }
       const body = junitXml(events);
       this.assertRetainedCapacity(Buffer.byteLength(body, "utf8"));
+      this.assertWritableArtifactRoot();
       this.storage.writeExclusive(path, body);
       return path;
     }
@@ -860,6 +889,8 @@ export interface HarnessRootFilesystem {
   exists(path: string): boolean;
   isSymlink(path: string): boolean;
   isDirectory(path: string): boolean;
+  /** Stable device/inode identity for one real directory. */
+  directoryIdentity(path: string): string;
   realpath(path: string): string;
   repositoryRoot(): string;
   homeDirectory(): string;
@@ -1074,6 +1105,11 @@ const nodeArtifactStorageCapability = Object.freeze<HarnessArtifactStorage>({
       return false;
     }
   },
+  directoryIdentity: (path) => {
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe directory");
+    return `${stat.dev}:${stat.ino}`;
+  },
   realpath: (path) => realpathSync(path),
   mkdir: (path) => mkdirSync(path),
   readdir: (path) => readdirSync(path),
@@ -1119,6 +1155,8 @@ export function createMemoryArtifactStorage(): HarnessArtifactStorage & {
   const files = new Map<string, string>();
   const directories = new Set<string>();
   const symlinks = new Set<string>();
+  const directoryIdentities = new Map<string, number>();
+  let nextDirectoryIdentity = 1;
   /** Inode identity, so `link` shares content rather than copying it. */
   const inodes = new Map<string, string>();
 
@@ -1126,9 +1164,17 @@ export function createMemoryArtifactStorage(): HarnessArtifactStorage & {
     let current = resolve(path);
     while (current !== sep && current.length > 1) {
       directories.add(current);
+      if (!directoryIdentities.has(current)) {
+        directoryIdentities.set(current, nextDirectoryIdentity);
+        nextDirectoryIdentity += 1;
+      }
       current = resolve(current, "..");
     }
     directories.add(sep);
+    if (!directoryIdentities.has(sep)) {
+      directoryIdentities.set(sep, nextDirectoryIdentity);
+      nextDirectoryIdentity += 1;
+    }
   };
 
   return {
@@ -1144,6 +1190,14 @@ export function createMemoryArtifactStorage(): HarnessArtifactStorage & {
     isSymlink: (path) => symlinks.has(resolve(path)),
     isFile: (path) => files.has(resolve(path)),
     isDirectory: (path) => directories.has(resolve(path)),
+    directoryIdentity: (path) => {
+      const key = resolve(path);
+      const identity = directoryIdentities.get(key);
+      if (!directories.has(key) || symlinks.has(key) || identity === undefined) {
+        throw new MemoryStorageError("ENOENT");
+      }
+      return `memory:${identity}`;
+    },
     realpath: (path) => {
       const key = resolve(path);
       if (!files.has(key) && !directories.has(key)) throw new MemoryStorageError("ENOENT");
@@ -1153,6 +1207,8 @@ export function createMemoryArtifactStorage(): HarnessArtifactStorage & {
       const key = resolve(path);
       if (files.has(key) || directories.has(key)) throw new MemoryStorageError("EEXIST");
       directories.add(key);
+      directoryIdentities.set(key, nextDirectoryIdentity);
+      nextDirectoryIdentity += 1;
     },
     readdir: (path) => {
       const key = resolve(path);
@@ -2254,6 +2310,14 @@ export interface PublishFailureBlobInput {
   /** Defaults to the real filesystem. */
   readonly storage?: HarnessArtifactStorage;
   /**
+   * Device/inode identity captured by the owning run.
+   *
+   * Direct atomic-publication probes may omit it and bind to the root they
+   * observe at call entry. ArtifactStore always supplies its earlier claim so
+   * a root swapped between run creation and blob publication is refused.
+   */
+  readonly expectedArtifactRootIdentity?: string;
+  /**
    * The bounded retained integration parent when this is real proof.
    *
    * Ordinary memory tests intentionally omit it. Opt-in direct filesystem
@@ -2330,6 +2394,16 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     storage,
   );
   assertContained(containmentRoot, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
+  const expectedArtifactRootIdentity =
+    input.expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactsDirectory);
+  const assertWriterBoundary = (): void =>
+    assertArtifactWriterBoundary(
+      containmentRoot,
+      artifactsDirectory,
+      expectedArtifactRootIdentity,
+      storage,
+    );
+  assertWriterBoundary();
 
   let retainedIntegrationDirectory: string | undefined;
   if (input.retainedIntegrationDirectory !== undefined) {
@@ -2370,6 +2444,7 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     );
   }
 
+  assertWriterBoundary();
   const store = blobStoreDirectory(artifactsDirectory, storage);
   const path = join(store, input.digest);
   assertContained(containmentRoot, path, "ARTIFACT_PATH_UNSAFE");
@@ -2384,10 +2459,12 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
   );
   assertContained(containmentRoot, staging, "ARTIFACT_PATH_UNSAFE");
   assertRegularOrAbsent(staging, "ARTIFACT_PATH_UNSAFE", storage);
+  assertWriterBoundary();
   storage.writeExclusive(staging, input.stored);
   // The contended window: this publisher has seen no blob and is about to claim
   // the name. A test hooks here to let another publisher win first.
   input.beforeLink?.(path);
+  assertWriterBoundary();
   try {
     storage.link(staging, path);
   } catch (error) {

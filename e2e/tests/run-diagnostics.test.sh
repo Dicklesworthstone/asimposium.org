@@ -113,7 +113,11 @@ e2e_claim_artifact_run_at_root "$root_epoch_root" "root-epoch-run" \
   || fail "ARTIFACT_ROOT_EPOCH_CLAIM_REJECTED"
 mv "$root_epoch_root/e2e/artifacts" "$root_epoch_root/e2e/artifacts-original" \
   || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
-mkdir -p "$root_epoch_root/e2e/artifacts/root-epoch-run" \
+mkdir "$root_epoch_root/e2e/artifacts" \
+  || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
+mv \
+  "$root_epoch_root/e2e/artifacts-original/root-epoch-run" \
+  "$root_epoch_root/e2e/artifacts/root-epoch-run" \
   || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
 if e2e_write_artifact_diagnostic_at_root "$root_epoch_root" "root-epoch-run" "$suite" "$started_ms" "fail" "REPLACED_ROOT_WRITE" "$reproduce" >/dev/null 2>&1; then
   fail "REPLACED_ARTIFACT_ROOT_DIAGNOSTIC_ACCEPTED"
@@ -122,7 +126,7 @@ if e2e_append_artifact_jsonl_at_root "$root_epoch_root" "root-epoch-run" "steps.
   fail "REPLACED_ARTIFACT_ROOT_STEP_ACCEPTED"
 fi
 if [[ -n "$(find "$root_epoch_root/e2e/artifacts/root-epoch-run" -mindepth 1 -print -quit)" \
-  || -n "$(find "$root_epoch_root/e2e/artifacts-original/root-epoch-run" -mindepth 1 -print -quit)" ]]; then
+  || -n "$(find "$root_epoch_root/e2e/artifacts-original" -mindepth 1 -print -quit)" ]]; then
   fail "REPLACED_ARTIFACT_ROOT_MUTATED"
 fi
 if fresh_shell_output="$(
