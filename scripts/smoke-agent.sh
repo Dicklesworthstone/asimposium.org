@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +x
 
 # Capture the credential into shell memory, then remove its exported name
 # before even repository discovery can start a child process. Authenticated
@@ -135,7 +136,7 @@ smoke_agent_run_fixture_self_test() {
   local invalid_fellow_token
   for invalid_fellow_token in \
     "${valid_fellow_token/asimp_ag_/asimp_ax_}" \
-    "${valid_fellow_token/A_/I_}" \
+    "${valid_fellow_token/A/I}" \
     "${valid_fellow_token%?}" \
     "${valid_fellow_token}_" \
     $'asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nforged'; do

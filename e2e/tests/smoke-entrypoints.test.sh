@@ -32,6 +32,39 @@ if ! ASIMPOSIUM_SMOKE_FELLOW_TOKEN="$synthetic_fellow_token" \
   exit 1
 fi
 
+set +e
+traced_self_test_output="$(
+  ASIMPOSIUM_SMOKE_FELLOW_TOKEN="$synthetic_fellow_token" \
+    bash -x "$repository_root/scripts/smoke-agent.sh" --self-test 2>&1
+)"
+traced_self_test_status=$?
+set -e
+if [[ "$traced_self_test_status" -ne 0 || "$traced_self_test_output" == *"$synthetic_fellow_token"* ]]; then
+  emit "fail" "SMOKE_AGENT_XTRACE_LEAKED_CREDENTIAL"
+  exit 1
+fi
+
+for smoke_source in \
+  "$repository_root/scripts/smoke-agent.sh" \
+  "$repository_root/scripts/smoke-gallery.sh"; do
+  if awk '
+    BEGIN { found = 0 }
+    !/^[[:space:]]*#/ && /(^|[^[:alnum:]_])curl[[:space:]]/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$smoke_source"; then
+    emit "fail" "SMOKE_ENTRYPOINT_BYPASSES_EXACT_USER_AGENT_WRAPPER"
+    exit 1
+  fi
+done
+if awk '
+  BEGIN { found = 0 }
+  !/^[[:space:]]*#/ && tolower($0) ~ /authorization:[[:space:]]*bearer/ { found = 1 }
+  END { exit(found ? 0 : 1) }
+' "$repository_root/scripts/smoke-agent.sh"; then
+  emit "fail" "SMOKE_AGENT_PUTS_CREDENTIAL_IN_CURL_ARGV"
+  exit 1
+fi
+
 assert_production_refused() {
   local entrypoint="$1"
   local expected_code="$2"
