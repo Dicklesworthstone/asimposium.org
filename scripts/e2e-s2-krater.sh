@@ -1260,11 +1260,13 @@ declare -a S2_LIFECYCLE_OWNED_PORTS=()
 # descendant are proved absent. The gate keeps a just-forked wrapper from
 # entering the child harness before the adjacent PID registration completes.
 S2_RAW_INHERITED_CHILD_PID=""
+S2_RAW_INHERITED_CHILD_PGID=""
 S2_RAW_INHERITED_CHILD_MARKER=""
 S2_RAW_INHERITED_CHILD_GATE=""
 S2_RAW_INHERITED_CHILD_RUN_ID=""
 S2_RAW_INHERITED_CHILD_RUN_IDENTITY=""
 S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN=0
+S2_RAW_INHERITED_CHILD_DESCENDANT_PROVEN=0
 # The origin the next phase talks to. The legacy upgrade stages run their own
 # Worker on their own owned port, so a phase must never assume the main one.
 S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
@@ -4137,18 +4139,42 @@ parent_pid="$1"
 gate="$2"
 marker="$3"
 script_path="$4"
+trap "" TERM HUP INT
 while [[ ! -f "${gate}" || -L "${gate}" ]]; do
   [[ "${PPID}" == "${parent_pid}" ]] || exit 125
   sleep 0.01
 done
 [[ "${PPID}" == "${parent_pid}" ]] || exit 125
 [[ "$(<"${gate}")" == "${marker}" ]] || exit 125
-exec -a "${marker}" bash "${script_path}" "${marker}"
+(
+  trap - TERM HUP INT
+  exec -a "${marker}-payload" bash "${script_path}" "${marker}"
+) &
+payload_pid=$!
+if wait "${payload_pid}"; then payload_status=0; else payload_status=$?; fi
+# Stay as the exact, still-identifiable session leader until the payload and
+# every non-zombie member of its private group have settled. The scanner first
+# leaves the group, so it cannot keep its own observation alive.
+while :; do
+  rows="$(LC_ALL=C perl -MPOSIX=setsid -e '\''setsid() or exit 125; exec @ARGV'\'' -- \
+    ps -o pid=,pgid=,stat= -g "$$")" || exit 125
+  group_busy=0
+  while read -r seen_pid seen_pgid seen_stat; do
+    [[ -n "${seen_pid}" ]] || continue
+    [[ "${seen_pid}" =~ ^[0-9]+$ && "${seen_pgid}" =~ ^[0-9]+$ ]] || exit 125
+    if [[ "${seen_pid}" != "$$" && "${seen_pgid}" == "$$" && "${seen_stat}" != Z* ]]; then
+      group_busy=1
+    fi
+  done <<<"${rows}"
+  [[ ${group_busy} -eq 1 ]] || exit "${payload_status}"
+  sleep 0.05
+done
 '
 
 s2_begin_raw_inherited_child_owner() {
   local child_run_id="$1" child_run_identity="$2"
   [[ -z "${S2_RAW_INHERITED_CHILD_PID}" && \
+    -z "${S2_RAW_INHERITED_CHILD_PGID}" && \
     -z "${S2_RAW_INHERITED_CHILD_MARKER}" && \
     -z "${S2_RAW_INHERITED_CHILD_GATE}" && \
     -z "${S2_RAW_INHERITED_CHILD_RUN_ID}" && \
@@ -4167,12 +4193,23 @@ s2_begin_raw_inherited_child_owner() {
 }
 
 s2_register_raw_inherited_child() {
-  local child_pid="$1"
+  local child_pid="$1" deadline
   is_decimal "${child_pid}" || return 1
   [[ -z "${S2_RAW_INHERITED_CHILD_PID}" && \
+    -z "${S2_RAW_INHERITED_CHILD_PGID}" && \
     -n "${S2_RAW_INHERITED_CHILD_MARKER}" && \
     -n "${S2_RAW_INHERITED_CHILD_GATE}" ]] || return 1
   S2_RAW_INHERITED_CHILD_PID="${child_pid}"
+  deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+  while (( SECONDS < deadline )); do
+    if s2_raw_inherited_child_command_is_exact "${child_pid}"; then
+      S2_RAW_INHERITED_CHILD_PGID="${child_pid}"
+      break
+    fi
+    kill -0 "${child_pid}" 2>/dev/null || return 1
+    sleep 0.01
+  done
+  [[ "${S2_RAW_INHERITED_CHILD_PGID}" == "${child_pid}" ]] || return 1
   s2_artifact_writer_boundary_is_open || return 1
   (umask 077; set -o noclobber; \
     printf '%s\n' "${S2_RAW_INHERITED_CHILD_MARKER}" \
@@ -4183,18 +4220,20 @@ s2_register_raw_inherited_child() {
 s2_raw_inherited_child_snapshot() {
   local pid="$1" line="" rows=0
   S2_RAW_CHILD_SEEN_PID=""
+  S2_RAW_CHILD_SEEN_PGID=""
   S2_RAW_CHILD_SEEN_PPID=""
   S2_RAW_CHILD_SEEN_STAT=""
   S2_RAW_CHILD_SEEN_COMMAND=""
-  capture_detached_process_table -o pid=,ppid=,stat=,command= -p "${pid}" || return 2
+  capture_detached_process_table -o pid=,pgid=,ppid=,stat=,command= -p "${pid}" || return 2
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     rows=$((rows + 1))
-    read -r S2_RAW_CHILD_SEEN_PID S2_RAW_CHILD_SEEN_PPID \
+    read -r S2_RAW_CHILD_SEEN_PID S2_RAW_CHILD_SEEN_PGID S2_RAW_CHILD_SEEN_PPID \
       S2_RAW_CHILD_SEEN_STAT S2_RAW_CHILD_SEEN_COMMAND <<<"${line}"
   done <<<"${S2_DETACHED_PROCESS_TABLE}"
   [[ ${rows} -eq 1 ]] || return 1
   is_decimal "${S2_RAW_CHILD_SEEN_PID}" && \
+    is_decimal "${S2_RAW_CHILD_SEEN_PGID}" && \
     is_decimal "${S2_RAW_CHILD_SEEN_PPID}" || return 2
 }
 
@@ -4202,6 +4241,7 @@ s2_raw_inherited_child_command_is_exact() {
   local pid="$1"
   s2_raw_inherited_child_snapshot "${pid}" || return 1
   [[ "${S2_RAW_CHILD_SEEN_PID}" == "${pid}" && \
+    "${S2_RAW_CHILD_SEEN_PGID}" == "${pid}" && \
     "${S2_RAW_CHILD_SEEN_PPID}" == "${S2_PARENT_PID}" && \
     "${S2_RAW_CHILD_SEEN_STAT}" != Z* && \
     "${S2_RAW_CHILD_SEEN_COMMAND}" == *"${S2_RAW_INHERITED_CHILD_MARKER}"* && \
@@ -4210,6 +4250,7 @@ s2_raw_inherited_child_command_is_exact() {
 
 clear_raw_inherited_child_owner() {
   S2_RAW_INHERITED_CHILD_PID=""
+  S2_RAW_INHERITED_CHILD_PGID=""
   S2_RAW_INHERITED_CHILD_MARKER=""
   S2_RAW_INHERITED_CHILD_GATE=""
   S2_RAW_INHERITED_CHILD_RUN_ID=""
@@ -4220,9 +4261,11 @@ clear_raw_inherited_child_owner() {
 # still names its identity-bound retained run before clearing the sole cleanup
 # capability. A failure keeps the slot populated and the parent lease open.
 cleanup_raw_inherited_child() {
-  local pid="${S2_RAW_INHERITED_CHILD_PID}" tick rows line child_run_directory
+  local pid="${S2_RAW_INHERITED_CHILD_PID}" pgid="${S2_RAW_INHERITED_CHILD_PGID}"
+  local tick rows line child_run_directory
   [[ -n "${pid}" ]] || {
-    [[ -z "${S2_RAW_INHERITED_CHILD_MARKER}" && \
+    [[ -z "${pgid}" && \
+      -z "${S2_RAW_INHERITED_CHILD_MARKER}" && \
       -z "${S2_RAW_INHERITED_CHILD_GATE}" && \
       -z "${S2_RAW_INHERITED_CHILD_RUN_ID}" && \
       -z "${S2_RAW_INHERITED_CHILD_RUN_IDENTITY}" ]]
@@ -4232,33 +4275,51 @@ cleanup_raw_inherited_child() {
     [[ -n "${S2_RAW_INHERITED_CHILD_MARKER}" && \
       -n "${S2_RAW_INHERITED_CHILD_RUN_ID}" && \
       -n "${S2_RAW_INHERITED_CHILD_RUN_IDENTITY}" ]] || return 1
-  if kill -0 "${pid}" 2>/dev/null; then
-    if ! s2_raw_inherited_child_snapshot "${pid}"; then
+  if [[ -z "${pgid}" ]]; then
+    # Registration can be interrupted before the setsid proof. The gated
+    # wrapper has not entered the child harness, so publish only an abort token
+    # and wait for that direct child to retire without signalling an unproved
+    # numeric process group.
+    [[ ! -e "${S2_RAW_INHERITED_CHILD_GATE}" && \
+      ! -L "${S2_RAW_INHERITED_CHILD_GATE}" ]] || return 1
+    s2_artifact_writer_boundary_is_open || return 1
+    (umask 077; set -o noclobber; \
+      printf 'abort\n' >"${S2_RAW_INHERITED_CHILD_GATE}") 2>/dev/null || return 1
+    s2_artifact_writer_boundary_is_open || return 1
+    for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+      kill -0 "${pid}" 2>/dev/null || break
+      sleep 0.05
+    done
+    kill -0 "${pid}" 2>/dev/null && return 1
+  else
+    [[ "${pgid}" == "${pid}" ]] || return 1
+    if kill -0 "${pid}" 2>/dev/null; then
+      s2_raw_inherited_child_command_is_exact "${pid}" || return 1
+      kill -TERM -- "-${pgid}" 2>/dev/null || {
+        kill -0 -- "-${pgid}" 2>/dev/null && return 1
+      }
+    elif kill -0 -- "-${pgid}" 2>/dev/null; then
+      # The group still exists but its direct leader is no longer available for
+      # a fresh identity proof. Retain the lease and refuse to signal it.
       return 1
     fi
-    if [[ "${S2_RAW_CHILD_SEEN_STAT}" != Z* ]]; then
-      s2_raw_inherited_child_command_is_exact "${pid}" || return 1
-      kill -TERM "${pid}" 2>/dev/null || {
-        kill -0 "${pid}" 2>/dev/null && return 1
+    for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+      kill -0 -- "-${pgid}" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 -- "-${pgid}" 2>/dev/null; then
+      # The still-unreaped exact group leader keeps this private session
+      # authority live even if it is already a zombie. Kill the whole group so
+      # a TERM-resistant descendant cannot outlive the writer lease.
+      kill -KILL -- "-${pgid}" 2>/dev/null || {
+        kill -0 -- "-${pgid}" 2>/dev/null && return 1
       }
       for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
-        if ! kill -0 "${pid}" 2>/dev/null; then break; fi
-        if s2_raw_inherited_child_snapshot "${pid}" && \
-          [[ "${S2_RAW_CHILD_SEEN_STAT}" == Z* ]]; then break; fi
+        kill -0 -- "-${pgid}" 2>/dev/null || break
         sleep 0.05
       done
     fi
-  fi
-  if kill -0 "${pid}" 2>/dev/null; then
-    if s2_raw_inherited_child_snapshot "${pid}" && \
-      [[ "${S2_RAW_CHILD_SEEN_STAT}" == Z* ]]; then
-      :
-    else
-      s2_raw_inherited_child_command_is_exact "${pid}" || return 1
-      kill -KILL "${pid}" 2>/dev/null || {
-        kill -0 "${pid}" 2>/dev/null && return 1
-      }
-    fi
+    kill -0 -- "-${pgid}" 2>/dev/null && return 1
   fi
   wait "${pid}" 2>/dev/null || :
   ! kill -0 "${pid}" 2>/dev/null || return 1
@@ -6065,6 +6126,7 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt-child \
       S2_RAW_INHERITED_CHILD_READY="${raw_ready}" \
+      perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
         "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
@@ -6099,6 +6161,7 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss-child \
       S2_PRE_ARM_OWNER_LOSS_RECORD="${parent_loss_record}" \
+      perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
         "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
@@ -6182,6 +6245,7 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=parent-loss-child \
       S2_PARENT_LOSS_RECORD="${parent_loss_record}" \
+      perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
         "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
@@ -6278,6 +6342,7 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=owner-loss-uncertain-child \
       S2_PARENT_LOSS_RECORD="${parent_loss_record}" \
+      perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
         "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
@@ -6537,6 +6602,7 @@ run_s2_shell_regression_test() {
       S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup-child \
       S2_PARENT_INTERRUPT_RECORD="${interrupt_record}" \
       S2_PARENT_INTERRUPT_SECRET="${interrupt_secret}" \
+      perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
         "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
