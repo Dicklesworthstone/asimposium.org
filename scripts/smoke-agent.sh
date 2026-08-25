@@ -20,7 +20,8 @@ set -euo pipefail
 #      exit 75 AGENT_LOOP_CREDENTIAL_ABSENT; with it, a passing run ends
 #      exit 0 AGENT_LOOP_COMPLETE.
 #
-# Other exits: 64 usage/run-id, 78 staging origin missing/invalid.
+# Other exits: 64 usage/run-id, 78 staging origin missing/invalid,
+# 90 AGENT_LOOP_CREDENTIAL_INVALID.
 #
 # Secret discipline: the device-flow response carries a flow handle. The body
 # is held only in shell variables, asserted structurally, and never printed,
@@ -29,6 +30,12 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
+
+# Capture the credential into shell memory, then remove its exported name
+# before the first child process starts. Authenticated curl calls receive it
+# over stdin through e2e_curl_with_fellow_token, never through argv or env.
+smoke_fellow_token="${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}"
+unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
 
 suite="smoke-agent"
 reproduce="scripts/smoke-agent.sh --self-test"
@@ -117,6 +124,25 @@ smoke_agent_run_fixture_self_test() {
   # pass, every violation class must refuse. No network; no real handles.
   local valid_handle="flow_v1.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"
   local valid_body="{\"device_code\":\"${valid_handle}\",\"user_code\":\"ABCD-EFGH\",\"verification_url\":\"https://staging.asimposium.org/approve\",\"interval_seconds\":5,\"expires_in_seconds\":900}"
+
+  # The entrypoint must scrub the exported credential before this function's
+  # Python children run. The helper mirrors FellowTokenSchema's exact grammar.
+  if [[ -v ASIMPOSIUM_SMOKE_FELLOW_TOKEN ]]; then
+    return 1
+  fi
+  local valid_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  e2e_validate_fellow_token "$valid_fellow_token" || return 1
+  local invalid_fellow_token
+  for invalid_fellow_token in \
+    "${valid_fellow_token/asimp_ag_/asimp_ax_}" \
+    "${valid_fellow_token/A_/I_}" \
+    "${valid_fellow_token%?}" \
+    "${valid_fellow_token}_" \
+    $'asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nforged'; do
+    if e2e_validate_fellow_token "$invalid_fellow_token"; then
+      return 1
+    fi
+  done
 
   # Acceptance: staging origin, then production origin.
   if ! printf '%s' "$valid_body" | smoke_agent_check_device_flow_shape; then
@@ -213,6 +239,11 @@ else
   exit 78
 fi
 
+if [[ -n "$smoke_fellow_token" ]] && ! e2e_validate_fellow_token "$smoke_fellow_token"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_LOOP_CREDENTIAL_INVALID" "$reproduce"
+  exit 90
+fi
+
 if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_UNAVAILABLE" "$reproduce"
   exit 69
@@ -227,7 +258,7 @@ fi
 # workshop-shaped keys, and the sponsor workshop route must not exist for an
 # anonymous caller. This runs unauthenticated, so it holds even before the
 # Fellow credential is provisioned.
-split_index="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/problems.json" 2>/dev/null)"
+split_index="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/problems.json" 2>/dev/null)"
 if ! printf '%s' "$split_index" | python3 -c '
 import json,sys
 d = json.load(sys.stdin)
@@ -238,7 +269,7 @@ sys.exit(0 if not leaks else 1)
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PUBLIC_FACE_LEAKS_WORKSHOP" "$reproduce"
   exit 87
 fi
-workshop_anonymous_status="$(curl --silent --max-time 15 -o /dev/null --write-out '%{http_code}' "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/v1/sponsors/workshop?problem=P-4DSP" 2>/dev/null)"
+workshop_anonymous_status="$(e2e_curl --silent --max-time 15 -o /dev/null --write-out '%{http_code}' "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/v1/sponsors/workshop?problem=P-4DSP" 2>/dev/null)"
 if [[ "$workshop_anonymous_status" != "404" && "$workshop_anonymous_status" != "401" && "$workshop_anonymous_status" != "403" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SPONSOR_READ_REACHABLE_ANONYMOUSLY" "$reproduce"
   exit 87
@@ -246,7 +277,7 @@ fi
 
 # The public cursor is a bare integer (one value, edge-cached; the lurker storm
 # never touches D1).
-cursor_value="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
+cursor_value="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
 if ! [[ "$cursor_value" =~ ^[0-9]+$ ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CURSOR_NOT_BARE_INTEGER" "$reproduce"
   exit 88
@@ -258,7 +289,7 @@ fi
 device_flow_idem_key="smoke-agent-$(e2e_now_ms)-$$"
 device_flow_payload='{"name":"smoke-agent-probe","model":"g0-smoke/probe","harness":"g0-smoke","requested_scopes":["review"]}'
 
-device_flow_start="$(curl --silent --max-time 15 --connect-timeout 5 \
+device_flow_start="$(e2e_curl --silent --max-time 15 --connect-timeout 5 \
   --write-out $'\n%{http_code}' \
   --header 'content-type: application/json' \
   --header "Idempotency-Key: $device_flow_idem_key" \
@@ -277,7 +308,7 @@ if ! printf '%s' "$device_flow_body" | smoke_agent_check_device_flow_shape; then
   exit 72
 fi
 
-device_flow_replay="$(curl --silent --max-time 15 --connect-timeout 5 \
+device_flow_replay="$(e2e_curl --silent --max-time 15 --connect-timeout 5 \
   --write-out $'\n%{http_code}' \
   --header 'content-type: application/json' \
   --header "Idempotency-Key: $device_flow_idem_key" \
@@ -299,7 +330,7 @@ fi
 # The session loop stages require a provisioned Fellow credential. Without
 # one the gate honestly reports the loop as unexercised rather than skipping
 # silently.
-if [[ -z "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}" ]]; then
+if [[ -z "$smoke_fellow_token" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "AGENT_LOOP_CREDENTIAL_ABSENT" "$reproduce"
   exit 75
 fi
@@ -307,12 +338,12 @@ fi
 smoke_loop() {
   local method="$1" path="$2" body="${3:-}" key="$4"
   if [[ "$method" == "GET" ]]; then
-    curl --silent --max-time 15 --write-out $'\n%{http_code}' \
-      --header "Authorization: Bearer $ASIMPOSIUM_SMOKE_FELLOW_TOKEN" \
+    e2e_curl_with_fellow_token "$smoke_fellow_token" \
+      --silent --max-time 15 --write-out $'\n%{http_code}' \
       "$ASIMPOSIUM_STAGING_AGENT_BASE_URL$path" 2>/dev/null
   else
-    curl --silent --max-time 15 --write-out $'\n%{http_code}' \
-      --header "Authorization: Bearer $ASIMPOSIUM_SMOKE_FELLOW_TOKEN" \
+    e2e_curl_with_fellow_token "$smoke_fellow_token" \
+      --silent --max-time 15 --write-out $'\n%{http_code}' \
       --header 'content-type: application/json' \
       --header "Idempotency-Key: smoke-$run_id-$key" \
       --data "$body" \
@@ -337,7 +368,7 @@ fi
 # Stage: working pack with the mandatory omitted[] and server next_actions.
 # A direct read: the nested smoke_loop_read -> smoke_loop command substitution
 # dropped the GET body, so the pack reads directly.
-loop_pack="$(curl --silent --max-time 15 --write-out $'\n%{http_code}' --header "Authorization: Bearer $ASIMPOSIUM_SMOKE_FELLOW_TOKEN" "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/v1/sessions/$loop_session_id/pack?profile=working")"
+loop_pack="$(e2e_curl_with_fellow_token "$smoke_fellow_token" --silent --max-time 15 --write-out $'\n%{http_code}' "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/v1/sessions/$loop_session_id/pack?profile=working")"
 loop_pack_status="${loop_pack##*$'\n'}"
 if [[ "$loop_pack_status" != "200" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PACK_UNAVAILABLE" "$reproduce"
@@ -356,7 +387,7 @@ if not isinstance(d.get("cursor"), int): sys.exit(1)
 fi
 
 # Stage: workshop push (private; the public cursor must not move).
-cursor_before="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
+cursor_before="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
 loop_push="$(smoke_loop POST "/v1/sessions/$loop_session_id/workshop" '{"type":"note","title":"smoke loop note","body_md":"The smoke gate walks the loop.","relates_to":[]}' push)" || loop_push=""
 if [[ "${loop_push##*$'\n'}" != "201" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_WORKSHOP_PUSH_FAILED" "$reproduce"
@@ -394,7 +425,7 @@ if [[ "${loop_promote##*$'\n'}" != "201" ]]; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PROMOTE_FAILED" "$reproduce"
   exit 81
 fi
-cursor_after="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
+cursor_after="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
 if [[ "$cursor_before" =~ ^[0-9]+$ ]] && [[ "$cursor_after" =~ ^[0-9]+$ ]]; then
   if (( cursor_after != cursor_before + 1 )); then
     e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CURSOR_LAW_VIOLATION" "$reproduce"

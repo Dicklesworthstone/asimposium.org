@@ -4,6 +4,28 @@
 # values, origins, credentials, artifact roots, or local absolute paths.
 
 ASIMPOSIUM_E2E_HARNESS_VERSION="0.1.0"
+ASIMPOSIUM_E2E_HTTP_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
+readonly ASIMPOSIUM_E2E_HTTP_USER_AGENT
+
+e2e_curl() {
+  command curl --user-agent "$ASIMPOSIUM_E2E_HTTP_USER_AGENT" "$@"
+}
+
+e2e_validate_fellow_token() {
+  local fellow_token="$1"
+  [[ "$fellow_token" =~ ^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$ ]]
+}
+
+e2e_curl_with_fellow_token() {
+  local fellow_token="$1"
+  shift
+
+  e2e_validate_fellow_token "$fellow_token" || return 64
+
+  # curl reads the Authorization header from stdin. The credential therefore
+  # appears neither in curl's argv nor in its inherited environment.
+  e2e_curl --config - "$@" <<<"header = \"Authorization: Bearer $fellow_token\""
+}
 
 e2e_now_ms() {
   local candidate
@@ -279,7 +301,7 @@ e2e_probe_public_path() {
   local http_status
   local curl_status
 
-  http_status="$(curl --silent --location --max-time 15 --connect-timeout 5 --output /dev/null --write-out '%{http_code}' "$origin$path" 2>/dev/null)"
+  http_status="$(e2e_curl --silent --location --max-time 15 --connect-timeout 5 --output /dev/null --write-out '%{http_code}' "$origin$path" 2>/dev/null)"
   curl_status=$?
   [[ "$curl_status" -eq 0 ]] || return 1
   [[ "$http_status" =~ ^2[0-9][0-9]$ ]]

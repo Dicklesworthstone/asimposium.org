@@ -76,7 +76,7 @@ fi
 # prompt to an anonymous visitor and carry no sponsor data (no Fellow names,
 # workshop objects, or proposals). The product copy may describe the workshop;
 # it must never render one.
-console_anonymous="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGORA_BASE_URL/console" 2>/dev/null)"
+console_anonymous="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGORA_BASE_URL/console" 2>/dev/null)"
 if ! printf '%s' "$console_anonymous" | python3 -c '
 import sys, re
 html = sys.stdin.read()
