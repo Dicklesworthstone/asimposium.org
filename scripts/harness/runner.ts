@@ -1943,6 +1943,7 @@ async function runAttempt(
   if (step.adapter === "d1") store.d1ArtifactWriterCapability();
 
   const visibleOutput = redactNeverLog(`${stdout.text}${stderr.text}`, options.root);
+  console.error("[DEBUG RUN ATTEMPT OUTPUT]", { stepId: step.id, stdoutLen: stdout.text.length, stderrLen: stderr.text.length, visibleLen: visibleOutput.length, visibleOutput });
   if (visibleOutput.length > 0) emitOutput(visibleOutput);
   const finished = new Date();
   const duration = Math.round(performance.now() - startedAt);
