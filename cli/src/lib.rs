@@ -60,8 +60,18 @@ pub fn resolve_origin(explicit: Option<&String>) -> Result<String, String> {
 }
 
 fn validate_origin(origin: &str) -> Result<&str, String> {
-    if origin.bytes().any(|byte| byte < 0x20 || byte == 0x7f) || origin.contains('\\') {
-        return Err("origin must not contain control characters or backslashes".to_string());
+    // url::Url follows WHATWG and trims leading/trailing C0-or-space bytes.
+    // Refuse those bytes before parsing so an accepted origin has no ignored
+    // prefix or suffix outside the parsed authority. Normal URL serialization
+    // may still canonicalize equivalent host spelling or a default port.
+    if origin
+        .bytes()
+        .any(|byte| byte <= b' ' || byte == 0x7f)
+        || origin.contains('\\')
+    {
+        return Err(
+            "origin must not contain spaces, control characters, or backslashes".to_string(),
+        );
     }
     let authority = origin
         .strip_prefix("https://")
@@ -97,9 +107,11 @@ pub fn build_url(origin: &str, path: &str) -> Result<String, String> {
     }
     if path.contains('#')
         || path.contains('\\')
-        || path.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+        || path.bytes().any(|byte| byte <= b' ' || byte == 0x7f)
     {
-        return Err("path must not contain a fragment, backslash, or control character".to_string());
+        return Err(
+            "path must not contain a fragment, backslash, space, or control character".to_string(),
+        );
     }
     let pathname = path.split_once('?').map_or(path, |(pathname, _)| pathname);
     if pathname.contains('%')
@@ -248,6 +260,8 @@ mod tests {
             "/../capabilities",
             "/a/./b",
             "/%2f%2fevil.test/x",
+            "/trailing-space ",
+            "/query?value=raw space",
             "/a\nb",
             "",
         ] {
@@ -276,6 +290,7 @@ mod tests {
             "https://example.test?query=1",
             "https://example.test#fragment",
             "https://example.test/",
+            "https://example.test ",
             "https:\\example.test",
             "https://example.test\n.evil.test",
         ] {

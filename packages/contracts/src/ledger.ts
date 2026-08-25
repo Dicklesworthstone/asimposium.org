@@ -80,7 +80,60 @@ const FaceItemSchema = z
   })
   .strict();
 
-const FaceNextActionSchema = NextActionSchema.extend({ method: z.literal("GET") }).strict();
+const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+
+function hasAsciiControlOrSpace(value: string): boolean {
+  for (let offset = 0; offset < value.length; offset += 1) {
+    const codeUnit = value.charCodeAt(offset);
+    if (codeUnit <= 0x20 || codeUnit === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Public next actions are executable navigation, not arbitrary links. Mirror
+ * the render boundary here so the exported response contract cannot validate
+ * a target the mounted renderer would refuse later.
+ */
+function isSafePublicActionPath(value: string): boolean {
+  const queryOffset = value.indexOf("?");
+  const pathname = queryOffset === -1 ? value : value.slice(0, queryOffset);
+  if (
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    ACTION_SCHEME.test(value) ||
+    value.includes("\\") ||
+    value.includes("#") ||
+    value.includes("`") ||
+    hasAsciiControlOrSpace(value) ||
+    pathname.includes("%") ||
+    pathname.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    return false;
+  }
+
+  try {
+    const origin = "https://a.asimposium.org";
+    const parsed = new URL(value, origin);
+    return (
+      parsed.origin === origin &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+const FaceNextActionSchema = NextActionSchema.extend({
+  method: z.literal("GET"),
+  url: z
+    .string()
+    .min(1)
+    .max(400)
+    .refine(isSafePublicActionPath, "invalid public Worker action path"),
+}).strict();
 
 export const ProblemFaceResponseSchema = z
   .object({

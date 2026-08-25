@@ -570,9 +570,9 @@ const emit = (record: Record<string, unknown>): void => {
   process.stdout.write(`${JSON.stringify(record)}\n`);
 };
 
-const fail = (code: string): never => {
+function fail(code: string): never {
   throw new Error(code);
-};
+}
 
 for (const problemId of MOUNTED_PROBLEMS) {
   if (!EnrollmentProblemBindingSchema.safeParse(problemId).success) {
@@ -874,7 +874,7 @@ export function parseS2WriteResult(body: Record<string, unknown>): WriteResult {
     chain_digest: lowerSha256At(body, "chain_digest"),
     chain_version: (() => {
       if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
-      return 2;
+      return 2 as const;
     })(),
     checkpoint_digest: lowerSha256At(body, "checkpoint_digest"),
     write_phase_ms: numberAt(body, "write_phase_ms"),
@@ -960,7 +960,7 @@ export function parseS2StateResult(body: Record<string, unknown>): S2StateResult
     chain_digest: lowerSha256At(body, "chain_digest"),
     chain_version: (() => {
       if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
-      return 2;
+      return 2 as const;
     })(),
     checkpoint_digest:
       body.checkpoint_digest === null ? null : lowerSha256At(body, "checkpoint_digest"),
@@ -1003,7 +1003,7 @@ export function parseS2ReplayResult(body: Record<string, unknown>): S2ReplayResu
     chain_digest: lowerSha256At(body, "chain_digest"),
     chain_version: (() => {
       if (body.chain_version !== 2) fail("S2_CHAIN_VERSION_INVALID");
-      return 2;
+      return 2 as const;
     })(),
     checkpoint_digest: lowerSha256At(body, "checkpoint_digest"),
   };

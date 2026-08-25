@@ -230,9 +230,11 @@ Smoke (G0 / W3):
 
 ```bash
 scripts/smoke-agent.sh     # target: join → hello → session → pack → workshop → refused self-cert → promote → delta → close
-                           # today:  public preflight + device-flow stage (start 201, contract shape,
-                           #         trusted verification origin, idempotent replay; exits 71–74),
-                           #         then exit 69 AGENT_CAPABILITIES_UNAVAILABLE / 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED
+                           # today: public/split/cursor preflight + device-flow stage (start 201,
+                           #        contract shape, trusted verification origin, idempotent replay;
+                           #        exits 71–74), then the full credentialed session loop. Without
+                           #        ASIMPOSIUM_SMOKE_FELLOW_TOKEN it blocks at exit 75 rather than
+                           #        skipping or claiming the product flow passed.
 scripts/smoke-gallery.sh   # target: Google test login → mint pairing → workshop visible, public page omits it
                            # today:  public preflight + /approve surface probe (exit 69 GALLERY_APPROVE_SURFACE_UNAVAILABLE),
                            #         then exit 70 GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED

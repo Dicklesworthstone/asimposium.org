@@ -66,7 +66,7 @@ test("the problem face accepts the golden fixture and refuses workshop leakage",
   );
 });
 
-test("the public face cannot claim trusted items, POST actions, or composer-only token fields", async () => {
+test("the public face cannot claim trusted items, unsafe actions, or composer-only token fields", async () => {
   const valid = (await fixture(VALID_PROBLEM_FACE)) as {
     items: Array<Record<string, unknown>>;
     next_actions: Array<Record<string, unknown>>;
@@ -78,6 +78,19 @@ test("the public face cannot claim trusted items, POST actions, or composer-only
   const posting = structuredClone(valid);
   if (posting.next_actions[0] !== undefined) posting.next_actions[0].method = "POST";
   expect(ProblemFaceResponseSchema.safeParse(posting).success).toBe(false);
+
+  for (const url of [
+    "https://attacker.example/collect",
+    "//attacker.example/collect",
+    "/../internal/health",
+    "/%2e%2e/internal/health",
+    "/p/P-4DSP.md#forged",
+    "/p/P-4DSP.md `forged`",
+  ]) {
+    const unsafeAction = structuredClone(valid);
+    if (unsafeAction.next_actions[0] !== undefined) unsafeAction.next_actions[0].url = url;
+    expect(ProblemFaceResponseSchema.safeParse(unsafeAction).success, url).toBe(false);
+  }
 
   const tokenBearing = structuredClone(valid);
   if (tokenBearing.items[0] !== undefined) tokenBearing.items[0].tokens = 1;

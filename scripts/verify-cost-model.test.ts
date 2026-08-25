@@ -89,6 +89,7 @@ function producerWrite(
     row_digest: hex.repeat(64),
     build_digest: hex.repeat(64),
     chain_digest: hex.repeat(64),
+    chain_version: 2,
     checkpoint_digest: hex.repeat(64),
     write_phase_ms: writePhaseMs,
     successful_batch_rows_read: rowsRead,
