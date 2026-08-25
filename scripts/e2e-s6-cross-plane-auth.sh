@@ -264,6 +264,10 @@ SPAWN_REGISTRATION_READY_MARKER=""
 SPAWN_REGISTRATION_RELEASE_MARKER=""
 SPAWN_HANDOFF_READY_MARKER=""
 SPAWN_HANDOFF_RELEASE_MARKER=""
+# Set by an outer self-test before it spawns any descendant. Descendants inherit it
+# and must never re-enter self_test: without this a child that reaches the self-test
+# gate re-runs the whole suite and forks another generation of victims (exponential).
+SELF_TEST_NESTED="${S6_SELF_TEST_NESTED:-0}"
 
 # Playwright launches Chromium as a grandchild and the minter can fork, so each
 # payload runs beneath a same-group supervisor. The parent never signals a
@@ -3902,6 +3906,13 @@ main() {
   fi
 
   if [[ "${1:-}" == "--self-test" || "${S6_SELF_TEST:-}" == "1" ]]; then
+    # Only the outermost self-test runs the suite. Every process this suite
+    # spawns inherits S6_SELF_TEST=1, so without this gate a descendant that
+    # reaches here starts a whole new suite -- the 2026-08-25 fork bomb.
+    if [[ "$SELF_TEST_NESTED" != "0" ]]; then
+      exit 0
+    fi
+    export S6_SELF_TEST_NESTED=1
     self_test
   fi
 
