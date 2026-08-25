@@ -2406,7 +2406,13 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
       "ARTIFACT_PATH_UNSAFE",
       storage,
     );
-    assertContained(containmentRoot, retainedIntegrationDirectory, "ARTIFACT_PATH_UNSAFE");
+    // A full run uses the checkout as its containment root and the retained
+    // integration below it. Direct filesystem publication probes invert those
+    // two levels: their case root is below the retained integration. Requiring
+    // the retained parent to sit below the byte-containment root made every
+    // direct real-filesystem publication probe fail before it could publish.
+    // The artifact directory must be inside both boundaries; that is the
+    // shared containment property for the two valid shapes.
     assertContained(retainedIntegrationDirectory, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
   }
   // Direct real-filesystem publication fixtures use a case directory as their
