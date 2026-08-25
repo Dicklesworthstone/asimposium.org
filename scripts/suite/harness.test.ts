@@ -1067,7 +1067,8 @@ describe("secret-safe, bounded artifacts", () => {
     const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
     const opaqueValue = "A".repeat(32);
     let visible = "";
-    console.error("[DIAG] STARTING REDACTION TEST");
+    const debug = process.env.ASIMPOSIUM_HARNESS_DEBUG === "1";
+    if (debug) console.error("[DIAG] STARTING REDACTION TEST");
     const result = await runHarness({
       root,
       storage,
@@ -1090,14 +1091,14 @@ describe("secret-safe, bounded artifacts", () => {
         },
       ],
       onEvent: (ev) => {
-        console.error("[DIAG EVENT]", ev.record, ev.step, ev.status);
+        if (debug) console.error("[DIAG EVENT]", ev.record, ev.step, ev.status);
       },
       onOutput: (text) => {
-        console.error("[DIAG OUTPUT]", JSON.stringify(text));
+        if (debug) console.error("[DIAG OUTPUT]", { visibleLength: text.length });
         visible += text;
       },
     });
-    console.error("[DIAG FINISHED]", { exitCode: result.exitCode, visible });
+    if (debug) console.error("[DIAG FINISHED]", { exitCode: result.exitCode, visibleLength: visible.length });
     expect(result.exitCode).toBe(1);
     expect(visible).toContain("<redacted>");
     expect(visible).not.toContain(secret);

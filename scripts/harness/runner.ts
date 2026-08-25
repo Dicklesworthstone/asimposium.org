@@ -1837,6 +1837,9 @@ async function runAttempt(
     );
   }
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  if (process.env.ASIMPOSIUM_HARNESS_DEBUG === "1") {
+    console.error("[DEBUG SPAWN]", { stepId: step.id, argvCount: commandLine.length });
+  }
   try {
     child = Bun.spawn({
       cmd: [...commandLine],
@@ -1943,7 +1946,14 @@ async function runAttempt(
   if (step.adapter === "d1") store.d1ArtifactWriterCapability();
 
   const visibleOutput = redactNeverLog(`${stdout.text}${stderr.text}`, options.root);
-  console.error("[DEBUG RUN ATTEMPT OUTPUT]", { stepId: step.id, stdoutLen: stdout.text.length, stderrLen: stderr.text.length, visibleLen: visibleOutput.length, visibleOutput });
+  if (process.env.ASIMPOSIUM_HARNESS_DEBUG === "1") {
+    console.error("[DEBUG RUN ATTEMPT OUTPUT]", {
+      stepId: step.id,
+      stdoutLen: stdout.text.length,
+      stderrLen: stderr.text.length,
+      visibleLen: visibleOutput.length,
+    });
+  }
   if (visibleOutput.length > 0) emitOutput(visibleOutput);
   const finished = new Date();
   const duration = Math.round(performance.now() - startedAt);
@@ -4195,11 +4205,26 @@ async function readBounded(
   limit: number,
 ): Promise<{ text: string; truncated: boolean }> {
   if (stream === null) return { text: "", truncated: false };
-  const raw = await Bun.readableStreamToText(stream);
-  if (raw.length <= limit) {
-    return { text: raw, truncated: false };
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let truncated = false;
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) break;
+    const decoded = decoder.decode(result.value, { stream: true });
+    const remaining = Math.max(0, limit - text.length);
+    if (remaining > 0) text += decoded.slice(0, remaining);
+    truncated ||= decoded.length > remaining;
   }
-  return { text: raw.slice(0, limit), truncated: true };
+  const ending = decoder.decode();
+  const remaining = Math.max(0, limit - text.length);
+  if (remaining > 0) text += ending.slice(0, remaining);
+  truncated ||= ending.length > remaining;
+  if (process.env.ASIMPOSIUM_HARNESS_DEBUG === "1") {
+    console.error("[DEBUG readBounded]", { capturedLength: text.length, truncated });
+  }
+  return { text, truncated };
 }
 
 function command(code: string): readonly string[] {
