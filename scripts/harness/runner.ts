@@ -1947,6 +1947,10 @@ async function runAttempt(
   if (!(await killAndProveChildGroupQuiescent(child.pid))) {
     throw new UnsettledChildProcessError();
   }
+  // The D1 child writes inside this store's retained run. Re-prove the exact
+  // root, namespace, run and still-open lease after its whole process group is
+  // absent and before any child output can become a retained parent event.
+  if (step.adapter === "d1") store.d1ArtifactWriterCapability();
 
   const visibleOutput = redactNeverLog(`${stdout.text}${stderr.text}`, options.root);
   if (visibleOutput.length > 0) emitOutput(visibleOutput);
@@ -3880,12 +3884,17 @@ export function assertD1ArtifactWriterCapability(
   ) {
     invalid();
   }
-  const expectedLeaseEpoch = join(
-    root,
-    "e2e",
-    ARTIFACT_WRITER_LEASES_NAME,
-    artifactWriterLeaseEpochName(typed.artifact_root_identity),
-  );
+  let expectedLeaseEpoch: string;
+  try {
+    expectedLeaseEpoch = join(
+      root,
+      "e2e",
+      ARTIFACT_WRITER_LEASES_NAME,
+      artifactWriterLeaseEpochName(typed.artifact_root_identity),
+    );
+  } catch {
+    return invalid();
+  }
   if (
     dirname(leaseDirectory) !== expectedLeaseEpoch ||
     !/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/.test(basename(leaseDirectory))

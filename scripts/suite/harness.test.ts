@@ -24,11 +24,14 @@ import {
   ARTIFACT_MAINTENANCE_FENCE_NAME,
   ARTIFACT_WRITER_LEASE_CLOSED_NAME,
   ARTIFACT_WRITER_LEASES_NAME,
+  D1_ARTIFACT_CAPABILITY_ENV,
+  type D1ArtifactWriterCapability,
   ArtifactStore,
   adapterProbePath,
   artifactCapacityReport,
   assertArtifactNamespaceBudget,
   assertContainedRoot,
+  assertD1ArtifactWriterCapability,
   assertRealStorageAuthority,
   assertRetainedD1StateDirectory,
   assertRetainedIntegrationCapacity,
@@ -420,6 +423,31 @@ function soleArtifactWriterLease(
   expect(leases[0]).toMatch(/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/);
   const directory = join(epoch, leases[0] as string);
   return { directory, closed: join(directory, ARTIFACT_WRITER_LEASE_CLOSED_NAME) };
+}
+
+function simulatedD1ArtifactCapability(
+  store: ArtifactStore,
+  root: string,
+  namespace: string,
+  storage: HarnessArtifactStorage,
+): D1ArtifactWriterCapability {
+  const artifactRoot = join(root, "e2e", "artifacts");
+  const namespaceDirectory = join(artifactRoot, namespace);
+  const lease = soleArtifactWriterLease(root, storage);
+  return {
+    schema_version: 1,
+    repository_root: root,
+    artifact_root: artifactRoot,
+    artifact_root_identity: storage.directoryIdentity(artifactRoot),
+    namespace,
+    namespace_directory: namespaceDirectory,
+    namespace_identity: storage.directoryIdentity(namespaceDirectory),
+    run_id: store.runId,
+    run_directory: store.directory,
+    run_identity: storage.directoryIdentity(store.directory),
+    lease_directory: lease.directory,
+    lease_identity: storage.directoryIdentity(lease.directory),
+  };
 }
 
 /**
@@ -1597,6 +1625,71 @@ test("ordinary units validate the D1 retained-state contract without executing D
       ],
     }),
   ).toThrow(/belong directly to this retained self-test run id/);
+});
+
+test("the inherited D1 writer capability binds one exact open retained run", () => {
+  const root = fixtureRoot("d1-capability");
+  const namespace = "d1-capability-integration";
+  const runId = "d1-capability-run";
+  const identity = {
+    runId,
+    suite: "unit",
+    seed: 7,
+    stepIds: ["d1"],
+    stepContractDigests: ["a".repeat(64)],
+    reproduction: SELF_TEST_REPRODUCTION,
+    artifactNamespace: namespace,
+    gitRevision: "unavailable",
+    childEnvironmentDigest: "b".repeat(64),
+    bindingVersions: {},
+  } as const;
+  const storage = fixtureStorage();
+  const store = new ArtifactStore(root, runId, false, identity, storage, namespace);
+  const capability = simulatedD1ArtifactCapability(store, root, namespace, storage);
+  expect(
+    assertD1ArtifactWriterCapability(capability, root, namespace, store.directory, storage),
+  ).toEqual(capability);
+  for (const planted of [
+    undefined,
+    { ...capability, extra: true },
+    { ...capability, artifact_root_identity: "memory:999999" },
+    { ...capability, namespace_identity: "memory:999999" },
+    { ...capability, run_identity: "memory:999999" },
+    { ...capability, lease_identity: "memory:999999" },
+  ]) {
+    expect(() =>
+      assertD1ArtifactWriterCapability(planted, root, namespace, store.directory, storage),
+    ).toThrow(/D1_ARTIFACT_CAPABILITY_INVALID|artifact capability/);
+  }
+  store.close();
+  expect(() =>
+    assertD1ArtifactWriterCapability(capability, root, namespace, store.directory, storage),
+  ).toThrow(/D1_ARTIFACT_CAPABILITY_INVALID|artifact capability/);
+
+  const fencedStorage = fixtureStorage();
+  const fencedStore = new ArtifactStore(root, runId, false, identity, fencedStorage, namespace);
+  const fencedCapability = simulatedD1ArtifactCapability(
+    fencedStore,
+    root,
+    namespace,
+    fencedStorage,
+  );
+  fencedStorage.writeExclusive(
+    join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
+    "maintenance\n",
+  );
+  expect(() =>
+    assertD1ArtifactWriterCapability(
+      fencedCapability,
+      root,
+      namespace,
+      fencedStore.directory,
+      fencedStorage,
+    ),
+  ).toThrow(/ARTIFACT_MAINTENANCE_ACTIVE|D1_ARTIFACT_CAPABILITY_INVALID|artifact capability/);
+  fencedStore.close();
+  const fencedLease = soleArtifactWriterLease(root, fencedStorage);
+  expect(fencedStorage.isDirectory(fencedLease.closed)).toBe(true);
 });
 
 test("the real integration reproduction contract separates preflight from execution", () => {

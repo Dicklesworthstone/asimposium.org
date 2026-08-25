@@ -194,11 +194,7 @@ describe("S-4 frozen corpus", () => {
         screening_url: new URL("https://a-staging.asimposium.org/internal/screen"),
         bearer: MOUNTED_SCREENING_BEARER,
         fetch_impl: async (url, init) =>
-          worker.fetch(
-            new Request(url.toString(), init),
-            env,
-            context,
-          ),
+          worker.fetch(new Request(url.toString(), init), env, context),
         write: (line) => writes.push(line),
       });
     } catch (error) {
@@ -223,7 +219,9 @@ describe("S-4 frozen corpus", () => {
     });
     expect(ai.calls).toHaveLength(150);
     expect(ai.calls.every((model) => model === WORKERS_AI_MODEL)).toBe(true);
-    expect(corpus.filter((example) => example.source.kind === "protected-staging")).toHaveLength(50);
+    expect(corpus.filter((example) => example.source.kind === "protected-staging")).toHaveLength(
+      50,
+    );
     expect(
       corpus
         .filter((example) => example.source.kind === "protected-staging")
