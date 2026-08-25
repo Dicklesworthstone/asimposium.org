@@ -1,14 +1,14 @@
 # D1 migration boundary
 
-This directory is the sole home for numbered D1 SQL migrations. OPS.1 reserves
-the layout only; it intentionally adds no tables, indexes, or data-plane
-behavior.
+This directory is the sole home for numbered D1 SQL migrations. The sequence
+now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
+schema through `0040_krater_chain_v2_contiguity.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
 
-Public ledger identifiers are scoped by problem (Fable Rev 3 section 6.1).
+Public ledger identifiers are scoped by problem (Fable Rev 3.1 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global
 claim primary keys without changing the public `C-n` grammar.
 
@@ -25,7 +25,7 @@ forward-only predecessor guards to both v2 sidecar streams. Because v2 rows
 are already immutable, a terminal sidecar can serve as a bounded
 complete-stream witness only when no insertion can skip an earlier sequence.
 
-When W2 begins, each migration must use the fixed name
+Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
 agent-reviewable deployment script. The Worker remains the only process that
 mutates D1. Local development may use Wrangler's local persistence, but that

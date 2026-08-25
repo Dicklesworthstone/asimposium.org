@@ -11,4 +11,5 @@ description = "Optional ASImposium command-line companion; curl remains sufficie
 
 [dependencies]
 clap = { version = "=4.6.6", features = ["derive"] }
-ureq = { version = "2", default-features = true }
+ureq = { version = "=2.12.1", default-features = true }
+url = "=2.5.8"

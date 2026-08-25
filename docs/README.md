@@ -5,6 +5,9 @@ the governing implementation plan. This directory will hold ADRs and runbooks
 that explain an implemented operational decision without competing with that
 plan.
 
-OPS.1 establishes only repository layout and static infrastructure checks. It
-does not establish a deployed Worker, any provisioned Cloudflare resource, or
-an operational recovery procedure.
+The repository now contains contracts, migrations, Worker and Agora product
+slices, served protocol text, local Workerd/D1 checks, and operational
+runbooks. Those source artifacts still do not establish a deployed Worker, a
+provisioned provider resource, a completed recovery exercise, or a green launch
+gate. Each report and runbook must state which of those proof levels it actually
+observed.

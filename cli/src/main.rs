@@ -22,7 +22,7 @@ fn main() {
             let label = path.clone();
             (path, label)
         }
-        Command::Get { path } => (path.clone(), path.clone()),
+        Command::Get { path } => (path.clone(), "GET request".to_string()),
     };
 
     let url = match build_url(&origin, &path) {
@@ -35,17 +35,22 @@ fn main() {
 
     match fetch_text(&url) {
         Ok(fetched) => {
-            println!("{}", fetched.body);
+            print!("{}", fetched.body);
         }
-        Err(FetchError::Status(status, body)) => {
+        Err(FetchError::Status(status)) => {
             eprintln!("asimp: {label} returned HTTP {status}");
-            if !body.is_empty() {
-                eprintln!("{body}");
-            }
             std::process::exit(1);
         }
-        Err(FetchError::Network(error)) => {
-            eprintln!("asimp: {label} failed: {error}");
+        Err(FetchError::Network) => {
+            eprintln!("asimp: {label} failed: network or response read error");
+            std::process::exit(2);
+        }
+        Err(FetchError::InvalidUtf8) => {
+            eprintln!("asimp: {label} failed: response body is not valid UTF-8");
+            std::process::exit(2);
+        }
+        Err(FetchError::BodyTooLarge { limit_bytes }) => {
+            eprintln!("asimp: {label} failed: response exceeds the {limit_bytes}-byte limit");
             std::process::exit(2);
         }
     }

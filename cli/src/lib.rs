@@ -10,6 +10,7 @@
 use clap::Parser;
 use std::io::Read;
 use ureq::{Agent, AgentBuilder};
+use url::Url;
 
 /// Parsed command line for the optional `asimp` companion.
 #[derive(Debug, Parser)]
@@ -44,7 +45,7 @@ pub enum Command {
 }
 
 pub const DEFAULT_ORIGIN: &str = "https://a.asimposium.org";
-const READ_TIMEOUT_MS: u64 = 15_000;
+pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Public faces are bounded well below this; the cap only stops a hostile
 /// or misconfigured origin from streaming forever into a terminal.
 const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
@@ -59,29 +60,64 @@ pub fn resolve_origin(explicit: Option<&String>) -> Result<String, String> {
 }
 
 fn validate_origin(origin: &str) -> Result<&str, String> {
-    if !origin.starts_with("https://") {
-        return Err("origin must be an https:// URL".to_string());
+    if origin.bytes().any(|byte| byte < 0x20 || byte == 0x7f) || origin.contains('\\') {
+        return Err("origin must not contain control characters or backslashes".to_string());
     }
-    if origin.len() <= "https://".len() || origin.ends_with('/') {
-        return Err(
-            "origin must be an https URL with a non-empty host and no trailing slash".to_string(),
-        );
+    let authority = origin
+        .strip_prefix("https://")
+        .ok_or_else(|| "origin must be an https URL with a non-empty host".to_string())?;
+    if authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+    {
+        return Err("origin must contain only an https authority with no trailing slash".to_string());
+    }
+    let parsed = Url::parse(origin).map_err(|_| "origin must be a valid https URL".to_string())?;
+    if parsed.scheme() != "https" || parsed.host().is_none() {
+        return Err("origin must be an https URL with a non-empty host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("origin must not contain user information".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() || parsed.path() != "/" {
+        return Err("origin must not contain a path, query, or fragment".to_string());
     }
     Ok(origin)
 }
 
 /// Join a validated origin with an origin-relative path. The path must be
-/// absolute, single-slash, free of control characters, and carry no fragment:
-/// these are GETs against documented faces, not an open proxy.
+/// absolute, single-slash, free of encoded/dot path segments and controls, and
+/// carry no fragment: these are GETs against documented faces, not an open
+/// proxy.
 pub fn build_url(origin: &str, path: &str) -> Result<String, String> {
     let origin = validate_origin(origin)?;
     if !path.starts_with('/') || path.starts_with("//") {
         return Err("path must be absolute and start with a single '/'".to_string());
     }
-    if path.contains('#') || path.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-        return Err("path must not contain a fragment or control characters".to_string());
+    if path.contains('#')
+        || path.contains('\\')
+        || path.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+    {
+        return Err("path must not contain a fragment, backslash, or control character".to_string());
     }
-    Ok(format!("{origin}{path}"))
+    let pathname = path.split_once('?').map_or(path, |(pathname, _)| pathname);
+    if pathname.contains('%')
+        || pathname
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("path must not contain encoded or dot path segments".to_string());
+    }
+    let base = Url::parse(&format!("{origin}/"))
+        .map_err(|_| "origin must be a valid https URL".to_string())?;
+    let joined = base
+        .join(path)
+        .map_err(|_| "path must be a valid origin-relative URL".to_string())?;
+    if joined.origin() != base.origin() {
+        return Err("path must stay on the configured origin".to_string());
+    }
+    Ok(joined.to_string())
 }
 
 /// What one read turned into: status line plus the body bytes as UTF-8.
@@ -93,41 +129,64 @@ pub struct Fetched {
 
 #[derive(Debug)]
 pub enum FetchError {
-    /// Non-2xx from the agent origin; carries the status and its problem body.
-    Status(u16, String),
-    Network(String),
+    /// Non-2xx from the agent origin. Response bytes never cross an error.
+    Status(u16),
+    /// The peer sent more bytes than the public read contract permits. No
+    /// partial body crosses this variant.
+    BodyTooLarge { limit_bytes: u64 },
+    Network,
+    InvalidUtf8,
 }
 
-fn agent() -> Agent {
+fn agent_with_timeout(timeout: std::time::Duration) -> Agent {
     AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(READ_TIMEOUT_MS))
+        .timeout(timeout)
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .redirects(0)
         .build()
 }
 
-fn read_capped(reader: impl Read) -> Result<String, String> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_BODY_BYTES)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    String::from_utf8(bytes).map_err(|error| error.to_string())
+fn agent() -> Agent {
+    agent_with_timeout(READ_TIMEOUT)
 }
 
-/// GET one full URL, bounding the response body. Redirects fail by default in
-/// ureq for good reason here: the faces are origin-pinned, so a redirect is
-/// either a misconfigured origin or an attempt to move the reader.
-pub fn fetch_text(url: &str) -> Result<Fetched, FetchError> {
-    let response = agent().get(url).call().map_err(|error| match error {
-        ureq::Error::Status(code, response) => {
-            let body = read_capped(response.into_reader()).unwrap_or_default();
-            FetchError::Status(code, body)
-        }
-        other => FetchError::Network(other.to_string()),
+fn read_capped(reader: impl Read) -> Result<String, FetchError> {
+    read_capped_at(reader, MAX_BODY_BYTES)
+}
+
+fn read_capped_at(reader: impl Read, max_body_bytes: u64) -> Result<String, FetchError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_body_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| FetchError::Network)?;
+    if bytes.len() as u64 > max_body_bytes {
+        return Err(FetchError::BodyTooLarge {
+            limit_bytes: max_body_bytes,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| FetchError::InvalidUtf8)
+}
+
+/// GET one full URL, bounding the response body. The configured agent disables
+/// redirects: an origin-pinned face may not move the reader somewhere else.
+fn fetch_text_with_agent(agent: &Agent, url: &str) -> Result<Fetched, FetchError> {
+    let response = agent.get(url).call().map_err(|error| match error {
+        ureq::Error::Status(code, _) => FetchError::Status(code),
+        _ => FetchError::Network,
     })?;
 
     let status = response.status();
-    let body = read_capped(response.into_reader()).map_err(FetchError::Network)?;
+    if !(200..300).contains(&status) {
+        return Err(FetchError::Status(status));
+    }
+    let body = read_capped(response.into_reader())?;
     Ok(Fetched { status, body })
+}
+
+pub fn fetch_text(url: &str) -> Result<Fetched, FetchError> {
+    fetch_text_with_agent(&agent(), url)
 }
 
 /// The path for a `problems` invocation.
@@ -144,6 +203,9 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn help_describes_asimp_as_optional() {
@@ -182,6 +244,10 @@ mod tests {
             "//evil.test/x",
             "https://evil.test/x",
             "/a#fragment",
+            "/\\evil.test/x",
+            "/../capabilities",
+            "/a/./b",
+            "/%2f%2fevil.test/x",
             "/a\nb",
             "",
         ] {
@@ -198,6 +264,109 @@ mod tests {
         let error = resolve_origin(Some(&"http://insecure.example".to_string())).unwrap_err();
         assert!(error.contains("https"));
         let _ = resolve_origin(None).unwrap();
+    }
+
+    #[test]
+    fn resolve_origin_rejects_authority_confusion_and_non_origin_components() {
+        for bad in [
+            "https://user@example.test",
+            "https://example.test/path",
+            "https://example.test/.",
+            "https://example.test/%2e",
+            "https://example.test?query=1",
+            "https://example.test#fragment",
+            "https://example.test/",
+            "https:\\example.test",
+            "https://example.test\n.evil.test",
+        ] {
+            assert!(
+                resolve_origin(Some(&bad.to_string())).is_err(),
+                "expected reject: {bad:?}"
+            );
+        }
+        assert_eq!(
+            resolve_origin(Some(&"https://example.test:8443".to_string())).unwrap(),
+            "https://example.test:8443"
+        );
+    }
+
+    #[test]
+    fn capped_reader_distinguishes_exact_limit_from_truncation() {
+        assert_eq!(read_capped_at("abcd".as_bytes(), 4).unwrap(), "abcd");
+        let error = read_capped_at("abcde".as_bytes(), 4).unwrap_err();
+        assert!(matches!(
+            error,
+            FetchError::BodyTooLarge { limit_bytes: 4 }
+        ));
+
+        let exact = vec![b'x'; MAX_BODY_BYTES as usize];
+        assert_eq!(
+            read_capped(exact.as_slice()).unwrap().len(),
+            MAX_BODY_BYTES as usize
+        );
+        let over = vec![b'x'; MAX_BODY_BYTES as usize + 1];
+        assert!(matches!(
+            read_capped(over.as_slice()),
+            Err(FetchError::BodyTooLarge {
+                limit_bytes: MAX_BODY_BYTES
+            })
+        ));
+    }
+
+    #[test]
+    fn the_connect_and_read_budget_is_fifteen_seconds_not_milliseconds_as_seconds() {
+        assert_eq!(READ_TIMEOUT, std::time::Duration::from_secs(15));
+        assert_ne!(READ_TIMEOUT, std::time::Duration::from_secs(15_000));
+    }
+
+    #[test]
+    fn the_configured_timeout_causally_stops_a_stalled_response_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut first_request_byte = [0_u8; 1];
+            stream.read_exact(&mut first_request_byte).unwrap();
+            thread::sleep(std::time::Duration::from_millis(200));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+        });
+
+        let started = std::time::Instant::now();
+        let result = fetch_text_with_agent(
+            &agent_with_timeout(std::time::Duration::from_millis(20)),
+            &format!("http://{address}/stalled"),
+        );
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(matches!(result, Err(FetchError::Network)));
+        assert!(elapsed < std::time::Duration::from_secs(1), "elapsed={elapsed:?}");
+    }
+
+    #[test]
+    fn fetch_text_refuses_redirects_instead_of_changing_origin() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut first_request_byte = [0_u8; 1];
+            stream.read_exact(&mut first_request_byte).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\nContent-Length: 31\r\nConnection: close\r\n\r\ncredential-shaped-response-body",
+                )
+                .unwrap();
+        });
+
+        let result = fetch_text(&format!("http://{address}/start"));
+        server.join().unwrap();
+        assert!(!format!("{result:?}").contains("credential-shaped-response-body"));
+        match result {
+            Err(FetchError::Status(302)) => {}
+            other => panic!("expected a refused 302 response, got {other:?}"),
+        }
     }
 
     #[test]

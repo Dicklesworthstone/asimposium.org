@@ -98,3 +98,24 @@ fn unknown_command_exits_nonzero_with_a_useful_stderr_hint() {
     );
     assert!(stderr.contains("--help"), "{context}");
 }
+
+#[test]
+fn invalid_origin_refusal_does_not_echo_credentials() {
+    let invocation = invoke(&[
+        "--origin",
+        "https://user:credential-shaped-value@example.test",
+        "capabilities",
+    ]);
+    let context = diagnostic(
+        "cli_surface::invalid_origin_refusal_does_not_echo_credentials",
+        &invocation,
+        "cargo test --test cli_surface invalid_origin_refusal_does_not_echo_credentials",
+    );
+    let stderr = String::from_utf8_lossy(&invocation.output.stderr);
+
+    assert_eq!(invocation.output.status.code(), Some(2), "{context}");
+    assert!(invocation.output.stdout.is_empty(), "{context}");
+    assert!(stderr.contains("origin must not contain user information"), "{context}");
+    assert!(!stderr.contains("credential-shaped-value"), "{context}");
+    assert!(!stderr.contains("example.test"), "{context}");
+}

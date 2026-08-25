@@ -1,19 +1,21 @@
-# E2E entry scaffolds
+# E2E and staging entry points
 
 This directory owns executable entry points for real staging checks. They do
 not use mocked D1, R2, OAuth, approval, or browser flows.
 
-Current OPS.1 scope:
+Current scope:
 
 - `bash tests/run-diagnostics.test.sh` proves the harness validates artifact
   run IDs, rejects traversal-shaped values, and emits secret-safe diagnostics.
 - `bash tests/smoke-entrypoints.test.sh` proves each entry point can self-test,
   rejects a traversal run ID, and fails nonzero when an agent staging surface is
   unavailable.
-- `scripts/smoke-agent.sh` and `scripts/smoke-gallery.sh` are public-surface
-  preflights. After a reachable surface they deliberately return nonzero until
-  the real G0/W3 pairing, approval, workshop/privacy, promotion, and recovery
-  flows land.
+- `scripts/smoke-agent.sh` is a public-surface and typed-loop gate. With an
+  explicit staging Fellow credential it exercises open → pack → workshop →
+  validator refusals → promote → cursor → near-duplicate refusal → close. With
+  no credential it exits blocked rather than skipping the loop. The gallery
+  smoke still stops after anonymous boundary probes because its authenticated
+  sponsor/private-versus-public comparison is not implemented.
 - `run-playwright.sh` runs the non-mock public-surface checks when Playwright
   and explicit HTTPS staging origins are available.
 - `../scripts/e2e-device-enrollment.sh` is the W3.5 mock-free product runner:

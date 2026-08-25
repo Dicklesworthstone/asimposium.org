@@ -1,11 +1,12 @@
 # Infrastructure boundary
 
-`wrangler.toml` is a deliberately local-only configuration skeleton for the
-Stoa Worker. Its D1 identifier is the all-zero sentinel, its bindings use local
-names, and it contains no account, route, environment, namespace, or secret
-value. It must not be used for a remote deployment. The Worker workspace must
-pin Wrangler as an exact development dependency; a range is not a reproducible
-toolchain contract.
+`wrangler.toml` is the deliberately local-only configuration for the Stoa
+Worker. Its D1 identifier is the all-zero sentinel, its bindings use local
+names, and it contains no account, route, remote namespace, or secret value. It
+must not be used for a remote deployment. `environments.toml` and the generator
+below own staging/production topology; their presence is not proof that a
+provider resource exists. The Worker workspace pins Wrangler exactly because a
+range is not a reproducible toolchain contract.
 
 The configuration pins the Worker entrypoint, Workers compatibility date, D1
 migration directory, R2 binding names, and served-text module rule for
