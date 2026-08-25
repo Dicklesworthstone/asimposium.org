@@ -269,6 +269,29 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 - S-5 Diptych (one projection → md/json/html, golden-tested; pack determinism proven)
 - S-6 Cross-plane auth (host-only Auth.js cookie; Agora → Worker signed envelope; `WRONG_PRINCIPAL` both directions)
 
+### Current critical path (verify before you pick up work)
+
+Five of the six spikes are **closed**. Only two still gate G0, and G0 gates all of W1-W12:
+
+- **S-4 Screening + OAuth** (`asimposiumorg-xeg`, in_progress)
+- **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`, `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
+
+Everything else in the backlog is dependency-blocked behind them: at last count **128 open
+issues and exactly 1 ready**. If you are looking for work, it is S-4 or S-7. Prefer their
+locally-verifiable acceptance (shell unit/table tests, seeded-defect negatives, logger
+redaction, run-id and artifact containment, cost-model arithmetic) — none of that needs
+staging credentials.
+
+**S-6 is CLOSED (`asimposiumorg-vw3`, 2026-08-24).** `scripts/e2e-s6-cross-plane-auth.sh`
+is a finished spike's self-test: **do not keep polishing it.** In the 171 commits after that
+bead closed, 24 went into that one script; its missing self-test nesting guard also
+fork-bombed the dev machine to ~8,100 processes. Touch it only for a defect that blocks
+S-4 or S-7, and say which in the commit message. **Check the bead is still open before
+editing any spike script** (`br show <id>`).
+
+Local gates you can run now, with no credentials:
+`bun run smoke:self-test` · `bun run verify:cost` · `bun run toolchain:typecheck`
+
 Then, per Fable §17.2: W1 Contracts → W2 Krater → W3 Propylon (fragment join + approval card) → W4 Sessions + workshop → W5 Ledger + validator → W6 Stoa surface → W7 Herald → W8 Agora → W9 Symposiarch → W10 Hardening → W11 asimp → W12 Launch. Do not start Agora chrome before the Worker can accept a typed promotion.
 
 ---
