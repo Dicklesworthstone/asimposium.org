@@ -9,13 +9,21 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const PIPELINE = join(REPO_ROOT, "scripts", "e2e-ci-pipeline.sh");
+const DIAGNOSTIC_LIBRARY = join(REPO_ROOT, "e2e", "lib", "run-diagnostics.sh");
 const SCRATCH = mkdtempSync(join(tmpdir(), "asimposium-ci-pipeline-test-"));
 const HELPER_ENV: NodeJS.ProcessEnv = {
   PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -197,6 +205,96 @@ function runInternalAction(action: string, runId: string): ReturnType<typeof spa
     encoding: "utf8",
     timeout: 10_000,
   });
+}
+
+interface ArtifactCapabilityFixture {
+  readonly root: string;
+  readonly runId: string;
+  readonly runDirectory: string;
+  readonly rootIdentity: string;
+  readonly runIdentity: string;
+  readonly leaseDirectory: string;
+  readonly leaseIdentity: string;
+}
+
+function directoryIdentity(path: string): string {
+  const stat = statSync(path, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("capability fixture path is not a direct directory");
+  }
+  return `${stat.dev}:${stat.ino}`;
+}
+
+function artifactCapabilityFixture(label: string): ArtifactCapabilityFixture {
+  runCounter += 1;
+  const runId = `ci-capability-${label}-${process.pid}-${runCounter}`;
+  const root = join(SCRATCH, `capability-${label}-${runCounter}`);
+  const artifacts = join(root, "e2e", "artifacts");
+  const runDirectory = join(artifacts, runId);
+  mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
+  const physicalRoot = realpathSync(root);
+  const physicalArtifacts = realpathSync(artifacts);
+  const physicalRun = realpathSync(runDirectory);
+  const rootIdentity = directoryIdentity(physicalArtifacts);
+  const [device, inode] = rootIdentity.split(":");
+  const leaseDirectory = join(
+    physicalRoot,
+    "e2e",
+    ".artifact-writer-leases",
+    `dev-${device}-ino-${inode}`,
+    `lease-${process.pid}-${Math.floor(Date.now() / 1000)}-${runCounter}-1`,
+  );
+  mkdirSync(leaseDirectory, { recursive: true, mode: 0o700 });
+  return {
+    root: physicalRoot,
+    runId,
+    runDirectory: physicalRun,
+    rootIdentity,
+    runIdentity: directoryIdentity(physicalRun),
+    leaseDirectory,
+    leaseIdentity: directoryIdentity(leaseDirectory),
+  };
+}
+
+function pipelineFunctionSource(name: string, nextName: string): string {
+  const source = readFileSync(PIPELINE, "utf8");
+  const start = source.indexOf(`${name}() {`);
+  const end = source.indexOf(`\n${nextName}() {`, start);
+  if (start < 0 || end < 0) throw new Error(`pipeline function is missing: ${name}`);
+  return source.slice(start, end);
+}
+
+function runArtifactCapability(
+  fixture: ArtifactCapabilityFixture,
+  overrides: Partial<ArtifactCapabilityFixture> = {},
+): ReturnType<typeof spawnSync> {
+  const value = { ...fixture, ...overrides };
+  const verifier = pipelineFunctionSource(
+    "ci_artifact_capability_directory_at_root",
+    "ci_artifact_capability_is_current",
+  );
+  const script = `
+set -u -o pipefail
+source "$1"
+${verifier}
+ci_artifact_capability_directory_at_root "$2" "$3" "$4" "$5" "$6" "$7"
+`;
+  return spawnSync(
+    "bash",
+    [
+      "-c",
+      script,
+      "ci-capability-plant",
+      DIAGNOSTIC_LIBRARY,
+      value.root,
+      value.runId,
+      value.rootIdentity,
+      value.runIdentity,
+      value.leaseDirectory,
+      value.leaseIdentity,
+    ],
+    { env: HELPER_ENV, encoding: "utf8", timeout: 10_000 },
+  );
 }
 
 function records(run: PipelineRun): readonly EvidenceRecord[] {
