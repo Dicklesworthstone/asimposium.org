@@ -154,11 +154,36 @@ phase_budget() {
   if (( left < nominal )); then printf '%s' "$left"; else printf '%s' "$nominal"; fi
 }
 
-readonly ROOT="$PWD"
-readonly PLAYWRIGHT_RUNNER="e2e/playwright/s6-cross-plane-runner.ts"
-# This script's own path, so the signal plant can run a nested instance.
+ROOT=""
+PLAYWRIGHT_RUNNER=""
+# This script's own path, canonicalized only after main has de-exported every
+# credential, so the signal plant can run a nested instance from any caller cwd.
 SCRIPT_SELF="${BASH_SOURCE[0]}"
-readonly SCRIPT_SELF
+
+initialize_repository_paths() {
+  local source_path="$SCRIPT_SELF" source_directory source_name
+  if [[ "$source_path" == */* ]]; then
+    source_directory="${source_path%/*}"
+    source_name="${source_path##*/}"
+  else
+    source_directory="$PWD"
+    source_name="$source_path"
+  fi
+  [[ "$source_directory" == /* ]] || source_directory="${PWD}/${source_directory}"
+  source_directory="$(cd -P -- "$source_directory" && pwd -P)" || return 1
+  SCRIPT_SELF="${source_directory}/${source_name}"
+  [[ "$source_name" == "e2e-s6-cross-plane-auth.sh" && \
+    -f "$SCRIPT_SELF" && ! -L "$SCRIPT_SELF" ]] || return 1
+  ROOT="$(cd -P -- "${source_directory}/.." && pwd -P)" || return 1
+  [[ "$source_directory" == "${ROOT}/scripts" && \
+    -f "${ROOT}/e2e/lib/run-diagnostics.sh" && \
+    ! -L "${ROOT}/e2e/lib/run-diagnostics.sh" ]] || return 1
+  PLAYWRIGHT_RUNNER="e2e/playwright/s6-cross-plane-runner.ts"
+  # shellcheck source=../e2e/lib/run-diagnostics.sh
+  source "${ROOT}/e2e/lib/run-diagnostics.sh"
+  cd "$ROOT" || return 1
+  readonly ROOT PLAYWRIGHT_RUNNER SCRIPT_SELF
+}
 
 readonly REQUIRED_VARS=(
   ASIMP_S6_PREVIEW_URL
@@ -206,6 +231,50 @@ EVIDENCE_ENVELOPE_INITIAL_LATENCY_SECONDS=""
 EVIDENCE_ENVELOPE_REPLAY_STATUS=""
 EVIDENCE_ENVELOPE_REPLAY_CODE=""
 EVIDENCE_ENVELOPE_REPLAY_LATENCY_SECONDS=""
+S6_ARTIFACT_ROOT_IDENTITY=""
+S6_ARTIFACT_NAMESPACE_IDENTITY=""
+S6_ARTIFACT_RUN_IDENTITY=""
+S6_ARTIFACT_WRITER_LEASE_PATH=""
+S6_ARTIFACT_WRITER_LEASE_IDENTITY=""
+S6_ARTIFACT_WRITER_LEASE_OWNED=0
+S6_RUN_ID=""
+S6_RUN_DIRECTORY=""
+S6_RUN_RELATIVE_DIRECTORY=""
+
+s6_artifact_writer_boundary_is_open() {
+  (( S6_ARTIFACT_WRITER_LEASE_OWNED == 1 )) || return 1
+  e2e_artifact_namespaced_run_matches_at_root \
+    "$ROOT" "$SUITE" "$S6_RUN_ID" \
+    "$S6_ARTIFACT_ROOT_IDENTITY" "$S6_ARTIFACT_NAMESPACE_IDENTITY" \
+    "$S6_ARTIFACT_RUN_IDENTITY" "$S6_ARTIFACT_WRITER_LEASE_PATH" \
+    "$S6_ARTIFACT_WRITER_LEASE_IDENTITY"
+}
+
+s6_claim_artifact_run() {
+  (( S6_ARTIFACT_WRITER_LEASE_OWNED == 0 )) || return 1
+  S6_RUN_ID="s6-${BASHPID}-${SECONDS}-${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+  e2e_claim_artifact_namespaced_run_at_root "$ROOT" "$SUITE" "$S6_RUN_ID" || return 1
+  S6_ARTIFACT_ROOT_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY"
+  S6_ARTIFACT_NAMESPACE_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY"
+  S6_ARTIFACT_RUN_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+  S6_ARTIFACT_WRITER_LEASE_PATH="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+  S6_ARTIFACT_WRITER_LEASE_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+  S6_RUN_DIRECTORY="$ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY"
+  S6_RUN_RELATIVE_DIRECTORY="${ASIMP_S6_EVIDENCE_DIR}/${S6_RUN_ID}"
+  S6_ARTIFACT_WRITER_LEASE_OWNED=1
+  [[ "$S6_RUN_DIRECTORY" == "${ROOT}/${S6_RUN_RELATIVE_DIRECTORY}" ]] || return 1
+  s6_artifact_writer_boundary_is_open
+}
+
+s6_close_artifact_writer_lease_after_settlement() {
+  (( S6_ARTIFACT_WRITER_LEASE_OWNED == 1 )) || return 0
+  (( REAP_SURVIVORS == 0 && ${#CHILD_PIDS[@]} == 0 )) || return 1
+  [[ -z "$GROUP_CONTROL_PID" ]] || return 1
+  s6_artifact_writer_boundary_is_open || return 1
+  e2e_close_artifact_writer_lease \
+    "$S6_ARTIFACT_WRITER_LEASE_PATH" "$S6_ARTIFACT_WRITER_LEASE_IDENTITY" || return 1
+  S6_ARTIFACT_WRITER_LEASE_OWNED=0
+}
 
 log() { printf '%s\n' "$*" >&2; }
 emit() { printf '%s\n' "$1"; }
@@ -755,6 +824,11 @@ on_exit() {
   # self_test exit, so retire it here where all exit paths converge.
   [[ -z "${SELF_TEST_BOUNDED_OUT:-}" ]] || rm -f "$SELF_TEST_BOUNDED_OUT" 2>/dev/null || true
   if (( CLEANED_UP == 1 )); then
+    s6_close_artifact_writer_lease_after_settlement || {
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"artifact-writer-lease-closed\",\"status\":\"fail\",\"detail\":\"the exact run boundary or settled owner set could not be revalidated before lease close\",\"reproduce\":\"${REPRODUCE}\"}"
+      trap - EXIT
+      exit "$EX_CLEANUP_UNPROVEN"
+    }
     publish_lifecycle_settled || {
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"no-child-survivors\",\"status\":\"fail\",\"detail\":\"owned process-group settlement was not proven\",\"reproduce\":\"${REPRODUCE}\"}"
       trap - EXIT
@@ -773,6 +847,11 @@ on_exit() {
     exit "$EX_CLEANUP_UNPROVEN"
   fi
   CLEANED_UP=1
+  s6_close_artifact_writer_lease_after_settlement || {
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"artifact-writer-lease-closed\",\"status\":\"fail\",\"detail\":\"the exact run boundary or settled owner set could not be revalidated before lease close\",\"reproduce\":\"${REPRODUCE}\"}"
+    trap - EXIT
+    exit "$EX_CLEANUP_UNPROVEN"
+  }
   publish_lifecycle_settled || {
     trap - EXIT
     exit "$EX_CLEANUP_UNPROVEN"
@@ -815,8 +894,14 @@ on_signal() {
     trap - EXIT
     exit "$EX_CLEANUP_UNPROVEN"
   fi
-  blocked_record "INTERRUPTED" "the run received SIG${signal} and every child process group was reaped"
   CLEANED_UP=1
+  if ! s6_close_artifact_writer_lease_after_settlement; then
+    blocked_record "CLEANUP_UNPROVEN" \
+      "the run received SIG${signal}, child groups settled, but the exact artifact writer boundary could not be revalidated for lease close"
+    trap - EXIT
+    exit "$EX_CLEANUP_UNPROVEN"
+  fi
+  blocked_record "INTERRUPTED" "the run received SIG${signal} and every child process group was reaped"
   exit "$EX_FAIL"
 }
 
@@ -2172,9 +2257,11 @@ assert_receipt_attributed() {
 # been verified on disk — a run must not report `pass` with no evidence behind
 # it. `noclobber` makes an existing path a refusal, never a truncation.
 write_evidence_bundle() {
-  local dir="${ASIMP_S6_EVIDENCE_DIR:-}"
-  if ! valid_evidence_directory "$dir" || evidence_directory_has_symlink_component; then
-    fail_record "evidence-written" "the mandatory evidence destination was absent, outside the fixed repository artifact root, or traversed a symlink; refusing to seal evidence"
+  local dir="${S6_RUN_RELATIVE_DIRECTORY:-}"
+  if ! valid_evidence_directory "${ASIMP_S6_EVIDENCE_DIR:-}" || \
+     [[ -z "$dir" || "$dir" != "${ASIMP_S6_EVIDENCE_DIR}/${S6_RUN_ID}" ]] || \
+     ! s6_artifact_writer_boundary_is_open; then
+    fail_record "evidence-written" "the exclusive run directory or its artifact-root epoch and writer lease could not be revalidated; refusing to seal evidence"
     return 1
   fi
   # A typed provisioning blocker has no complete live tuple. Preserve the
@@ -2211,12 +2298,8 @@ write_evidence_bundle() {
     fail_record "evidence-written" "the validator-backed request, response, cookie, or latency tuple was incomplete; refusing to seal partial evidence"
     return 1
   fi
-  if ! mkdir -p "$dir" 2>/dev/null; then
-    fail_record "evidence-written" "the evidence directory could not be created"
-    return 1
-  fi
-  if [[ ! -d "$dir" ]] || evidence_directory_has_symlink_component; then
-    fail_record "evidence-written" "the evidence destination was not a real repository-local directory after creation"
+  if [[ ! -d "$dir" || -L "$dir" ]] || ! s6_artifact_writer_boundary_is_open; then
+    fail_record "evidence-written" "the preclaimed evidence run was not the same real repository-local directory before publication"
     return 1
   fi
   # ONE immutable expected tuple feeds both rendering and validation. In
@@ -2240,8 +2323,8 @@ write_evidence_bundle() {
   local -r expected_browser_leg_seconds="$BROWSER_LEG_LATENCY_SECONDS"
   local -r expected_run_seconds="$SECONDS"
   local -r expected_assertions="$ASSERTIONS" expected_failures="$FAILURES"
-  local path="${dir}/${SUITE}.$$.${expected_run_seconds}.json"
-  if [[ -e "$path" ]]; then
+  local path="${dir}/evidence.json"
+  if [[ -e "$path" || -L "$path" ]] || ! s6_artifact_writer_boundary_is_open; then
     fail_record "evidence-written" "an artifact already exists at the allocated evidence path; refusing to overwrite it"
     return 1
   fi
@@ -2276,7 +2359,8 @@ write_evidence_bundle() {
   )
   local wrote=$?
   umask "$previous_umask"
-  if (( wrote != 0 )) || [[ ! -f "$path" || ! -s "$path" ]]; then
+  if (( wrote != 0 )) || [[ ! -f "$path" || ! -s "$path" ]] || \
+     ! s6_artifact_writer_boundary_is_open; then
     fail_record "evidence-written" "the evidence record was not created as a non-empty regular file"
     return 1
   fi
@@ -2293,7 +2377,7 @@ write_evidence_bundle() {
     fail_record "evidence-written" "the evidence record's mode could not be confirmed as owner-only (observed '${mode:-unreadable}')"
     return 1
   fi
-  if ! validate_evidence_bundle \
+  if ! s6_artifact_writer_boundary_is_open || ! validate_evidence_bundle \
     "$path" "$expected_revision" "$expected_deployment_id" \
     "$expected_agora_host" "$expected_stoa_host" "$expected_kid" \
     "$expected_payload_sha256" "$expected_principal_pseudonym" \
@@ -2301,6 +2385,10 @@ write_evidence_bundle() {
     "$expected_browser_leg_seconds" "$expected_run_seconds" \
     "$expected_assertions" "$expected_failures"; then
     fail_record "evidence-written" "the retained evidence bytes failed the bounded shared schema-v4 validator"
+    return 1
+  fi
+  if ! s6_artifact_writer_boundary_is_open; then
+    fail_record "evidence-written" "the exact run boundary changed while the retained evidence was being validated"
     return 1
   fi
   EVIDENCE_PATH="$path"
@@ -3761,6 +3849,13 @@ main() {
   export -n ASIMP_S6_TEST_GOOGLE_USER 2>/dev/null || true
   export -n ASIMP_S6_FELLOW_TOKEN 2>/dev/null || true
   export -n ASIMP_S6_SIGNING_KEY_HEX 2>/dev/null || true
+
+  if ! initialize_repository_paths; then
+    blocked_record "REPOSITORY_ROOT_INVALID" \
+      "the canonical script path, repository root, or shared artifact diagnostics library was unavailable"
+    CLEANED_UP=1
+    exit "$EX_CONFIG"
+  fi
 
   # One exact, provider-free supervisor bootstrap for focused portability and
   # fd-handoff diagnosis. It exercises the production run_bounded path without
