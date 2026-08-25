@@ -29,8 +29,16 @@ interface RawRoute {
   readonly path: string;
 }
 
-/** One-way normalization: mounted `:p{regex}` / `:p` become advertised `<p>` form. */
+const SUFFIXED_LEDGER_FACE_PATHS: Readonly<Record<string, string>> = {
+  "/p/:id{.+\\.events\\.json$}": "/p/<id>.events.json",
+  "/p/:id{.+\\.json$}": "/p/<id>.json",
+  "/p/:id{.+\\.md$}": "/p/<id>.md",
+};
+
+/** One-way normalization: mounted regex suffixes retain their public suffix. */
 function normalizeMountedPath(path: string): string {
+  const suffixed = SUFFIXED_LEDGER_FACE_PATHS[path];
+  if (suffixed !== undefined) return suffixed;
   return path.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/g, "<$1>");
 }
 
@@ -52,6 +60,8 @@ function normalizeAdvertisedEntry(entry: string): `${string} ${string}` {
 /** Advertised rows whose parameter spelling differs from the mounted template, pinned explicitly. */
 const ADVERTISED_EQUIVALENT_MOUNTED_ROUTE: Record<string, string> = {
   "GET /join/<enrollment-id>": "GET /join/<enrollmentId>",
+  "GET /p/<problem-id>.json": "GET /p/<id>.json",
+  "GET /p/<problem-id>.md": "GET /p/<id>.md",
 };
 
 const STUB_SERVICE = {} as never;
@@ -93,8 +103,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
   const UNDISCLOSED_REASON_BY_ROUTE: Record<string, string> = {
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
-    "GET /p/<id>":
-      "per-problem face shapes are quarantined fail-closed placeholders (.events.json/.json/.md) until their W6.4 Diptych contract mounts",
+    "GET /p/<id>.events.json":
+      "the W6.4 event-tail source remains fail-closed until its response contract and nested public route land",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/enrollments/proposals":

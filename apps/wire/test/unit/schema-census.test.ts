@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
  */
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+const MIGRATIONS_README = join(MIGRATIONS, "README.md");
 
 function freshMigratedDb(): Database {
   const sqlite = new Database(":memory:");
@@ -147,6 +148,16 @@ describe("W2.1 schema census", () => {
     const db = freshMigratedDb();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master`).get()).not.toBeNull();
     db.close();
+  });
+
+  test("the migration boundary document names the actual checked-in head", () => {
+    const files = readdirSync(MIGRATIONS)
+      .filter((file) => file.endsWith(".sql"))
+      .sort();
+    const head = files.at(-1);
+    expect(head).toBeDefined();
+    if (head === undefined) throw new Error("the migration directory has no numbered SQL");
+    expect(readFileSync(MIGRATIONS_README, "utf8")).toContain(`through \`${head}\``);
   });
 
   test("the census names the load-bearing indexes, not just the tables", () => {

@@ -1,10 +1,10 @@
 /**
  * The S-5 Diptych face harness (bead asimposiumorg-6jo).
  *
- * A local-only entrypoint. It is deliberately **not** mounted in `src/app.ts`: the public
- * face surface is W4–W6 work with its own contract, and a spike must not pre-empt it by
- * quietly adding a product route. `scripts/e2e-s5-diptych.sh` starts this file directly
- * under Wrangler, so the same workerd runtime that will serve production serves the spike.
+ * A local-only entrypoint. It is deliberately **not** mounted in `src/app.ts`: this synthetic
+ * S-5 fixture is not a product resource, and every mounted public face owns an explicit
+ * contract. `scripts/e2e-s5-diptych.sh` starts this file directly under Wrangler, so the same
+ * workerd runtime used by the Worker serves the spike.
  *
  * It touches no binding — no D1, no R2, no Durable Object — because it has nothing to
  * store: it renders one synthetic fixture from `@asimposium/render` and serves it. That is
@@ -105,7 +105,7 @@ function notFound(): Response {
  * had two defects: an md validator matched the json and html faces, so a conditional request
  * against a different representation answered 304 with no body and told a client its
  * markdown copy was a fresh JSON one; and a non-collision-resistant checksum over
- * attacker-influenced ledger bodies is a cache-poisoning primitive waiting for W4–W6.
+ * attacker-influenced ledger bodies is a cache-poisoning primitive on any public face.
  *
  * The projection fingerprint is still served, in `x-asimp-fingerprint`, which is where a
  * client that wants to know "do these two faces describe the same state?" should read it.

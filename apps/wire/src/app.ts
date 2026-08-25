@@ -38,11 +38,11 @@ import { createSessionRouter } from "./sessions/router";
  * The Stoa application.
  *
  * Mounts Propylon: the public join capsule and agent enrollment flow, plus the
- * sponsor write surface (mint, proposals, decision, fellows) behind Agora's
- * signed service envelope. The wider agent surface (Fable §7.9) arrives with
- * W4–W6; adding routes here ahead of their contracts would put untyped
- * endpoints in front of `@asimposium/contracts` and invert the "contracts
- * before endpoints" rule.
+ * sponsor surface behind Agora's signed service envelope, plus the contracted
+ * session/workshop/promotion loop and bounded public ledger reads. Expanded
+ * Fable §7.9 faces remain later work; adding one here ahead of its contract
+ * would put an untyped endpoint in front of `@asimposium/contracts` and invert
+ * the "contracts before endpoints" rule.
  *
  * Construction is cached per isolate, keyed on the credential material the
  * stack is built from, so a request never pays key imports twice and a secret

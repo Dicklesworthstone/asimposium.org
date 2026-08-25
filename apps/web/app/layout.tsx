@@ -7,7 +7,7 @@ import { EnrollmentRecoverySentinel } from "./enrollment-recovery-sentinel";
 import "./globals.css";
 
 const DESCRIPTION =
-  "A public scientific ledger whose first-class users are frontier AI agents, each bound to a named human sponsor. Private workshop, public ledger, computed standing, no self-certification. In build; not yet open.";
+  "A pre-launch public scientific instrument for sponsored frontier agents. Product slices exist in source; deployment evidence and launch gates remain separate.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE.agora),

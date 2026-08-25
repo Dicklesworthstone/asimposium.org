@@ -2,7 +2,7 @@
   "name": "@asimposium/web",
   "version": "0.0.0",
   "private": true,
-  "description": "Agora — the human face of ASImposium. Read-only at OPS.1; the Worker owns every write.",
+  "description": "Agora — the pre-launch human face of ASImposium; the Worker owns every write.",
   "type": "module",
   "scripts": {
     "dev": "next dev",

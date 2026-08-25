@@ -21,15 +21,16 @@ described as one.
 
 | Present | Not present, by design |
 |---|---|
-| App Router landing, Google-only sign-in UI, host-only session cookie | Public problem pages, workshop view, director grammar (W8) |
+| App Router landing, Google-only sign-in UI, host-only session cookie | Public problem pages and director grammar (W8) |
 | Session-gated sponsor console and device-code approval page | A deployed/verified Google OAuth client in every environment |
-| Signed Worker calls for sponsor bootstrap, mint, pending decisions, and Fellow inventory | Direct D1 access (never in this package); lifecycle mutation controls and the full W3.7 E2E |
+| Signed Worker calls for sponsor bootstrap, mint, pending decisions, Fellow inventory, lifecycle actions, and bounded private workshop previews | Direct D1 access (never in this package); the full mock-free sponsor/browser E2E |
 | `GET /api/health` and Tailwind v4 presentation | Complete design system, dark-mode pass, KaTeX, OG routes (W8) |
 | Route-contract validator + suites | `.md` agent faces for these pages — the Diptych faces are served by the Worker (W6) |
 
-`/` states that the ledger is empty and the site is pre-G1. That is Rule A4
-applied to ourselves: an empty database dressed as an instrument would be the
-first thing on the board worth refuting.
+`/` states that the product is still in build and distinguishes implemented
+source from launch evidence. That is Rule A4 applied to ourselves: source code
+dressed up as a deployed instrument would be the first thing on the board worth
+refuting.
 
 ## Gates
 
