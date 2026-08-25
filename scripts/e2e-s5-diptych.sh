@@ -20,7 +20,7 @@
 # Phase 2 (Worker-served): start real local wrangler/workerd on the unmounted harness
 # entrypoint apps/wire/src/render-face/worker.ts and compare the *served* bytes against a
 # local render — media type, ETag, If-None-Match 304, and the canary's absence on public
-# faces. No binding is touched, so nothing is mocked; the harness is not the W4-W6 public
+# faces. No binding is touched, so nothing is mocked; the harness is not the contracted product
 # surface and answers 404 on product routes, which phase 2 asserts.
 #
 # Evidence discipline: captured tool output is never replayed. A local Worker or checker can

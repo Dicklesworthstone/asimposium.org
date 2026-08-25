@@ -447,7 +447,7 @@ async function main(): Promise<void> {
   check(
     "the harness serves no product route",
     unknownRoute.status === 404,
-    `status ${unknownRoute.status} — a spike must not pre-empt the W4-W6 face surface`,
+    `status ${unknownRoute.status} — a spike must not pre-empt the contracted product face surface`,
   );
 
   const write = await fetch(`${origin}/__s5/face`, { method: "POST" });
