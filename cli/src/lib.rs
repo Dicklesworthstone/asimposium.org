@@ -239,7 +239,7 @@ fn fetch_text_with_deadline(
 ) -> Result<Fetched, FetchError> {
     let started = std::time::Instant::now();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
+    let worker = std::thread::Builder::new()
         .name("asimp-read".to_string())
         .spawn(move || {
             let _ = sender.send(fetch_text_with_agent(&agent, &url));
@@ -247,11 +247,21 @@ fn fetch_text_with_deadline(
         .map_err(|_| FetchError::Network)?;
 
     match receiver.recv_timeout(timeout.saturating_sub(started.elapsed())) {
-        Ok(result) => result,
-        Err(
-            std::sync::mpsc::RecvTimeoutError::Timeout
-            | std::sync::mpsc::RecvTimeoutError::Disconnected,
-        ) => Err(FetchError::Network),
+        Ok(result) => {
+            worker.join().map_err(|_| FetchError::Network)?;
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            Err(FetchError::Network)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // `ToSocketAddrs` cannot be cancelled. Detach only on the timeout
+            // path; the one-shot CLI immediately exits after rendering the
+            // body-free error, which terminates this owned worker.
+            drop(worker);
+            Err(FetchError::Network)
+        }
     }
 }
 
@@ -562,7 +572,7 @@ mod tests {
         let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(1);
         let resolver = move |_: &str| {
             entered_sender.send(()).unwrap();
-            thread::sleep(std::time::Duration::from_millis(200));
+            thread::sleep(std::time::Duration::from_millis(500));
             finished_sender.send(()).unwrap();
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -588,22 +598,31 @@ mod tests {
             .expect("the planted resolver must run");
         assert!(matches!(result, Err(FetchError::Network)));
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
+            elapsed < std::time::Duration::from_millis(250),
             "elapsed={elapsed:?}"
         );
         finished_receiver
             .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("the planted resolver worker must retire");
+            .expect("the planted resolver must finish");
     }
 
     #[test]
     fn over_limit_bodies_never_cross_the_cli_stdout_boundary() {
-        for command in [
-            Command::Capabilities,
-            Command::Problems { json: true },
-            Command::Get {
-                path: "/protocol.md".to_string(),
-            },
+        for (command, expected_stderr) in [
+            (
+                Command::Capabilities,
+                "asimp: /capabilities failed: response exceeds the 8388608-byte limit\n",
+            ),
+            (
+                Command::Problems { json: true },
+                "asimp: /problems.json failed: response exceeds the 8388608-byte limit\n",
+            ),
+            (
+                Command::Get {
+                    path: "/protocol.md".to_string(),
+                },
+                "asimp: GET request failed: response exceeds the 8388608-byte limit\n",
+            ),
         ] {
             let cli = Cli {
                 origin: Some("https://example.test".to_string()),
@@ -617,8 +636,7 @@ mod tests {
 
             assert_eq!(output.exit_code, 2);
             assert!(output.stdout.is_empty());
-            assert!(output.stderr.contains("response exceeds the 8388608-byte limit"));
-            assert!(!output.stderr.contains("xxxx"));
+            assert_eq!(output.stderr, expected_stderr);
         }
     }
 

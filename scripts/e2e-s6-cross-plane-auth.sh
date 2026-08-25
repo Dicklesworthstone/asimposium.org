@@ -544,6 +544,7 @@ consume_group_terminal_during_grace() {
     return 0
   fi
   if (( GROUP_TERMINAL_SEEN == 1 )); then
+    sleep "$CHILD_SETTLE_POLL_SECONDS"
     return 0
   fi
   IFS= read -r -t "$grace" record <&5
