@@ -18,7 +18,11 @@ Current scope:
   canonical token grammar, and passes the Authorization header to curl over
   stdin rather than argv or inherited environment. The gallery smoke still
   stops after anonymous boundary probes because its authenticated
-  sponsor/private-versus-public comparison is not implemented.
+  sponsor/private-versus-public comparison is not implemented. The anonymous
+  agent smoke requires `/problems.json` to return exact status 200, canonical
+  `application/json; charset=utf-8`, and the generated closed contract; it also
+  validates the sponsor route's exact 401 `UNAUTHORIZED` problem face, but it does not claim byte-level workshop
+  privacy without a seeded private canary and its paired public observation.
 - `run-playwright.sh` runs the non-mock public-surface checks when Playwright
   and explicit HTTPS staging origins are available.
 - `../scripts/e2e-device-enrollment.sh` is the W3.5 mock-free product runner:
@@ -30,19 +34,39 @@ Current scope:
   a 24-hour no-reactivation soak. The runner refuses canonical production
   origins and never captures screenshots, traces, cookies, codes, flow handles,
   tokens, proposal bodies, or sponsor identity.
-- `gauntlet/run.sh` refuses to synthesize a Cold-Agent score until fresh-harness
-  adapters, sponsor approval automation, and the real typed product flow exist.
+- `../scripts/e2e-s6-cross-plane-auth.sh` is the mock-free cross-plane S-6 runner. Its paired
+  targets are supplied explicitly as `ASIMP_S6_PREVIEW_URL` and `ASIMP_S6_WORKER_URL`, alongside
+  the real Google sign-in, Fellow bearer, signing authority, revision/deployment identity, and
+  repository-local evidence destination. Missing inputs exit 78 as
+  `REQUIRED_HARNESS_INPUTS_MISSING`, an external execution prerequisite; that result does not say
+  whether provider resources are provisioned. Supplying configuration also is not proof: only the
+  completed live run and its validated schema-v4 evidence establish the cross-plane claims.
+- `gauntlet/run.sh` blocks when no join-URL file is supplied. With one supplied,
+  the current orchestrator can run and emit a score, but its adapters exercise
+  only registration and `hello`, its transcript classifier is heuristic, and
+  its scorecard does not yet enforce ten complete Fable §16.1 attempts. Treat
+  every current score as harness-development output, never as the Cold-Agent
+  acceptance gate.
 
-All runners accept `--self-test`. Live entry points require explicit HTTPS
-origins through `ASIMPOSIUM_STAGING_AGENT_BASE_URL` and, where applicable,
-`ASIMPOSIUM_STAGING_AGORA_BASE_URL`; no runner infers a staging target or logs
-its value. Curl calls routed through the shared E2E helper send the exact
-`OpenAI File Downloader, XaiImageApiFetch/1.0` User-Agent.
-`--write-artifacts --run-id <id>` writes only beneath
+All runners accept `--self-test`. The smoke, Gauntlet, Playwright, and device-enrollment entry
+points require explicit HTTPS origins through `ASIMPOSIUM_STAGING_AGENT_BASE_URL` and, where
+applicable, `ASIMPOSIUM_STAGING_AGORA_BASE_URL`; S-6 uses the two `ASIMP_S6_*_URL` inputs named
+above. No shell runner infers or prints a target. Playwright failure artifacts
+can retain requests to the public staging origins, including their URLs, and
+must be handled accordingly. Curl calls routed through the shared E2E helper
+send the exact `OpenAI File Downloader, XaiImageApiFetch/1.0` User-Agent, disable automatic
+redirects, and refuse response bodies larger than 1 MiB before they can accumulate in a shell
+variable. The wrapper disables implicit curl config, and callers cannot override or reset those
+transport controls. The shared public preflight accepts a
+direct 2xx or explicitly checks one path-preserving same-origin canonicalization hop; it never
+borrows a green result from another origin or an unrelated login/landing path.
+For entry points that expose `--write-artifacts --run-id <id>`, evidence writes only beneath
 `e2e/artifacts/<id>/`; valid IDs match
 `^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`. The device-enrollment runner atomically
 claims its artifact directory and refuses a reused ID, so evidence from two
-attempts cannot be blended.
+attempts cannot be blended. S-6 has a separate fixed contract: it requires
+`ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and accepts neither
+of those command-line flags.
 
 No current-revision automated smoke, Playwright, or Cold-Agent Gauntlet product
 flow has passed from these entry points yet.

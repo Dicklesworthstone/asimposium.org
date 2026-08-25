@@ -6,9 +6,66 @@
 ASIMPOSIUM_E2E_HARNESS_VERSION="0.1.0"
 ASIMPOSIUM_E2E_HTTP_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 readonly ASIMPOSIUM_E2E_HTTP_USER_AGENT
+ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES=1048576
+readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES
+
+e2e_curl_header_preserves_user_agent() {
+  local header_value="$1"
+
+  header_value="${header_value#"${header_value%%[![:space:]]*}"}"
+  [[ "$header_value" != @* ]] || return 1
+  [[ "$header_value" != *$'\n'* && "$header_value" != *$'\r'* ]] || return 1
+  [[ ! "${header_value,,}" =~ ^user-agent[[:space:]]*[:\;] ]]
+}
+
+e2e_curl_policy_arguments_valid() {
+  local argument
+  local expect_header=0
+  local header_value
+
+  # These options are part of the evidence boundary, not caller preferences.
+  # Refuse an attempted override before curl starts; otherwise a later caller
+  # argument wins over the defaults below. Config files are refused here too:
+  # the authenticated wrapper owns the sole stdin config line itself.
+  for argument in "$@"; do
+    if [[ "$expect_header" -eq 1 ]]; then
+      e2e_curl_header_preserves_user_agent "$argument" || return 64
+      expect_header=0
+      continue
+    fi
+    case "$argument" in
+      --heade*=*)
+        header_value="${argument#*=}"
+        e2e_curl_header_preserves_user_agent "$header_value" || return 64
+        ;;
+      --heade* | -H)
+        expect_header=1
+        ;;
+      -H?*)
+        header_value="${argument#-H}"
+        e2e_curl_header_preserves_user_agent "$header_value" || return 64
+        ;;
+      --expand-h* | --user-a* | --max-re* | --max-f* | --locat* | --no-locat* | \
+        --conf* | --nex* | -: | -[!-]*:* | -A | -A?* | -K | -K?* | \
+        -L | -[!-]*A* | -[!-]*H* | -[!-]*K* | -[!-]*L*)
+        return 64
+        ;;
+    esac
+  done
+
+  [[ "$expect_header" -eq 0 ]] || return 64
+}
 
 e2e_curl() {
-  command curl --user-agent "$ASIMPOSIUM_E2E_HTTP_USER_AGENT" "$@"
+  e2e_curl_policy_arguments_valid "$@" || return 64
+
+  command curl \
+    --disable \
+    --user-agent "$ASIMPOSIUM_E2E_HTTP_USER_AGENT" \
+    --max-redirs 0 \
+    --max-filesize "$ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES" \
+    --no-location \
+    "$@"
 }
 
 e2e_validate_fellow_token() {
@@ -21,10 +78,20 @@ e2e_curl_with_fellow_token() {
   shift
 
   e2e_validate_fellow_token "$fellow_token" || return 64
+  # The one allowed config source is the wrapper-owned stdin line below, so a
+  # caller cannot replace transport policy or append another config source.
+  e2e_curl_policy_arguments_valid "$@" || return 64
 
   # curl reads the Authorization header from stdin. The credential therefore
   # appears neither in curl's argv nor in its inherited environment.
-  e2e_curl --config - "$@" <<<"header = \"Authorization: Bearer $fellow_token\""
+  command curl \
+    --disable \
+    --user-agent "$ASIMPOSIUM_E2E_HTTP_USER_AGENT" \
+    --max-redirs 0 \
+    --max-filesize "$ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES" \
+    --no-location \
+    --config - \
+    "$@" <<<"header = \"Authorization: Bearer $fellow_token\""
 }
 
 e2e_now_ms() {
@@ -81,6 +148,7 @@ e2e_validate_staging_origin() {
   local origin="${!variable_name:-}"
   local authority
   local hostname
+  local port
 
   [[ -n "$origin" ]] || return 2
   [[ "$origin" == https://* ]] || return 1
@@ -92,6 +160,14 @@ e2e_validate_staging_origin() {
   [[ "$authority" != *"#"* ]] || return 1
   [[ "$authority" != *"@"* ]] || return 1
   [[ "$authority" != *[[:space:]]* ]] || return 1
+  # Accept only a DNS name (or dotted-decimal hostname) with an optional
+  # decimal port. Curl's permissive URL parser must not get to reinterpret
+  # backslashes, escapes, delimiters, or an out-of-range port after this gate.
+  [[ "$authority" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?(:[1-9][0-9]{0,4})?$ ]] || return 1
+  if [[ "$authority" == *:* ]]; then
+    port="${authority##*:}"
+    (( 10#$port > 0 && 10#$port <= 65535 )) || return 1
+  fi
 
   # Staging evidence must never be borrowed from the canonical deployment. Do
   # this before any caller launches curl or a browser, including explicit ports
@@ -298,13 +374,48 @@ e2e_emit_and_optionally_record() {
 e2e_probe_public_path() {
   local origin="$1"
   local path="$2"
+  local probe_result
   local http_status
+  local redirect_url
+  local redirected_status
   local curl_status
+  local requested_url
+  local slash_variant
 
-  http_status="$(e2e_curl --silent --location --max-time 15 --connect-timeout 5 --output /dev/null --write-out '%{http_code}' "$origin$path" 2>/dev/null)"
+  requested_url="$origin$path"
+  if [[ "$path" == "/" ]]; then
+    slash_variant=""
+  elif [[ "$path" == */ ]]; then
+    slash_variant="${requested_url%/}"
+  else
+    slash_variant="$requested_url/"
+  fi
+
+  probe_result="$(e2e_curl --silent --max-time 15 --connect-timeout 5 --output /dev/null --write-out $'%{http_code}\t%{redirect_url}' "$origin$path" 2>/dev/null)"
   curl_status=$?
   [[ "$curl_status" -eq 0 ]] || return 1
-  [[ "$http_status" =~ ^2[0-9][0-9]$ ]]
+  [[ "$probe_result" == *$'\t'* && "$probe_result" != *$'\n'* && "$probe_result" != *$'\r'* ]] || return 1
+  http_status="${probe_result%%$'\t'*}"
+  redirect_url="${probe_result#*$'\t'}"
+  [[ "$redirect_url" != *$'\t'* ]] || return 1
+  if [[ "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+    [[ -z "$redirect_url" ]]
+    return
+  fi
+  case "$http_status" in
+    301 | 302 | 307 | 308) ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$redirect_url" && "$redirect_url" != *[[:space:]]* && "$redirect_url" != *"#"* ]] || return 1
+  [[ -n "$slash_variant" && "$redirect_url" == "$slash_variant" ]] || return 1
+
+  # One explicit path-preserving same-origin hop satisfies the agent-surface
+  # canonicalization contract. It cannot borrow a green preflight from a login
+  # page, production, or another host; a second redirect remains a refusal.
+  redirected_status="$(e2e_curl --silent --max-time 15 --connect-timeout 5 --output /dev/null --write-out '%{http_code}' "$redirect_url" 2>/dev/null)"
+  curl_status=$?
+  [[ "$curl_status" -eq 0 ]] || return 1
+  [[ "$redirected_status" =~ ^2[0-9][0-9]$ ]]
 }
 
 e2e_run_harness_self_test() {

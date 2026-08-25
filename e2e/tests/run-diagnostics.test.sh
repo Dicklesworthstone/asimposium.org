@@ -43,6 +43,19 @@ for production_origin in \
     fail "PRODUCTION_ORIGIN_ACCEPTED_AS_STAGING"
   fi
 done
+for malformed_origin in \
+  'https://agent-preview.example\backslash' \
+  'https://agent-preview.example;forged' \
+  'https://-agent-preview.example' \
+  'https://agent-preview-.example' \
+  'https://agent-preview.example:0' \
+  'https://agent-preview.example:0443' \
+  'https://agent-preview.example:65536'; do
+  export ASIMPOSIUM_TEST_STAGING_ORIGIN="$malformed_origin"
+  if e2e_validate_staging_origin "ASIMPOSIUM_TEST_STAGING_ORIGIN"; then
+    fail "MALFORMED_STAGING_AUTHORITY_ACCEPTED"
+  fi
+done
 unset ASIMPOSIUM_TEST_STAGING_ORIGIN
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-artifact.XXXXXX")" || fail "TEMPORARY_FIXTURE_UNAVAILABLE"
@@ -147,18 +160,32 @@ mkdir -p "$curl_fixture_bin" || fail "CURL_FIXTURE_LAYOUT_FAILED"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
-  'printf "<%s>\n" "$@" >"$ASIMPOSIUM_E2E_CURL_ARGS_FILE"' \
+  'printf "%s\n" "<__ASIMP_CURL_INVOCATION__>" >>"$ASIMPOSIUM_E2E_CURL_ARGS_FILE"' \
+  'printf "<%s>\n" "$@" >>"$ASIMPOSIUM_E2E_CURL_ARGS_FILE"' \
   'printf "%s\n" "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN-}" >"$ASIMPOSIUM_E2E_CURL_ENV_FILE"' \
   'config_line=""' \
+  'write_out=""' \
   'read_stdin=0' \
   'previous_argument=""' \
   'for argument in "$@"; do' \
   '  if [[ "$previous_argument" == "--config" && "$argument" == "-" ]]; then read_stdin=1; fi' \
+  '  if [[ "$previous_argument" == "--write-out" ]]; then write_out="$argument"; fi' \
   '  previous_argument="$argument"' \
   'done' \
   'if [[ "$read_stdin" -eq 1 ]]; then IFS= read -r config_line || true; fi' \
   'printf "%s\n" "$config_line" >"$ASIMPOSIUM_E2E_CURL_STDIN_FILE"' \
-  'printf "204"' \
+  'url="${!#}"' \
+  'case "$url" in' \
+  '  */redirect-production) printf "302\thttps://a.asimposium.org/" ;;' \
+  '  */redirect-self) printf "302\thttps://agent-preview.example/redirect-self" ;;' \
+  '  */redirect-same) printf "302\thttps://agent-preview.example/redirect-same/" ;;' \
+  '  */redirect-same/) printf "204" ;;' \
+  '  */redirect-not-modified) printf "304\thttps://agent-preview.example/redirect-not-modified/" ;;' \
+  '  */redirect-not-modified/) printf "204" ;;' \
+  '  */redirect-wrong) printf "302\thttps://agent-preview.example/landing" ;;' \
+  '  */landing) printf "204" ;;' \
+  '  *) if [[ "$write_out" == *"redirect_url"* ]]; then printf "204\t"; else printf "204"; fi ;;' \
+  'esac' \
   >"$curl_fixture_bin/curl" || fail "CURL_FIXTURE_WRITE_FAILED"
 chmod 700 "$curl_fixture_bin/curl" || fail "CURL_FIXTURE_MODE_FAILED"
 
@@ -168,27 +195,147 @@ export ASIMPOSIUM_E2E_CURL_STDIN_FILE="$curl_stdin_file"
 original_path="$PATH"
 PATH="$curl_fixture_bin:$PATH"
 
+curl_invocation_count() {
+  grep -Fxc '<__ASIMP_CURL_INVOCATION__>' "$curl_args_file"
+}
+
+curl_invocation_prefix() {
+  local target_invocation="$1"
+  awk -v target="$target_invocation" '
+    $0 == "<__ASIMP_CURL_INVOCATION__>" { current += 1; next }
+    current == target && arguments < 8 { print; arguments += 1 }
+  ' "$curl_args_file"
+}
+
+curl_invocation_argument() {
+  local target_invocation="$1"
+  local target_argument="$2"
+  awk -v target_invocation="$target_invocation" -v target_argument="$target_argument" '
+    $0 == "<__ASIMP_CURL_INVOCATION__>" { current += 1; next }
+    current == target_invocation {
+      arguments += 1
+      if (arguments == target_argument) { print; exit }
+    }
+  ' "$curl_args_file"
+}
+
+assert_exact_curl_policy_prefix() {
+  local target_invocation="$1"
+  local failure_code="$2"
+  local expected_prefix
+  local actual_prefix
+
+  expected_prefix="$(printf '%s\n' \
+    '<--disable>' \
+    '<--user-agent>' \
+    "<$ASIMPOSIUM_E2E_HTTP_USER_AGENT>" \
+    '<--max-redirs>' \
+    '<0>' \
+    '<--max-filesize>' \
+    "<$ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES>" \
+    '<--no-location>')"
+  actual_prefix="$(curl_invocation_prefix "$target_invocation")"
+  [[ "$actual_prefix" == "$expected_prefix" ]] || fail "$failure_code"
+}
+
+: >"$curl_args_file"
 if ! planted_probe_status="$(e2e_probe_public_path "https://agent-preview.example" "/")"; then
   fail "PLANTED_PUBLIC_PROBE_REJECTED"
 fi
 if [[ -n "$planted_probe_status" ]]; then
   fail "PLANTED_PUBLIC_PROBE_PRINTED"
 fi
-if [[ "$(sed -n '1p' "$curl_args_file")" != "<--user-agent>" \
-  || "$(sed -n '2p' "$curl_args_file")" != "<$ASIMPOSIUM_E2E_HTTP_USER_AGENT>" ]]; then
-  fail "EXACT_CURL_USER_AGENT_MISSING"
+if [[ "$(curl_invocation_count)" -ne 1 ]]; then
+  fail "EXACT_CURL_TRANSPORT_POLICY_MISSING"
+fi
+assert_exact_curl_policy_prefix 1 "EXACT_CURL_TRANSPORT_POLICY_MISSING"
+if [[ "$(declare -f e2e_probe_public_path)" == *"--location"* ]]; then
+  fail "PUBLIC_PROBE_FOLLOWS_REDIRECT"
+fi
+if e2e_probe_public_path "https://agent-preview.example" "/redirect-production"; then
+  fail "PUBLIC_PROBE_BORROWED_PRODUCTION_REDIRECT"
+fi
+if e2e_probe_public_path "https://agent-preview.example" "/redirect-self"; then
+  fail "PUBLIC_PROBE_ACCEPTED_SELF_REDIRECT"
+fi
+: >"$curl_args_file"
+if ! e2e_probe_public_path "https://agent-preview.example" "/redirect-same"; then
+  fail "PUBLIC_PROBE_REFUSED_SAFE_SAME_ORIGIN_REDIRECT"
+fi
+if [[ "$(curl_invocation_count)" -ne 2 ]]; then
+  fail "REDIRECT_HOP_TRANSPORT_POLICY_MISSING"
+fi
+assert_exact_curl_policy_prefix 1 "REDIRECT_HOP_TRANSPORT_POLICY_MISSING"
+assert_exact_curl_policy_prefix 2 "REDIRECT_HOP_TRANSPORT_POLICY_MISSING"
+if e2e_probe_public_path "https://agent-preview.example" "/redirect-wrong"; then
+  fail "PUBLIC_PROBE_BORROWED_WRONG_PATH_REDIRECT"
+fi
+if e2e_probe_public_path "https://agent-preview.example" "/redirect-not-modified"; then
+  fail "PUBLIC_PROBE_ACCEPTED_NON_REDIRECT_304"
+fi
+
+assert_transport_override_refused() {
+  : >"$curl_args_file"
+  if e2e_curl "$@" >/dev/null 2>&1; then
+    fail "CURL_TRANSPORT_OVERRIDE_ACCEPTED"
+  fi
+  if [[ -s "$curl_args_file" ]]; then
+    fail "CURL_TRANSPORT_OVERRIDE_REACHED_PROCESS"
+  fi
+}
+
+assert_transport_override_refused --user-agent forged https://agent-preview.example/
+assert_transport_override_refused --user-ag=forged https://agent-preview.example/
+assert_transport_override_refused --max-redirs 3 https://agent-preview.example/
+assert_transport_override_refused --max-re=3 https://agent-preview.example/
+assert_transport_override_refused --max-filesize 0 https://agent-preview.example/
+assert_transport_override_refused --location https://agent-preview.example/
+assert_transport_override_refused -sL https://agent-preview.example/
+assert_transport_override_refused -: https://agent-preview.example/
+assert_transport_override_refused --header 'User-Agent: forged' https://agent-preview.example/
+assert_transport_override_refused --heade 'User-Agent: forged' https://agent-preview.example/
+assert_transport_override_refused --heade='User-Agent: forged' https://agent-preview.example/
+assert_transport_override_refused --expand-header 'User-Agent: forged' https://agent-preview.example/
+assert_transport_override_refused --expand-he 'User-Agent: forged' https://agent-preview.example/
+assert_transport_override_refused -H'user-agent: forged' https://agent-preview.example/
+assert_transport_override_refused --header 'User-Agent;' https://agent-preview.example/
+assert_transport_override_refused --header '@/tmp/hostile-headers' https://agent-preview.example/
+assert_transport_override_refused --header $'x-safe: one\nUser-Agent: forged' https://agent-preview.example/
+assert_transport_override_refused --config "$temporary_root/hostile-curl-config" https://agent-preview.example/
+assert_transport_override_refused --next https://agent-preview.example/
+
+: >"$curl_args_file"
+if [[ "$(e2e_curl --max-rate 1M --local-port 5000-5010 "https://agent-preview.example/")" != "204" ]]; then
+  fail "LEGITIMATE_CURL_OPTIONS_FALSE_RED"
 fi
 
 valid_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
+: >"$curl_args_file"
 if [[ "$(e2e_curl_with_fellow_token "$valid_fellow_token" --silent "https://agent-preview.example/v1/sessions")" != "204" ]]; then
   fail "FELLOW_TOKEN_STDIN_TRANSPORT_FAILED"
+fi
+if [[ "$(curl_invocation_count)" -ne 1 ]]; then
+  fail "AUTHENTICATED_CURL_TRANSPORT_POLICY_MISSING"
+fi
+assert_exact_curl_policy_prefix 1 "AUTHENTICATED_CURL_TRANSPORT_POLICY_MISSING"
+if [[ "$(curl_invocation_argument 1 9)" != "<--config>" \
+  || "$(curl_invocation_argument 1 10)" != "<->" ]]; then
+  fail "AUTHENTICATED_CURL_TRANSPORT_POLICY_MISSING"
 fi
 if grep -Fq "$valid_fellow_token" "$curl_args_file" || grep -Fq "$valid_fellow_token" "$curl_env_file"; then
   fail "FELLOW_TOKEN_REACHED_CURL_PROCESS_METADATA"
 fi
 if [[ "$(<"$curl_stdin_file")" != "header = \"Authorization: Bearer $valid_fellow_token\"" ]]; then
   fail "FELLOW_TOKEN_AUTHORIZATION_HEADER_MISSING"
+fi
+
+: >"$curl_args_file"
+if e2e_curl_with_fellow_token "$valid_fellow_token" --location "https://agent-preview.example/v1/sessions" >/dev/null 2>&1; then
+  fail "AUTHENTICATED_CURL_TRANSPORT_OVERRIDE_ACCEPTED"
+fi
+if [[ -s "$curl_args_file" ]]; then
+  fail "AUTHENTICATED_CURL_TRANSPORT_OVERRIDE_REACHED_PROCESS"
 fi
 
 : >"$curl_args_file"
