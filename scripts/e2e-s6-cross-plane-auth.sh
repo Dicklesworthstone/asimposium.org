@@ -389,7 +389,7 @@ read_group_exact_until() {
     # Exactly one real child terminal may race a requested TERM acknowledgement,
     # but only after the parent has latched its deadline. No readiness/input
     # phase and no later KILL acknowledgement may queue another terminal.
-    if (( allow_child == 1 )) && [[ "$GROUP_PROTOCOL_STATE" == "running" ]] &&
+    if (( allow_child == 1 )) && [[ "$GROUP_PROTOCOL_STATE" == "running" || "$GROUP_PROTOCOL_STATE" == "terminal" ]] &&
        (( GROUP_TERMINAL_SEEN == 0 )) && [[ -z "$GROUP_PENDING_CHILD_RECORD" ]] &&
        validate_group_child_record "$record"; then
       GROUP_PENDING_CHILD_RECORD="$record"
@@ -1143,7 +1143,7 @@ run_bounded() {
               }
               die "close-from unavailable" unless $fd_dir_found;
               POSIX::close($_) for grep { $_ > 2 } @fds;
-              exec @ARGV or die $!;
+              exec {$ARGV[0]} @ARGV or exec @ARGV or die $!;
             '"'"' -- "$@" >"$stdout_file"
           ) || command_status=$?
           if [[ -n "$child_status_plant" ]]; then command_status="$child_status_plant"; fi
@@ -1176,7 +1176,7 @@ run_bounded() {
               if [[ "$child_before_ack_plant" == "1" ]]; then
                 kill -TERM 0 2>/dev/null || kill -KILL 0
                 if (( child_sent == 0 )); then
-                  IFS= read -r -t 1 child_record <&8 || kill -KILL 0
+                  IFS= read -r -t 3 child_record <&8 || kill -KILL 0
                   child_prefix="child:${token}:"
                   [[ "$child_record" == "$child_prefix"* ]] || kill -KILL 0
                   child_status="${child_record#"$child_prefix"}"
