@@ -97,9 +97,14 @@ for collision_entrypoint in \
   "$collision_root/e2e/gauntlet/run.sh"; do
   set +e
   collision_output="$(
-    env -u ASIMPOSIUM_E2E_RUN_ID \
+    env \
+      -u ASIMPOSIUM_E2E_RUN_ID \
+      -u ASIMPOSIUM_SMOKE_FELLOW_TOKEN \
+      -u GAUNTLET_JOIN_URLS_FILE \
       PATH="$collision_bin:$PATH" \
       ARTIFACT_CLAIM_PRODUCT_MARKER="$collision_marker" \
+      ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://agent-preview.example" \
+      ASIMPOSIUM_STAGING_AGORA_BASE_URL="https://agora-preview.example" \
       /bin/bash "$collision_entrypoint" --write-artifacts --run-id collision-run 2>&1
   )"
   collision_status=$?

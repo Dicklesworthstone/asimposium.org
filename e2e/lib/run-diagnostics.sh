@@ -12,11 +12,13 @@ readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES
 # Successful artifact namespace claims are process capabilities. Bash arrays
 # survive the command-substitution subshells used by the writer helpers, but
 # they are not exported to an independently started shell. Binding the claim to
-# the directory's device/inode also prevents path-only adoption after a rename
-# or replacement.
-declare -ag ASIMPOSIUM_E2E_CLAIM_ROOTS=()
-declare -ag ASIMPOSIUM_E2E_CLAIM_RUN_IDS=()
-declare -ag ASIMPOSIUM_E2E_CLAIM_IDENTITIES=()
+# the directory's device/inode rejects a replacement observed before a helper
+# publishes. This is not an atomic maintenance lease: pathname replacement can
+# still race the final append, so whole-root rotation remains forbidden.
+# Top-level declarations are global without Bash 4's non-portable `declare -g`.
+declare -a ASIMPOSIUM_E2E_CLAIM_ROOTS=()
+declare -a ASIMPOSIUM_E2E_CLAIM_RUN_IDS=()
+declare -a ASIMPOSIUM_E2E_CLAIM_IDENTITIES=()
 
 e2e_curl_header_preserves_user_agent() {
   local header_value="$1"

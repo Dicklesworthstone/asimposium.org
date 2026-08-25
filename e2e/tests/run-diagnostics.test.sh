@@ -97,6 +97,24 @@ if [[ -e "$temporary_root/e2e/artifacts/claimed-run/steps.jsonl" ]]; then
   fail "FOREIGN_CLAIMED_STEP_WRITE_MUTATED"
 fi
 
+e2e_claim_artifact_run_at_root "$temporary_root" "replaced-run" \
+  || fail "REPLACED_RUN_CLAIM_REJECTED"
+mv \
+  "$temporary_root/e2e/artifacts/replaced-run" \
+  "$temporary_root/e2e/artifacts/replaced-run-original" \
+  || fail "REPLACED_RUN_PLANT_UNAVAILABLE"
+mkdir "$temporary_root/e2e/artifacts/replaced-run" \
+  || fail "REPLACED_RUN_PLANT_UNAVAILABLE"
+if e2e_write_artifact_diagnostic_at_root "$temporary_root" "replaced-run" "$suite" "$started_ms" "fail" "REPLACED_RUN_WRITE" "$reproduce" >/dev/null 2>&1; then
+  fail "REPLACED_RUN_DIAGNOSTIC_ACCEPTED"
+fi
+if e2e_append_artifact_jsonl_at_root "$temporary_root" "replaced-run" "steps.jsonl" '{"status":"pass"}' >/dev/null 2>&1; then
+  fail "REPLACED_RUN_STEP_ACCEPTED"
+fi
+if [[ -n "$(find "$temporary_root/e2e/artifacts/replaced-run" -mindepth 1 -print -quit)" ]]; then
+  fail "REPLACED_RUN_MUTATED"
+fi
+
 if unclaimed_write_output="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "regular-run" "$suite" "$started_ms" "fail" "UNCLAIMED_ARTIFACT_TEST" "$reproduce" 2>&1)"; then
   fail "UNCLAIMED_ARTIFACT_WRITE_ACCEPTED"
 fi

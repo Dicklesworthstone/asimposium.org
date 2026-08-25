@@ -462,16 +462,17 @@ class ArtifactStore {
     // limit after this one had already counted; narrowing it to a single
     // reservation cannot make the backstop exact under concurrency, but it does
     // remove the avoidable part of the gap.
-    this.directory =
-      artifactNamespace === undefined
-        ? reserveArtifactNamespace(
+    this.directory = resume
+      ? realDirectory(join(artifacts, runId), "ARTIFACT_PATH_UNSAFE", storage)
+      : artifactNamespace === undefined
+        ? reserveNewArtifactNamespace(
             this.physicalRoot,
             artifacts,
             runId,
             MAX_ARTIFACT_NAMESPACES,
             storage,
           )
-        : reserveRetainedIntegrationDirectory(artifacts, runId, storage, 1);
+        : reserveNewRetainedIntegrationDirectory(artifacts, runId, storage, 1);
     this.jsonl = join(this.directory, "events.jsonl");
     assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
     this.identityPath = join(this.directory, RUN_IDENTITY_NAME);
@@ -3058,6 +3059,33 @@ export function reserveArtifactNamespace(
   return ensureDirectDirectory(artifactsDirectory, namespace, storage);
 }
 
+/**
+ * Atomically claim a top-level namespace for a new run.
+ *
+ * `reserveArtifactNamespace` deliberately permits an existing directory so a
+ * retained integration parent can be reused. A new run has the opposite
+ * contract: after the earlier existence observation, another process can win
+ * the mkdir race, and this writer must receive EEXIST rather than adopt the
+ * winner's evidence directory.
+ */
+export function reserveNewArtifactNamespace(
+  root: string,
+  artifactsDirectory: string,
+  namespace: string,
+  limit = MAX_ARTIFACT_NAMESPACES,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): string {
+  assertExactArtifactsDirectory(root, artifactsDirectory, storage);
+  if (!validateRunId(namespace)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "artifact namespace names must be safe bounded path components.",
+    );
+  }
+  assertArtifactNamespaceBudget(root, namespace, limit, storage);
+  return createNewRunDirectory(artifactsDirectory, namespace, storage);
+}
+
 export function assertArtifactNamespaceBudget(
   root: string,
   namespace: string,
@@ -3241,6 +3269,56 @@ export function reserveRetainedIntegrationDirectory(
     );
   }
   return ensureDirectDirectory(root, name, storage);
+}
+
+/** The retained-integration form of the same exclusive new-run claim. */
+function reserveNewRetainedIntegrationDirectory(
+  integrationDirectory: string,
+  name: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+  projectedDirectories = 1,
+): string {
+  if (!validateRunId(name)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "retained integration directory names must be safe bounded path components.",
+    );
+  }
+  const root = realDirectory(resolve(integrationDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  assertRetainedIntegrationCapacity(
+    root,
+    { additionalDirectories: projectedDirectories },
+    storage,
+  );
+  return createNewRunDirectory(root, name, storage);
+}
+
+/** Exclusive mkdir plus post-create containment, shared by both new-run paths. */
+function createNewRunDirectory(
+  parent: string,
+  name: string,
+  storage: HarnessArtifactStorage,
+): string {
+  const target = join(parent, name);
+  assertContained(parent, target, "ARTIFACT_PATH_UNSAFE");
+  try {
+    storage.mkdir(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (storage.isSymlink(target)) {
+      throw new HarnessError(
+        "ARTIFACT_PATH_UNSAFE",
+        "the run namespace is a symlink; artifacts must not be redirected out of the artifact area.",
+      );
+    }
+    throw new HarnessError(
+      "RUN_ID_EXISTS",
+      "run_id already owns an artifact namespace; choose a new run_id or resume that run.",
+    );
+  }
+  const physical = realDirectory(target, "ARTIFACT_PATH_UNSAFE", storage);
+  assertContained(parent, physical, "ARTIFACT_PATH_UNSAFE");
+  return physical;
 }
 
 function assertContained(root: string, target: string, code: string): void {

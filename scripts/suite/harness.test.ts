@@ -71,6 +71,7 @@ import {
   redactNeverLog,
   repositoryRoot,
   reserveArtifactNamespace,
+  reserveNewArtifactNamespace,
   reserveRetainedIntegrationDirectory,
   restoreProtectedSha256Marker,
   retainedD1StateDirectory,
@@ -3275,6 +3276,36 @@ describe("run options are covered at compile time", () => {
         retainArtifacts: true,
       } as unknown as Parameters<typeof runHarness>[0]),
     ).rejects.toThrow(/unknown run option "retainArtifacts"/);
+  });
+});
+
+describe("new-run artifact namespace ownership", () => {
+  test("PLANTED: a competing mkdir winner cannot be adopted by the new run", () => {
+    const root = fixtureRoot("new-run-claim-race");
+    const storage = fixtureStorage();
+    const artifacts = join(root, "e2e", "artifacts");
+    storage.seedDirectory(artifacts);
+    const target = join(artifacts, "contended-run");
+    const mkdir = storage.mkdir.bind(storage);
+    let planted = false;
+    const racingStorage: HarnessArtifactStorage = {
+      ...storage,
+      mkdir: (path) => {
+        if (path === target && !planted) {
+          planted = true;
+          mkdir(path);
+          storage.writeExclusive(join(path, "foreign.marker"), "foreign\n");
+        }
+        mkdir(path);
+      },
+    };
+
+    expect(() =>
+      reserveNewArtifactNamespace(root, artifacts, "contended-run", 5, racingStorage),
+    ).toThrow(/RUN_ID_EXISTS|already owns/);
+    expect(planted).toBe(true);
+    expect(storage.readFile(join(target, "foreign.marker"))).toBe("foreign\n");
+    expect(storage.exists(join(target, "events.jsonl"))).toBe(false);
   });
 });
 
