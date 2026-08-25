@@ -48,6 +48,53 @@ usage() {
   printf 'usage: scripts/e2e-ci-pipeline.sh [--run-id <safe-id>]\n' >&2
 }
 
+# Resolve one top-level run only while its inherited artifact capability still
+# names the exact physical root epoch, run inode, and open matching-epoch lease.
+# This is deliberately read-only and prints only the already-contained run
+# directory. Recursive deployment children inherit the values from their live
+# parent; they never acquire or close the parent's lease.
+ci_artifact_capability_directory_at_root() {
+  local capability_root="$1"
+  local capability_run_id="$2"
+  local expected_root_identity="$3"
+  local expected_run_identity="$4"
+  local lease_directory="$5"
+  local lease_identity="$6"
+  local physical_artifacts_root
+  local run_directory
+  local physical_run_directory
+  local epoch_directory
+
+  e2e_validate_run_id "$capability_run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$capability_root" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$capability_root")" || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root")" == \
+    "$expected_root_identity" ]] || return 1
+  run_directory="$physical_artifacts_root/$capability_run_id"
+  physical_run_directory="$(e2e_physical_directory "$run_directory")" || return 1
+  [[ "$physical_run_directory" == "$run_directory" \
+    && "$(e2e_artifact_directory_identity "$physical_run_directory")" == \
+      "$expected_run_identity" ]] || return 1
+  epoch_directory="$(e2e_artifact_writer_lease_epoch_at_root \
+    "$capability_root" "$expected_root_identity")" || return 1
+  [[ "${lease_directory%/*}" == "$epoch_directory" ]] || return 1
+  e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity" || return 1
+  e2e_artifact_maintenance_absent_at_root "$capability_root" || return 1
+  printf '%s\n' "$physical_run_directory"
+}
+
+ci_artifact_capability_is_current() {
+  local verified_directory
+  verified_directory="$(ci_artifact_capability_directory_at_root \
+    "$repository_root" "$RUN_ID" \
+    "${ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY:-}" \
+    "${ASIMP_CI_INTERNAL_RUN_IDENTITY:-}" \
+    "${ASIMP_CI_INTERNAL_LEASE_DIRECTORY:-}" \
+    "${ASIMP_CI_INTERNAL_LEASE_IDENTITY:-}")" || return 64
+  [[ -z "$ARTIFACT_DIRECTORY" || "$ARTIFACT_DIRECTORY" == "$verified_directory" ]] || return 64
+  ARTIFACT_DIRECTORY="$verified_directory"
+}
+
 now_iso() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
