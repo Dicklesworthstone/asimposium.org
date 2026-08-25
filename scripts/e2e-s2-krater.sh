@@ -1264,6 +1264,7 @@ S2_RAW_INHERITED_CHILD_MARKER=""
 S2_RAW_INHERITED_CHILD_GATE=""
 S2_RAW_INHERITED_CHILD_RUN_ID=""
 S2_RAW_INHERITED_CHILD_RUN_IDENTITY=""
+S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN=0
 # The origin the next phase talks to. The legacy upgrade stages run their own
 # Worker on their own owned port, so a phase must never assume the main one.
 S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
@@ -4274,6 +4275,7 @@ cleanup_raw_inherited_child() {
   done <<<"${rows}"
   lsof_scanner_is_healthy || return 1
   lsof_scan_reaches_no_matches -nP -t +w +D "${child_run_directory}" || return 1
+  S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN=1
   clear_raw_inherited_child_owner
 }
 
@@ -5114,6 +5116,9 @@ on_exit() {
     if ! e2e_close_artifact_writer_lease \
       "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
       final_status=125
+    elif [[ "${S2_SHELL_REGRESSION_TEST:-}" == "raw-inherited-child-interrupt" && \
+      ${S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN} -eq 1 ]]; then
+      emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease","reproduce":"S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt scripts/e2e-s2-krater.sh"}'
     fi
   fi
   exit "${final_status}"
@@ -6035,6 +6040,48 @@ run_s2_shell_regression_test() {
     return 125
   fi
 
+  if [[ "${mode}" == "raw-inherited-child-interrupt-child" ]]; then
+    local raw_ready="${S2_RAW_INHERITED_CHILD_READY:-}"
+    [[ -n "${raw_ready}" && "${raw_ready}" == "${S2_EVIDENCE_ROOT}/"* && \
+      ! -e "${raw_ready}" && ! -L "${raw_ready}" ]] || return 2
+    (umask 077; set -o noclobber; printf 'ready\n' >"${raw_ready}") 2>/dev/null || return 1
+    while :; do sleep 30; done
+  fi
+
+  if [[ "${mode}" == "raw-inherited-child-interrupt" ]]; then
+    local raw_ready child_run_id child_run_identity raw_child_pid
+    raw_ready="${S2_STATE_DIR}/raw-inherited-interrupt-ready-$(random_hex 8)"
+    child_run_id="s2c-$(random_hex 24)" || return 1
+    s2_prepare_inherited_child_run "${child_run_id}" || return 1
+    child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
+    s2_begin_raw_inherited_child_owner "${child_run_id}" "${child_run_identity}" || return 1
+    env \
+      S2_RUN_ID="${child_run_id}" \
+      S2_INHERIT_WRITER_LEASE=1 \
+      S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+      S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+      S2_INHERITED_RUN_DIR_IDENTITY="${child_run_identity}" \
+      S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+      S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
+      S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt-child \
+      S2_RAW_INHERITED_CHILD_READY="${raw_ready}" \
+      bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
+        "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+    raw_child_pid=$!
+    s2_register_raw_inherited_child "${raw_child_pid}" || return 1
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    while [[ ! -f "${raw_ready}" || -L "${raw_ready}" ]]; do
+      s2_raw_inherited_child_command_is_exact "${raw_child_pid}" || return 1
+      (( SECONDS < deadline )) || return 1
+      sleep 0.05
+    done
+    [[ "$(<"${raw_ready}")" == ready ]] || return 1
+    s2_raw_inherited_child_command_is_exact "${raw_child_pid}" || return 1
+    kill -TERM "$$"
+    return 125
+  fi
+
   if [[ "${mode}" == "pre-arm-owner-loss" ]]; then
     local planted_helper_pid child_persist child_port child_run_id child_run_identity
     parent_loss_record="${S2_STATE_DIR}/pre-arm-owner-loss-record-$(random_hex 8)"
@@ -6220,6 +6267,7 @@ run_s2_shell_regression_test() {
     child_run_id="s2c-$(random_hex 24)" || return 1
     s2_prepare_inherited_child_run "${child_run_id}" || return 1
     child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
+    s2_begin_raw_inherited_child_owner "${child_run_id}" "${child_run_identity}" || return 1
     env \
       S2_RUN_ID="${child_run_id}" \
       S2_INHERIT_WRITER_LEASE=1 \
@@ -6230,8 +6278,11 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=owner-loss-uncertain-child \
       S2_PARENT_LOSS_RECORD="${parent_loss_record}" \
-      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+      bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
+        "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     parent_loss_child=$!
+    s2_register_raw_inherited_child "${parent_loss_child}" || return 1
     if wait "${parent_loss_child}" 2>/dev/null; then
       parent_loss_status=0
     else
@@ -6294,6 +6345,7 @@ run_s2_shell_regression_test() {
       emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_PLANTED_CHECKPOINT"
       return 91
     fi
+    cleanup_raw_inherited_child || return 1
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"controller-loss-plus-leader-loss-plus-term-resistant-member-bounds-owner-loss-inspection-and-watchdog-self-retires","reproduce":"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh"}'
     return 0
   fi
@@ -6473,6 +6525,7 @@ run_s2_shell_regression_test() {
     child_run_id="s2c-$(random_hex 24)" || return 1
     s2_prepare_inherited_child_run "${child_run_id}" || return 1
     child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
+    s2_begin_raw_inherited_child_owner "${child_run_id}" "${child_run_identity}" || return 1
     env \
       S2_RUN_ID="${child_run_id}" \
       S2_INHERIT_WRITER_LEASE=1 \
@@ -6484,8 +6537,11 @@ run_s2_shell_regression_test() {
       S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup-child \
       S2_PARENT_INTERRUPT_RECORD="${interrupt_record}" \
       S2_PARENT_INTERRUPT_SECRET="${interrupt_secret}" \
-      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+      bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
+        "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     interrupt_child=$!
+    s2_register_raw_inherited_child "${interrupt_child}" || return 1
     if wait "${interrupt_child}" 2>/dev/null; then
       interrupt_status=0
     else
@@ -6525,6 +6581,7 @@ run_s2_shell_regression_test() {
       "${manifest_body}" == *'"exit_code":143'* && \
       "${diagnostic_body}" != *"${interrupt_secret}"* && \
       "${manifest_body}" != *"${interrupt_secret}"* ]] || return 1
+    cleanup_raw_inherited_child || return 1
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor","reproduce":"S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup scripts/e2e-s2-krater.sh"}'
     return 0
   fi
