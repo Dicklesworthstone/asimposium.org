@@ -3803,15 +3803,8 @@ main() {
     local hold_fifo="${ready_marker}.hold"
     trap '' HUP
     trap 'printf term-observed > "$terminated_marker"; exit 0' TERM
-    rm -f "$hold_fifo" 2>/dev/null || true
-    mkfifo -m 600 "$hold_fifo" || exit "$EX_FAIL"
-    # A builtin read keeps the acknowledgement shell itself interruptible. A
-    # foreground `sleep` would enter a fresh job-control group and defer Bash's
-    # TERM trap until the sleep ended, making the plant measure that unrelated
-    # child rather than the group signal under test.
-    exec 6<>"$hold_fifo" || exit "$EX_FAIL"
     printf '%s' "$BASHPID" > "$ready_marker"
-    while :; do IFS= read -r -t 3600 _ <&6 || true; done
+    while :; do sleep 3600; done
   fi
 
   # Hidden hostile-target mode. It receives only a non-secret search root. If a

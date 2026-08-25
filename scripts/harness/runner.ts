@@ -426,6 +426,7 @@ export class ArtifactStore {
             artifactNamespace,
             MAX_ARTIFACT_NAMESPACES,
             storage,
+            this.artifactRootIdentity,
           );
     this.artifactsDirectory = artifacts;
     this.retainedIntegrationDirectory = artifactNamespace === undefined ? undefined : artifacts;
@@ -480,6 +481,7 @@ export class ArtifactStore {
             runId,
             MAX_ARTIFACT_NAMESPACES,
             storage,
+            this.artifactRootIdentity,
           )
         : reserveNewRetainedIntegrationDirectory(artifacts, runId, storage, 1);
     this.assertWritableArtifactRoot();
@@ -2399,23 +2401,6 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     storage,
   );
   assertContained(containmentRoot, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
-  const artifactRootDirectory = realDirectory(
-    resolve(input.artifactRootDirectory ?? input.artifactsDirectory),
-    "ARTIFACT_PATH_UNSAFE",
-    storage,
-  );
-  assertContained(containmentRoot, artifactRootDirectory, "ARTIFACT_PATH_UNSAFE");
-  const expectedArtifactRootIdentity =
-    input.expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRootDirectory);
-  const assertWriterBoundary = (): void =>
-    assertArtifactWriterBoundary(
-      containmentRoot,
-      artifactRootDirectory,
-      expectedArtifactRootIdentity,
-      storage,
-    );
-  assertWriterBoundary();
-
   let retainedIntegrationDirectory: string | undefined;
   if (input.retainedIntegrationDirectory !== undefined) {
     retainedIntegrationDirectory = realDirectory(
@@ -2426,6 +2411,38 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     assertContained(containmentRoot, retainedIntegrationDirectory, "ARTIFACT_PATH_UNSAFE");
     assertContained(retainedIntegrationDirectory, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
   }
+  // Direct real-filesystem publication fixtures use a case directory as their
+  // byte-containment root, but that case lives below the checkout's retained
+  // integration namespace. Derive the shared writer boundary from that parent
+  // so those writers observe the same global fence and root epoch as a run.
+  const writerRoot = realDirectory(
+    retainedIntegrationDirectory === undefined
+      ? containmentRoot
+      : resolve(retainedIntegrationDirectory, "..", "..", ".."),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  const artifactRootDirectory = realDirectory(
+    resolve(
+      input.artifactRootDirectory ??
+        (retainedIntegrationDirectory === undefined
+          ? input.artifactsDirectory
+          : join(retainedIntegrationDirectory, "..")),
+    ),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  assertContained(artifactRootDirectory, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
+  const expectedArtifactRootIdentity =
+    input.expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRootDirectory);
+  const assertWriterBoundary = (): void =>
+    assertArtifactWriterBoundary(
+      writerRoot,
+      artifactRootDirectory,
+      expectedArtifactRootIdentity,
+      storage,
+    );
+  assertWriterBoundary();
 
   // Deduplication is a read-only operation and remains valid at the retention
   // ceiling. Checking capacity first made a resume fail even when the exact
@@ -3141,10 +3158,23 @@ export function reserveArtifactNamespace(
   namespace: string,
   limit = MAX_ARTIFACT_NAMESPACES,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
+  expectedArtifactRootIdentity?: string,
 ): string {
   assertExactArtifactsDirectory(root, artifactsDirectory, storage);
+  const rootDirectory = realDirectory(resolve(root), "ARTIFACT_PATH_UNSAFE", storage);
+  const artifactRoot = realDirectory(
+    resolve(artifactsDirectory),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  const expectedIdentity =
+    expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
+  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
   assertArtifactNamespaceBudget(root, namespace, limit, storage);
-  return ensureDirectDirectory(artifactsDirectory, namespace, storage);
+  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  const reserved = ensureDirectDirectory(artifactsDirectory, namespace, storage);
+  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  return reserved;
 }
 
 /**
@@ -3162,8 +3192,18 @@ function reserveNewArtifactNamespace(
   namespace: string,
   limit = MAX_ARTIFACT_NAMESPACES,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
+  expectedArtifactRootIdentity?: string,
 ): string {
   assertExactArtifactsDirectory(root, artifactsDirectory, storage);
+  const rootDirectory = realDirectory(resolve(root), "ARTIFACT_PATH_UNSAFE", storage);
+  const artifactRoot = realDirectory(
+    resolve(artifactsDirectory),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  const expectedIdentity =
+    expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
+  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
   if (!validateRunId(namespace)) {
     throw new HarnessError(
       "ARTIFACT_NAMESPACE_INVALID",
@@ -3171,7 +3211,10 @@ function reserveNewArtifactNamespace(
     );
   }
   assertArtifactNamespaceBudget(root, namespace, limit, storage);
-  return createNewRunDirectory(artifactsDirectory, namespace, storage);
+  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  const reserved = createNewRunDirectory(artifactsDirectory, namespace, storage);
+  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  return reserved;
 }
 
 export function assertArtifactNamespaceBudget(

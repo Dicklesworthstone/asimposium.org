@@ -2367,6 +2367,44 @@ describe("content-addressed failure artifacts", () => {
     // It does not claim kernel hard-link, inode, or scheduler behaviour.
     expect(storage.authority).toBe("simulation");
   });
+
+  test("PLANTED: blob publication revalidates the owning root before its final link", () => {
+    const root = fixtureRoot("blob-root-epoch-change");
+    const artifactsDirectory = join(root, "e2e", "artifacts");
+    const base = fixtureStorage();
+    base.seedDirectory(artifactsDirectory);
+    const expectedArtifactRootIdentity = base.directoryIdentity(artifactsDirectory);
+    let epochChanged = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      directoryIdentity: (path) => {
+        const identity = base.directoryIdentity(path);
+        return path === artifactsDirectory && epochChanged
+          ? `${identity}:replacement`
+          : identity;
+      },
+    };
+    const body = "root epoch link refusal\n";
+    const digest = createHash("sha256").update(body, "utf8").digest("hex");
+    const published = join(artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, "sha256", digest);
+
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory,
+        expectedArtifactRootIdentity,
+        digest,
+        stored: body,
+        attempt: 1,
+        storage,
+        beforeLink: () => {
+          epochChanged = true;
+        },
+      }),
+    ).toThrow(/ARTIFACT_ROOT_CHANGED|physical artifact root changed/);
+    expect(epochChanged).toBe(true);
+    expect(base.exists(published)).toBe(false);
+  });
 });
 
 describe("artifact namespace backstop", () => {
