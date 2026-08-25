@@ -11,6 +11,7 @@ import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import {
   assertServedTextSafe,
   getDocument,
+  listDocuments,
   type ProtocolDocument,
   ProtocolError,
   sha256Hex,
@@ -112,6 +113,9 @@ const INTERNAL_ERROR =
 
 const APP_MODULE_PATH = "/virtual/apps/wire/src/app.ts";
 const PROTOCOL_MODULE = "@asimposium/protocol";
+const PUBLIC_TEXT_DOCUMENTS = listDocuments().filter(
+  (document) => !document.served_at.includes("<"),
+);
 
 interface ParsedAppModule {
   readonly source: ts.SourceFile;
@@ -1414,28 +1418,18 @@ describe("face wire format", () => {
     expect(cursor.status).not.toBe(404);
   });
 
-  test("GET / is the exact handbook, independent of D1", async () => {
-    const document = getDocument("handbook");
-    const res = await callWorker("/", {});
+  test.each(PUBLIC_TEXT_DOCUMENTS)(
+    "GET $served_at serves the exact registered $id bytes without D1",
+    async (document) => {
+      const res = await callWorker(document.served_at, {});
 
-    expect(res.status).toBe(200);
-    expect(res.contentType).toBe(document.media_type);
-    expect(res.headers.get("etag")).toBe(`"${document.digest}"`);
-    expect(res.headers.get("cache-control")).toContain("max-age=60");
-    expect(res.bodyText).toBe(document.body);
-  });
-
-  test.each([
-    ["/llms.txt", "llms", "txt"],
-    ["/policy.md", "policy", "md"],
-    ["/protocol.md", "protocol", "md"],
-  ] as const)("GET %s serves its registered bytes", async (path, id, format) => {
-    const document = getDocument(id);
-    const res = await callWorker(`${path}?format=${format}`, {});
-    expect(res.status).toBe(200);
-    expect(res.contentType).toBe(document.media_type);
-    expect(res.bodyText).toBe(document.body);
-  });
+      expect(res.status).toBe(200);
+      expect(res.contentType).toBe(document.media_type);
+      expect(res.headers.get("etag")).toBe(`"${document.digest}"`);
+      expect(res.headers.get("cache-control")).toContain("max-age=60");
+      expect(res.bodyText).toBe(document.body);
+    },
+  );
 
   test.each([...listPublicSchemas()])(
     "GET $served_at serves the exact drift-checked $id schema without D1",
@@ -1448,32 +1442,40 @@ describe("face wire format", () => {
     },
   );
 
-  test("public texts honor strong, weak, and wildcard conditional reads", async () => {
-    const document = getDocument("handbook");
-    for (const value of [`"${document.digest}"`, `W/"${document.digest}"`, "*"]) {
+  test.each(PUBLIC_TEXT_DOCUMENTS)(
+    "$served_at honors strong, weak, and wildcard conditional reads",
+    async (document) => {
+      for (const value of [`"${document.digest}"`, `W/"${document.digest}"`, "*"]) {
+        const app = createApp();
+        const response = await app.fetch(
+          new Request(`https://a.asimposium.org${document.served_at}`, {
+            headers: { "if-none-match": value },
+          }),
+          {} as Env,
+          executionContext() as unknown as Parameters<typeof app.fetch>[2],
+        );
+        expect(response.status, value).toBe(304);
+        expect(response.headers.get("etag"), value).toBe(`"${document.digest}"`);
+        expect(await response.text(), value).toBe("");
+      }
+    },
+  );
+
+  test.each(PUBLIC_TEXT_DOCUMENTS)(
+    "HEAD $served_at returns registered metadata without body bytes",
+    async (document) => {
       const app = createApp();
       const response = await app.fetch(
-        new Request("https://a.asimposium.org/", { headers: { "if-none-match": value } }),
+        new Request(`https://a.asimposium.org${document.served_at}`, { method: "HEAD" }),
         {} as Env,
         executionContext() as unknown as Parameters<typeof app.fetch>[2],
       );
-      expect(response.status, value).toBe(304);
-      expect(response.headers.get("etag"), value).toBe(`"${document.digest}"`);
-      expect(await response.text(), value).toBe("");
-    }
-  });
-
-  test("HEAD returns handbook metadata without body bytes", async () => {
-    const app = createApp();
-    const response = await app.fetch(
-      new Request("https://a.asimposium.org/", { method: "HEAD" }),
-      {} as Env,
-      executionContext() as unknown as Parameters<typeof app.fetch>[2],
-    );
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toBe(getDocument("handbook").media_type);
-    expect(await response.text()).toBe("");
-  });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(document.media_type);
+      expect(response.headers.get("etag")).toBe(`"${document.digest}"`);
+      expect(await response.text()).toBe("");
+    },
+  );
 
   test.each([...listPublicSchemas()])(
     "$served_at honors HEAD and conditional reads without body bytes",
