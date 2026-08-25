@@ -8,6 +8,9 @@
  * The law it enforces: projections are DERIVED. If one drifts, the log wins,
  * and serving fabricated-empty state is forbidden — a drifted projection must
  * be flagged `stale` and rebuilt, never silently trusted.
+ *
+ * The same read-only doctor boundary also reports durable problem identifiers
+ * that violate the renderer-safe contract; it never repairs identifiers.
  */
 
 import type { D1Database } from "@cloudflare/workers-types";
