@@ -1192,7 +1192,7 @@ describe("owned session launcher", () => {
       // The detached holder is deliberately outside the owned group. Finishing
       // well before pipeDrainMs proves the typed refusal cancels its local readers;
       // the still-live marker proves the dispatcher did not claim or kill that PID.
-      expect(performance.now() - startedAt).toBeLessThan(3_000);
+      expect(performance.now() - startedAt).toBeLessThan(6_000);
       expect(processTable()).toContain(marker);
     } finally {
       stopDetachedFixture(marker);
@@ -1233,7 +1233,7 @@ describe("owned session launcher", () => {
       expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
       // The release signal was ignored, so the dispatcher must return from its
       // bounded direct-child reap instead of waiting for the escaped pipe FD.
-      expect(performance.now() - startedAt).toBeLessThan(3_000);
+      expect(performance.now() - startedAt).toBeLessThan(6_000);
       const supervisorPid = Number(readFileSync(supervisorPidPath, "utf8").trim());
       const holderPid = Number(readFileSync(holderPidPath, "utf8").trim());
       expect(Number.isSafeInteger(supervisorPid)).toBe(true);

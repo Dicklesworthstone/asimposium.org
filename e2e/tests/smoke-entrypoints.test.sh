@@ -229,6 +229,88 @@ if awk '
   exit 1
 fi
 
+assert_cli_parsing_table() {
+  local entrypoint="$1"
+  local output
+  local status
+
+  # 1. Unknown argument
+  set +e
+  output="$("$entrypoint" --invalid-flag 2>&1)"
+  status=$?
+  set -e
+  if [[ "$status" -ne 64 || "$output" != *'"code":"UNKNOWN_ARGUMENT"'* ]]; then
+    emit "fail" "CLI_UNKNOWN_ARGUMENT_MISCLASSIFIED"
+    exit 1
+  fi
+
+  # 2. Missing --run-id values
+  set +e
+  output="$("$entrypoint" --run-id 2>&1)"
+  status=$?
+  set -e
+  if [[ "$status" -ne 64 || "$output" != *'"code":"RUN_ID_MISSING"'* ]]; then
+    emit "fail" "CLI_RUN_ID_MISSING_MISCLASSIFIED"
+    exit 1
+  fi
+
+  set +e
+  output="$("$entrypoint" --run-id "" 2>&1)"
+  status=$?
+  set -e
+  if [[ "$status" -ne 64 || "$output" != *'"code":"RUN_ID_MISSING"'* ]]; then
+    emit "fail" "CLI_RUN_ID_EMPTY_MISCLASSIFIED"
+    exit 1
+  fi
+
+  set +e
+  output="$("$entrypoint" --run-id --self-test 2>&1)"
+  status=$?
+  set -e
+  if [[ "$status" -ne 64 || "$output" != *'"code":"RUN_ID_MISSING"'* ]]; then
+    emit "fail" "CLI_RUN_ID_FLAG_NEXT_MISCLASSIFIED"
+    exit 1
+  fi
+
+  # 3. Invalid run-id values
+  for invalid_run_id in \
+    "../escape" \
+    "with spaces" \
+    ".leading-dot" \
+    "_leading-underscore" \
+    "-leading-dash" \
+    "has\$dollar" \
+    "$(printf 'a%.0s' {1..81})"; do
+    set +e
+    output="$("$entrypoint" --self-test --run-id "$invalid_run_id" 2>&1)"
+    status=$?
+    set -e
+    if [[ "$status" -ne 64 || "$output" != *'"code":"RUN_ID_INVALID"'* ]]; then
+      emit "fail" "CLI_RUN_ID_INVALID_MISCLASSIFIED"
+      exit 1
+    fi
+  done
+
+  # 4. Valid run-id boundaries with --self-test
+  for valid_run_id in \
+    "valid-run-1" \
+    "A.B-C_D" \
+    "$(printf 'a%.0s' {1..80})"; do
+    set +e
+    output="$("$entrypoint" --self-test --run-id "$valid_run_id" 2>&1)"
+    status=$?
+    set -e
+    if [[ "$status" -ne 0 || "$output" != *'"code":"HARNESS_SELF_TEST_OK"'* ]]; then
+      emit "fail" "CLI_RUN_ID_VALID_SELF_TEST_FAILED"
+      exit 1
+    fi
+  done
+}
+
+assert_cli_parsing_table "$repository_root/scripts/smoke-agent.sh"
+assert_cli_parsing_table "$repository_root/scripts/smoke-gallery.sh"
+assert_cli_parsing_table "$repository_root/e2e/gauntlet/run.sh"
+
 assert_production_refused() {
   local entrypoint="$1"
   local expected_code="$2"
