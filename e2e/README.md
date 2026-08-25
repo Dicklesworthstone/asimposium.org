@@ -104,8 +104,19 @@ parent's lease. The parent closes only after its child-aware cleanup and final
 publication boundary are proven. Early signals, crashes, and cleanup ambiguity
 leave the top-level lease open. This is source-level wiring only: the S-2 lane
 has not executed at the current revision under the required low-load RCH gate.
+S-6 now claims its fixed
+`e2e/artifacts/s6-cross-plane-auth/<run-id>` directory under the same root
+epoch before any product child or evidence writer can start. It revalidates
+the exact root, namespace, run, and lease identities before, during, and after
+the one schema-v4 evidence write. The lease closes only after the owned child
+set is proven empty and final evidence publication is complete; its exact
+lifecycle terminal records that the lease is closed or was never acquired.
+Signal cleanup follows the same settlement boundary, while a survivor or
+identity mismatch leaves the lease open and refuses a tidy terminal. This is
+also source-level wiring only: the focused S-6 and aggregate lanes have not
+executed at this revision under the required low-load RCH gate.
 Direct exported artifact helpers, standalone real-filesystem test fixtures,
-the standalone direct D1 adapter, S-6, and other raw artifact writers do not
+the standalone direct D1 adapter, and other raw artifact writers do not
 yet share the full lifetime contract, and a deliberately re-daemonized child
 can escape the owned process group. There is also no archive locator or
 operator maintenance acquisition path. Moving or rotating `e2e/artifacts`
