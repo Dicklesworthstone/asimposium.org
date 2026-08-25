@@ -55,6 +55,7 @@ function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
 }
 
 const PUBLIC_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
+const PROBLEM_DIGEST_CLAIM_LIMIT = 8;
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
@@ -229,12 +230,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     if (problemRow === null || problemRow === undefined) return null;
     const claims = await db
       .prepare(
-        "SELECT id, statement, source_seq, created_at FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
+        `SELECT id, statement, source_seq, created_at FROM claims
+         WHERE problem_id = ? ORDER BY source_seq ASC LIMIT ${PROBLEM_DIGEST_CLAIM_LIMIT + 1}`,
       )
       .bind(problemId)
       .all<{ id: string; statement: string; source_seq: number; created_at: string }>();
     const cursor = await readCursor(db, problemId);
     const claimRows = claims.results ?? [];
+    const claimsTruncated = claimRows.length > PROBLEM_DIGEST_CLAIM_LIMIT;
     return {
       schema: "asimposium.problem-face.v1",
       kind: "problem-face",
@@ -243,7 +246,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       cursor,
       title: `${problemRow.id} — public ledger face`,
       preamble: PACK_PREAMBLE,
-      items: claimRows.map((claim) => ({
+      items: claimRows.slice(0, PROBLEM_DIGEST_CLAIM_LIMIT).map((claim) => ({
         kind: "claim",
         id: claim.id,
         scope: "ledger",
@@ -256,6 +259,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
           reason: "w5_4_w5_8_pending",
           detail: "dispositions, reviews, hypotheses, and citations land with W5.4/W5.8",
         },
+        ...(claimsTruncated
+          ? [
+              {
+                reason: "claim_digest_limit",
+                detail: `claims beyond the first ${PROBLEM_DIGEST_CLAIM_LIMIT} in ledger sequence order`,
+              },
+            ]
+          : []),
       ],
       next_actions: [
         { method: "GET", url: `/p/${problemRow.id}.md`, why: "the human-readable face" },

@@ -626,6 +626,12 @@ describe("face wire format", () => {
                       source_seq: 7,
                       created_at: "2026-08-19T00:00:01.000Z",
                     },
+                    ...Array.from({ length: 8 }, (_, index) => ({
+                      id: `C-${index + 8}`,
+                      statement: `bounded claim ${index + 8}`,
+                      source_seq: index + 8,
+                      created_at: "2026-08-19T00:00:02.000Z",
+                    })),
                   ],
                 }),
               };
@@ -666,9 +672,16 @@ describe("face wire format", () => {
     expect(face.next_actions).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ url: "/steal" })]),
     );
+    expect(face.items).toHaveLength(8);
+    expect(face.items.map((item) => item.id)).not.toContain("C-15");
+    expect(face.omitted).toContainEqual({
+      reason: "claim_digest_limit",
+      detail: "claims beyond the first 8 in ledger sequence order",
+    });
     expect(queries).toHaveLength(3);
     expect(queries[0]).toContain("SELECT id, public_seq, created_at FROM problems");
     expect(queries[1]).toContain("SELECT id, statement, source_seq, created_at FROM claims");
+    expect(queries[1]).toContain("ORDER BY source_seq ASC LIMIT 9");
     expect(queries[2]).toContain("SELECT public_seq FROM problems WHERE id = ?");
 
     const markdown = await wireEntrypoint.fetch(
