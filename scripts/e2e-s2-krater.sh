@@ -6041,6 +6041,7 @@ run_s2_shell_regression_test() {
     child_run_id="s2c-$(random_hex 24)" || return 1
     s2_prepare_inherited_child_run "${child_run_id}" || return 1
     child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
+    s2_begin_raw_inherited_child_owner "${child_run_id}" "${child_run_identity}" || return 1
     env \
       S2_RUN_ID="${child_run_id}" \
       S2_INHERIT_WRITER_LEASE=1 \
@@ -6051,13 +6052,17 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss-child \
       S2_PRE_ARM_OWNER_LOSS_RECORD="${parent_loss_record}" \
-      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
+      bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
+        "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
+        "${S2_RAW_INHERITED_CHILD_MARKER}" "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     parent_loss_child=$!
+    s2_register_raw_inherited_child "${parent_loss_child}" || return 1
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while [[ ! -f "${parent_loss_record}" || -L "${parent_loss_record}" ]]; do
       if (( SECONDS >= deadline )); then
         kill -KILL "${parent_loss_child}" 2>/dev/null || :
         wait "${parent_loss_child}" 2>/dev/null || :
+        cleanup_raw_inherited_child || :
         return 1
       fi
       sleep 0.05
@@ -6089,6 +6094,7 @@ run_s2_shell_regression_test() {
     if kill -0 "${planted_helper_pid}" 2>/dev/null; then return 1; fi
     assert_no_run_survivors \
       "${child_persist}" "${child_port}" "${supervisor_marker}" || return 1
+    cleanup_raw_inherited_child || return 1
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"controller-death-before-first-gate-reaps-supervisor-and-planted-helper","reproduce":"S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss scripts/e2e-s2-krater.sh"}'
     return 0
   fi
