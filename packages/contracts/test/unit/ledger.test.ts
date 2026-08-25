@@ -131,9 +131,14 @@ test("the published ledger schema preserves the public face safety boundary", ()
         properties: {
           problem: { maxLength?: number; pattern?: string };
           items: {
+            maxItems?: number;
             items: {
               properties: {
+                kind: { const?: string };
                 id: { maxLength?: number; pattern?: string };
+                scope: { const?: string };
+                untrusted: { const?: boolean };
+                tokens?: unknown;
               };
             };
           };
@@ -179,6 +184,11 @@ test("the published ledger schema preserves the public face safety boundary", ()
   expect(publishedProblemId.test("P-X--FORGED")).toBe(false);
 
   const itemId = face.items.items.properties.id;
+  expect(face.items.maxItems).toBe(200);
+  expect(face.items.items.properties.kind.const).toBe("claim");
+  expect(face.items.items.properties.scope.const).toBe("ledger");
+  expect(face.items.items.properties.untrusted.const).toBe(true);
+  expect("tokens" in face.items.items.properties).toBe(false);
   expect(itemId.maxLength).toBe(128);
   expect(typeof itemId.pattern).toBe("string");
   const publishedItemId = new RegExp(itemId.pattern as string);
