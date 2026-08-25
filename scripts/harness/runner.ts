@@ -630,6 +630,7 @@ export class ArtifactStore {
       attempt: this.stagingCounter,
       storage: this.storage,
       retainedIntegrationDirectory: this.retainedIntegrationDirectory,
+      artifactRootDirectory: this.topLevelArtifactsDirectory,
       expectedArtifactRootIdentity: this.artifactRootIdentity,
     });
   }
@@ -1021,6 +1022,8 @@ export interface HarnessArtifactStorage {
   isSymlink(path: string): boolean;
   isFile(path: string): boolean;
   isDirectory(path: string): boolean;
+  /** Stable device/inode identity for one real directory. */
+  directoryIdentity(path: string): string;
   realpath(path: string): string;
   mkdir(path: string): void;
   readdir(path: string): readonly string[];
@@ -2309,6 +2312,8 @@ export interface PublishFailureBlobInput {
   readonly attempt: number;
   /** Defaults to the real filesystem. */
   readonly storage?: HarnessArtifactStorage;
+  /** Top-level `<root>/e2e/artifacts`; defaults to `artifactsDirectory`. */
+  readonly artifactRootDirectory?: string;
   /**
    * Device/inode identity captured by the owning run.
    *
@@ -2394,12 +2399,18 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     storage,
   );
   assertContained(containmentRoot, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
+  const artifactRootDirectory = realDirectory(
+    resolve(input.artifactRootDirectory ?? input.artifactsDirectory),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  assertContained(containmentRoot, artifactRootDirectory, "ARTIFACT_PATH_UNSAFE");
   const expectedArtifactRootIdentity =
-    input.expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactsDirectory);
+    input.expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRootDirectory);
   const assertWriterBoundary = (): void =>
     assertArtifactWriterBoundary(
       containmentRoot,
-      artifactsDirectory,
+      artifactRootDirectory,
       expectedArtifactRootIdentity,
       storage,
     );
@@ -3430,6 +3441,58 @@ function assertExactArtifactsDirectory(
       "artifact namespace directory must be a direct real directory, not a redirected path.",
     );
   }
+}
+
+/** Refuse all writer activity while an operator-owned maintenance fence exists. */
+function assertArtifactMaintenanceAbsent(
+  root: string,
+  storage: HarnessArtifactStorage,
+): void {
+  const fence = join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME);
+  assertContained(root, fence, "ARTIFACT_PATH_UNSAFE");
+  // Any filesystem node at the reserved name closes the gate. A symlink or
+  // directory must not be able to turn a malformed fence into an open one.
+  if (storage.exists(fence) || storage.isSymlink(fence)) {
+    throw new HarnessError(
+      "ARTIFACT_MAINTENANCE_ACTIVE",
+      "artifact maintenance is active; no run may claim or publish evidence.",
+    );
+  }
+}
+
+/**
+ * Revalidate the physical artifact-root epoch immediately before a write.
+ *
+ * This narrows pathname replacement races but is not a lifetime lease: the
+ * root can still be replaced after this check and before the filesystem call.
+ * Whole-root maintenance therefore remains forbidden until every writer holds
+ * a lease that an exclusive operator action can drain.
+ */
+function assertArtifactWriterBoundary(
+  root: string,
+  artifactsDirectory: string,
+  expectedIdentity: string,
+  storage: HarnessArtifactStorage,
+): void {
+  assertArtifactMaintenanceAbsent(root, storage);
+  const expectedPath = join(root, "e2e", "artifacts");
+  try {
+    if (
+      artifactsDirectory !== expectedPath ||
+      storage.isSymlink(expectedPath) ||
+      !storage.isDirectory(expectedPath) ||
+      storage.realpath(expectedPath) !== expectedPath ||
+      storage.directoryIdentity(expectedPath) !== expectedIdentity
+    ) {
+      throw new Error("artifact root changed");
+    }
+  } catch {
+    throw new HarnessError(
+      "ARTIFACT_ROOT_CHANGED",
+      "the physical artifact root changed after this writer claimed it; retained evidence was left untouched.",
+    );
+  }
+  assertArtifactMaintenanceAbsent(root, storage);
 }
 
 function realDirectory(

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARTIFACT_BLOB_DIRECTORY,
+  ARTIFACT_MAINTENANCE_FENCE_NAME,
   ArtifactStore,
   adapterProbePath,
   artifactCapacityReport,
@@ -3280,6 +3281,97 @@ describe("run options are covered at compile time", () => {
 });
 
 describe("new-run artifact namespace ownership", () => {
+  test("PLANTED: a maintenance fence blocks before the artifact root is created", async () => {
+    const root = fixtureRoot("maintenance-before-claim");
+    const storage = fixtureStorage();
+    const e2e = join(root, "e2e");
+    storage.seedDirectory(e2e);
+    storage.writeExclusive(join(e2e, ARTIFACT_MAINTENANCE_FENCE_NAME), "maintenance\n");
+
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId: "maintenance-before-claim",
+        steps: [passStep("ok")],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/ARTIFACT_MAINTENANCE_ACTIVE|maintenance is active/);
+    expect(storage.exists(join(e2e, "artifacts"))).toBe(false);
+  });
+
+  test("PLANTED: a fence raised after claim blocks the next event append", async () => {
+    const root = fixtureRoot("maintenance-after-claim");
+    const artifacts = join(root, "e2e", "artifacts");
+    const run = join(artifacts, "maintenance-after-claim");
+    const base = fixtureStorage();
+    let fenced = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      size: (path) => {
+        const size = base.size(path);
+        if (path === join(run, "events.jsonl") && !fenced) {
+          fenced = true;
+          base.writeExclusive(
+            join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
+            "maintenance\n",
+          );
+        }
+        return size;
+      },
+    };
+
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId: "maintenance-after-claim",
+        steps: [passStep("ok")],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/ARTIFACT_MAINTENANCE_ACTIVE|maintenance is active/);
+    expect(fenced).toBe(true);
+    expect(base.readFile(join(run, "events.jsonl"))).toBe("");
+  });
+
+  test("PLANTED: an artifact-root epoch change blocks the next event append", async () => {
+    const root = fixtureRoot("artifact-root-epoch-change");
+    const artifacts = join(root, "e2e", "artifacts");
+    const run = join(artifacts, "artifact-root-epoch-change");
+    const base = fixtureStorage();
+    let epochChanged = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      directoryIdentity: (path) => {
+        const identity = base.directoryIdentity(path);
+        return path === artifacts && epochChanged ? `${identity}:replacement` : identity;
+      },
+      size: (path) => {
+        const size = base.size(path);
+        if (path === join(run, "events.jsonl")) epochChanged = true;
+        return size;
+      },
+    };
+
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId: "artifact-root-epoch-change",
+        steps: [passStep("ok")],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/ARTIFACT_ROOT_CHANGED|physical artifact root changed/);
+    expect(epochChanged).toBe(true);
+    expect(base.readFile(join(run, "events.jsonl"))).toBe("");
+  });
+
   test("PLANTED: a top-level mkdir winner cannot be adopted by the new run", async () => {
     const root = fixtureRoot("new-run-claim-race");
     const artifacts = join(root, "e2e", "artifacts");
