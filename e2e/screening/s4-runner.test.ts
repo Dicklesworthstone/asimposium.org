@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import worker from "../../apps/wire/src/index";
 import type {
@@ -210,17 +211,11 @@ describe("S-4 frozen corpus", () => {
     const expectedIdentity = await deriveS4EvaluatedCorpusIdentity(
       corpus.filter((example) => example.source.availability === "available"),
     );
-    const child = Bun.spawn({
-      cmd: ["bun", "e2e/screening/s4-runner.ts", "self-test"],
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
+    const { stdout, stderr, status: exitCode } = spawnSync(
+      process.execPath,
+      [resolve(import.meta.dir, "s4-runner.ts"), "self-test"],
+      { cwd: root, encoding: "utf8", env: process.env },
+    );
     const records = stdout
       .split("\n")
       .filter((line) => line.length > 0)
@@ -366,17 +361,11 @@ describe("S-4 live-response bounds", () => {
   });
 
   test("PLANTED NEGATIVE: an invalid command emits exactly one typed terminal diagnostic", async () => {
-    const child = Bun.spawn({
-      cmd: ["bun", "e2e/screening/s4-runner.ts", "not-a-command"],
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
+    const { stdout, stderr, status: exitCode } = spawnSync(
+      process.execPath,
+      [resolve(import.meta.dir, "s4-runner.ts"), "not-a-command"],
+      { cwd: root, encoding: "utf8", env: process.env },
+    );
     const lines = stderr.split("\n").filter((line) => line.length > 0);
 
     expect(exitCode).toBe(64);

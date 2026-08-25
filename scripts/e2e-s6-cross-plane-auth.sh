@@ -270,7 +270,11 @@ s6_close_artifact_writer_lease_after_settlement() {
   (( S6_ARTIFACT_WRITER_LEASE_OWNED == 1 )) || return 0
   (( REAP_SURVIVORS == 0 && ${#CHILD_PIDS[@]} == 0 )) || return 1
   [[ -z "$GROUP_CONTROL_PID" ]] || return 1
-  s6_artifact_writer_boundary_is_open || return 1
+  # Closing is not publication. A maintenance fence raised after our claim
+  # must stop every later write, but it must not strand an already-settled
+  # writer lease and thereby prevent maintenance from ever observing
+  # quiescence. The close helper still re-proves the captured lease path and
+  # device/inode identity immediately before creating its append-only marker.
   e2e_close_artifact_writer_lease \
     "$S6_ARTIFACT_WRITER_LEASE_PATH" "$S6_ARTIFACT_WRITER_LEASE_IDENTITY" || return 1
   S6_ARTIFACT_WRITER_LEASE_OWNED=0
@@ -3897,6 +3901,9 @@ main() {
           ;;
         malformed)
           printf '\377\n'
+          ;;
+        bom)
+          printf '\357\273\277%s\n' "$bootstrap_record"
           ;;
         dead-stream)
           exec >/dev/null

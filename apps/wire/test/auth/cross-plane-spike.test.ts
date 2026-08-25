@@ -189,6 +189,9 @@ function readBounded(fd: number, path: string, identity: CaptureIdentity): strin
   ) {
     throw new Error(`capture changed while being read at ${path}`);
   }
+  if (size >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    throw new Error(`capture begins with a noncanonical UTF-8 BOM at ${path}`);
+  }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
   } catch {
@@ -2642,6 +2645,15 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
   });
 
   test("the shared artifact claim owns the directory and every evidence write revalidates it", () => {
+    expect(shellFunction(source, "s6_artifact_writer_boundary_is_open")).toBe(
+      `s6_artifact_writer_boundary_is_open() {
+  (( S6_ARTIFACT_WRITER_LEASE_OWNED == 1 )) || return 1
+  e2e_artifact_namespaced_run_matches_at_root \\
+    "$ROOT" "$SUITE" "$S6_RUN_ID" \\
+    "$S6_ARTIFACT_ROOT_IDENTITY" "$S6_ARTIFACT_NAMESPACE_IDENTITY" \\
+    "$S6_ARTIFACT_RUN_IDENTITY" "$S6_ARTIFACT_WRITER_LEASE_PATH" \\
+    "$S6_ARTIFACT_WRITER_LEASE_IDENTITY"`,
+    );
     const claim = shellFunction(source, "s6_claim_artifact_run");
     expect(claim).toContain(
       'e2e_claim_artifact_namespaced_run_at_root "$ROOT" "$SUITE" "$S6_RUN_ID"',
@@ -3285,11 +3297,10 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     expect(closeLease).toContain("REAP_SURVIVORS == 0");
     expect(closeLease).toContain("${#CHILD_PIDS[@]} == 0");
     expect(closeLease).toContain('[[ -z "$GROUP_CONTROL_PID" ]]');
-    const revalidate = closeLease.indexOf("s6_artifact_writer_boundary_is_open");
-    const close = closeLease.indexOf("e2e_close_artifact_writer_lease", revalidate);
+    expect(closeLease).not.toContain("s6_artifact_writer_boundary_is_open");
+    const close = closeLease.indexOf("e2e_close_artifact_writer_lease");
     const release = closeLease.indexOf("S6_ARTIFACT_WRITER_LEASE_OWNED=0", close);
-    expect(revalidate).toBeGreaterThanOrEqual(0);
-    expect(close).toBeGreaterThan(revalidate);
+    expect(close).toBeGreaterThan(closeLease.indexOf('[[ -z "$GROUP_CONTROL_PID" ]]'));
     expect(release).toBeGreaterThan(close);
 
     const onExit = shellFunction(source, "on_exit");
@@ -4075,11 +4086,15 @@ describe("the shell's causal self-tests actually run", () => {
       }
 
       // Invalid UTF-8 must die in the held-inode reader before an ordinary
-      // JavaScript string can substitute U+FFFD, and no-output must be a
-      // transport fault rather than a passing empty transcript.
+      // JavaScript string can substitute U+FFFD. A valid-but-noncanonical BOM
+      // must be rejected before TextDecoder can consume it, and no-output must
+      // be a transport fault rather than a passing empty transcript.
       await expect(
         runShell(["--self-test-supervisor-bootstrap", "malformed"], withoutS6Env()),
       ).rejects.toThrow("capture is not canonical UTF-8");
+      await expect(
+        runShell(["--self-test-supervisor-bootstrap", "bom"], withoutS6Env()),
+      ).rejects.toThrow("capture begins with a noncanonical UTF-8 BOM");
       await expect(
         runShell(["--self-test-supervisor-bootstrap", "dead-stream"], withoutS6Env()),
       ).rejects.toThrow("capture lost");
@@ -4758,6 +4773,9 @@ while :; do sleep 1; done
     expect(controller).toContain("readBounded(stdoutFd, stdoutPath, stdoutCaptureIdentity)");
     expect(reader).toContain("while (offset < size)");
     expect(reader).toContain("after.size !== before.size");
+    expect(reader).toContain(
+      "buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf",
+    );
     expect(reader).toContain('new TextDecoder("utf-8", { fatal: true })');
     expect(reader).not.toContain("statSync(path)");
     expect(controller.indexOf("readBounded(stdoutFd")).toBeLessThan(
