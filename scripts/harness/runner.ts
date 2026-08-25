@@ -54,6 +54,8 @@ export const MAX_RETAINED_INTEGRATION_DIRECTORIES = 512;
 export const MAX_RETAINED_INTEGRATION_BYTES = 16 * 1024 * 1024;
 /** Conservative reservation for one real D1 adapter state tree. */
 export const MAX_D1_ADAPTER_STATE_BYTES = 2 * 1024 * 1024;
+/** Internal, non-secret capability passed only from ArtifactStore to its D1 child. */
+export const D1_ARTIFACT_CAPABILITY_ENV = "ASIMPOSIUM_HARNESS_D1_ARTIFACT_CAPABILITY";
 /**
  * Ceiling on artifact namespaces (run directories plus fixture scratch) under
  * `e2e/artifacts`.
@@ -360,6 +362,26 @@ export interface HarnessRunResult {
   storageAuthority: HarnessStorageAuthority;
 }
 
+/**
+ * Serializable proof that a D1 adapter is one child of a still-open retained
+ * ArtifactStore run. It is authority metadata, not a credential: every field
+ * is independently re-proved against the filesystem before a child write.
+ */
+export interface D1ArtifactWriterCapability {
+  readonly schema_version: 1;
+  readonly repository_root: string;
+  readonly artifact_root: string;
+  readonly artifact_root_identity: string;
+  readonly namespace: string;
+  readonly namespace_directory: string;
+  readonly namespace_identity: string;
+  readonly run_id: string;
+  readonly run_directory: string;
+  readonly run_identity: string;
+  readonly lease_directory: string;
+  readonly lease_identity: string;
+}
+
 export class HarnessError extends Error {
   constructor(
     readonly code: string,
@@ -393,6 +415,8 @@ export class ArtifactStore {
   private readonly artifactRootIdentity: string;
   /** Present only for the explicit retained integration lane. */
   private readonly retainedIntegrationDirectory: string | undefined;
+  private readonly retainedIntegrationIdentity: string | undefined;
+  private readonly runDirectoryIdentity: string;
   /** Manifest-relative base for the selected artifact namespace. */
   private readonly artifactRelativeRoot: string;
   /** `<run>/failures.jsonl`: digests this run produced, in order. */
@@ -452,6 +476,8 @@ export class ArtifactStore {
             );
       this.artifactsDirectory = artifacts;
       this.retainedIntegrationDirectory = artifactNamespace === undefined ? undefined : artifacts;
+      this.retainedIntegrationIdentity =
+        artifactNamespace === undefined ? undefined : storage.directoryIdentity(artifacts);
       this.artifactRelativeRoot =
         artifactNamespace === undefined ? "e2e/artifacts" : `e2e/artifacts/${artifactNamespace}`;
       /**
@@ -512,6 +538,7 @@ export class ArtifactStore {
               1,
               this.artifactRootIdentity,
             );
+      this.runDirectoryIdentity = storage.directoryIdentity(this.directory);
       this.assertWritableArtifactRoot();
       this.jsonl = join(this.directory, "events.jsonl");
       assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
@@ -689,6 +716,43 @@ export class ArtifactStore {
       );
     }
     assertArtifactWriterLeaseOpen(lease);
+  }
+
+  d1ArtifactWriterCapability(): D1ArtifactWriterCapability {
+    const lease = this.writerLease;
+    if (
+      lease === undefined ||
+      this.retainedIntegrationDirectory === undefined ||
+      this.retainedIntegrationIdentity === undefined ||
+      this.storage.authority !== "real-filesystem"
+    ) {
+      throw new HarnessError(
+        "D1_ARTIFACT_CAPABILITY_UNAVAILABLE",
+        "the real D1 adapter requires one live real-filesystem retained ArtifactStore run.",
+      );
+    }
+    const capability: D1ArtifactWriterCapability = {
+      schema_version: 1,
+      repository_root: this.physicalRoot,
+      artifact_root: this.topLevelArtifactsDirectory,
+      artifact_root_identity: this.artifactRootIdentity,
+      namespace: basename(this.retainedIntegrationDirectory),
+      namespace_directory: this.retainedIntegrationDirectory,
+      namespace_identity: this.retainedIntegrationIdentity,
+      run_id: this.runId,
+      run_directory: this.directory,
+      run_identity: this.runDirectoryIdentity,
+      lease_directory: lease.directory,
+      lease_identity: lease.identity,
+    };
+    assertD1ArtifactWriterCapability(
+      capability,
+      this.physicalRoot,
+      capability.namespace,
+      this.directory,
+      this.storage,
+    );
+    return capability;
   }
 
   close(): void {
@@ -1706,7 +1770,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
       const retries = step.replaySafe ? (step.retries ?? 0) : 0;
       let finalEvent: HarnessEvent | undefined;
       for (let attempt = 0; attempt <= retries; attempt += 1) {
-        finalEvent = await runAttempt(options, step, seed, attempt, retries, output);
+        finalEvent = await runAttempt(options, step, seed, attempt, retries, output, store);
         if (finalEvent.status !== "pass" && finalEvent.status !== "blocked") {
           const mergedOutput = finalEvent.detail ?? "";
           store.writeFailureLog(step, attempt + 1, mergedOutput);
@@ -1757,6 +1821,7 @@ async function runAttempt(
   attempt: number,
   retries: number,
   emitOutput: (text: string) => void,
+  store: ArtifactStore,
 ): Promise<HarnessEvent> {
   const started = new Date();
   const startedAt = performance.now();
@@ -1764,6 +1829,12 @@ async function runAttempt(
   const commandLine = step.command;
   if (commandLine === undefined) {
     throw new HarnessError("COMMAND_MISSING", "a process step requires a validated command.");
+  }
+  const childEnvironment = scrubbedChildEnvironment();
+  if (step.adapter === "d1") {
+    childEnvironment[D1_ARTIFACT_CAPABILITY_ENV] = JSON.stringify(
+      store.d1ArtifactWriterCapability(),
+    );
   }
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
@@ -1774,7 +1845,7 @@ async function runAttempt(
       stderr: "pipe",
       stdin: "ignore",
       detached: true,
-      env: scrubbedChildEnvironment(),
+      env: childEnvironment,
     });
   } catch (error) {
     const denied =
@@ -3715,6 +3786,133 @@ interface ArtifactWriterLease {
   readonly directory: string;
   readonly identity: string;
   readonly storage: HarnessArtifactStorage;
+}
+
+const D1_ARTIFACT_CAPABILITY_KEYS: readonly (keyof D1ArtifactWriterCapability)[] = [
+  "schema_version",
+  "repository_root",
+  "artifact_root",
+  "artifact_root_identity",
+  "namespace",
+  "namespace_directory",
+  "namespace_identity",
+  "run_id",
+  "run_directory",
+  "run_identity",
+  "lease_directory",
+  "lease_identity",
+];
+
+/** Re-prove one inherited D1 writer capability against current filesystem bytes. */
+export function assertD1ArtifactWriterCapability(
+  value: unknown,
+  expectedRepositoryRoot: string,
+  expectedNamespace: string,
+  expectedRunDirectory: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): D1ArtifactWriterCapability {
+  const invalid = (): never => {
+    throw new HarnessError(
+      "D1_ARTIFACT_CAPABILITY_INVALID",
+      "the D1 adapter artifact capability is absent, malformed, replaced, closed, or outside its owning run.",
+    );
+  };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) invalid();
+  const capability = value as Record<string, unknown>;
+  const keys = Object.keys(capability);
+  if (
+    keys.length !== D1_ARTIFACT_CAPABILITY_KEYS.length ||
+    !D1_ARTIFACT_CAPABILITY_KEYS.every((key) => keys.includes(key)) ||
+    capability.schema_version !== 1
+  ) {
+    invalid();
+  }
+  for (const key of D1_ARTIFACT_CAPABILITY_KEYS.slice(1)) {
+    const field = capability[key];
+    if (typeof field !== "string" || field.length === 0 || field.length > 4_096) invalid();
+  }
+  const typed = capability as unknown as D1ArtifactWriterCapability;
+  if (!validateRunId(expectedNamespace) || !validateRunId(typed.run_id)) invalid();
+
+  let root: string;
+  let artifactRoot: string;
+  let namespaceDirectory: string;
+  let runDirectory: string;
+  let leaseDirectory: string;
+  try {
+    root = realDirectory(resolve(expectedRepositoryRoot), "D1_ARTIFACT_CAPABILITY_INVALID", storage);
+    artifactRoot = realDirectory(
+      join(root, "e2e", "artifacts"),
+      "D1_ARTIFACT_CAPABILITY_INVALID",
+      storage,
+    );
+    namespaceDirectory = realDirectory(
+      join(artifactRoot, expectedNamespace),
+      "D1_ARTIFACT_CAPABILITY_INVALID",
+      storage,
+    );
+    runDirectory = realDirectory(
+      resolve(expectedRunDirectory),
+      "D1_ARTIFACT_CAPABILITY_INVALID",
+      storage,
+    );
+    leaseDirectory = realDirectory(
+      typed.lease_directory,
+      "D1_ARTIFACT_CAPABILITY_INVALID",
+      storage,
+    );
+  } catch {
+    return invalid();
+  }
+  if (
+    root !== resolve(expectedRepositoryRoot) ||
+    typed.repository_root !== root ||
+    typed.artifact_root !== artifactRoot ||
+    typed.artifact_root_identity !== storage.directoryIdentity(artifactRoot) ||
+    typed.namespace !== expectedNamespace ||
+    typed.namespace_directory !== namespaceDirectory ||
+    typed.namespace_identity !== storage.directoryIdentity(namespaceDirectory) ||
+    typed.run_directory !== runDirectory ||
+    runDirectory !== join(namespaceDirectory, typed.run_id) ||
+    typed.run_identity !== storage.directoryIdentity(runDirectory) ||
+    leaseDirectory !== typed.lease_directory ||
+    typed.lease_identity !== storage.directoryIdentity(leaseDirectory)
+  ) {
+    invalid();
+  }
+  const expectedLeaseEpoch = join(
+    root,
+    "e2e",
+    ARTIFACT_WRITER_LEASES_NAME,
+    artifactWriterLeaseEpochName(typed.artifact_root_identity),
+  );
+  if (
+    dirname(leaseDirectory) !== expectedLeaseEpoch ||
+    !/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/.test(basename(leaseDirectory))
+  ) {
+    invalid();
+  }
+  const lease: ArtifactWriterLease = {
+    root,
+    artifactsDirectory: artifactRoot,
+    artifactRootIdentity: typed.artifact_root_identity,
+    directory: leaseDirectory,
+    identity: typed.lease_identity,
+    storage,
+  };
+  try {
+    assertArtifactWriterLeaseOpen(lease);
+    if (
+      storage.directoryIdentity(namespaceDirectory) !== typed.namespace_identity ||
+      storage.directoryIdentity(runDirectory) !== typed.run_identity
+    ) {
+      invalid();
+    }
+    assertArtifactWriterLeaseOpen(lease);
+  } catch {
+    return invalid();
+  }
+  return typed;
 }
 
 function artifactWriterLeaseEpochName(rootIdentity: string): string {
