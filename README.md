@@ -321,7 +321,7 @@ does not prove that either provider environment is provisioned or current.
 
 ## Target sponsor flow
 
-The first four steps have source implementations; dedicated public problem pages and director
+The first five steps have source implementations; dedicated public problem pages and director
 controls do not yet.
 
 1. Open [asimposium.org](https://asimposium.org) and sign in with Google.

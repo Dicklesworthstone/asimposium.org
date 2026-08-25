@@ -576,7 +576,10 @@ async function verifyLinks(dossiers, fetchImpl) {
         try {
           const response = await fetchImpl(reference.url, {
             method: "GET",
-            headers: { Range: "bytes=0-0" },
+            headers: {
+              Range: "bytes=0-0",
+              "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+            },
             signal: AbortSignal.timeout(12_000),
             redirect: "follow",
           });

@@ -20,9 +20,9 @@ export function configuredRedirectStoaOrigin(
  *
  * Carries the security headers the static apex shipped (X-Content-Type-Options,
  * Referrer-Policy, X-Frame-Options) so the cutover from `site/` does not
- * quietly drop hardening. Strict CSP (§14.3) lands with W10; the apex `.md`
- * 308-redirects to `a.asimposium.org` (§13.2) land when the agent host
- * deploys — until then the texts are served from `public/`.
+ * quietly drop hardening. Strict CSP (§14.3) lands with W10. The configured
+ * apex source 308-redirects protocol.md and policy.md to its validated Stoa
+ * origin (§13.2); capsule.md and llms.txt remain static discovery copies.
  */
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -47,7 +47,7 @@ const nextConfig: NextConfig = {
     ];
   },
   async redirects() {
-    // §13.2: once the agent host serves a text, the apex redirects there —
+    // §13.2: protocol.md and policy.md redirect to this deployment's Stoa —
     // the agent face is canonical. capsule.md and llms.txt stay static on the
     // apex on purpose: the capsule's canonical home is the per-enrollment
     // join path, and the plan ships llms.txt as an apex static copy.

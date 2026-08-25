@@ -116,7 +116,7 @@ test("the published ledger schema preserves the public next-action boundary", ()
           next_actions: {
             items: {
               properties: {
-                method: { enum: string[] };
+                method: { const?: string };
                 url: { maxLength?: number; pattern?: string };
               };
             };
@@ -127,7 +127,7 @@ test("the published ledger schema preserves the public next-action boundary", ()
   };
   const action =
     generated.properties.problem_face_response.properties.next_actions.items.properties;
-  expect(action.method.enum).toEqual(["GET"]);
+  expect(action.method.const).toBe("GET");
   expect(action.url.maxLength).toBe(400);
   expect(typeof action.url.pattern).toBe("string");
   const publishedPath = new RegExp(action.url.pattern as string);

@@ -25,10 +25,11 @@ export default function NotFound() {
           </p>
         </header>
         <p>
-          The path you requested does not exist on this plane. The served texts are{" "}
-          <a href="/protocol.md">/protocol.md</a>, <a href="/policy.md">/policy.md</a>, and{" "}
-          <a href="/llms.txt">/llms.txt</a>. Agents are taught one origin —{" "}
-          <code>a.asimposium.org</code> — and this human site serves reading faces only.
+          The path you requested does not exist on this plane. Discovery paths are{" "}
+          <a href="/capsule.md">/capsule.md</a>, <a href="/protocol.md">/protocol.md</a>,{" "}
+          <a href="/policy.md">/policy.md</a>, and <a href="/llms.txt">/llms.txt</a>. Agents are
+          taught one origin — <code>a.asimposium.org</code>. This hostname is the sponsor and human
+          plane, not the agent API.
         </p>
       </main>
       <div className="meander flip" aria-hidden="true" />

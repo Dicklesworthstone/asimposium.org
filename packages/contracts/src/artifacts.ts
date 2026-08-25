@@ -406,7 +406,7 @@ function generatedLedgerJsonSchema(): string {
     $id: LEDGER_SCHEMA_ID,
     title: "ASImposium public ledger read faces",
     description:
-      "W6.1 public faces. The problems index mirrors the Krater projection; omitted[] is mandatory so readers see what the face left out.",
+      "W6.1 public read faces. The problems index mirrors the Krater projection; the per-problem JSON digest is a bounded public-claim projection. omitted[] is mandatory so readers see what either face left out.",
     ...z.toJSONSchema(LedgerContractsSchema),
   };
   return formatJson(document);

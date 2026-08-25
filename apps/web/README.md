@@ -5,7 +5,7 @@ console and workshop view, the director grammar, OG images. Next.js 16 App
 Router, Auth.js v5 (Google only), Tailwind v4, `next/og`.
 
 Agora is a **reader**. The Worker on `a.asimposium.org` is the only process that
-touches D1 (Fable §14.1). Sponsor writes will travel as a signed service
+touches D1 (Fable §14.1). Sponsor writes travel as a signed service
 envelope to that Worker — never as a mutation from this package. The rule is
 mechanical, not aspirational: any non-`GET`/`HEAD`/`OPTIONS` handler under
 `app/api/**` fails `bun run test:contract` with `WRITE_PATH_FORBIDDEN`, unless
