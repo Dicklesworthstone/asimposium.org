@@ -1727,6 +1727,20 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit).toContain(
       '"${cleanup_proven}" == true && "${S2_WRITER_LEASE_OWNED}" == 1',
     );
+    const snapshotRegression = shell.slice(
+      shell.indexOf('if [[ "${mode}" == "source-snapshot-freeze" ]]'),
+      shell.indexOf('if [[ "${mode}" == "foreign-listener-attribution" ]]'),
+    );
+    expect(snapshotRegression).toContain(
+      "s2_artifact_writer_boundary_is_open || return 1\n" +
+        "    write_s2_source_snapshot || return 1\n" +
+        "    s2_artifact_writer_boundary_is_open || return 1",
+    );
+    expect(snapshotRegression).toContain(
+      "s2_artifact_writer_boundary_is_open || return 1\n" +
+        "    if write_s2_source_snapshot >/dev/null 2>&1; then return 1; fi\n" +
+        "    s2_artifact_writer_boundary_is_open || return 1",
+    );
     const recursiveLaunches = Array.from(shell.matchAll(/bash "\$\{S2_SCRIPT_PATH\}"/g));
     expect(recursiveLaunches.length).toBeGreaterThanOrEqual(6);
     for (const launch of recursiveLaunches) {

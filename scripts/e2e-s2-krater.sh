@@ -5674,7 +5674,9 @@ run_s2_shell_regression_test() {
 
   if [[ "${mode}" == "source-snapshot-freeze" ]]; then
     local snapshot_aggregate snapshot_entries snapshot_mode expected_entries
+    s2_artifact_writer_boundary_is_open || return 1
     write_s2_source_snapshot || return 1
+    s2_artifact_writer_boundary_is_open || return 1
     [[ -f "${S2_SOURCE_SNAPSHOT_PATH}" && ! -L "${S2_SOURCE_SNAPSHOT_PATH}" ]] || return 1
     snapshot_mode="$(LC_ALL=C stat -f '%Lp' "${S2_SOURCE_SNAPSHOT_PATH}" 2>/dev/null)" || return 1
     [[ "${snapshot_mode}" == "600" ]] || return 1
@@ -5692,7 +5694,9 @@ run_s2_shell_regression_test() {
     [[ "${snapshot_entries}" == "${expected_entries}" ]] || return 1
     # Immutability is the whole point: the exclusive create must refuse a second
     # write rather than silently replacing what a commit may already be bound to.
+    s2_artifact_writer_boundary_is_open || return 1
     if write_s2_source_snapshot >/dev/null 2>&1; then return 1; fi
+    s2_artifact_writer_boundary_is_open || return 1
     emit "{\"tool\":\"bash+bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"source-snapshot-is-frozen-exact-and-not-rewritable\",\"aggregate_digest\":\"${snapshot_aggregate}\",\"entries\":${snapshot_entries},\"reproduce\":\"S2_SHELL_REGRESSION_TEST=source-snapshot-freeze scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
