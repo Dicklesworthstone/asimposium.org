@@ -3334,7 +3334,7 @@ self_test() {
     fi
     printf '%s\n%s\n' \
       "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"INTERRUPTED\",\"historical_evidence_bead\":\"asimposiumorg-vw3\",\"detail\":\"the run received SIG${signal} and every child process group was reaped\",\"reproduce\":\"${REPRODUCE}\"}" \
-      "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}" >"$expected"
+      "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\",\"artifact_writer_lease\":\"closed-or-not-acquired\"}" >"$expected"
     cmp -s "$capture" "$expected" && exact="exact"
     check "${seam}-${signal}-registration-barrier-armed" "$ready_seen" "ready"
     check "${seam}-${signal}-dispatch-succeeded" "$dispatch" "sent"

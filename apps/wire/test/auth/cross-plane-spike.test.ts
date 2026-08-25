@@ -808,9 +808,16 @@ function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifec
   if (
     JSON.stringify(lifecycle) !== lifecycleLine ||
     JSON.stringify(Object.keys(lifecycle)) !==
-      JSON.stringify(["suite", "record_type", "status", "owned_same_process_groups"]) ||
+      JSON.stringify([
+        "suite",
+        "record_type",
+        "status",
+        "owned_same_process_groups",
+        "artifact_writer_lease",
+      ]) ||
     lifecycle.status !== "pass" ||
-    lifecycle.owned_same_process_groups !== "settled"
+    lifecycle.owned_same_process_groups !== "settled" ||
+    lifecycle.artifact_writer_lease !== "closed-or-not-acquired"
   ) {
     return refused();
   }
@@ -2603,7 +2610,7 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
     }
   });
 
-  test("symlink components and invalid deployment configuration have typed blockers", () => {
+  test("invalid deployment configuration is rejected before the artifact run is claimed", () => {
     const symlinkGuard = shellFunction(source, "evidence_directory_has_symlink_component");
     expect(symlinkGuard).toContain('[[ -L "e2e" || -L "e2e/artifacts" ||');
     expect(symlinkGuard).toContain('-L "e2e/artifacts/s6-cross-plane-auth" ]]');
@@ -2615,6 +2622,9 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
     const directoryCheck = main.indexOf('if ! valid_evidence_directory "$ASIMP_S6_EVIDENCE_DIR"');
     const symlinkCheck = main.indexOf("evidence_directory_has_symlink_component", directoryCheck);
     const directoryBlocker = main.indexOf('blocked_record "EVIDENCE_DIR_INVALID"');
+    const claim = main.indexOf("s6_claim_artifact_run", directoryBlocker);
+    const claimBlocker = main.indexOf('blocked_record "ARTIFACT_RUN_CLAIM_FAILED"', claim);
+    const stateDirectory = main.indexOf('RUN_STATE_DIR="$(mktemp -d', claimBlocker);
     expect(revisionCheck).toBeGreaterThanOrEqual(0);
     expect(revisionBlocker).toBeGreaterThan(revisionCheck);
     expect(main.slice(revisionCheck, revisionBlocker)).toContain("^([0-9a-f]{40}|[0-9a-f]{64})$");
@@ -2626,18 +2636,74 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
     expect(directoryCheck).toBeGreaterThan(deploymentBlocker);
     expect(symlinkCheck).toBeGreaterThan(directoryCheck);
     expect(directoryBlocker).toBeGreaterThan(symlinkCheck);
+    expect(claim).toBeGreaterThan(directoryBlocker);
+    expect(claimBlocker).toBeGreaterThan(claim);
+    expect(stateDirectory).toBeGreaterThan(claimBlocker);
+  });
+
+  test("the shared artifact claim owns the directory and every evidence write revalidates it", () => {
+    const claim = shellFunction(source, "s6_claim_artifact_run");
+    expect(claim).toContain(
+      'e2e_claim_artifact_namespaced_run_at_root "$ROOT" "$SUITE" "$S6_RUN_ID"',
+    );
+    for (const identity of [
+      "ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY",
+      "ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY",
+      "ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY",
+      "ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY",
+      "ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY",
+      "ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY",
+    ]) {
+      expect(claim).toContain(identity);
+    }
+    expect(claim).toContain('S6_ARTIFACT_WRITER_LEASE_OWNED=1');
+    expect(claim).toContain(
+      '[[ "$S6_RUN_DIRECTORY" == "${ROOT}/${S6_RUN_RELATIVE_DIRECTORY}" ]]',
+    );
+    expect(claim.trimEnd().endsWith("s6_artifact_writer_boundary_is_open\n}")).toBe(true);
 
     const writer = shellFunction(source, "write_evidence_bundle");
-    const fixedRoot = writer.indexOf('valid_evidence_directory "$dir"');
-    const beforeCreate = writer.indexOf("evidence_directory_has_symlink_component", fixedRoot);
-    const create = writer.indexOf('mkdir -p "$dir"', beforeCreate);
-    const afterCreate = writer.indexOf("evidence_directory_has_symlink_component", create);
-    const finalPath = writer.indexOf('if [[ -L "$path" ]]', afterCreate);
-    expect(fixedRoot).toBeGreaterThanOrEqual(0);
-    expect(beforeCreate).toBeGreaterThan(fixedRoot);
-    expect(create).toBeGreaterThan(beforeCreate);
-    expect(afterCreate).toBeGreaterThan(create);
-    expect(finalPath).toBeGreaterThan(afterCreate);
+    expect(writer).toContain('local dir="${S6_RUN_RELATIVE_DIRECTORY:-}"');
+    expect(writer).toContain('valid_evidence_directory "${ASIMP_S6_EVIDENCE_DIR:-}"');
+    expect(writer).toContain('"$dir" != "${ASIMP_S6_EVIDENCE_DIR}/${S6_RUN_ID}"');
+    expect(writer).not.toContain("mkdir");
+    expect(writer).toContain('local path="${dir}/evidence.json"');
+    const beforeDirectory = writer.indexOf("s6_artifact_writer_boundary_is_open");
+    const directory = writer.indexOf('[[ ! -d "$dir" || -L "$dir" ]]', beforeDirectory);
+    const beforePath = writer.indexOf("s6_artifact_writer_boundary_is_open", directory);
+    const path = writer.indexOf('[[ -e "$path" || -L "$path" ]]', beforePath);
+    const insideWrite = writer.indexOf(
+      's6_artifact_writer_boundary_is_open || exit "$EX_CLEANUP_UNPROVEN"',
+      path,
+    );
+    const afterWrite = writer.indexOf("s6_artifact_writer_boundary_is_open", insideWrite + 1);
+    const beforeValidate = writer.indexOf("s6_artifact_writer_boundary_is_open", afterWrite + 1);
+    const validator = writer.indexOf("validate_evidence_bundle", beforeValidate);
+    const afterValidate = writer.indexOf("s6_artifact_writer_boundary_is_open", validator);
+    const publish = writer.indexOf('EVIDENCE_PATH="$path"', afterValidate);
+    for (const boundary of [
+      beforeDirectory,
+      directory,
+      beforePath,
+      path,
+      insideWrite,
+      afterWrite,
+      beforeValidate,
+      validator,
+      afterValidate,
+      publish,
+    ]) {
+      expect(boundary).toBeGreaterThanOrEqual(0);
+    }
+    expect(beforeDirectory).toBeLessThan(directory);
+    expect(directory).toBeLessThan(beforePath);
+    expect(beforePath).toBeLessThan(path);
+    expect(path).toBeLessThan(insideWrite);
+    expect(insideWrite).toBeLessThan(afterWrite);
+    expect(afterWrite).toBeLessThan(beforeValidate);
+    expect(beforeValidate).toBeLessThan(validator);
+    expect(validator).toBeLessThan(afterValidate);
+    expect(afterValidate).toBeLessThan(publish);
   });
 
   test("PLANTED: the shared exact schema validator rejects partial or overstated evidence", () => {
@@ -3041,6 +3107,28 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     }
   });
 
+  test("repository discovery follows credential de-export and precedes every mode", () => {
+    const main = source.slice(source.indexOf("main() {"));
+    const initialize = main.indexOf("initialize_repository_paths");
+    const firstMode = main.indexOf("--self-test-supervisor-bootstrap");
+    expect(initialize).toBeGreaterThanOrEqual(0);
+    expect(firstMode).toBeGreaterThan(initialize);
+    for (const name of [
+      "ASIMP_S6_TEST_GOOGLE_PASS",
+      "ASIMP_S6_TEST_GOOGLE_USER",
+      "ASIMP_S6_FELLOW_TOKEN",
+      "ASIMP_S6_SIGNING_KEY_HEX",
+    ]) {
+      expect(main.indexOf(`export -n ${name}`)).toBeLessThan(initialize);
+    }
+    const discovery = shellFunction(source, "initialize_repository_paths");
+    expect(discovery).toContain('source_directory="$(cd -P -- "$source_directory" && pwd -P)"');
+    expect(discovery).toContain('ROOT="$(cd -P -- "${source_directory}/.." && pwd -P)"');
+    expect(discovery).toContain('! -L "${ROOT}/e2e/lib/run-diagnostics.sh"');
+    expect(discovery).toContain('source "${ROOT}/e2e/lib/run-diagnostics.sh"');
+    expect(discovery).toContain('cd "$ROOT"');
+  });
+
   test("the leak scan never puts its needle in an argv", () => {
     const scanner = shellFunction(source, "scan_regular_files_for");
     // `grep -qF -- "$needle" file` published the secret in grep's command line
@@ -3076,6 +3164,33 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     expect(evidence).toBeGreaterThanOrEqual(0);
     expect(reap).toBeLessThan(scan);
     expect(refusal).toBeLessThan(evidence);
+  });
+
+  test("terminal records follow the final evidence write and artifact lease close", () => {
+    const finish = shellFunction(source, "finish");
+    const reap = finish.indexOf("reap_children");
+    const evidence = finish.indexOf("write_evidence_bundle", reap);
+    const close = finish.indexOf("s6_close_artifact_writer_lease_after_settlement", evidence);
+    const failTerminal = finish.indexOf('emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"fail\\"', close);
+    const passTerminal = finish.indexOf('emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"pass\\"', close);
+    expect(reap).toBeGreaterThanOrEqual(0);
+    expect(evidence).toBeGreaterThan(reap);
+    expect(close).toBeGreaterThan(evidence);
+    expect(failTerminal).toBeGreaterThan(close);
+    expect(passTerminal).toBeGreaterThan(failTerminal);
+
+    const main = shellFunction(source, "main");
+    const browserFailure = main.indexOf('if ! run_browser_leg "$worker"');
+    const browserEvidence = main.indexOf("write_evidence_bundle", browserFailure);
+    const browserClose = main.indexOf(
+      "s6_close_artifact_writer_lease_after_settlement",
+      browserEvidence,
+    );
+    const browserTerminal = main.indexOf("publish_buffered_browser_blocked", browserClose);
+    expect(browserFailure).toBeGreaterThanOrEqual(0);
+    expect(browserEvidence).toBeGreaterThan(browserFailure);
+    expect(browserClose).toBeGreaterThan(browserEvidence);
+    expect(browserTerminal).toBeGreaterThan(browserClose);
   });
 
   test("anonymous supervisor authority exists before any payload fork", () => {
@@ -3146,14 +3261,36 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     }
   });
 
-  test("clean script terminals publish one exact owned-group lifecycle record", () => {
+  test("clean script terminals prove both owner settlement and artifact lease closure", () => {
     const lifecycle = shellFunction(source, "publish_lifecycle_settled");
     expect(lifecycle).toContain("${#CHILD_PIDS[@]} == 0");
     expect(lifecycle).toContain('[[ -z "$GROUP_CONTROL_PID" ]]');
+    expect(lifecycle).toContain("S6_ARTIFACT_WRITER_LEASE_OWNED == 0");
     expect(lifecycle).toContain(
-      '\\"record_type\\":\\"lifecycle-terminal\\",\\"status\\":\\"pass\\",\\"owned_same_process_groups\\":\\"settled\\"',
+      '\\"record_type\\":\\"lifecycle-terminal\\",\\"status\\":\\"pass\\",\\"owned_same_process_groups\\":\\"settled\\",\\"artifact_writer_lease\\":\\"closed-or-not-acquired\\"',
     );
-    expect(shellFunction(source, "on_exit")).toContain("publish_lifecycle_settled");
+    const closeLease = shellFunction(source, "s6_close_artifact_writer_lease_after_settlement");
+    expect(closeLease).toContain("REAP_SURVIVORS == 0");
+    expect(closeLease).toContain("${#CHILD_PIDS[@]} == 0");
+    expect(closeLease).toContain('[[ -z "$GROUP_CONTROL_PID" ]]');
+    const revalidate = closeLease.indexOf("s6_artifact_writer_boundary_is_open");
+    const close = closeLease.indexOf("e2e_close_artifact_writer_lease", revalidate);
+    const release = closeLease.indexOf("S6_ARTIFACT_WRITER_LEASE_OWNED=0", close);
+    expect(revalidate).toBeGreaterThanOrEqual(0);
+    expect(close).toBeGreaterThan(revalidate);
+    expect(release).toBeGreaterThan(close);
+
+    const onExit = shellFunction(source, "on_exit");
+    const alreadyCleanClose = onExit.indexOf("s6_close_artifact_writer_lease_after_settlement");
+    const alreadyCleanLifecycle = onExit.indexOf("publish_lifecycle_settled", alreadyCleanClose);
+    const reap = onExit.indexOf("reap_children", alreadyCleanLifecycle);
+    const settledClose = onExit.indexOf("s6_close_artifact_writer_lease_after_settlement", reap);
+    const settledLifecycle = onExit.indexOf("publish_lifecycle_settled", settledClose);
+    expect(alreadyCleanClose).toBeGreaterThanOrEqual(0);
+    expect(alreadyCleanLifecycle).toBeGreaterThan(alreadyCleanClose);
+    expect(reap).toBeGreaterThan(alreadyCleanLifecycle);
+    expect(settledClose).toBeGreaterThan(reap);
+    expect(settledLifecycle).toBeGreaterThan(settledClose);
   });
 
   test("the blocked boundary pins its distinctive forbidden-substitutes clause", () => {
@@ -4476,7 +4613,7 @@ while :; do sleep 1; done
     const aggregate =
       '{"suite":"s6-cross-plane-auth","status":"pass","assertions":3,"failures":0,"reproduce":"bash scripts/e2e-s6-cross-plane-auth.sh"}';
     const lifecycle =
-      '{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled"}';
+      '{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled","artifact_writer_lease":"closed-or-not-acquired"}';
     const exact = `${assertionRecords}\n${aggregate}\n${lifecycle}\n`;
     const refused = { cleanupUnproven: true, ownedSameProcessGroupsSettled: false };
     expect(shellLifecycleFromRecords(exact, 0)).toEqual({
@@ -4496,6 +4633,14 @@ while :; do sleep 1; done
       `${assertionRecords}\n${aggregate}\n${lifecycle.replace(
         '"owned_same_process_groups":"settled"',
         '"owned_same_process_groups":"settled","extra":true',
+      )}\n`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle.replace(
+        '"artifact_writer_lease":"closed-or-not-acquired"',
+        '"artifact_writer_lease":"open"',
+      )}\n`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle.replace(
+        ',"artifact_writer_lease":"closed-or-not-acquired"',
+        "",
       )}\n`,
       ` ${assertionRecords}\n${aggregate}\n${lifecycle}\n`,
       `${assertionRecords}\n${aggregate}\n${aggregate}\n${lifecycle}\n`,
@@ -4524,7 +4669,7 @@ while :; do sleep 1; done
       reproduce: "bash scripts/e2e-s6-cross-plane-auth.sh",
     });
     const lifecycle =
-      '{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled"}';
+      '{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled","artifact_writer_lease":"closed-or-not-acquired"}';
     const exact = `${missing}\n${lifecycle}\n`;
     const genericReservedCode = `${JSON.stringify({
       suite: "s6-cross-plane-auth",
