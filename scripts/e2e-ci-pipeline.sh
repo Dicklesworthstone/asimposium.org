@@ -586,6 +586,7 @@ observe_active_worker_deployment() {
   local status
   local -a pipeline_statuses=()
 
+  ci_artifact_capability_is_current || return 64
   curl_with_bearer "$CLOUDFLARE_API_TOKEN" \
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
@@ -661,6 +662,7 @@ worker_deploy() {
   local safe_receipt="$ARTIFACT_DIRECTORY/worker-deployment.json"
   local status version_id
 
+  ci_artifact_capability_is_current || return 64
   require_bearer_token CLOUDFLARE_API_TOKEN || return $?
   require_live_variable CLOUDFLARE_ACCOUNT_ID || return $?
   require_live_variable ASIMP_D1_DATABASE_ID_STAGING || return $?
@@ -675,6 +677,7 @@ worker_deploy() {
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   (
     cd "$repository_root/apps/wire" || exit 1
     export CLOUDFLARE_API_TOKEN
@@ -689,6 +692,7 @@ worker_deploy() {
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   python3 - "$raw_receipt" <<'PY' > "$version_receipt"
 import json
 import re
@@ -722,10 +726,12 @@ worker_readiness() {
   local attestation_receipt="$ARTIFACT_DIRECTORY/worker-readiness-deployment.json"
   local deployment_id schema_path version_id index=0 status
 
+  ci_artifact_capability_is_current || return 64
   bash "$repository_root/scripts/e2e-environments.sh" staging
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   curl --fail --silent --show-error --location \
     --user-agent "$USER_AGENT" \
     --connect-timeout 5 --max-time 20 \
@@ -734,6 +740,7 @@ worker_readiness() {
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   python3 - "$capabilities" <<'PY' > "$schema_paths"
 import json
 import re
@@ -759,6 +766,7 @@ PY
   while IFS= read -r schema_path; do
     [[ -n "$schema_path" ]] || continue
     index=$((index + 1))
+    ci_artifact_capability_is_current || return 64
     curl --fail --silent --show-error --location \
       --user-agent "$USER_AGENT" \
       --connect-timeout 5 --max-time 20 \
@@ -798,6 +806,7 @@ web_deploy() {
   local deployment_host deployment_id deployment_origin deployment_output inspect_output status version_id
   local -a pipeline_statuses=()
 
+  ci_artifact_capability_is_current || return 64
   require_bearer_token VERCEL_TOKEN || return $?
   require_live_variable VERCEL_ORG_ID || return $?
   require_live_variable VERCEL_PROJECT_ID || return $?
@@ -811,6 +820,7 @@ web_deploy() {
   export -n CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
   export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
 
+  ci_artifact_capability_is_current || return 64
   curl_with_bearer "$VERCEL_TOKEN" \
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
@@ -842,6 +852,7 @@ print(json.dumps({"project_id": sys.argv[1], "git_linked": False}, separators=("
   # classified first deployment. Require an existing Preview record for this
   # exact project before mutation, so a new or ambiguously initialized project
   # stops at a read-only provider check.
+  ci_artifact_capability_is_current || return 64
   curl_with_bearer "$VERCEL_TOKEN" \
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
@@ -890,6 +901,7 @@ print(json.dumps({
   status="${pipeline_statuses[1]}"
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   deployment_output="$(bunx --bun "vercel@$VERCEL_CLI_VERSION" deploy "$repository_root" \
     --yes \
@@ -902,6 +914,7 @@ print(json.dumps({
   export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   printf '%s' "$deployment_output" | python3 -c '
 import sys
 from urllib.parse import urlsplit
@@ -919,11 +932,13 @@ print("https://" + parts.hostname)
   [[ "$status" -eq 0 ]] || return "$status"
   deployment_origin="$(<"$deployment_url_file")"
 
+  ci_artifact_capability_is_current || return 64
   export VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   inspect_output="$(bunx --bun "vercel@$VERCEL_CLI_VERSION" inspect "$deployment_origin" --wait --timeout 25m --json)"
   status=$?
   export -n VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
   [[ "$status" -eq 0 ]] || return "$status"
+  ci_artifact_capability_is_current || return 64
   printf '%s' "$inspect_output" | python3 -c '
 import json
 import re
@@ -962,6 +977,7 @@ print(json.dumps({
   [[ "$status" -eq 0 ]] || return "$status"
 
   deployment_host="${deployment_origin#https://}"
+  ci_artifact_capability_is_current || return 64
   curl_with_bearer "$VERCEL_TOKEN" \
     --fail --silent --show-error \
     --user-agent "$USER_AGENT" \
@@ -1014,6 +1030,7 @@ print(json.dumps({
   status="${pipeline_statuses[1]}"
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   deployment_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" deployment_id)" || return 1
   version_id="$(safe_receipt_field "$ARTIFACT_DIRECTORY/worker-deployment.json" version_id)" || return 1
   observe_active_worker_deployment \
@@ -1021,6 +1038,7 @@ print(json.dumps({
   status=$?
   [[ "$status" -eq 0 ]] || return "$status"
 
+  ci_artifact_capability_is_current || return 64
   python3 - "$inspect_receipt" "$api_receipt" "$REVISION" "$VERCEL_PROJECT_ID" "$deployment_origin" <<'PY' > "$safe_receipt"
 import datetime
 import json
@@ -1179,15 +1197,36 @@ stage_command() {
       printf '%s\0' bash "$repository_root/scripts/gates.sh" --all
       ;;
     worker-deploy)
-      printf '%s\0' /usr/bin/env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" ASIMP_CI_RUNNER="$RUNNER" \
+      printf '%s\0' /usr/bin/env \
+        ASIMP_CI_INTERNAL=1 \
+        ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+        ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY="$ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY" \
+        ASIMP_CI_INTERNAL_RUN_IDENTITY="$ASIMP_CI_INTERNAL_RUN_IDENTITY" \
+        ASIMP_CI_INTERNAL_LEASE_DIRECTORY="$ASIMP_CI_INTERNAL_LEASE_DIRECTORY" \
+        ASIMP_CI_INTERNAL_LEASE_IDENTITY="$ASIMP_CI_INTERNAL_LEASE_IDENTITY" \
+        ASIMP_CI_RUNNER="$RUNNER" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_deploy
       ;;
     worker-readiness)
-      printf '%s\0' /usr/bin/env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" ASIMP_CI_RUNNER="$RUNNER" \
+      printf '%s\0' /usr/bin/env \
+        ASIMP_CI_INTERNAL=1 \
+        ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+        ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY="$ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY" \
+        ASIMP_CI_INTERNAL_RUN_IDENTITY="$ASIMP_CI_INTERNAL_RUN_IDENTITY" \
+        ASIMP_CI_INTERNAL_LEASE_DIRECTORY="$ASIMP_CI_INTERNAL_LEASE_DIRECTORY" \
+        ASIMP_CI_INTERNAL_LEASE_IDENTITY="$ASIMP_CI_INTERNAL_LEASE_IDENTITY" \
+        ASIMP_CI_RUNNER="$RUNNER" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __worker_readiness
       ;;
     web-deploy)
-      printf '%s\0' /usr/bin/env ASIMP_CI_INTERNAL=1 ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" ASIMP_CI_RUNNER="$RUNNER" \
+      printf '%s\0' /usr/bin/env \
+        ASIMP_CI_INTERNAL=1 \
+        ASIMP_CI_INTERNAL_RUN_ID="$RUN_ID" \
+        ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY="$ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY" \
+        ASIMP_CI_INTERNAL_RUN_IDENTITY="$ASIMP_CI_INTERNAL_RUN_IDENTITY" \
+        ASIMP_CI_INTERNAL_LEASE_DIRECTORY="$ASIMP_CI_INTERNAL_LEASE_DIRECTORY" \
+        ASIMP_CI_INTERNAL_LEASE_IDENTITY="$ASIMP_CI_INTERNAL_LEASE_IDENTITY" \
+        ASIMP_CI_RUNNER="$RUNNER" \
         bash "$repository_root/scripts/e2e-ci-pipeline.sh" __web_deploy
       ;;
     smoke-agent)
@@ -1269,26 +1308,40 @@ run_stage() {
 }
 
 internal_entrypoint() {
-  local action="$1" stage="${2:-}" physical_artifact_directory
+  local action="$1" stage="${2:-}"
   case "$action" in
     __plant)
       plant_stage "$stage"
       ;;
     __worker_deploy | __worker_readiness | __web_deploy)
+      local inherited_root_identity inherited_run_identity
+      local inherited_lease_directory inherited_lease_identity inherited_runner
       [[ "$PIPELINE_TEST_MODE" != "1" ]] || return 64
       [[ "${ASIMP_CI_INTERNAL:-0}" == "1" ]] || return 64
       RUN_ID="${ASIMP_CI_INTERNAL_RUN_ID:-}"
+      inherited_root_identity="${ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY:-}"
+      inherited_run_identity="${ASIMP_CI_INTERNAL_RUN_IDENTITY:-}"
+      inherited_lease_directory="${ASIMP_CI_INTERNAL_LEASE_DIRECTORY:-}"
+      inherited_lease_identity="${ASIMP_CI_INTERNAL_LEASE_IDENTITY:-}"
+      inherited_runner="${ASIMP_CI_RUNNER:-manual}"
+      # Keep the inherited handoff out of every nested process. The child uses
+      # unexported shell copies for its repeated filesystem proof.
+      unset ASIMP_CI_INTERNAL ASIMP_CI_INTERNAL_RUN_ID ASIMP_CI_RUNNER \
+        ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY ASIMP_CI_INTERNAL_RUN_IDENTITY \
+        ASIMP_CI_INTERNAL_LEASE_DIRECTORY ASIMP_CI_INTERNAL_LEASE_IDENTITY
+      ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY="$inherited_root_identity"
+      ASIMP_CI_INTERNAL_RUN_IDENTITY="$inherited_run_identity"
+      ASIMP_CI_INTERNAL_LEASE_DIRECTORY="$inherited_lease_directory"
+      ASIMP_CI_INTERNAL_LEASE_IDENTITY="$inherited_lease_identity"
+      RUNNER="$inherited_runner"
       e2e_validate_run_id "$RUN_ID" || return 64
-      # Internal actions may consume only the run directory already claimed by
-      # the parent orchestrator. The ordinary artifact helper creates a missing
-      # directory, which made a refused direct call leave filesystem state.
-      ARTIFACT_DIRECTORY="$repository_root/e2e/artifacts/$RUN_ID"
-      [[ -d "$ARTIFACT_DIRECTORY" && ! -L "$ARTIFACT_DIRECTORY" ]] || return 64
-      physical_artifact_directory="$(cd "$ARTIFACT_DIRECTORY" && pwd -P)" || return 64
-      [[ "$physical_artifact_directory" == "$ARTIFACT_DIRECTORY" ]] || return 64
+      # The child may consume only the exact still-leased parent run. A run id,
+      # directory, or stage-prefix ledger alone is forgeable and authorizes no
+      # provider call or retained receipt.
+      ARTIFACT_DIRECTORY=""
+      ci_artifact_capability_is_current || return 64
       REVISION="$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" || return 65
       [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || return 65
-      RUNNER="${ASIMP_CI_RUNNER:-manual}"
       validate_runner_context || return $?
       assert_revision_unchanged || return $?
       case "$action" in
@@ -1370,9 +1423,21 @@ else
     printf 'ci-pipeline: artifact run id is already claimed or unsafe\n' >&2
     exit 64
   }
-  ARTIFACT_DIRECTORY="$(e2e_artifact_directory_at_root "$repository_root" "$RUN_ID")" || exit 64
+  e2e_select_artifact_claim_at_root "$repository_root" "$RUN_ID" || exit 64
+  ARTIFACT_DIRECTORY="$ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY"
+  ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY"
+  ASIMP_CI_INTERNAL_RUN_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+  ASIMP_CI_INTERNAL_LEASE_DIRECTORY="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+  ASIMP_CI_INTERNAL_LEASE_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+  ci_artifact_capability_is_current || exit 64
+fi
+if [[ "$PIPELINE_TEST_MODE" != "1" ]]; then
+  ci_artifact_capability_is_current || exit 64
 fi
 mkdir "$ARTIFACT_DIRECTORY/curl-home" || exit 64
+if [[ "$PIPELINE_TEST_MODE" != "1" ]]; then
+  ci_artifact_capability_is_current || exit 64
+fi
 printf 'user-agent = "%s"\n' "$USER_AGENT" > "$ARTIFACT_DIRECTORY/curl-home/.curlrc" || exit 64
 export CURL_HOME="$ARTIFACT_DIRECTORY/curl-home"
 record_runner_context || exit 1
