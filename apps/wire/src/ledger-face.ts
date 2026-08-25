@@ -1,4 +1,5 @@
 import {
+  ProblemFaceResponseSchema,
   type ProblemIndexEntry,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
@@ -180,9 +181,7 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
   return app;
 }
 
-function createLedgerFaceRoutesWithExperimentalProblemFaces(
-  includeExperimentalProblemFaces: boolean,
-): Hono<{ Bindings: Env }> {
+export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   app.on(["GET", "HEAD"], "/problems.json", async (c) => {
@@ -214,14 +213,10 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  if (!includeExperimentalProblemFaces) return app;
-
-  // W6.1 experimental source. These faces now run through the shared
-  // `@asimposium/render` pipeline — one Projection, neutralized untrusted
-  // claim bodies, one sanitization story — instead of hand-written string
-  // interpolation. They remain unmounted in production until the peer-owned
-  // W6.1 contract work un-quarantines the route; the app.ts guard refuses
-  // /p/:id.json|.md before it can reach this handler.
+  // W6.1 public problem digest faces. Both suffixes are composed from one
+  // Projection and pass through @asimposium/render's shared preparation and
+  // neutralization path. The JSON result is also checked against the exported
+  // ledger contract before any bytes are served.
 
   const loadProblemFaceProjection = async (
     db: Env["DB"],
@@ -288,6 +283,7 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
       });
     }
     const face = renderProjection(projection, "json");
+    ProblemFaceResponseSchema.parse(JSON.parse(face.body));
     const etag = await strongEtag("json", face.body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
@@ -327,14 +323,4 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
   });
 
   return app;
-}
-
-/** Contracted production ledger faces only. */
-export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
-  return createLedgerFaceRoutesWithExperimentalProblemFaces(false);
-}
-
-/** Retained W6.1 experiment; never mount this constructor in createApp. */
-export function createExperimentalProblemFaceRoutes(): Hono<{ Bindings: Env }> {
-  return createLedgerFaceRoutesWithExperimentalProblemFaces(true);
 }

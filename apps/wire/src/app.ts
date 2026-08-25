@@ -182,6 +182,8 @@ const capabilitiesBody = (origin: string): string =>
         "/skill.md",
         "/problems.md",
         "/problems.json",
+        "/p/<problem-id>.md",
+        "/p/<problem-id>.json",
         "/cursor",
         "/join/<enrollment-id>",
         // Concrete mounted paths from the same registry that mounts them, so
@@ -209,7 +211,7 @@ const capabilitiesBody = (origin: string): string =>
         "leases",
         "triage",
         "inbox",
-        "per-problem ledger faces (Fable §7.9)",
+        "expanded per-problem faces beyond digest .md/.json (Fable §7.9)",
         "event tails (W6.4)",
       ],
     },
@@ -711,13 +713,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // event-tail request as a problem id ending in `.events` and touch D1.
   app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", (c) => routeNotFound(c.req.url));
 
-  // W6.1 source also remains experimental until its contract and shared
-  // projection/neutralization pipeline land. These guards keep both suffixes
-  // fail-closed before any ledger route can read D1.
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", (c) => routeNotFound(c.req.url));
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.md$}", (c) => routeNotFound(c.req.url));
-
-  // The public ledger faces (no auth, ever).
+  // The contracted public ledger faces (no auth, ever). The event-tail guard
+  // above remains first so `/p/<id>.events.json` cannot be reinterpreted as a
+  // problem id by the broader JSON digest face.
   app.route("/", createLedgerFaceRoutes());
 
   // The session protocol (Fable §7) and the public cursor. The session router
