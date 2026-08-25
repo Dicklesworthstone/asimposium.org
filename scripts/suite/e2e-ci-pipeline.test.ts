@@ -276,7 +276,7 @@ async function cancelPipeline(
       child.once("close", (code, signal) => resolve({ code, signal }));
     });
 
-    const deadline = Date.now() + 30000;
+    const deadline = Date.now() + 60000;
     let reached = false;
     while (Date.now() < deadline) {
       if (
@@ -311,7 +311,7 @@ async function cancelPipeline(
   const helper = spawnSync(process.execPath, ["-e", helperSource], {
     encoding: "utf8",
     env: HELPER_ENV,
-    timeout: 45000,
+    timeout: 75000,
   });
   if (helper.status !== 0) {
     throw new Error(

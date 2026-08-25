@@ -100,19 +100,43 @@ test("the public face cannot claim trusted items, unsafe actions, or composer-on
   if (tokenBearing.items[0] !== undefined) tokenBearing.items[0].tokens = 1;
   expect(ProblemFaceResponseSchema.safeParse(tokenBearing).success).toBe(false);
 
+  const nonClaimId = structuredClone(valid);
+  if (nonClaimId.items[0] !== undefined) nonClaimId.items[0].id = "H-7@2";
+  expect(ProblemFaceResponseSchema.safeParse(nonClaimId).success).toBe(false);
+
+  const longestClaimId = structuredClone(valid);
+  if (longestClaimId.items[0] !== undefined) {
+    longestClaimId.items[0].id = `C-${"1".repeat(126)}`;
+  }
+  expect(ProblemFaceResponseSchema.safeParse(longestClaimId).success).toBe(true);
+
+  const oversizedClaimId = structuredClone(valid);
+  if (oversizedClaimId.items[0] !== undefined) {
+    oversizedClaimId.items[0].id = `C-${"1".repeat(127)}`;
+  }
+  expect(ProblemFaceResponseSchema.safeParse(oversizedClaimId).success).toBe(false);
+
   const duplicate = structuredClone(valid);
   const first = duplicate.items[0];
   if (first !== undefined) duplicate.items.push(structuredClone(first));
   expect(ProblemFaceResponseSchema.safeParse(duplicate).success).toBe(false);
 });
 
-test("the published ledger schema preserves the public next-action boundary", () => {
+test("the published ledger schema preserves the public face safety boundary", () => {
   const generated = JSON.parse(
     readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
   ) as {
     properties: {
       problem_face_response: {
         properties: {
+          problem: { maxLength?: number; pattern?: string };
+          items: {
+            items: {
+              properties: {
+                id: { maxLength?: number; pattern?: string };
+              };
+            };
+          };
           next_actions: {
             items: {
               properties: {
@@ -123,10 +147,15 @@ test("the published ledger schema preserves the public next-action boundary", ()
           };
         };
       };
+      problem_index_entry: {
+        properties: {
+          created_at: { pattern?: string };
+        };
+      };
     };
   };
-  const action =
-    generated.properties.problem_face_response.properties.next_actions.items.properties;
+  const face = generated.properties.problem_face_response.properties;
+  const action = face.next_actions.items.properties;
   expect(action.method.const).toBe("GET");
   expect(action.url.maxLength).toBe(400);
   expect(typeof action.url.pattern).toBe("string");
@@ -142,6 +171,26 @@ test("the published ledger schema preserves the public next-action boundary", ()
   ]) {
     expect(publishedPath.test(unsafe), unsafe).toBe(false);
   }
+
+  expect(face.problem.maxLength).toBe(128);
+  expect(typeof face.problem.pattern).toBe("string");
+  const publishedProblemId = new RegExp(face.problem.pattern as string);
+  expect(publishedProblemId.test("P-alpha")).toBe(true);
+  expect(publishedProblemId.test("P-X--FORGED")).toBe(false);
+
+  const itemId = face.items.items.properties.id;
+  expect(itemId.maxLength).toBe(128);
+  expect(typeof itemId.pattern).toBe("string");
+  const publishedItemId = new RegExp(itemId.pattern as string);
+  expect(publishedItemId.test("C-7")).toBe(true);
+  expect(publishedItemId.test("H-7@2")).toBe(false);
+
+  const createdAt = generated.properties.problem_index_entry.properties.created_at;
+  expect(typeof createdAt.pattern).toBe("string");
+  const publishedTimestamp = new RegExp(createdAt.pattern as string);
+  expect(publishedTimestamp.test("2026-08-14T23:59:59.999Z")).toBe(true);
+  expect(publishedTimestamp.test("2026-99-14T00:00:00.000Z")).toBe(false);
+  expect(publishedTimestamp.test("2026-08-14T24:00:00.000Z")).toBe(false);
 });
 
 test("the public ledger id grammar is renderer-safe without rewriting Krater's full ingress law", () => {

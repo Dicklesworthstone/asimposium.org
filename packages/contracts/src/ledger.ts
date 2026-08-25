@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { NextActionSchema, PackNeutralizationSchema } from "./sessions.ts";
+import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./sessions.ts";
 
 /**
  * Public ledger read faces (W6.1). First slice: the problems index.
@@ -78,7 +78,7 @@ export type ProblemsIndexResponse = z.infer<typeof ProblemsIndexResponseSchema>;
 const FaceItemSchema = z
   .object({
     kind: z.literal("claim"),
-    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/),
+    id: ClaimIdSchema.max(128),
     scope: z.literal("ledger"),
     untrusted: z.literal(true),
     why_included: z.string().min(1).max(240),
