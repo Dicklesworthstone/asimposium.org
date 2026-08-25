@@ -74,17 +74,23 @@ directory before product work and refuse a reused ID, so two ordinary attempts
 cannot blend evidence under one name. The TypeScript OPS harness likewise uses
 an exclusive `mkdir` for both a top-level new run and a new run inside its
 retained integration namespace; only an explicit resume may reopen an existing
-directory, after its immutable run-identity record is checked. These namespace claims are not yet a
-whole-root maintenance lease. Common shell writers now bind their claim to the
-artifact root's device/inode as well as the run directory's, revalidate both
-before each append, and refuse any node at the reserved sibling fence
-`e2e/.artifact-maintenance` before claim and publication. The TypeScript
-harness applies the same fence and physical-root epoch around namespace
+directory, after its immutable run-identity record is checked. Common shell
+writers now bind their claim to the artifact root's device/inode as well as the
+run directory's, revalidate both before each append, and refuse any node at the
+reserved sibling fence `e2e/.artifact-maintenance` before claim and
+publication. They also acquire an append-only lifetime lease under
+`e2e/.artifact-writer-leases/dev-<device>-ino-<inode>/` before the exclusive run
+claim. Their entry points mark that lease `closed/` only on an ordinary
+top-level exit after synchronous child work has returned. A fatal signal that
+does not prove descendants were reaped, or a crash, leaves it open; neither PID
+nor age automatically reclaims it. The read-only lease census fails closed on
+open matching-epoch leases, symlinks, or malformed registry nodes. The
+TypeScript harness applies the fence and physical-root epoch around namespace
 reservation, event/manifest/JUnit writes, and blob publication, including its
-retained-integration lane. S-6 does not yet share that contract, there is no
-lifetime writer lease or archive locator, and each final pathname mutation
-still has a check/use window. Moving or rotating `e2e/artifacts` therefore
-remains unsafe while any writer may exist. S-6 has a separate fixed contract:
+retained-integration lane, but does not yet hold the lifetime lease. S-2, S-6,
+and other raw artifact writers do not yet share the full lease contract, and
+there is no archive locator or operator maintenance acquisition path. Moving or
+rotating `e2e/artifacts` therefore remains unsafe. S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.
 

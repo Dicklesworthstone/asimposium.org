@@ -69,8 +69,15 @@ for leased_entrypoint in \
     /trap .*e2e_close_artifact_writer_leases_on_exit.* EXIT/ && exit_trap == 0 {
       exit_trap = NR
     }
+    /^trap .* INT$/ && int_trap == 0 { int_trap = NR }
+    /^trap .* TERM$/ && term_trap == 0 { term_trap = NR }
+    /^trap .* HUP$/ && hup_trap == 0 { hup_trap = NR }
     /e2e_claim_artifact_run_at_root/ && claim == 0 { claim = NR }
-    END { exit(!(helper > 0 && exit_trap > helper && claim > exit_trap)) }
+    END {
+      exit(!(helper > 0 && exit_trap > helper &&
+        int_trap > exit_trap && term_trap > exit_trap && hup_trap > exit_trap &&
+        claim > int_trap && claim > term_trap && claim > hup_trap))
+    }
   ' "$leased_entrypoint"; then
     emit "fail" "ARTIFACT_WRITER_LEASE_TRAP_ORDER_INVALID"
     exit 1

@@ -73,6 +73,14 @@ interface ScreeningRouteExample {
 interface ParsedScreeningRequest {
   readonly corpus_revision: string;
   readonly corpus_digest: string;
+  /**
+   * The caller's declaration that this submission is an evaluable SUBSET of the
+   * corpus rather than the whole of it. It is attested back in the response so a
+   * partial run can never be read as a full-corpus pass: without it a 150-body
+   * legitimate-only run is byte-identical to a 200-body run that also cleared
+   * the hard-reject strata.
+   */
+  readonly partial_run: boolean;
   readonly examples: readonly ScreeningRouteExample[];
 }
 
@@ -174,6 +182,7 @@ function parseScreeningRequest(
     request: {
       corpus_revision: body.corpus_revision,
       corpus_digest: body.corpus_digest,
+      partial_run: body.partial_run,
       examples,
     },
   };
@@ -360,6 +369,10 @@ export async function handleScreeningRequest(
     `${JSON.stringify({
       corpus_revision: identity.corpus_revision,
       corpus_digest: identity.corpus_digest,
+      // Attested, not merely accepted: the caller's partiality declaration is
+      // returned inside the same object as the recomputed corpus digest, so any
+      // consumer of this attestation sees the scope the observations cover.
+      partial_run: submission.partial_run,
       model_version: identity.model_version,
       policy_version: identity.policy_version,
       configuration_digest: identity.configuration_digest,

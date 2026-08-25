@@ -16,6 +16,8 @@
 # There is no offline mode, no fixture mode and no "simulated" pass. Exit 78
 # (EX_CONFIG) means blocked; exit 1 means the spike ran and something failed.
 #
+export -n ASIMP_S6_TEST_GOOGLE_PASS ASIMP_S6_TEST_GOOGLE_USER ASIMP_S6_FELLOW_TOKEN ASIMP_S6_SIGNING_KEY_HEX ASIMP_S6_SIGNING_KID 2>/dev/null || true
+#
 # ## Division of labour, and why the browser leg exists
 #
 # Two claims cannot be made from a shell:

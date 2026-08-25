@@ -312,7 +312,12 @@ e2e_artifact_writer_lease_root_at_root() {
     [[ -d "$lease_root" && ! -L "$lease_root" ]] || return 1
   else
     [[ "$create_if_missing" == "1" ]] || return 1
-    mkdir "$lease_root" 2>/dev/null || return 1
+    # Another writer may atomically establish this shared append-only parent
+    # after our absence check. Accept only the exact direct directory in that
+    # case; every other mkdir failure remains a refusal.
+    mkdir "$lease_root" 2>/dev/null \
+      || [[ -d "$lease_root" && ! -L "$lease_root" ]] \
+      || return 1
   fi
   physical_lease_root="$(e2e_physical_directory "$lease_root")" || return 1
   [[ "$physical_lease_root" == "$lease_root" ]] || return 1
@@ -335,7 +340,9 @@ e2e_artifact_writer_lease_epoch_at_root() {
     [[ -d "$epoch_directory" && ! -L "$epoch_directory" ]] || return 1
   else
     [[ "$create_if_missing" == "1" ]] || return 1
-    mkdir "$epoch_directory" 2>/dev/null || return 1
+    mkdir "$epoch_directory" 2>/dev/null \
+      || [[ -d "$epoch_directory" && ! -L "$epoch_directory" ]] \
+      || return 1
   fi
   physical_epoch_directory="$(e2e_physical_directory "$epoch_directory")" || return 1
   [[ "$physical_epoch_directory" == "$epoch_directory" ]] || return 1
@@ -439,6 +446,17 @@ e2e_close_artifact_writer_leases_on_exit() {
     [[ "$original_status" -ne 0 ]] || original_status=76
   fi
   exit "$original_status"
+}
+
+e2e_leave_artifact_writer_leases_open_on_signal() {
+  local signal_exit_code="$1"
+
+  # A signal delivered only to the shell does not prove its foreground child
+  # or descendants are gone. Suppress the normal closer and leave the
+  # append-only lease open; maintenance must prefer a durable false refusal to
+  # moving artifacts underneath work that may still be alive.
+  trap - EXIT INT TERM HUP
+  exit "$signal_exit_code"
 }
 
 # Read-only maintenance census for one physical artifact-root epoch. It never

@@ -313,6 +313,29 @@ if e2e_artifact_writer_leases_quiescent_at_root "$crash_lease_root" "$crash_leas
   fail "CRASHED_ARTIFACT_WRITER_LEASE_RECLAIMED"
 fi
 
+signal_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-signal-lease.XXXXXX")" \
+  || fail "ARTIFACT_WRITER_SIGNAL_FIXTURE_UNAVAILABLE"
+mkdir -p "$signal_lease_root/e2e" || fail "ARTIFACT_WRITER_SIGNAL_FIXTURE_UNAVAILABLE"
+set +e
+bash -c '
+  source "$1"
+  trap '\''e2e_close_artifact_writer_leases_on_exit'\'' EXIT
+  trap '\''e2e_leave_artifact_writer_leases_open_on_signal 143'\'' TERM
+  e2e_claim_artifact_run_at_root "$2" "signal-lease-run" || exit 98
+  kill -TERM "$$"
+  exit 97
+' _ "$repository_root/e2e/lib/run-diagnostics.sh" "$signal_lease_root"
+signal_lease_status=$?
+set -e
+if [[ "$signal_lease_status" -ne 143 ]]; then
+  fail "ARTIFACT_WRITER_SIGNAL_EXIT_INVALID"
+fi
+signal_lease_identity="$(e2e_artifact_directory_identity "$signal_lease_root/e2e/artifacts")" \
+  || fail "ARTIFACT_WRITER_SIGNAL_FIXTURE_UNAVAILABLE"
+if e2e_artifact_writer_leases_quiescent_at_root "$signal_lease_root" "$signal_lease_identity"; then
+  fail "SIGNALED_ARTIFACT_WRITER_LEASE_RECLAIMED"
+fi
+
 malformed_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-malformed-lease.XXXXXX")" \
   || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"
 mkdir -p "$malformed_lease_root/e2e/artifacts" "$malformed_lease_root/e2e/.artifact-writer-leases" \

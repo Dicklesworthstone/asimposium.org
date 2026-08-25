@@ -53,6 +53,12 @@ class RunnerFailure extends Error {
 interface StagingScreeningResponse {
   readonly corpus_revision: string;
   readonly corpus_digest: string;
+  /**
+   * Staging's attestation of the scope it screened. A deployment that omits it
+   * leaves this `undefined`, which fails the scope binding below rather than
+   * silently passing -- an unattested run is refused, not assumed full.
+   */
+  readonly partial_run: boolean;
   readonly model_version: string;
   readonly policy_version: string;
   readonly configuration_digest: string;
@@ -401,6 +407,13 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
     screening.corpus_digest !== corpusIdentity.corpus_digest
   ) {
     throw new RunnerFailure("STAGING_CORPUS_IDENTITY_MISMATCH", 1);
+  }
+  // Staging must attest the SAME scope this runner submitted. A deployment that
+  // echoes a partial submission as a full-corpus run (or the reverse) would let
+  // a legitimate-only measurement be filed as the 200-body G0 pass, which is
+  // false-green hazard (1) on this spike. Bind it before anything is reported.
+  if (screening.partial_run !== partial) {
+    throw new RunnerFailure("STAGING_PARTIAL_RUN_SCOPE_MISMATCH", 1);
   }
   const identity: ScreeningRunIdentity = {
     corpus_revision: screening.corpus_revision,

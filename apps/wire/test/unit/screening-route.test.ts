@@ -775,3 +775,34 @@ describe("POST /internal/screen", () => {
     expect(() => verifyObservationBodyBindings(submitted, observations as never)).toThrow();
   });
 });
+
+describe("POST /internal/screen — run scope attestation", () => {
+  // The route validated `partial_run` and then dropped it: a 150-body
+  // legitimate-only submission produced an attestation byte-identical to a
+  // 200-body run that had also cleared the hard-reject strata. That is
+  // false-green hazard (1) on S-4 ("treating 1/150 provider FP as the 200-body
+  // G0 pass"), so the scope must be attested, not merely accepted.
+  test("attests a partial run so it cannot be read as a full-corpus pass", async () => {
+    const corpus = await corpusRequest([{ id: "legit-001", body: "A benign post." }]);
+    corpus.partial_run = true;
+    const res = await postScreening(corpus);
+    expect(res.status).toBe(200);
+    expect((res.json as { partial_run?: unknown }).partial_run).toBe(true);
+  });
+
+  test("attests a full-corpus run distinctly from a partial one", async () => {
+    const corpus = await corpusRequest([{ id: "legit-002", body: "Another benign post." }]);
+    corpus.partial_run = false;
+    const res = await postScreening(corpus);
+    expect(res.status).toBe(200);
+    // Distinct from the partial case above, which proves the field is threaded
+    // from the submission rather than emitted as a constant.
+    expect((res.json as { partial_run?: unknown }).partial_run).toBe(false);
+  });
+
+  test("still refuses a submission whose partial_run is not a boolean", async () => {
+    const corpus = await corpusRequest([{ id: "legit-003", body: "A third benign post." }]);
+    const res = await postScreening({ ...corpus, partial_run: "yes" });
+    expect(res.status).toBe(422);
+  });
+});

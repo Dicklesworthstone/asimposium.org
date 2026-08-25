@@ -8,6 +8,9 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
 trap 'e2e_close_artifact_writer_leases_on_exit' EXIT
+trap 'e2e_leave_artifact_writer_leases_open_on_signal 130' INT
+trap 'e2e_leave_artifact_writer_leases_open_on_signal 143' TERM
+trap 'e2e_leave_artifact_writer_leases_open_on_signal 129' HUP
 cd "$repository_root"
 
 suite="device-enrollment-e2e"
