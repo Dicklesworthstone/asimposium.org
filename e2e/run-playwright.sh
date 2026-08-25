@@ -45,6 +45,11 @@ run_id="$(e2e_resolve_run_id "$suite" "$explicit_run_id")" || {
   e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_INVALID" "$reproduce"
   exit 64
 }
+if [[ "$write_artifacts" -eq 1 ]] \
+  && ! e2e_claim_artifact_run_at_root "$repository_root" "$run_id"; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "ARTIFACT_RUN_ALREADY_EXISTS" "$reproduce"
+  exit 78
+fi
 
 for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGORA_BASE_URL; do
   if e2e_validate_staging_origin "$origin_variable"; then

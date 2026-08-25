@@ -67,9 +67,14 @@ direct 2xx or explicitly checks one path-preserving same-origin canonicalization
 borrows a green result from another origin or an unrelated login/landing path.
 For entry points that expose `--write-artifacts --run-id <id>`, evidence writes only beneath
 `e2e/artifacts/<id>/`; valid IDs match
-`^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`. The device-enrollment runner atomically
-claims its artifact directory and refuses a reused ID, so evidence from two
-attempts cannot be blended. S-6 has a separate fixed contract: it requires
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`. The shared writer refuses to create or
+adopt a missing run directory: Smoke Agent, Smoke Gallery, Playwright,
+Gauntlet, device enrollment, and the CI pipeline atomically claim that
+directory before product work and refuse a reused ID, so two ordinary attempts
+cannot blend evidence under one name. This namespace claim is not yet a
+whole-root maintenance lease: the active artifact root still lacks a universal
+epoch/device/inode identity and an archive locator, so moving or rotating
+`e2e/artifacts` remains unsafe while any writer may exist. S-6 has a separate fixed contract: it requires
 `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and accepts neither
 of those command-line flags.
 

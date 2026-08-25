@@ -252,11 +252,11 @@ e2e_artifact_directory_at_root() {
   physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
 
   artifact_directory="$physical_artifacts_root/$run_id"
-  if [[ -e "$artifact_directory" || -L "$artifact_directory" ]]; then
-    [[ -d "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
-  else
-    mkdir "$artifact_directory" 2>/dev/null || return 1
-  fi
+  # Publication may only use a namespace that the entry point atomically
+  # claimed before it began product work. Lazily creating or adopting a missing
+  # directory here lets two same-run writers blend evidence and lets a writer
+  # cross an artifact-root maintenance boundary between work and publication.
+  [[ -d "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
   physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
   [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
   printf '%s\n' "$physical_artifact_directory"

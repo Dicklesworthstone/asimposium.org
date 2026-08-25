@@ -45,6 +45,11 @@ run_id="$(e2e_resolve_run_id "$suite" "$explicit_run_id")" || {
   e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_INVALID" "$reproduce"
   exit 64
 }
+if [[ "$write_artifacts" -eq 1 ]] \
+  && ! e2e_claim_artifact_run_at_root "$repository_root" "$run_id"; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "ARTIFACT_RUN_ALREADY_EXISTS" "$reproduce"
+  exit 78
+fi
 
 # The state-derived Fable §16.1 flow is not implemented. Refuse a provisioned
 # run before any staging probe so this entry cannot launch work or turn a

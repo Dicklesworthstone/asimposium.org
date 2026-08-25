@@ -70,6 +70,21 @@ if [[ -n "$second_claim_output" ]]; then
   fail "REUSED_ARTIFACT_RUN_LEAKED"
 fi
 
+if unclaimed_write_output="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "regular-run" "$suite" "$started_ms" "fail" "UNCLAIMED_ARTIFACT_TEST" "$reproduce" 2>&1)"; then
+  fail "UNCLAIMED_ARTIFACT_WRITE_ACCEPTED"
+fi
+if [[ -n "$unclaimed_write_output" || -e "$temporary_root/e2e/artifacts/regular-run" ]]; then
+  fail "UNCLAIMED_ARTIFACT_WRITE_MUTATED_OR_LEAKED"
+fi
+if e2e_append_artifact_jsonl_at_root "$temporary_root" "regular-run" "steps.jsonl" '{"status":"pass"}' >/dev/null 2>&1; then
+  fail "UNCLAIMED_STEP_ARTIFACT_WRITE_ACCEPTED"
+fi
+if [[ -e "$temporary_root/e2e/artifacts/regular-run" ]]; then
+  fail "UNCLAIMED_STEP_ARTIFACT_WRITE_MUTATED"
+fi
+
+e2e_claim_artifact_run_at_root "$temporary_root" "regular-run" \
+  || fail "REGULAR_ARTIFACT_RUN_CLAIM_REJECTED"
 if ! regular_artifact_path="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "regular-run" "$suite" "$started_ms" "fail" "REGULAR_ARTIFACT_TEST" "$reproduce")"; then
   fail "REGULAR_ARTIFACT_WRITE_REJECTED"
 fi
