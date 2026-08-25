@@ -348,7 +348,9 @@ pub fn run_cli_with_fetch(
         Err(FetchError::BodyTooLarge { limit_bytes }) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
-            stderr: format!("asimp: {label} failed: response exceeds the {limit_bytes}-byte limit\n"),
+            stderr: format!(
+                "asimp: {label} failed: response exceeds the {limit_bytes}-byte limit\n"
+            ),
         },
     }
 }

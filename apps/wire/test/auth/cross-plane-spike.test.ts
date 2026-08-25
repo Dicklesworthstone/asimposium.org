@@ -727,7 +727,7 @@ const OUTER_SUPERVISOR_PROGRAM = [
   '      "SIGNAL:TERM")',
   '        [[ "$ack_delay" == "0" ]] || { IFS= read -r -t "$ack_delay" _ <&7 || :; }',
   '        printf "outer-ack:%s:TERM\\n" "$token" >&7 || kill -KILL 0',
-  "        kill -TERM 0 2>/dev/null || kill -KILL 0",
+  "        kill -TERM 0 2>/dev/null || true",
   "        ;;",
   '      "SIGNAL:KILL")',
   '        [[ "$ack_delay" == "0" ]] || { IFS= read -r -t "$ack_delay" _ <&7 || :; }',
