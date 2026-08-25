@@ -559,6 +559,13 @@ for unsafe_step in \
   '{"flow_handle":"flow_v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' \
   '{"token":"asimp_ag_SECRET"}' \
   '{"email":"sponsor@example.invalid"}' \
+  '{"redirect":"http://127.0.0.1:8787/v1/sessions?secret=abc"}' \
+  '{"url":"https://a.asimposium.org/v1/pack"}' \
+  '{"header":"Authorization: Bearer secret-token"}' \
+  '{"header":"authorization: asimp_ag_xyz"}' \
+  '{"auth":"Bearer test-bearer-value"}' \
+  '{"header":"Cookie: session=secret-cookie-val"}' \
+  '{"header":"Set-Cookie: auth=session-token"}' \
   $'{"status":"pass"}\n{"status":"forged"}'; do
   if e2e_append_artifact_jsonl_at_root "$temporary_root" "regular-run" "steps.jsonl" "$unsafe_step" >/dev/null; then
     fail "UNSAFE_STEP_ARTIFACT_ACCEPTED"

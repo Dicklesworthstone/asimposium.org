@@ -3868,19 +3868,31 @@ export function assertD1ArtifactWriterCapability(
   } catch {
     return invalid();
   }
+  let artifactRootIdentity: string;
+  let namespaceIdentity: string;
+  let runIdentity: string;
+  let leaseIdentity: string;
+  try {
+    artifactRootIdentity = storage.directoryIdentity(artifactRoot);
+    namespaceIdentity = storage.directoryIdentity(namespaceDirectory);
+    runIdentity = storage.directoryIdentity(runDirectory);
+    leaseIdentity = storage.directoryIdentity(leaseDirectory);
+  } catch {
+    return invalid();
+  }
   if (
     root !== resolve(expectedRepositoryRoot) ||
     typed.repository_root !== root ||
     typed.artifact_root !== artifactRoot ||
-    typed.artifact_root_identity !== storage.directoryIdentity(artifactRoot) ||
+    typed.artifact_root_identity !== artifactRootIdentity ||
     typed.namespace !== expectedNamespace ||
     typed.namespace_directory !== namespaceDirectory ||
-    typed.namespace_identity !== storage.directoryIdentity(namespaceDirectory) ||
+    typed.namespace_identity !== namespaceIdentity ||
     typed.run_directory !== runDirectory ||
     runDirectory !== join(namespaceDirectory, typed.run_id) ||
-    typed.run_identity !== storage.directoryIdentity(runDirectory) ||
+    typed.run_identity !== runIdentity ||
     leaseDirectory !== typed.lease_directory ||
-    typed.lease_identity !== storage.directoryIdentity(leaseDirectory)
+    typed.lease_identity !== leaseIdentity
   ) {
     invalid();
   }

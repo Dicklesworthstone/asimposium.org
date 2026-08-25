@@ -21,6 +21,13 @@
  * Reading state afterwards is the whole point: a batch that reports an error is
  * not evidence of rollback, only evidence of an error.
  *
+ * This executable is an inherited-capability child, not a standalone writer.
+ * `runHarness` owns the retained run and its lifetime lease, passes the exact
+ * identities through a scrubbed environment, and closes only after this
+ * adapter's whole process group has settled. The adapter deletes that inherited
+ * value before launching Wrangler, re-proves it around every mutation, and
+ * never closes the parent's lease itself.
+ *
  * ## Modes
  *
  * `--mode ok`            the batch contains the planted late failure; rollback
@@ -578,6 +585,7 @@ async function main(): Promise<number> {
       { encoding: "utf8", flag: "wx" },
     );
   } catch (error) {
+    if (!capabilityIntact()) return emitArtifactCapabilityFailure(false);
     say({
       status: "blocked",
       code: "D1_STATE_WRITE_DENIED",

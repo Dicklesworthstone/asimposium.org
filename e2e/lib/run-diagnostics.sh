@@ -963,8 +963,10 @@ e2e_append_artifact_jsonl_at_root() {
   [[ "$file_name" =~ ^[a-z0-9][a-z0-9._-]{0,79}\.jsonl$ ]] || return 1
   [[ -n "$record" && "${#record}" -le 16384 ]] || return 1
   [[ "$record" != *$'\n'* && "$record" != *$'\r'* ]] || return 1
-  for forbidden in "flow_v1." "asimp_ag_" "#v1." "https://" "/Users/" '"device_code"' '"user_code"' '"flow_handle"' '"token"' '"cookie"' '"email"'; do
-    [[ "$record" != *"$forbidden"* ]] || return 1
+  local lower_record
+  lower_record="$(printf '%s' "$record" | e2e_ascii_lower)" || return 1
+  for forbidden in "flow_v1." "asimp_ag_" "#v1." "https://" "http://" "/users/" '"device_code"' '"user_code"' '"flow_handle"' '"token"' '"cookie"' '"email"' '"authorization"' "bearer " "cookie:" "set-cookie:"; do
+    [[ "$lower_record" != *"$forbidden"* ]] || return 1
   done
 
   physical_artifact_directory="$(e2e_artifact_directory_at_root "$repository_root" "$run_id")" || return 1

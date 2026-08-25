@@ -41,13 +41,6 @@ interface CliResult {
   stderr: string;
 }
 
-let testCaptureRoot: string | undefined;
-
-function capturePath(name: string): string {
-  testCaptureRoot ??= mkdtempSync(join(tmpdir(), "asimposium-suite-capture-"));
-  return join(testCaptureRoot, name);
-}
-
 const FILE_CAPTURE_EXEC = `
 use strict;
 use warnings;
@@ -63,8 +56,9 @@ async function runCli(
   args: string[],
   env: Record<string, string> = {},
 ): Promise<CliResult> {
-  const stdoutPath = capturePath("cli.stdout");
-  const stderrPath = capturePath("cli.stderr");
+  const runCaptureDir = mkdtempSync(join(tmpdir(), "asimposium-suite-capture-"));
+  const stdoutPath = join(runCaptureDir, "cli.stdout");
+  const stderrPath = join(runCaptureDir, "cli.stderr");
   closeSync(openSync(stdoutPath, "w", 0o600));
   closeSync(openSync(stderrPath, "w", 0o600));
   const child = Bun.spawn({

@@ -115,12 +115,20 @@ Signal cleanup follows the same settlement boundary, while a survivor or
 identity mismatch leaves the lease open and refuses a tidy terminal. This is
 also source-level wiring only: the focused S-6 and aggregate lanes have not
 executed at this revision under the required low-load RCH gate.
-Direct exported artifact helpers, standalone real-filesystem test fixtures,
-the standalone direct D1 adapter, and other raw artifact writers do not
+The D1 rollback adapter is now inherited-capability-only: `runHarness` owns its
+retained run and lifetime lease, injects the exact root/namespace/run/lease
+identities only into registered D1 steps, and re-proves them after the detached
+process group is absent. The adapter deletes the inherited value before
+Wrangler starts, validates around each state mutation, and never closes the
+parent's lease. Its direct-process negative also plants an ambient bypass value
+and requires refusal before the D1 state leaf exists. This is source-level
+wiring only; the real-D1 positive and negative lane has not executed at this
+revision under the required low-load RCH gate. Direct exported artifact helpers,
+standalone real-filesystem test fixtures, and other raw artifact writers do not
 yet share the full lifetime contract, and a deliberately re-daemonized child
-can escape the owned process group. There is also no archive locator or
-operator maintenance acquisition path. Moving or rotating `e2e/artifacts`
-therefore remains unsafe.
+can escape the owned process group. There is also no archive locator or operator
+maintenance acquisition path. Moving or rotating `e2e/artifacts` therefore
+remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.

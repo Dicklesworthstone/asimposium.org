@@ -1840,7 +1840,7 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   }
 
   async function runAdapter(
-    file: string,
+    file: "http-fault.ts" | "browser-assert.ts",
     mode: "ok" | "planted-fail",
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     requireRealFilesystemIntegration();
@@ -1917,39 +1917,52 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
     const runId = fixtureRunId("d1-direct-refusal");
     const stateDirectory = fixtureD1StateDirectory(runId, "ok");
     let output = "";
-    const result = await runHarness({
-      root,
-      runId,
-      suite: "ops.2a-d1-direct-refusal",
-      reproduction: "self-test",
-      artifactNamespace: DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
-      onOutput: (text) => {
-        output += text;
-      },
-      onEvent: () => {},
-      steps: [
-        {
-          id: "direct-d1-without-capability",
-          scenario: "integration",
-          // Deliberately ordinary: only a registered D1 step receives the
-          // parent capability. The same executable copied into a direct process
-          // invocation must fail before creating its state leaf.
-          adapter: "process",
-          command: [
-            process.execPath,
-            join(ADAPTERS, "d1-rollback.ts"),
-            "--mode",
-            "ok",
-            "--state-dir",
-            stateDirectory,
-            "--integration-namespace",
-            DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+    const priorAmbientCapability = process.env[D1_ARTIFACT_CAPABILITY_ENV];
+    process.env[D1_ARTIFACT_CAPABILITY_ENV] = JSON.stringify({ planted: "ambient-bypass" });
+    const result = await (async () => {
+      try {
+        return await runHarness({
+          root,
+          runId,
+          suite: "ops.2a-d1-direct-refusal",
+          reproduction: "self-test",
+          artifactNamespace: DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+          onOutput: (text) => {
+            output += text;
+          },
+          onEvent: () => {},
+          steps: [
+            {
+              id: "direct-d1-without-capability",
+              scenario: "integration",
+              // Deliberately ordinary: only a registered D1 step receives the
+              // parent capability. Even a planted ambient value must be scrubbed,
+              // so copying the executable into a process step fails before the
+              // D1 state leaf exists.
+              adapter: "process",
+              command: [
+                process.execPath,
+                join(ADAPTERS, "d1-rollback.ts"),
+                "--mode",
+                "ok",
+                "--state-dir",
+                stateDirectory,
+                "--integration-namespace",
+                DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+              ],
+              replaySafe: false,
+              timeoutMs: 5_000,
+            },
           ],
-          replaySafe: false,
-          timeoutMs: 5_000,
-        },
-      ],
-    });
+        });
+      } finally {
+        if (priorAmbientCapability === undefined) {
+          delete process.env[D1_ARTIFACT_CAPABILITY_ENV];
+        } else {
+          process.env[D1_ARTIFACT_CAPABILITY_ENV] = priorAmbientCapability;
+        }
+      }
+    })();
     expect(result.exitCode).toBe(1);
     expect(output).toContain("D1_ARTIFACT_CAPABILITY_REQUIRED");
     expect(existsSync(stateDirectory)).toBe(false);
