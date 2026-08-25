@@ -694,20 +694,8 @@ describe("execution lifecycle", () => {
               append: () => failAtHook("planted storage append failure"),
             }
           : base;
-      const grandchild =
-        'process.on("disconnect", () => { ' +
-        `setTimeout(async () => { await fetch(${JSON.stringify(ipc.endpoint("/escaped-descendant"))}); ` +
-        "process.exit(0); }, 250); setTimeout(() => process.exit(2), 1000); }); " +
-        'if (process.send) process.send("ready");';
-      const parent =
-        'const cp = require("node:child_process"); ' +
-        `const child = cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], ` +
-        '{ stdio: ["ignore", "ignore", "ignore", "ipc"] }); ' +
-        'child.once("error", () => process.exit(4)); ' +
-        'child.once("message", (message) => { if (message !== "ready") process.exit(3); ' +
-        'process.stdout.write("callback-trigger:ready"); child.disconnect(); child.unref(); ' +
-        "setImmediate(() => process.exit(0)); }); " +
-        "setTimeout(() => process.exit(5), 1000);";
+      const grandchild = `setTimeout(() => void fetch(${JSON.stringify(ipc.endpoint("/escaped-descendant"))}), 250); setTimeout(() => process.exit(0), 1000);`;
+      const parent = `const cp = require("node:child_process"); const child = cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { detached: true, stdio: "ignore" }); child.unref(); process.stderr.write("callback-trigger:ready\\n");`;
 
       try {
         await expect(
@@ -725,10 +713,11 @@ describe("execution lifecycle", () => {
               },
             ],
             onOutput: (text) => {
-              expect(text).toContain("callback-trigger:ready");
-              readyOutputSeen = true;
-              if (failurePoint === "onOutput") {
-                failAtHook("planted output callback failure");
+              if (text.includes("callback-trigger:ready")) {
+                readyOutputSeen = true;
+                if (failurePoint === "onOutput") {
+                  failAtHook("planted output callback failure");
+                }
               }
             },
             onEvent:

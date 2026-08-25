@@ -123,12 +123,25 @@ Wrangler starts, validates around each state mutation, and never closes the
 parent's lease. Its direct-process negative also plants an ambient bypass value
 and requires refusal before the D1 state leaf exists. This is source-level
 wiring only; the real-D1 positive and negative lane has not executed at this
-revision under the required low-load RCH gate. Direct exported artifact helpers,
-standalone real-filesystem test fixtures, and other raw artifact writers do not
-yet share the full lifetime contract, and a deliberately re-daemonized child
-can escape the owned process group. There is also no archive locator or operator
-maintenance acquisition path. Moving or rotating `e2e/artifacts` therefore
-remains unsafe.
+revision under the required low-load RCH gate. The CI review pipeline now hands
+each recursive Worker deploy, Worker readiness, and web deploy child the exact
+root, run, and parent-lease identities for its retained top-level run. The child
+copies that handoff into unexported shell state, removes it from the environment
+before starting provider tools, and re-proves the capability before provider
+operations and retained receipt writes. Only the top-level pipeline closes the
+lease. Its bounded stage wrapper polls the owned process group after SIGKILL and
+uses exit 125 when absence cannot be proved; that terminal leaves the parent
+lease open. The focused tests include one live-capability positive control,
+reject root/run/lease identity mismatches, a foreign lease, a closed lease, and
+an artifact-maintenance fence, and exercise an actual claimed lease on both the
+settled-close and deliberately-unprovable-open paths. This CI wiring is also
+source-level only; neither its process controls nor a hosted deployment have
+executed at this revision under the required low-load RCH gate. Direct exported
+artifact helpers, standalone real-filesystem test fixtures, and remaining raw
+artifact writers do not yet share the full lifetime contract, and a deliberately
+re-daemonized child can escape the owned process group. There is also no archive
+locator or operator maintenance acquisition path. Moving or rotating
+`e2e/artifacts` therefore remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.

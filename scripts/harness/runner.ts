@@ -1893,16 +1893,6 @@ async function runAttempt(
   const stdoutPromise = readBounded(child.stdout, MAX_CAPTURED_OUTPUT_CHARS);
   const stderrPromise = readBounded(child.stderr, MAX_CAPTURED_OUTPUT_CHARS);
   const exitPromise = child.exited;
-  const exitAndGroupKillPromise = exitPromise.then(
-    (code) => {
-      signalOwnedProcessGroupOnly(child.pid, "SIGKILL");
-      return code;
-    },
-    (error: unknown) => {
-      signalOwnedProcessGroupOnly(child.pid, "SIGKILL");
-      throw error;
-    },
-  );
   let stdout: Awaited<typeof stdoutPromise>;
   let stderr: Awaited<typeof stderrPromise>;
   let exitCode: number;
@@ -1910,7 +1900,7 @@ async function runAttempt(
     [stdout, stderr, exitCode] = await Promise.all([
       stdoutPromise,
       stderrPromise,
-      exitAndGroupKillPromise,
+      exitPromise,
     ]);
   } catch (error) {
     // A pipe/read/exit rejection must not let the caller close its artifact
@@ -2172,7 +2162,13 @@ function scrubbedChildEnvironment(): Record<string, string> {
   // are sufficient for absolute executables and the standard system command search path.
   return process.platform === "win32"
     ? { PATH: "C:\\Windows\\System32", LANG: "C", TZ: "UTC" }
-    : { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C", TZ: "UTC" };
+    : {
+        PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        LANG: "C",
+        LC_ALL: "C",
+        TZ: "UTC",
+        TMPDIR: tmpdir(),
+      };
 }
 
 function killChildGroup(
@@ -2205,7 +2201,37 @@ function signalOwnedProcessGroupOnly(
     process.kill(-processGroupId, signal);
     return "present";
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "absent" : "unknown";
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "absent";
+    if (code === "EPERM" && process.platform === "darwin") {
+      // On Darwin, killpg throws EPERM when the process group leader has exited.
+      // Verify via pgrep whether any process actually exists in the group.
+      try {
+        const pgrep = Bun.spawnSync({
+          cmd: ["/usr/bin/pgrep", "-g", String(processGroupId), ".*"],
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        const out = new TextDecoder().decode(pgrep.stdout).trim();
+        if (pgrep.exitCode === 1 || out.length === 0) {
+          return "absent";
+        }
+        if (signal !== 0) {
+          const pids = out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+          for (const pid of pids) {
+            try {
+              process.kill(pid, signal);
+            } catch {
+              // Expected if child exits concurrently.
+            }
+          }
+        }
+        return "present";
+      } catch {
+        return "unknown";
+      }
+    }
+    return "unknown";
   }
 }
 

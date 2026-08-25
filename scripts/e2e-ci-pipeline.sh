@@ -8,7 +8,28 @@ set -u -o pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
-trap 'e2e_close_artifact_writer_leases_on_exit' EXIT
+
+# The ordinary common closer is correct only after every owned stage process
+# group has been proved absent. Keep the lease durably open when the bounded
+# wrapper cannot establish that terminal fact; maintenance must prefer a false
+# refusal to moving the root beneath a surviving descendant.
+PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+ci_pipeline_artifact_writer_leases_on_exit() {
+  local original_status=$?
+
+  if ((BASH_SUBSHELL > 0)); then
+    return "$original_status"
+  fi
+  trap - EXIT
+  if [[ "$PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED" != "1" ]]; then
+    exit "$original_status"
+  fi
+  if ! e2e_close_artifact_writer_leases; then
+    [[ "$original_status" -ne 0 ]] || original_status=76
+  fi
+  exit "$original_status"
+}
+trap 'ci_pipeline_artifact_writer_leases_on_exit' EXIT
 
 readonly SUITE="ci-pipeline"
 readonly USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
@@ -380,7 +401,7 @@ record_current_stage_result() {
 }
 
 run_bounded() {
-  local timeout_seconds="$1" termination_grace_seconds=10 status
+  local timeout_seconds="$1" termination_grace_seconds=10 force_unsettled=0 status
   shift
   # Process controls use a short grace so the planted matrix stays fast. Live
   # stages get enough bounded time for their own failure traps to retire remote
@@ -388,7 +409,16 @@ run_bounded() {
   if [[ "$PIPELINE_TEST_MODE" == "1" ]]; then
     termination_grace_seconds=1
   fi
-  python3 - "$timeout_seconds" "$termination_grace_seconds" "$@" <<'PY' &
+  case "${ASIMP_CI_PROCESS_FORCE_UNSETTLED:-0}" in
+    0) ;;
+    1)
+      [[ "$PIPELINE_TEST_MODE" == "1" ]] || return 64
+      force_unsettled=1
+      ;;
+    *) return 64 ;;
+  esac
+  PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=0
+  python3 - "$timeout_seconds" "$termination_grace_seconds" "$force_unsettled" "$@" <<'PY' &
 import os
 import signal
 import subprocess
@@ -397,38 +427,62 @@ import time
 
 timeout_seconds = int(sys.argv[1])
 termination_grace_seconds = int(sys.argv[2])
-command = sys.argv[3:]
-child = subprocess.Popen(command, start_new_session=True)
+force_unsettled = sys.argv[3] == "1"
+command = sys.argv[4:]
+unsettled_exit = 125
+try:
+    child = subprocess.Popen(command, start_new_session=True)
+except BaseException:
+    sys.exit(unsettled_exit)
 caught = None
+settlement_proven = True
 
-def terminate_group(first_signal: int) -> None:
-    def group_exists() -> bool:
+def group_absent() -> bool:
+    try:
         # Reap an exited group leader before probing the process group. A live
         # ignoring descendant keeps the group addressable after that reap.
         child.poll()
-        try:
-            os.killpg(child.pid, 0)
-        except ProcessLookupError:
-            return False
+        os.killpg(child.pid, 0)
+    except ProcessLookupError:
         return True
+    except OSError:
+        return False
+    return False
 
+def wait_for_group_absence() -> bool:
+    deadline = time.monotonic() + termination_grace_seconds
+    while not group_absent() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return group_absent()
+
+def terminate_group(first_signal: int) -> bool:
     try:
         os.killpg(child.pid, first_signal)
     except ProcessLookupError:
-        return
-    deadline = time.monotonic() + termination_grace_seconds
-    while group_exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    if group_exists():
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        return not force_unsettled
+    except OSError:
+        return False
+    if wait_for_group_absence():
+        return not force_unsettled
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return not force_unsettled
+    except OSError:
+        return False
+    return wait_for_group_absence() and not force_unsettled
+
+def wait_for_leader() -> bool:
+    try:
+        child.wait(timeout=termination_grace_seconds + 1)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 def cancelled(signum: int, _frame: object) -> None:
-    global caught
+    global caught, settlement_proven
     caught = signum
-    terminate_group(signum)
+    settlement_proven = terminate_group(signum)
 
 for forwarded in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(forwarded, cancelled)
@@ -438,24 +492,30 @@ while child.poll() is None and caught is None and time.monotonic() < deadline:
     time.sleep(0.02)
 
 if caught is not None:
-    child.wait()
+    if not wait_for_leader() or not settlement_proven:
+        sys.exit(unsettled_exit)
     sys.exit(128 + caught)
 if child.poll() is None:
-    terminate_group(signal.SIGTERM)
-    child.wait()
+    settlement_proven = terminate_group(signal.SIGTERM)
+    if not wait_for_leader() or not settlement_proven:
+        sys.exit(unsettled_exit)
     sys.exit(124)
 
 status = child.returncode
 # A terminal group leader does not prove its stage is quiescent: failed tools
 # can leave background descendants behind. Retire any surviving process-group
 # members on every outcome before returning the leader's exact status.
-terminate_group(signal.SIGTERM)
+if not terminate_group(signal.SIGTERM):
+    sys.exit(unsettled_exit)
 sys.exit(128 - status if status < 0 else status)
 PY
   CURRENT_WRAPPER_PID=$!
   wait "$CURRENT_WRAPPER_PID"
   status=$?
   CURRENT_WRAPPER_PID=""
+  if [[ "$status" -ne 125 ]]; then
+    PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+  fi
   return "$status"
 }
 

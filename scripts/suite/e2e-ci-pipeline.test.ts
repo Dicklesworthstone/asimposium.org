@@ -236,7 +236,11 @@ function artifactCapabilityFixture(label: string): ArtifactCapabilityFixture {
   const physicalArtifacts = realpathSync(artifacts);
   const physicalRun = realpathSync(runDirectory);
   const rootIdentity = directoryIdentity(physicalArtifacts);
-  const [device, inode] = rootIdentity.split(":");
+  const identityMatch = /^(\d+):(\d+)$/.exec(rootIdentity);
+  if (identityMatch === null) {
+    throw new Error("capability fixture identity is malformed");
+  }
+  const [, device, inode] = identityMatch;
   const leaseDirectory = join(
     physicalRoot,
     "e2e",
@@ -295,6 +299,97 @@ ci_artifact_capability_directory_at_root "$2" "$3" "$4" "$5" "$6" "$7"
     ],
     { env: HELPER_ENV, encoding: "utf8", timeout: 10_000 },
   );
+}
+
+interface LeaseSettlementPlant {
+  readonly status: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly leaseDirectory: string;
+  readonly leaseIdentity: string;
+}
+
+function runLeaseSettlementPlant(forceUnsettled: boolean): LeaseSettlementPlant {
+  runCounter += 1;
+  const root = join(SCRATCH, `lease-settlement-${runCounter}`);
+  const runId = `ci-lease-settlement-${process.pid}-${runCounter}`;
+  const receipt = join(SCRATCH, `lease-settlement-${runCounter}.txt`);
+  mkdirSync(join(root, "e2e"), { recursive: true, mode: 0o700 });
+
+  const source = readFileSync(PIPELINE, "utf8");
+  const closerStart = source.indexOf("ci_pipeline_artifact_writer_leases_on_exit() {");
+  const closerEnd = source.indexOf(
+    "\ntrap 'ci_pipeline_artifact_writer_leases_on_exit' EXIT",
+    closerStart,
+  );
+  if (closerStart < 0 || closerEnd < 0) {
+    throw new Error("pipeline lease closer is missing");
+  }
+  const closer = source.slice(closerStart, closerEnd);
+  const bounded = pipelineFunctionSource("run_bounded", "plant_stage");
+  const script = `
+set -u -o pipefail
+source "$1"
+PIPELINE_TEST_MODE=1
+PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+CURRENT_WRAPPER_PID=""
+ASIMP_CI_PROCESS_FORCE_UNSETTLED="$5"
+${closer}
+${bounded}
+e2e_claim_artifact_run_at_root "$2" "$3" || exit 90
+printf '%s\\n%s\\n' \
+  "\${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[0]}" \
+  "\${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[0]}" > "$4" || exit 91
+trap 'ci_pipeline_artifact_writer_leases_on_exit' EXIT
+run_bounded 2 /bin/bash -c 'sleep 30 & exit 0'
+exit $?
+`;
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      script,
+      "ci-lease-settlement-plant",
+      DIAGNOSTIC_LIBRARY,
+      root,
+      runId,
+      receipt,
+      forceUnsettled ? "1" : "0",
+    ],
+    { env: HELPER_ENV, encoding: "utf8", timeout: 10_000 },
+  );
+  if (!existsSync(receipt)) {
+    throw new Error(
+      `pipeline lease settlement plant failed before its receipt: ${result.status} ${result.stderr}`,
+    );
+  }
+  const [leaseDirectory, leaseIdentity] = readFileSync(receipt, "utf8").trim().split("\n");
+  if (!leaseDirectory || !leaseIdentity) {
+    throw new Error("pipeline lease settlement plant omitted its lease receipt");
+  }
+  return {
+    status: result.status,
+    signal: result.signal,
+    leaseDirectory,
+    leaseIdentity,
+  };
+}
+
+function expectCapabilityGuardBefore(
+  body: string,
+  marker: string,
+  maxLineDistance = 6,
+): void {
+  const guard = "ci_artifact_capability_is_current || return 64";
+  let markerIndex = body.indexOf(marker);
+  expect(markerIndex).toBeGreaterThanOrEqual(0);
+  while (markerIndex >= 0) {
+    const guardIndex = body.lastIndexOf(guard, markerIndex);
+    expect(guardIndex).toBeGreaterThanOrEqual(0);
+    const guardLine = body.slice(0, guardIndex).split("\n").length;
+    const markerLine = body.slice(0, markerIndex).split("\n").length;
+    expect(markerLine - guardLine).toBeLessThanOrEqual(maxLineDistance);
+    markerIndex = body.indexOf(marker, markerIndex + marker.length);
+  }
 }
 
 function records(run: PipelineRun): readonly EvidenceRecord[] {
@@ -474,7 +569,184 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(HELPER_ENV.HOME).toBeUndefined();
   });
 
-  test("internal deploy actions refuse a caller without an orchestrated stage prefix", () => {
+  test("exact inherited artifact capability resolves only its live retained run", () => {
+    const capability = artifactCapabilityFixture("positive");
+    const result = runArtifactCapability(capability);
+
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(capability.runDirectory);
+    expect(result.stderr).toBe("");
+  });
+
+  test("artifact capability refuses mismatched, foreign, closed, and fenced plants", () => {
+    const mismatchPlants: Array<{
+      readonly label: string;
+      readonly mutate: (
+        capability: ArtifactCapabilityFixture,
+      ) => Partial<ArtifactCapabilityFixture>;
+    }> = [
+      { label: "root-identity", mutate: () => ({ rootIdentity: "0:0" }) },
+      { label: "run-identity", mutate: () => ({ runIdentity: "0:0" }) },
+      {
+        label: "foreign-lease",
+        mutate: (capability) => ({
+          leaseDirectory: capability.runDirectory,
+          leaseIdentity: capability.runIdentity,
+        }),
+      },
+      { label: "lease-identity", mutate: () => ({ leaseIdentity: "0:0" }) },
+      {
+        label: "closed-lease",
+        mutate: (capability) => {
+          mkdirSync(join(capability.leaseDirectory, "closed"));
+          return {};
+        },
+      },
+      {
+        label: "maintenance-fence",
+        mutate: (capability) => {
+          mkdirSync(join(capability.root, "e2e", ".artifact-maintenance"));
+          return {};
+        },
+      },
+    ];
+
+    for (const plant of mismatchPlants) {
+      const capability = artifactCapabilityFixture(plant.label);
+      const result = runArtifactCapability(capability, plant.mutate(capability));
+      expect(result.signal).toBeNull();
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe("");
+    }
+  });
+
+  test("the parent closes its actual lease only after process-group settlement proof", () => {
+    const settled = runLeaseSettlementPlant(false);
+    expect(settled.signal).toBeNull();
+    expect(settled.status).toBe(0);
+    expect(directoryIdentity(settled.leaseDirectory)).toBe(settled.leaseIdentity);
+    expect(existsSync(join(settled.leaseDirectory, "closed"))).toBe(true);
+
+    const unsettled = runLeaseSettlementPlant(true);
+    expect(unsettled.signal).toBeNull();
+    expect(unsettled.status).toBe(125);
+    expect(directoryIdentity(unsettled.leaseDirectory)).toBe(unsettled.leaseIdentity);
+    expect(existsSync(join(unsettled.leaseDirectory, "closed"))).toBe(false);
+  });
+
+  test("recursive deployment children are wired to the parent capability boundary", () => {
+    const source = readFileSync(PIPELINE, "utf8");
+    const stageCommand = pipelineFunctionSource("stage_command", "run_stage");
+    const internalStart = source.indexOf("internal_entrypoint() {");
+    const internalEnd = source.indexOf('\nif [[ "${1:-}" == __* ]]', internalStart);
+    expect(internalStart).toBeGreaterThanOrEqual(0);
+    expect(internalEnd).toBeGreaterThan(internalStart);
+    const internal = source.slice(internalStart, internalEnd);
+    const workerDeploy = pipelineFunctionSource("worker_deploy", "worker_readiness");
+    const workerReadiness = pipelineFunctionSource("worker_readiness", "web_deploy");
+    const webDeploy = pipelineFunctionSource("web_deploy", "safe_receipt_field");
+    const observeWorker = pipelineFunctionSource(
+      "observe_active_worker_deployment",
+      "worker_deploy",
+    );
+    const bounded = pipelineFunctionSource("run_bounded", "plant_stage");
+
+    const inheritedCapability = {
+      ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY:
+        "ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY",
+      ASIMP_CI_INTERNAL_RUN_IDENTITY: "ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY",
+      ASIMP_CI_INTERNAL_LEASE_DIRECTORY: "ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY",
+      ASIMP_CI_INTERNAL_LEASE_IDENTITY: "ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY",
+    } as const;
+    for (const [name, selectedName] of Object.entries(inheritedCapability)) {
+      expect(stageCommand.split(`${name}=\"$${name}\"`)).toHaveLength(4);
+      expect(source).toContain(`${name}=\"$${selectedName}\"`);
+    }
+    expect(source).not.toContain("export ASIMP_CI_INTERNAL_");
+    expect(source.match(/e2e_close_artifact_writer_leases;/g)).toHaveLength(1);
+    expect(source).toContain(
+      'if [[ "$PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED" != "1" ]]; then',
+    );
+    expect(bounded).toContain("os.killpg(child.pid, signal.SIGKILL)");
+    expect(bounded).toContain(
+      "return wait_for_group_absence() and not force_unsettled",
+    );
+    expect(bounded).toContain("if [[ \"$status\" -ne 125 ]]; then");
+
+    const parentClaimIndex = source.lastIndexOf(
+      'e2e_claim_artifact_run_at_root "$repository_root" "$RUN_ID"',
+    );
+    const parentSelectIndex = source.lastIndexOf(
+      'e2e_select_artifact_claim_at_root "$repository_root" "$RUN_ID"',
+    );
+    const parentCaptureIndex = source.lastIndexOf(
+      'ASIMP_CI_INTERNAL_LEASE_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"',
+    );
+    const parentProofIndex = source.indexOf(
+      "ci_artifact_capability_is_current || exit 64",
+      parentCaptureIndex,
+    );
+    const curlHomeIndex = source.indexOf(
+      'mkdir "$ARTIFACT_DIRECTORY/curl-home"',
+      parentProofIndex,
+    );
+    const preWriteProofIndex = source.indexOf(
+      "ci_artifact_capability_is_current || exit 64",
+      curlHomeIndex,
+    );
+    const curlConfigIndex = source.indexOf(
+      "printf 'user-agent =",
+      preWriteProofIndex,
+    );
+    expect(parentClaimIndex).toBeGreaterThanOrEqual(0);
+    expect(parentSelectIndex).toBeGreaterThan(parentClaimIndex);
+    expect(parentCaptureIndex).toBeGreaterThan(parentSelectIndex);
+    expect(parentProofIndex).toBeGreaterThan(parentCaptureIndex);
+    expect(curlHomeIndex).toBeGreaterThan(parentProofIndex);
+    expect(preWriteProofIndex).toBeGreaterThan(curlHomeIndex);
+    expect(curlConfigIndex).toBeGreaterThan(preWriteProofIndex);
+
+    const unsetIndex = internal.indexOf("unset ASIMP_CI_INTERNAL");
+    const restoreIndex = internal.indexOf(
+      'ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY="$inherited_root_identity"',
+    );
+    const proofIndex = internal.indexOf("ci_artifact_capability_is_current || return 64");
+    const revisionIndex = internal.indexOf('REVISION="$(git -C');
+    const prefixIndex = internal.indexOf('require_stage_prefix "root-gate');
+    expect(unsetIndex).toBeGreaterThanOrEqual(0);
+    expect(restoreIndex).toBeGreaterThan(unsetIndex);
+    expect(proofIndex).toBeGreaterThan(restoreIndex);
+    expect(revisionIndex).toBeGreaterThan(proofIndex);
+    expect(prefixIndex).toBeGreaterThan(revisionIndex);
+
+    expectCapabilityGuardBefore(
+      observeWorker,
+      'curl_with_bearer "$CLOUDFLARE_API_TOKEN"',
+    );
+    expectCapabilityGuardBefore(workerDeploy, 'WRANGLER_OUTPUT_FILE_PATH="$raw_receipt"');
+    expectCapabilityGuardBefore(workerDeploy, 'python3 - "$raw_receipt"');
+    expectCapabilityGuardBefore(
+      workerReadiness,
+      'bash "$repository_root/scripts/e2e-environments.sh" staging',
+    );
+    expectCapabilityGuardBefore(workerReadiness, '--output "$capabilities"');
+    expectCapabilityGuardBefore(workerReadiness, 'python3 - "$capabilities"');
+    expectCapabilityGuardBefore(
+      workerReadiness,
+      '--output "$ARTIFACT_DIRECTORY/schema-$index.json"',
+    );
+    expectCapabilityGuardBefore(webDeploy, "https://api.vercel.com/v9/projects/");
+    expectCapabilityGuardBefore(webDeploy, "https://api.vercel.com/v7/deployments?");
+    expectCapabilityGuardBefore(webDeploy, 'vercel@$VERCEL_CLI_VERSION" deploy');
+    expectCapabilityGuardBefore(webDeploy, 'printf \'%s\' "$deployment_output"');
+    expectCapabilityGuardBefore(webDeploy, 'vercel@$VERCEL_CLI_VERSION" inspect');
+    expectCapabilityGuardBefore(webDeploy, 'printf \'%s\' "$inspect_output"');
+    expectCapabilityGuardBefore(webDeploy, "https://api.vercel.com/v13/deployments/");
+    expectCapabilityGuardBefore(webDeploy, 'python3 - "$inspect_receipt"');
+  });
+
+  test("internal deploy actions refuse a caller without a parent capability", () => {
     for (const action of ["__worker_deploy", "__worker_readiness", "__web_deploy"]) {
       runCounter += 1;
       const runId = `pipeline-test-unclaimed-${action.slice(2)}-${process.pid}-${runCounter}`;
