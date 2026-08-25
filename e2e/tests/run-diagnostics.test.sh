@@ -70,6 +70,17 @@ fi
 
 e2e_claim_artifact_run_at_root "$temporary_root" "claimed-run" \
   || fail "UNIQUE_ARTIFACT_RUN_REJECTED"
+claimed_root_identity="$(e2e_artifact_directory_identity "$temporary_root/e2e/artifacts")" \
+  || fail "ARTIFACT_WRITER_LEASE_IDENTITY_UNAVAILABLE"
+if e2e_artifact_writer_leases_quiescent_at_root "$temporary_root" "$claimed_root_identity"; then
+  fail "OPEN_ARTIFACT_WRITER_LEASE_REPORTED_QUIESCENT"
+fi
+if [[ "${#ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[@]}" -ne 1 \
+  || ! "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[0]}" =~ /e2e/\.artifact-writer-leases/dev-[0-9]+-ino-[0-9]+/lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$ \
+  || ! -d "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[0]}" \
+  || -L "${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[0]}" ]]; then
+  fail "ARTIFACT_WRITER_LEASE_SHAPE_INVALID"
+fi
 if second_claim_output="$(e2e_claim_artifact_run_at_root "$temporary_root" "claimed-run" 2>&1)"; then
   fail "REUSED_ARTIFACT_RUN_ACCEPTED"
 fi
@@ -258,6 +269,60 @@ fi
 
 if [[ "$emitted_stderr" == *"$temporary_root"* ]] || [[ "$emitted_stderr" == *"https://"* ]] || [[ "$emitted_stderr" == *"asimp_ag_"* ]]; then
   fail "ARTIFACT_WRITE_FAILURE_DIAGNOSTIC_UNSAFE"
+fi
+
+if ! e2e_close_artifact_writer_leases; then
+  fail "ARTIFACT_WRITER_LEASE_CLOSE_FAILED"
+fi
+if ! e2e_artifact_writer_leases_quiescent_at_root "$temporary_root" "$claimed_root_identity"; then
+  fail "CLOSED_ARTIFACT_WRITER_LEASE_NOT_QUIESCENT"
+fi
+if e2e_write_artifact_diagnostic_at_root "$temporary_root" "regular-run" "$suite" "$started_ms" "fail" "CLOSED_LEASE_WRITE" "$reproduce" >/dev/null 2>&1; then
+  fail "CLOSED_ARTIFACT_WRITER_LEASE_PUBLISHED"
+fi
+
+exit_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-exit-lease.XXXXXX")" \
+  || fail "ARTIFACT_WRITER_EXIT_FIXTURE_UNAVAILABLE"
+mkdir -p "$exit_lease_root/e2e" || fail "ARTIFACT_WRITER_EXIT_FIXTURE_UNAVAILABLE"
+if ! bash -c '
+  source "$1"
+  trap '\''e2e_close_artifact_writer_leases_on_exit'\'' EXIT
+  e2e_claim_artifact_run_at_root "$2" "exit-lease-run"
+' _ "$repository_root/e2e/lib/run-diagnostics.sh" "$exit_lease_root"; then
+  fail "ARTIFACT_WRITER_EXIT_DISPATCHER_FAILED"
+fi
+exit_lease_identity="$(e2e_artifact_directory_identity "$exit_lease_root/e2e/artifacts")" \
+  || fail "ARTIFACT_WRITER_EXIT_FIXTURE_UNAVAILABLE"
+if ! e2e_artifact_writer_leases_quiescent_at_root "$exit_lease_root" "$exit_lease_identity"; then
+  fail "ARTIFACT_WRITER_EXIT_DISPATCHER_LEFT_OPEN_LEASE"
+fi
+
+crash_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-crash-lease.XXXXXX")" \
+  || fail "ARTIFACT_WRITER_CRASH_FIXTURE_UNAVAILABLE"
+mkdir -p "$crash_lease_root/e2e" || fail "ARTIFACT_WRITER_CRASH_FIXTURE_UNAVAILABLE"
+if bash -c '
+  source "$1"
+  e2e_claim_artifact_run_at_root "$2" "crash-lease-run"
+  exit 99
+' _ "$repository_root/e2e/lib/run-diagnostics.sh" "$crash_lease_root"; then
+  fail "ARTIFACT_WRITER_CRASH_PLANT_DID_NOT_EXIT"
+fi
+crash_lease_identity="$(e2e_artifact_directory_identity "$crash_lease_root/e2e/artifacts")" \
+  || fail "ARTIFACT_WRITER_CRASH_FIXTURE_UNAVAILABLE"
+if e2e_artifact_writer_leases_quiescent_at_root "$crash_lease_root" "$crash_lease_identity"; then
+  fail "CRASHED_ARTIFACT_WRITER_LEASE_RECLAIMED"
+fi
+
+malformed_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-malformed-lease.XXXXXX")" \
+  || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"
+mkdir -p "$malformed_lease_root/e2e/artifacts" "$malformed_lease_root/e2e/.artifact-writer-leases" \
+  || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"
+malformed_lease_identity="$(e2e_artifact_directory_identity "$malformed_lease_root/e2e/artifacts")" \
+  || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"
+: > "$malformed_lease_root/e2e/.artifact-writer-leases/forged" \
+  || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"
+if e2e_artifact_writer_leases_quiescent_at_root "$malformed_lease_root" "$malformed_lease_identity"; then
+  fail "MALFORMED_ARTIFACT_WRITER_LEASE_ACCEPTED"
 fi
 
 if ! command -v curl >/dev/null 2>&1; then

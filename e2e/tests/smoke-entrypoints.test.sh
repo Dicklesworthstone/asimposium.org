@@ -34,6 +34,7 @@ for artifact_entrypoint in \
   "$repository_root/e2e/run-playwright.sh" \
   "$repository_root/e2e/gauntlet/run.sh"; do
   if ! awk '
+    /e2e_close_artifact_writer_leases_on_exit/ && exit_trap == 0 { exit_trap = NR }
     /^run_id="\$\(e2e_resolve_run_id / { resolved = NR }
     resolved > 0 && /&& ! e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
     resolved > 0 && /e2e_validate_staging_origin / && first_validation == 0 {
@@ -43,11 +44,35 @@ for artifact_entrypoint in \
       first_record = NR
     }
     END {
-      exit(!(resolved > 0 && claim > resolved &&
+      exit(!(exit_trap > 0 && resolved > exit_trap && claim > resolved &&
         first_validation > claim && first_record > claim))
     }
   ' "$artifact_entrypoint"; then
     emit "fail" "ARTIFACT_CLAIM_ORDER_INVALID"
+    exit 1
+  fi
+done
+
+# Every production shell writer that adopts the shared artifact claim must arm
+# its lease closer immediately after sourcing the helper and before its first
+# claim. The helper deliberately does not seize EXIT itself because complex
+# orchestrators must retain ownership of child reaping and terminal evidence.
+for leased_entrypoint in \
+  "$repository_root/scripts/smoke-agent.sh" \
+  "$repository_root/scripts/smoke-gallery.sh" \
+  "$repository_root/e2e/run-playwright.sh" \
+  "$repository_root/e2e/gauntlet/run.sh" \
+  "$repository_root/scripts/e2e-device-enrollment.sh" \
+  "$repository_root/scripts/e2e-ci-pipeline.sh"; do
+  if ! awk '
+    /source .*e2e\/lib\/run-diagnostics\.sh/ && helper == 0 { helper = NR }
+    /trap .*e2e_close_artifact_writer_leases_on_exit.* EXIT/ && exit_trap == 0 {
+      exit_trap = NR
+    }
+    /e2e_claim_artifact_run_at_root/ && claim == 0 { claim = NR }
+    END { exit(!(helper > 0 && exit_trap > helper && claim > exit_trap)) }
+  ' "$leased_entrypoint"; then
+    emit "fail" "ARTIFACT_WRITER_LEASE_TRAP_ORDER_INVALID"
     exit 1
   fi
 done

@@ -427,6 +427,13 @@ e2e_close_artifact_writer_leases() {
 e2e_close_artifact_writer_leases_on_exit() {
   local original_status=$?
 
+  # Some Bash configurations propagate EXIT into command-substitution or
+  # parenthesized subshells. Those children inherit a snapshot of the claim
+  # arrays but do not own the parent writer's lifetime; closing from there
+  # would let maintenance move the root while the entry point is still live.
+  if ((BASH_SUBSHELL > 0)); then
+    return "$original_status"
+  fi
   trap - EXIT
   if ! e2e_close_artifact_writer_leases; then
     [[ "$original_status" -ne 0 ]] || original_status=76
