@@ -1763,6 +1763,7 @@ describe("S2 to S7 normalized cost receipt", () => {
       expect(inheritedCapability).toContain("S2_INHERITED_RUN_DIR_IDENTITY=");
       expect(inheritedCapability).toContain("s2_prepare_inherited_child_run");
       expect(inheritedCapability).toContain("s2_begin_raw_inherited_child_owner");
+      expect(inheritedCapability).toContain("perl -MPOSIX=setsid");
       expect(adjacentRegistration).toMatch(
         /&\n    (?:parent_loss_child|interrupt_child|raw_child_pid)=\$!\n    s2_register_raw_inherited_child "\$\{(?:parent_loss_child|interrupt_child|raw_child_pid)\}"/u,
       );
@@ -1781,9 +1782,17 @@ describe("S2 to S7 normalized cost receipt", () => {
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "pre-arm-owner-loss" ]]'),
     );
-    expect(rawInterrupt).toContain('[[ "$(<"${raw_ready}")" == ready ]]');
+    expect(rawInterrupt).toContain("s2_raw_inherited_descendant_is_exact");
+    expect(rawInterrupt).toContain("S2_RAW_INHERITED_CHILD_DESCENDANT_PROVEN=1");
     expect(rawInterrupt).toContain('s2_raw_inherited_child_command_is_exact "${raw_child_pid}"');
     expect(rawInterrupt).toContain('kill -TERM "$$"');
+    const rawCleanup = shell.slice(
+      shell.indexOf("cleanup_raw_inherited_child() {"),
+      shell.indexOf("cleanup_workers() {"),
+    );
+    expect(rawCleanup).toContain('kill -TERM -- "-${pgid}"');
+    expect(rawCleanup).toContain('kill -KILL -- "-${pgid}"');
+    expect(rawCleanup).toContain('s2_raw_inherited_child_command_is_exact "${pid}"');
     expect(onExit.indexOf("e2e_close_artifact_writer_lease")).toBeLessThan(
       onExit.indexOf(
         '"scenario":"outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease"',
@@ -2652,6 +2661,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
             status: "pass",
             scenario:
               "outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease",
+            term_resistant_descendant_proven: true,
+            no_exact_group_survivor: true,
             reproduce:
               "S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt scripts/e2e-s2-krater.sh",
           });
