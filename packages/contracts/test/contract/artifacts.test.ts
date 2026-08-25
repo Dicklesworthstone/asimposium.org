@@ -1,11 +1,16 @@
 import { expect, test } from "bun:test";
 import type {
+  ProblemFaceResponse as PackageProblemFaceResponse,
   ScreeningContracts as PackageScreeningContracts,
   ScreeningPromotionDecisionProvenance as PackageScreeningPromotionDecisionProvenance,
   ScreeningPublicAction as PackageScreeningPublicAction,
 } from "@asimposium/contracts";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import type {
+  ProblemFaceResponse as GeneratedProblemFaceResponse,
+  PublicLedgerProblemId as GeneratedPublicLedgerProblemId,
+} from "../../generated/ledger.types.ts";
 import type {
   ScreeningContracts as GeneratedScreeningContracts,
   ScreeningPromotionDecisionProvenance as GeneratedScreeningPromotionDecisionProvenance,
@@ -181,6 +186,25 @@ test("the generated enrollment TypeScript face exports the exact public contract
       "",
     ].join("\n"),
   );
+});
+
+test("the generated ledger TypeScript face exports the complete mounted-face roster", () => {
+  const artifact = generatedArtifacts().find(
+    (candidate) => candidate.relativePath === "generated/ledger.types.ts",
+  );
+  expect(artifact?.content).toBe(
+    [
+      "// Generated from src/ledger.ts by `bun run generate`. Do not edit.",
+      'export type { ProblemFaceResponse, ProblemIndexEntry, ProblemsIndexResponse, PublicLedgerProblemId } from "../src/ledger.ts";',
+      "",
+    ].join("\n"),
+  );
+
+  const generatedFace = {} as GeneratedProblemFaceResponse;
+  const packageFace: PackageProblemFaceResponse = generatedFace;
+  expect(packageFace).toBe(generatedFace);
+  const publicId = "P-4DSP" as GeneratedPublicLedgerProblemId;
+  expect(publicId).toBe("P-4DSP");
 });
 
 /**

@@ -139,10 +139,15 @@ against a weak reader stays in the threat model, not hidden under it.
 
 ## No-claim boundary
 
-- **No W4 pack-composer determinism claim.** This package has checked-in, reviewable golden face
-  snapshots and renderer-level determinism checks. They do not prove Worker pack composition
-  (budgets, `omitted[]` selection, or stable-prefix ordering); that claim remains
-  **asimposiumorg-ceq**.
+- **Composer source evidence is not deployed evidence.** The package now includes the W4 pack
+  composer with budget bucketization, mandatory omissions, stable-prefix selection, access
+  filtering, hostile-body neutralization, deterministic fingerprints, differential tests, and
+  mutation-sensitive negatives. The Worker uses that composer for session packs and the bounded
+  public problem digest. Those source/local suites do not prove the deployed Worker, staging D1,
+  cache behavior, or the Cold-Agent Gauntlet.
+- **The mounted digest is not full W6 Diptych.** Stoa currently serves the per-problem digest in
+  Markdown and JSON. The Agora problem-page HTML projection, expanded object faces, event tails,
+  and TOON mega-reads remain absent, so the project must not call W6 complete from these two faces.
 - **No markdown pipeline.** Nothing here parses or renders markdown to HTML. The GFM + math
   pipeline with raw HTML disabled and KaTeX trust mode off (§14.3) does not exist yet; the html
   fragment escapes untrusted bodies into `<pre><code>` rather than rendering them. The auxiliary

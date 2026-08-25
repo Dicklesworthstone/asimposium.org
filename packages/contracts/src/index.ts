@@ -184,10 +184,14 @@ export {
 } from "./health.ts";
 export {
   LedgerContractsSchema,
+  type ProblemFaceResponse,
+  ProblemFaceResponseSchema,
   type ProblemIndexEntry,
   ProblemIndexEntrySchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  type PublicLedgerProblemId,
+  PublicLedgerProblemIdSchema,
 } from "./ledger.ts";
 export {
   CONTRACT_PROBLEM_CODES,

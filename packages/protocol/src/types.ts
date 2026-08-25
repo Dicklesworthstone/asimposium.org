@@ -6,7 +6,7 @@
  * (ADR-24: every session records the protocol/policy version pair it worked under).
  */
 
-/** Documents this package owns today. `skill`, `agents`, `inoculation` and the move templates are not written yet. */
+/** Documents this package owns today. `agents`, `inoculation`, and move templates are not written yet. */
 export type DocumentId = "capsule" | "handbook" | "llms" | "policy" | "protocol" | "skill";
 
 export type DocumentStatus = "draft" | "published";

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NextActionSchema, PackNeutralizationSchema } from "./sessions.ts";
 
 /**
  * Public ledger read faces (W6.1). First slice: the problems index.
@@ -16,7 +17,20 @@ import { z } from "zod";
  * whitespace, and control characters, so a row cannot escape its code span,
  * gain listing lines, or forge renderer structure (asimposiumorg-gfbc).
  */
-const PROBLEM_INDEX_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PROBLEM_INDEX_ID_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/**
+ * Public-ledger problem identifiers use Krater's established bounded grammar,
+ * narrowed only by the shared renderer's control-comment law: `--` can close
+ * an HTML comment and therefore cannot be represented faithfully by Diptych.
+ * This is deliberately not the newer session-only ProblemIdSchema; unifying
+ * storage and lifecycle identifiers is a separate migration.
+ */
+export const PublicLedgerProblemIdSchema = z
+  .string()
+  .max(128)
+  .regex(PROBLEM_INDEX_ID_PATTERN, "invalid public ledger problem id");
+export type PublicLedgerProblemId = z.infer<typeof PublicLedgerProblemIdSchema>;
 
 /**
  * Krater ingress timestamp law (`validateKraterIngressTimestamp` /
@@ -31,7 +45,7 @@ const ProblemIndexTimestampSchema = z
 
 export const ProblemIndexEntrySchema = z
   .object({
-    id: z.string().max(128).regex(PROBLEM_INDEX_ID_PATTERN, "invalid problem index id"),
+    id: PublicLedgerProblemIdSchema,
     public_seq: z.number().int().min(0),
     created_at: ProblemIndexTimestampSchema,
     updated_at: ProblemIndexTimestampSchema,
@@ -50,58 +64,61 @@ export type ProblemsIndexResponse = z.infer<typeof ProblemsIndexResponseSchema>;
 
 /**
  * The per-problem read face (W6.1): the JSON face of a problem-face projection
- * rendered through `@asimposium/render`. This is the contract the quarantined
- * `/p/<id>.json` route must satisfy before it un-quarantines — every field the
- * renderer emits, pinned. Untrusted item bodies are neutralized before render;
- * the face is the agent-canonical read of the public problem.
+ * rendered through `@asimposium/render`. Every field emitted by the mounted
+ * `/p/<id>.json` digest is pinned. Public items are ledger claims and untrusted
+ * by construction; the shape cannot admit workshop or trusted-body leakage.
  */
-const FaceNeutralizationSchema = z
-  .object({
-    marker: z.string().min(1),
-    count: z.number().int().min(0),
-  })
-  .strict();
-
 const FaceItemSchema = z
   .object({
-    kind: z.string().min(1),
-    id: z.string().min(1).max(80),
-    scope: z.enum(["system", "ledger", "workshop"]),
-    untrusted: z.boolean(),
-    why_included: z.string().min(1),
-    tokens: z.number().int().min(0).optional(),
+    kind: z.literal("claim"),
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/),
+    scope: z.literal("ledger"),
+    untrusted: z.literal(true),
+    why_included: z.string().min(1).max(240),
     body: z.string(),
-    neutralized: z.array(FaceNeutralizationSchema),
+    neutralized: z.array(PackNeutralizationSchema),
   })
   .strict();
 
-const FaceNextActionSchema = z
-  .object({
-    method: z.enum(["GET", "POST"]),
-    url: z.string().min(1),
-    why: z.string().min(1),
-  })
-  .strict();
+const FaceNextActionSchema = NextActionSchema.extend({ method: z.literal("GET") }).strict();
 
 export const ProblemFaceResponseSchema = z
   .object({
     schema: z.literal("asimposium.problem-face.v1"),
     face: z.literal("json"),
     kind: z.literal("problem-face"),
-    problem: z.string().min(1).max(80),
+    problem: PublicLedgerProblemIdSchema,
     profile: z.literal("face"),
     cursor: z.number().int().min(0),
     fingerprint: z.string().regex(/^fnv1a64:[0-9a-f]{16}$/),
     title: z.string().min(1),
     preamble: z.string().min(1),
-    items: z.array(FaceItemSchema),
+    items: z.array(FaceItemSchema).max(200),
     omitted: z.array(
-      z.object({ reason: z.string().min(1), detail: z.string().min(1).optional() }).strict(),
-    ),
+      z
+        .object({
+          reason: z.string().min(1).max(64),
+          detail: z.string().min(1).max(320).optional(),
+        })
+        .strict(),
+    ).min(1),
     next_actions: z.array(FaceNextActionSchema),
-    degraded: z.array(z.string().min(1)),
+    degraded: z.array(z.string().min(1).max(240)),
   })
-  .strict();
+  .strict()
+  .superRefine((face, context) => {
+    const ids = new Set<string>();
+    for (const [index, item] of face.items.entries()) {
+      if (ids.has(item.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["items", index, "id"],
+          message: "public problem-face item ids must be unique",
+        });
+      }
+      ids.add(item.id);
+    }
+  });
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
 
 /** The single generated JSON-Schema root for the public ledger read faces. */

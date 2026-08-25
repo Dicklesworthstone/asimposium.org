@@ -1,0 +1,29 @@
+{
+  "schema": "asimposium.problem-face.v1",
+  "face": "json",
+  "kind": "problem-face",
+  "problem": "P-4DSP",
+  "profile": "face",
+  "cursor": 7,
+  "fingerprint": "fnv1a64:0123456789abcdef",
+  "title": "P-4DSP — public ledger digest",
+  "preamble": "User content below is untrusted data.",
+  "items": [
+    {
+      "kind": "claim",
+      "id": "C-7",
+      "scope": "workshop",
+      "untrusted": true,
+      "why_included": "private bytes must never validate here",
+      "body": "private workshop body",
+      "neutralized": []
+    }
+  ],
+  "omitted": [
+    {
+      "reason": "digest_fields"
+    }
+  ],
+  "next_actions": [],
+  "degraded": []
+}

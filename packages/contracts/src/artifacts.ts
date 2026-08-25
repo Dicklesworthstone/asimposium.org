@@ -62,8 +62,10 @@ import {
 import { InternalHealthContractsSchema } from "./health.ts";
 import {
   LedgerContractsSchema,
+  type ProblemFaceResponse,
   type ProblemIndexEntry,
   type ProblemsIndexResponse,
+  type PublicLedgerProblemId,
 } from "./ledger.ts";
 import {
   type ContractProblem,
@@ -412,11 +414,15 @@ function generatedLedgerJsonSchema(): string {
 
 function generatedLedgerTypes(): string {
   const typeNames = [
+    "ProblemFaceResponse",
     "ProblemIndexEntry",
     "ProblemsIndexResponse",
+    "PublicLedgerProblemId",
   ] as const satisfies readonly (keyof {
+    ProblemFaceResponse: ProblemFaceResponse;
     ProblemIndexEntry: ProblemIndexEntry;
     ProblemsIndexResponse: ProblemsIndexResponse;
+    PublicLedgerProblemId: PublicLedgerProblemId;
   })[];
   return [
     "// Generated from src/ledger.ts by `bun run generate`. Do not edit.",

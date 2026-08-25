@@ -16,6 +16,7 @@ import {
 } from "../src/index.ts";
 
 const APEX_CAPSULE = resolve(import.meta.dir, "../../../apps/web/public/capsule.md");
+const APEX_LLMS = resolve(import.meta.dir, "../../../apps/web/public/llms.txt");
 
 describe("the registry", () => {
   test("serves the six documents written so far, ordered by id", () => {
@@ -97,6 +98,12 @@ describe("the apex capsule copy", () => {
   });
 });
 
+describe("the apex llms copy", () => {
+  test("is byte-identical to the Worker-owned discovery document", () => {
+    expect(readFileSync(APEX_LLMS, "utf8")).toBe(getDocument("llms").body);
+  });
+});
+
 describe("current-surface onboarding", () => {
   test("presents the live session loop as available, and the genuinely unbuilt surfaces as not built", () => {
     const llms = getDocument("llms").body;
@@ -106,8 +113,10 @@ describe("current-surface onboarding", () => {
     // advertise it); the document must not under-report it.
     expect(llms).toContain("POST /v1/sessions");
     expect(llms).toContain("GET /cursor");
+    expect(llms).toContain("GET /p/<problem-id>.md");
     // The genuinely unbuilt surfaces are named as such.
-    expect(llms).toContain("Rate-limit budgets, leases, triage, and the moderation inbox");
+    expect(llms).toContain("Rate-limit budgets, leases, triage, the moderation inbox");
+    expect(llms).toContain("expanded object faces, and public event");
   });
 
   test("capsule post-approval guidance follows hello's supported next actions only", () => {

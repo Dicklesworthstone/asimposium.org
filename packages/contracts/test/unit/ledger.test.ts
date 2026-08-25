@@ -2,13 +2,23 @@ import { expect, test } from "bun:test";
 
 import {
   LedgerContractsSchema,
+  ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
   ProblemsIndexResponseSchema,
+  PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
 
 const VALID_INDEX = new URL("../fixtures/valid/ledger-problems-index.json", import.meta.url);
 const INVALID_INDEX = new URL(
   "../fixtures/invalid/ledger-problems-index-no-omitted.json",
+  import.meta.url,
+);
+const VALID_PROBLEM_FACE = new URL(
+  "../fixtures/valid/ledger-problem-face.json",
+  import.meta.url,
+);
+const INVALID_WORKSHOP_FACE = new URL(
+  "../fixtures/invalid/ledger-problem-face-workshop-item.json",
   import.meta.url,
 );
 
@@ -47,6 +57,45 @@ test("the index rejects extra fields and malformed entries", () => {
       omitted: [],
     }).success,
   ).toBe(false);
+});
+
+test("the problem face accepts the golden fixture and refuses workshop leakage", async () => {
+  expect(ProblemFaceResponseSchema.safeParse(await fixture(VALID_PROBLEM_FACE)).success).toBe(true);
+  expect(ProblemFaceResponseSchema.safeParse(await fixture(INVALID_WORKSHOP_FACE)).success).toBe(
+    false,
+  );
+});
+
+test("the public face cannot claim trusted items, POST actions, or composer-only token fields", async () => {
+  const valid = (await fixture(VALID_PROBLEM_FACE)) as {
+    items: Array<Record<string, unknown>>;
+    next_actions: Array<Record<string, unknown>>;
+  };
+  const trusted = structuredClone(valid);
+  if (trusted.items[0] !== undefined) trusted.items[0].untrusted = false;
+  expect(ProblemFaceResponseSchema.safeParse(trusted).success).toBe(false);
+
+  const posting = structuredClone(valid);
+  if (posting.next_actions[0] !== undefined) posting.next_actions[0].method = "POST";
+  expect(ProblemFaceResponseSchema.safeParse(posting).success).toBe(false);
+
+  const tokenBearing = structuredClone(valid);
+  if (tokenBearing.items[0] !== undefined) tokenBearing.items[0].tokens = 1;
+  expect(ProblemFaceResponseSchema.safeParse(tokenBearing).success).toBe(false);
+
+  const duplicate = structuredClone(valid);
+  const first = duplicate.items[0];
+  if (first !== undefined) duplicate.items.push(structuredClone(first));
+  expect(ProblemFaceResponseSchema.safeParse(duplicate).success).toBe(false);
+});
+
+test("the public ledger id grammar is renderer-safe without rewriting Krater's full ingress law", () => {
+  for (const valid of ["P-4DSP", "P-alpha", "problem.v2:branch_1"]) {
+    expect(PublicLedgerProblemIdSchema.safeParse(valid).success, valid).toBe(true);
+  }
+  for (const invalid of ["P-X--FORGED", "-leading", ".leading", "x".repeat(129)]) {
+    expect(PublicLedgerProblemIdSchema.safeParse(invalid).success, invalid).toBe(false);
+  }
 });
 
 test("every contract-valid entry has an unambiguous bounded markdown row", () => {
@@ -95,11 +144,14 @@ test("every contract-valid entry has an unambiguous bounded markdown row", () =>
   }
 });
 
-test("the ledger root schema carries the index pair", () => {
+test("the ledger root schema positively carries both index faces and the problem digest", async () => {
+  const index = await fixture(VALID_INDEX);
+  const indexEntry = (index as { problems: unknown[] }).problems[0];
   expect(
     LedgerContractsSchema.safeParse({
-      problem_index_entry: {},
-      problems_index_response: {},
+      problem_index_entry: indexEntry,
+      problems_index_response: index,
+      problem_face_response: await fixture(VALID_PROBLEM_FACE),
     }).success,
-  ).toBe(false);
+  ).toBe(true);
 });

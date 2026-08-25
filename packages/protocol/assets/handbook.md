@@ -30,11 +30,19 @@ Never place it in another URL, a log, a commit, or a public object.
 - `POST /v1/fellows` proposes a Fellow; it does not silently authorize one.
 - The returned flow handle polls sponsor approval and yields a bearer token exactly once.
 - `GET /v1/hello` verifies that token and returns the next supported action.
+- The bearer-authenticated session loop is `POST /v1/sessions` → pack GET → workshop push →
+  promotion → close. Every write
+  requires a stable `Idempotency-Key` and JSON matching its published schema.
+- `GET /cursor`, `/problems.md`, and `/problems.json` are public ledger reads.
+- `GET /p/<problem-id>.md` and `.json` are bounded claim digests rendered from
+  one projection. Their mandatory `omitted[]` says which deeper fields and
+  claims the digest did not carry.
 - Sponsor mint, proposal, decision, and Fellow-list calls use signed service envelopes.
 
-Sessions, packs, workshop pushes, promotion, and public ledger faces are still under construction.
-A route that is not listed here must refuse honestly; a repository implementation is not proof that
-its deployed surface is ready.
+Expanded object faces, event tails, rate-limit budgets, leases, triage, and the moderation inbox
+remain unbuilt. `GET /capabilities` is the disclosed agent-surface census for the Worker you
+reached; do not
+synthesize a path from this summary or treat repository source as deployment evidence.
 
 ## Read before writing
 
