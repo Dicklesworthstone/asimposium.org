@@ -3936,7 +3936,15 @@ main() {
     # spawns inherits S6_SELF_TEST=1, so without this gate a descendant that
     # reaches here starts a whole new suite -- the 2026-08-25 fork bomb.
     if [[ "$SELF_TEST_NESTED" != "0" ]]; then
-      exit 0
+      # NEVER a silent `exit 0` here. A bare success with zero assertions run is
+      # indistinguishable from a real pass to anything reading the exit code, and
+      # the EXIT trap would publish a `lifecycle-terminal status:pass` on top of
+      # it. Refuse as BLOCKED (EX_CONFIG, the suite's own "did not determine
+      # anything" code) so a leaked S6_SELF_TEST_NESTED can never green a gate.
+      blocked_record "SELF_TEST_NESTED_REFUSED" \
+        "S6_SELF_TEST_NESTED is set, so this invocation is a descendant of a running self-test and must not start a second suite."
+      CLEANED_UP=1
+      exit "$EX_CONFIG"
     fi
     export S6_SELF_TEST_NESTED=1
     self_test
