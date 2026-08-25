@@ -1254,6 +1254,16 @@ declare -a S2_LIFECYCLE_OWNED_WATCHDOG_PIDS=()
 declare -a S2_LIFECYCLE_OWNED_WATCHDOG_HEALTH_FILES=()
 declare -a S2_LIFECYCLE_OWNED_STATE_DIRS=()
 declare -a S2_LIFECYCLE_OWNED_PORTS=()
+# A raw recursive harness child shares this process's sole artifact writer
+# lease. Its direct PID therefore remains a global cleanup capability from the
+# moment the launch gate opens until both the child and every run-scoped
+# descendant are proved absent. The gate keeps a just-forked wrapper from
+# entering the child harness before the adjacent PID registration completes.
+S2_RAW_INHERITED_CHILD_PID=""
+S2_RAW_INHERITED_CHILD_MARKER=""
+S2_RAW_INHERITED_CHILD_GATE=""
+S2_RAW_INHERITED_CHILD_RUN_ID=""
+S2_RAW_INHERITED_CHILD_RUN_IDENTITY=""
 # The origin the next phase talks to. The legacy upgrade stages run their own
 # Worker on their own owned port, so a phase must never assume the main one.
 S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
@@ -4117,10 +4127,161 @@ stop_most_recent_untracked_supervisor() {
   return 1
 }
 
+# Hold a raw recursive child behind a parent-owned gate until its direct PID is
+# durably enrolled in the outer EXIT cleanup slot. If the parent disappears in
+# the fork-to-registration interval, PPID changes and the wrapper exits without
+# ever entering the artifact-writing child harness.
+readonly S2_RAW_INHERITED_CHILD_WRAPPER='
+parent_pid="$1"
+gate="$2"
+marker="$3"
+script_path="$4"
+while [[ ! -f "${gate}" || -L "${gate}" ]]; do
+  [[ "${PPID}" == "${parent_pid}" ]] || exit 125
+  sleep 0.01
+done
+[[ "${PPID}" == "${parent_pid}" ]] || exit 125
+[[ "$(<"${gate}")" == "${marker}" ]] || exit 125
+exec -a "${marker}" bash "${script_path}" "${marker}"
+'
+
+s2_begin_raw_inherited_child_owner() {
+  local child_run_id="$1" child_run_identity="$2"
+  [[ -z "${S2_RAW_INHERITED_CHILD_PID}" && \
+    -z "${S2_RAW_INHERITED_CHILD_MARKER}" && \
+    -z "${S2_RAW_INHERITED_CHILD_GATE}" && \
+    -z "${S2_RAW_INHERITED_CHILD_RUN_ID}" && \
+    -z "${S2_RAW_INHERITED_CHILD_RUN_IDENTITY}" ]] || return 1
+  e2e_artifact_namespaced_run_matches_at_root \
+    "${S2_REPOSITORY_ROOT}" s2-krater "${child_run_id}" \
+    "${S2_ARTIFACT_ROOT_IDENTITY}" "${S2_EVIDENCE_ROOT_IDENTITY}" \
+    "${child_run_identity}" "${S2_WRITER_LEASE_PATH}" \
+    "${S2_WRITER_LEASE_IDENTITY}" || return 1
+  S2_RAW_INHERITED_CHILD_MARKER="s2-raw-inherited-${child_run_id}"
+  S2_RAW_INHERITED_CHILD_GATE="${S2_STATE_DIR}/${S2_RAW_INHERITED_CHILD_MARKER}.gate"
+  S2_RAW_INHERITED_CHILD_RUN_ID="${child_run_id}"
+  S2_RAW_INHERITED_CHILD_RUN_IDENTITY="${child_run_identity}"
+  [[ ! -e "${S2_RAW_INHERITED_CHILD_GATE}" && \
+    ! -L "${S2_RAW_INHERITED_CHILD_GATE}" ]] || return 1
+}
+
+s2_register_raw_inherited_child() {
+  local child_pid="$1"
+  is_decimal "${child_pid}" || return 1
+  [[ -z "${S2_RAW_INHERITED_CHILD_PID}" && \
+    -n "${S2_RAW_INHERITED_CHILD_MARKER}" && \
+    -n "${S2_RAW_INHERITED_CHILD_GATE}" ]] || return 1
+  S2_RAW_INHERITED_CHILD_PID="${child_pid}"
+  s2_artifact_writer_boundary_is_open || return 1
+  (umask 077; set -o noclobber; \
+    printf '%s\n' "${S2_RAW_INHERITED_CHILD_MARKER}" \
+      >"${S2_RAW_INHERITED_CHILD_GATE}") 2>/dev/null || return 1
+  s2_artifact_writer_boundary_is_open
+}
+
+s2_raw_inherited_child_snapshot() {
+  local pid="$1" line="" rows=0
+  S2_RAW_CHILD_SEEN_PID=""
+  S2_RAW_CHILD_SEEN_PPID=""
+  S2_RAW_CHILD_SEEN_STAT=""
+  S2_RAW_CHILD_SEEN_COMMAND=""
+  capture_detached_process_table -o pid=,ppid=,stat=,command= -p "${pid}" || return 2
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    rows=$((rows + 1))
+    read -r S2_RAW_CHILD_SEEN_PID S2_RAW_CHILD_SEEN_PPID \
+      S2_RAW_CHILD_SEEN_STAT S2_RAW_CHILD_SEEN_COMMAND <<<"${line}"
+  done <<<"${S2_DETACHED_PROCESS_TABLE}"
+  [[ ${rows} -eq 1 ]] || return 1
+  is_decimal "${S2_RAW_CHILD_SEEN_PID}" && \
+    is_decimal "${S2_RAW_CHILD_SEEN_PPID}" || return 2
+}
+
+s2_raw_inherited_child_command_is_exact() {
+  local pid="$1"
+  s2_raw_inherited_child_snapshot "${pid}" || return 1
+  [[ "${S2_RAW_CHILD_SEEN_PID}" == "${pid}" && \
+    "${S2_RAW_CHILD_SEEN_PPID}" == "${S2_PARENT_PID}" && \
+    "${S2_RAW_CHILD_SEEN_STAT}" != Z* && \
+    "${S2_RAW_CHILD_SEEN_COMMAND}" == *"${S2_RAW_INHERITED_CHILD_MARKER}"* && \
+    "${S2_RAW_CHILD_SEEN_COMMAND}" == *"${S2_SCRIPT_PATH}"* ]]
+}
+
+clear_raw_inherited_child_owner() {
+  S2_RAW_INHERITED_CHILD_PID=""
+  S2_RAW_INHERITED_CHILD_MARKER=""
+  S2_RAW_INHERITED_CHILD_GATE=""
+  S2_RAW_INHERITED_CHILD_RUN_ID=""
+  S2_RAW_INHERITED_CHILD_RUN_IDENTITY=""
+}
+
+# Stop and reap the exact direct child, then prove no process or open descriptor
+# still names its identity-bound retained run before clearing the sole cleanup
+# capability. A failure keeps the slot populated and the parent lease open.
+cleanup_raw_inherited_child() {
+  local pid="${S2_RAW_INHERITED_CHILD_PID}" tick rows line child_run_directory
+  [[ -n "${pid}" ]] || {
+    [[ -z "${S2_RAW_INHERITED_CHILD_MARKER}" && \
+      -z "${S2_RAW_INHERITED_CHILD_GATE}" && \
+      -z "${S2_RAW_INHERITED_CHILD_RUN_ID}" && \
+      -z "${S2_RAW_INHERITED_CHILD_RUN_IDENTITY}" ]]
+    return
+  }
+  is_decimal "${pid}" && \
+    [[ -n "${S2_RAW_INHERITED_CHILD_MARKER}" && \
+      -n "${S2_RAW_INHERITED_CHILD_RUN_ID}" && \
+      -n "${S2_RAW_INHERITED_CHILD_RUN_IDENTITY}" ]] || return 1
+  if kill -0 "${pid}" 2>/dev/null; then
+    if ! s2_raw_inherited_child_snapshot "${pid}"; then
+      return 1
+    fi
+    if [[ "${S2_RAW_CHILD_SEEN_STAT}" != Z* ]]; then
+      s2_raw_inherited_child_command_is_exact "${pid}" || return 1
+      kill -TERM "${pid}" 2>/dev/null || {
+        kill -0 "${pid}" 2>/dev/null && return 1
+      }
+      for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+        if ! kill -0 "${pid}" 2>/dev/null; then break; fi
+        if s2_raw_inherited_child_snapshot "${pid}" && \
+          [[ "${S2_RAW_CHILD_SEEN_STAT}" == Z* ]]; then break; fi
+        sleep 0.05
+      done
+    fi
+  fi
+  if kill -0 "${pid}" 2>/dev/null; then
+    if s2_raw_inherited_child_snapshot "${pid}" && \
+      [[ "${S2_RAW_CHILD_SEEN_STAT}" == Z* ]]; then
+      :
+    else
+      s2_raw_inherited_child_command_is_exact "${pid}" || return 1
+      kill -KILL "${pid}" 2>/dev/null || {
+        kill -0 "${pid}" 2>/dev/null && return 1
+      }
+    fi
+  fi
+  wait "${pid}" 2>/dev/null || :
+  ! kill -0 "${pid}" 2>/dev/null || return 1
+  child_run_directory="${S2_EVIDENCE_ROOT}/${S2_RAW_INHERITED_CHILD_RUN_ID}"
+  e2e_artifact_namespaced_run_matches_at_root \
+    "${S2_REPOSITORY_ROOT}" s2-krater "${S2_RAW_INHERITED_CHILD_RUN_ID}" \
+    "${S2_ARTIFACT_ROOT_IDENTITY}" "${S2_EVIDENCE_ROOT_IDENTITY}" \
+    "${S2_RAW_INHERITED_CHILD_RUN_IDENTITY}" "${S2_WRITER_LEASE_PATH}" \
+    "${S2_WRITER_LEASE_IDENTITY}" || return 1
+  rows="$(LC_ALL=C ps -axo pid=,ppid=,stat=,command=)" || return 1
+  while IFS= read -r line; do
+    [[ "${line}" != *"${S2_RAW_INHERITED_CHILD_MARKER}"* && \
+      "${line}" != *"${child_run_directory}"* ]] || return 1
+  done <<<"${rows}"
+  lsof_scanner_is_healthy || return 1
+  lsof_scan_reaches_no_matches -nP -t +w +D "${child_run_directory}" || return 1
+  clear_raw_inherited_child_owner
+}
+
 # shellcheck disable=SC2329
 cleanup_workers() {
   local result=0
   cleanup_post_release_controller || result=1
+  cleanup_raw_inherited_child || result=1
   stop_most_recent_untracked_supervisor || result=1
   stop_lifecycle_supervisors || result=1
   stop_worker || result=1
