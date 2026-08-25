@@ -737,6 +737,7 @@ publish_lifecycle_settled() {
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 on_exit() {
   local status=$?
+  (( BASH_SUBSHELL == 0 )) || return 0
   # The per-run bounded-supervisor stdout capture leaks on every early
   # self_test exit, so retire it here where all exit paths converge.
   [[ -z "${SELF_TEST_BOUNDED_OUT:-}" ]] || rm -f "$SELF_TEST_BOUNDED_OUT" 2>/dev/null || true

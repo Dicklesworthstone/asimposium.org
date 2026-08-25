@@ -3498,6 +3498,102 @@ describe("new-run artifact namespace ownership", () => {
     expect(base.readFile(join(target, "foreign.marker"))).toBe("foreign\n");
     expect(base.exists(join(target, "events.jsonl"))).toBe(false);
   });
+
+  test("PLANTED: a fence raised during retained new-run capacity scan blocks mkdir", () => {
+    const root = fixtureRoot("retained-fence-during-capacity");
+    const namespace = "retained-fence-capacity";
+    const integration = join(root, "e2e", "artifacts", namespace);
+    const target = join(integration, "fenced-retained-run");
+    const base = fixtureStorage();
+    base.seedDirectory(integration);
+    let integrationScans = 0;
+    let fenced = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      readdir: (path) => {
+        const entries = base.readdir(path);
+        if (path === integration) {
+          integrationScans += 1;
+          // Reusing the existing top-level integration namespace needs no
+          // recursive scan. This first scan is the private retained-new-run
+          // capacity check immediately before its mkdir.
+          if (integrationScans === 1) {
+            fenced = true;
+            base.writeExclusive(
+              join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
+              "maintenance\n",
+            );
+          }
+        }
+        return entries;
+      },
+    };
+    const identity = {
+      runId: "fenced-retained-run",
+      suite: "unit",
+      seed: 7,
+      stepIds: ["ok"],
+      stepContractDigests: ["a".repeat(64)],
+      reproduction: SELF_TEST_REPRODUCTION,
+      artifactNamespace: namespace,
+      gitRevision: "unavailable",
+      childEnvironmentDigest: "b".repeat(64),
+      bindingVersions: {},
+    } as const;
+
+    expect(
+      () => new ArtifactStore(root, identity.runId, false, identity, storage, namespace),
+    ).toThrow(/ARTIFACT_MAINTENANCE_ACTIVE|maintenance is active/);
+    expect(integrationScans).toBe(1);
+    expect(fenced).toBe(true);
+    expect(base.exists(target)).toBe(false);
+  });
+
+  test("PLANTED: a root epoch change during retained capacity scan blocks mkdir", () => {
+    const root = fixtureRoot("retained-epoch-during-capacity");
+    const artifacts = join(root, "e2e", "artifacts");
+    const namespace = "retained-epoch-capacity";
+    const integration = join(artifacts, namespace);
+    const target = join(integration, "epoch-retained-run");
+    const base = fixtureStorage();
+    base.seedDirectory(integration);
+    let integrationScans = 0;
+    let epochChanged = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      directoryIdentity: (path) => {
+        const identity = base.directoryIdentity(path);
+        return path === artifacts && epochChanged ? `${identity}:replacement` : identity;
+      },
+      readdir: (path) => {
+        const entries = base.readdir(path);
+        if (path === integration) {
+          integrationScans += 1;
+          if (integrationScans === 1) epochChanged = true;
+        }
+        return entries;
+      },
+    };
+    const identity = {
+      runId: "epoch-retained-run",
+      suite: "unit",
+      seed: 7,
+      stepIds: ["ok"],
+      stepContractDigests: ["a".repeat(64)],
+      reproduction: SELF_TEST_REPRODUCTION,
+      artifactNamespace: namespace,
+      gitRevision: "unavailable",
+      childEnvironmentDigest: "b".repeat(64),
+      bindingVersions: {},
+    } as const;
+
+    expect(
+      () => new ArtifactStore(root, identity.runId, false, identity, storage, namespace),
+    ).toThrow(/ARTIFACT_ROOT_CHANGED|physical artifact root changed/);
+    expect(integrationScans).toBe(1);
+    expect(epochChanged).toBe(true);
+    expect(base.exists(target)).toBe(false);
+  });
 });
 
 describeRealFilesystemIntegration("real filesystem reservation semantics", () => {

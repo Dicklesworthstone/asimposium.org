@@ -483,7 +483,13 @@ export class ArtifactStore {
             storage,
             this.artifactRootIdentity,
           )
-        : reserveNewRetainedIntegrationDirectory(artifacts, runId, storage, 1);
+        : reserveNewRetainedIntegrationDirectory(
+            artifacts,
+            runId,
+            storage,
+            1,
+            this.artifactRootIdentity,
+          );
     this.assertWritableArtifactRoot();
     this.jsonl = join(this.directory, "events.jsonl");
     assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
@@ -1109,7 +1115,7 @@ const nodeArtifactStorageCapability = Object.freeze<HarnessArtifactStorage>({
     }
   },
   directoryIdentity: (path) => {
-    const stat = lstatSync(path);
+    const stat = lstatSync(path, { bigint: true });
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe directory");
     return `${stat.dev}:${stat.ino}`;
   },
@@ -3438,6 +3444,7 @@ function reserveNewRetainedIntegrationDirectory(
   name: string,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
   projectedDirectories = 1,
+  expectedArtifactRootIdentity?: string,
 ): string {
   if (!validateRunId(name)) {
     throw new HarnessError(
@@ -3446,12 +3453,24 @@ function reserveNewRetainedIntegrationDirectory(
     );
   }
   const root = realDirectory(resolve(integrationDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  const artifactRoot = realDirectory(resolve(root, ".."), "ARTIFACT_PATH_UNSAFE", storage);
+  const writerRoot = realDirectory(
+    resolve(artifactRoot, "..", ".."),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  const expectedIdentity =
+    expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
+  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
   assertRetainedIntegrationCapacity(
     root,
     { additionalDirectories: projectedDirectories },
     storage,
   );
-  return createNewRunDirectory(root, name, storage);
+  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
+  const reserved = createNewRunDirectory(root, name, storage);
+  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
+  return reserved;
 }
 
 /** Exclusive mkdir plus post-create containment, shared by both new-run paths. */
