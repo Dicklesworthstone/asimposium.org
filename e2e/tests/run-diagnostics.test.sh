@@ -135,6 +135,73 @@ if ! command -v curl >/dev/null 2>&1; then
   fail "CURL_UNAVAILABLE"
 fi
 
+# A planted curl binary proves the shared wrapper supplies the exact user
+# agent, while the authenticated wrapper transports a canonical Fellow token
+# only through stdin config—not through argv or inherited environment.
+curl_fixture_bin="$temporary_root/curl-fixture-bin"
+curl_args_file="$temporary_root/curl-fixture-args"
+curl_env_file="$temporary_root/curl-fixture-env"
+curl_stdin_file="$temporary_root/curl-fixture-stdin"
+mkdir -p "$curl_fixture_bin" || fail "CURL_FIXTURE_LAYOUT_FAILED"
+# shellcheck disable=SC2016
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'printf "<%s>\n" "$@" >"$ASIMPOSIUM_E2E_CURL_ARGS_FILE"' \
+  'env >"$ASIMPOSIUM_E2E_CURL_ENV_FILE"' \
+  'config_line=""' \
+  'read_stdin=0' \
+  'previous_argument=""' \
+  'for argument in "$@"; do' \
+  '  if [[ "$previous_argument" == "--config" && "$argument" == "-" ]]; then read_stdin=1; fi' \
+  '  previous_argument="$argument"' \
+  'done' \
+  'if [[ "$read_stdin" -eq 1 ]]; then IFS= read -r config_line || true; fi' \
+  'printf "%s\n" "$config_line" >"$ASIMPOSIUM_E2E_CURL_STDIN_FILE"' \
+  'printf "204"' \
+  >"$curl_fixture_bin/curl" || fail "CURL_FIXTURE_WRITE_FAILED"
+chmod 700 "$curl_fixture_bin/curl" || fail "CURL_FIXTURE_MODE_FAILED"
+
+export ASIMPOSIUM_E2E_CURL_ARGS_FILE="$curl_args_file"
+export ASIMPOSIUM_E2E_CURL_ENV_FILE="$curl_env_file"
+export ASIMPOSIUM_E2E_CURL_STDIN_FILE="$curl_stdin_file"
+original_path="$PATH"
+PATH="$curl_fixture_bin:$PATH"
+
+if ! planted_probe_status="$(e2e_probe_public_path "https://agent-preview.example" "/")"; then
+  fail "PLANTED_PUBLIC_PROBE_REJECTED"
+fi
+if [[ -n "$planted_probe_status" ]]; then
+  fail "PLANTED_PUBLIC_PROBE_PRINTED"
+fi
+if [[ "$(sed -n '1p' "$curl_args_file")" != "<--user-agent>" \
+  || "$(sed -n '2p' "$curl_args_file")" != "<$ASIMPOSIUM_E2E_HTTP_USER_AGENT>" ]]; then
+  fail "EXACT_CURL_USER_AGENT_MISSING"
+fi
+
+valid_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
+if [[ "$(e2e_curl_with_fellow_token "$valid_fellow_token" --silent "https://agent-preview.example/v1/sessions")" != "204" ]]; then
+  fail "FELLOW_TOKEN_STDIN_TRANSPORT_FAILED"
+fi
+if grep -Fq "$valid_fellow_token" "$curl_args_file" || grep -Fq "$valid_fellow_token" "$curl_env_file"; then
+  fail "FELLOW_TOKEN_REACHED_CURL_PROCESS_METADATA"
+fi
+if [[ "$(<"$curl_stdin_file")" != "header = \"Authorization: Bearer $valid_fellow_token\"" ]]; then
+  fail "FELLOW_TOKEN_AUTHORIZATION_HEADER_MISSING"
+fi
+
+: >"$curl_args_file"
+if e2e_curl_with_fellow_token "asimp_ag_invalid" --silent "https://agent-preview.example" >/dev/null 2>&1; then
+  fail "MALFORMED_FELLOW_TOKEN_ACCEPTED"
+fi
+if [[ -s "$curl_args_file" ]]; then
+  fail "MALFORMED_FELLOW_TOKEN_REACHED_CURL"
+fi
+
+PATH="$original_path"
+unset ASIMPOSIUM_E2E_CURL_ARGS_FILE ASIMPOSIUM_E2E_CURL_ENV_FILE ASIMPOSIUM_E2E_CURL_STDIN_FILE
+
 if probe_output="$(e2e_probe_public_path "https://127.0.0.1:1" "/" 2>&1)"; then
   fail "UNREACHABLE_PROBE_ACCEPTED"
 fi

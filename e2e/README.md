@@ -13,8 +13,11 @@ Current scope:
 - `scripts/smoke-agent.sh` is a public-surface and typed-loop gate. With an
   explicit staging Fellow credential it exercises open → pack → workshop →
   validator refusals → promote → cursor → near-duplicate refusal → close. With
-  no credential it exits blocked rather than skipping the loop. The gallery
-  smoke still stops after anonymous boundary probes because its authenticated
+  no credential it exits blocked rather than skipping the loop. It captures
+  and unsets the credential before starting a child process, validates the
+  canonical token grammar, and passes the Authorization header to curl over
+  stdin rather than argv or inherited environment. The gallery smoke still
+  stops after anonymous boundary probes because its authenticated
   sponsor/private-versus-public comparison is not implemented.
 - `run-playwright.sh` runs the non-mock public-surface checks when Playwright
   and explicit HTTPS staging origins are available.
@@ -33,14 +36,16 @@ Current scope:
 All runners accept `--self-test`. Live entry points require explicit HTTPS
 origins through `ASIMPOSIUM_STAGING_AGENT_BASE_URL` and, where applicable,
 `ASIMPOSIUM_STAGING_AGORA_BASE_URL`; no runner infers a staging target or logs
-its value. `--write-artifacts --run-id <id>` writes only beneath
+its value. Curl calls routed through the shared E2E helper send the exact
+`OpenAI File Downloader, XaiImageApiFetch/1.0` User-Agent.
+`--write-artifacts --run-id <id>` writes only beneath
 `e2e/artifacts/<id>/`; valid IDs match
 `^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`. The device-enrollment runner atomically
 claims its artifact directory and refuses a reused ID, so evidence from two
 attempts cannot be blended.
 
-No automated smoke, Playwright, or Cold-Agent Gauntlet product flow has passed
-from these entry points yet.
+No current-revision automated smoke, Playwright, or Cold-Agent Gauntlet product
+flow has passed from these entry points yet.
 
 ## Device-enrollment staging runner
 

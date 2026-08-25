@@ -758,30 +758,26 @@ describe("neutralizeUntrustedBody", () => {
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
-  test(
-    "keeps benign Unicode-normalization metadata proportional to findings, not source code points",
-    () => {
-      // U+FDFA expands to many UTF-16 units under NFKD. This deliberately
-      // checks the allocation shape rather than a timing or RSS threshold that
-      // would depend on the host runtime.
-      // U+FDFA is three UTF-8 bytes, so this exercises the reported 300 KB
-      // attack shape without asserting a host-specific RSS ceiling.
-      const sourceCodePoints = 100_000;
-      const body = "\ufdfa".repeat(sourceCodePoints);
-      const diagnostics = activeHtmlScanDiagnostics(body);
+  test("keeps benign Unicode-normalization metadata proportional to findings, not source code points", () => {
+    // U+FDFA expands to many UTF-16 units under NFKD. This deliberately
+    // checks the allocation shape rather than a timing or RSS threshold that
+    // would depend on the host runtime.
+    // U+FDFA is three UTF-8 bytes, so this exercises the reported 300 KB
+    // attack shape without asserting a host-specific RSS ceiling.
+    const sourceCodePoints = 100_000;
+    const body = "\ufdfa".repeat(sourceCodePoints);
+    const diagnostics = activeHtmlScanDiagnostics(body);
 
-      expect(diagnostics.canonical.transformed_utf16_units).toBeGreaterThan(sourceCodePoints * 10);
-      expect(diagnostics.raw.finding_offsets).toBe(0);
-      expect(diagnostics.raw.source_mapping_entries).toBe(0);
-      expect(diagnostics.canonical.finding_offsets).toBe(0);
-      expect(diagnostics.canonical.source_mapping_entries).toBe(0);
+    expect(diagnostics.canonical.transformed_utf16_units).toBeGreaterThan(sourceCodePoints * 10);
+    expect(diagnostics.raw.finding_offsets).toBe(0);
+    expect(diagnostics.raw.source_mapping_entries).toBe(0);
+    expect(diagnostics.canonical.finding_offsets).toBe(0);
+    expect(diagnostics.canonical.source_mapping_entries).toBe(0);
 
-      const canonicalFinding = activeHtmlScanDiagnostics("<ＳＶＧ／ＯＮＬＯＡＤ=record()＞");
-      expect(canonicalFinding.canonical.finding_offsets).toBe(1);
-      expect(canonicalFinding.canonical.source_mapping_entries).toBe(1);
-    },
-    30_000,
-  );
+    const canonicalFinding = activeHtmlScanDiagnostics("<ＳＶＧ／ＯＮＬＯＡＤ=record()＞");
+    expect(canonicalFinding.canonical.finding_offsets).toBe(1);
+    expect(canonicalFinding.canonical.source_mapping_entries).toBe(1);
+  }, 30_000);
 
   test("does not mistake prose, math, comments, tag names, or attribute values for handlers", () => {
     const controls = [

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import { readFileSync } from "node:fs";
 
 import {
   LedgerContractsSchema,

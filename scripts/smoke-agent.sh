@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Capture the credential into shell memory, then remove its exported name
+# before even repository discovery can start a child process. Authenticated
+# curl calls later receive it over stdin, never through argv or environment.
+smoke_fellow_token="${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}"
+unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
+
 # smoke-agent — G0 agent-surface smoke gate (asimposiumorg-7ft).
 #
 # Stages, in order, each with a precise refusal code:
@@ -30,12 +36,6 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/lib/run-diagnostics.sh
 source "$repository_root/e2e/lib/run-diagnostics.sh"
-
-# Capture the credential into shell memory, then remove its exported name
-# before the first child process starts. Authenticated curl calls receive it
-# over stdin through e2e_curl_with_fellow_token, never through argv or env.
-smoke_fellow_token="${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}"
-unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
 
 suite="smoke-agent"
 reproduce="scripts/smoke-agent.sh --self-test"
@@ -127,7 +127,7 @@ smoke_agent_run_fixture_self_test() {
 
   # The entrypoint must scrub the exported credential before this function's
   # Python children run. The helper mirrors FellowTokenSchema's exact grammar.
-  if [[ -v ASIMPOSIUM_SMOKE_FELLOW_TOKEN ]]; then
+  if [[ "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN+present}" == "present" ]]; then
     return 1
   fi
   local valid_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"

@@ -25,6 +25,13 @@ for self_test in \
   fi
 done
 
+synthetic_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+if ! ASIMPOSIUM_SMOKE_FELLOW_TOKEN="$synthetic_fellow_token" \
+  "$repository_root/scripts/smoke-agent.sh" --self-test >/dev/null; then
+  emit "fail" "SMOKE_AGENT_DID_NOT_SCRUB_EXPORTED_CREDENTIAL"
+  exit 1
+fi
+
 assert_production_refused() {
   local entrypoint="$1"
   local expected_code="$2"
@@ -125,6 +132,23 @@ fi
 
 if [[ "$credential_origin_output" == *"test-user"* ]] || [[ "$credential_origin_output" == *"test-pass"* ]] || [[ "$credential_origin_output" == *"127.0.0.1:1"* ]]; then
   emit "fail" "CREDENTIAL_ORIGIN_LEAKED"
+  exit 1
+fi
+
+set +e
+invalid_fellow_output="$(
+  ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://127.0.0.1:1" \
+    ASIMPOSIUM_SMOKE_FELLOW_TOKEN="asimp_ag_invalid" \
+    "$repository_root/scripts/smoke-agent.sh" 2>&1
+)"
+invalid_fellow_status=$?
+set -e
+if [[ "$invalid_fellow_status" -ne 90 || "$invalid_fellow_output" != *'"code":"AGENT_LOOP_CREDENTIAL_INVALID"'* ]]; then
+  emit "fail" "MALFORMED_FELLOW_CREDENTIAL_NOT_REFUSED"
+  exit 1
+fi
+if [[ "$invalid_fellow_output" == *"asimp_ag_"* || "$invalid_fellow_output" == *"127.0.0.1:1"* ]]; then
+  emit "fail" "MALFORMED_FELLOW_CREDENTIAL_REJECTION_LEAKED"
   exit 1
 fi
 
