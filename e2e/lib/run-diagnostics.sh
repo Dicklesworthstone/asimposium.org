@@ -8,6 +8,8 @@ ASIMPOSIUM_E2E_HTTP_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
 readonly ASIMPOSIUM_E2E_HTTP_USER_AGENT
 ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES=1048576
 readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES
+ASIMPOSIUM_E2E_ARTIFACT_MAINTENANCE_FENCE=".artifact-maintenance"
+readonly ASIMPOSIUM_E2E_ARTIFACT_MAINTENANCE_FENCE
 
 # Successful artifact namespace claims are process capabilities. Bash arrays
 # survive the command-substitution subshells used by the writer helpers, but
@@ -17,6 +19,7 @@ readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES
 # still race the final append, so whole-root rotation remains forbidden.
 # Top-level declarations are global without Bash 4's non-portable `declare -g`.
 declare -a ASIMPOSIUM_E2E_CLAIM_ROOTS=()
+declare -a ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES=()
 declare -a ASIMPOSIUM_E2E_CLAIM_RUN_IDS=()
 declare -a ASIMPOSIUM_E2E_CLAIM_IDENTITIES=()
 
@@ -273,14 +276,31 @@ e2e_artifact_directory_identity() {
   printf '%s\n' "$identity"
 }
 
+e2e_artifact_maintenance_absent_at_root() {
+  local repository_root="$1"
+  local physical_repository_root
+  local physical_e2e_root
+  local fence
+
+  physical_repository_root="$(e2e_physical_directory "$repository_root")" || return 1
+  physical_e2e_root="$(e2e_physical_directory "$physical_repository_root/e2e")" || return 1
+  [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
+  fence="$physical_e2e_root/$ASIMPOSIUM_E2E_ARTIFACT_MAINTENANCE_FENCE"
+  # Any node at the reserved name is a closed gate. Treating only a regular
+  # file as the fence would let a symlink or directory silently disable it.
+  [[ ! -e "$fence" && ! -L "$fence" ]]
+}
+
 e2e_artifact_claim_matches() {
   local physical_artifacts_root="$1"
-  local run_id="$2"
-  local identity="$3"
+  local root_identity="$2"
+  local run_id="$3"
+  local identity="$4"
   local index
 
   for ((index = 0; index < ${#ASIMPOSIUM_E2E_CLAIM_RUN_IDS[@]}; index++)); do
     if [[ "${ASIMPOSIUM_E2E_CLAIM_ROOTS[$index]}" == "$physical_artifacts_root" \
+      && "${ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES[$index]}" == "$root_identity" \
       && "${ASIMPOSIUM_E2E_CLAIM_RUN_IDS[$index]}" == "$run_id" \
       && "${ASIMPOSIUM_E2E_CLAIM_IDENTITIES[$index]}" == "$identity" ]]; then
       return 0
@@ -293,12 +313,15 @@ e2e_artifact_directory_at_root() {
   local repository_root="$1"
   local run_id="$2"
   local physical_artifacts_root
+  local root_identity
   local artifact_directory
   local physical_artifact_directory
   local artifact_identity
 
   e2e_validate_run_id "$run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
   physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+  root_identity="$(e2e_artifact_directory_identity "$physical_artifacts_root")" || return 1
 
   artifact_directory="$physical_artifacts_root/$run_id"
   # Publication may only use a namespace that the entry point atomically
@@ -309,7 +332,8 @@ e2e_artifact_directory_at_root() {
   physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
   [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
   artifact_identity="$(e2e_artifact_directory_identity "$physical_artifact_directory")" || return 1
-  e2e_artifact_claim_matches "$physical_artifacts_root" "$run_id" "$artifact_identity" || return 1
+  e2e_artifact_claim_matches "$physical_artifacts_root" "$root_identity" "$run_id" "$artifact_identity" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
   printf '%s\n' "$physical_artifact_directory"
 }
 
@@ -317,19 +341,28 @@ e2e_claim_artifact_run_at_root() {
   local repository_root="$1"
   local run_id="$2"
   local physical_artifacts_root
+  local root_identity
   local artifact_directory
   local physical_artifact_directory
   local artifact_identity
 
   e2e_validate_run_id "$run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
   physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root" 1)" || return 1
+  root_identity="$(e2e_artifact_directory_identity "$physical_artifacts_root")" || return 1
   artifact_directory="$physical_artifacts_root/$run_id"
   [[ ! -e "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
   mkdir "$artifact_directory" 2>/dev/null || return 1
   physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
   [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
   artifact_identity="$(e2e_artifact_directory_identity "$physical_artifact_directory")" || return 1
+  # Close the claim/fence ordering window before the caller starts product
+  # work. If maintenance won after the first check, leave the empty namespace
+  # retained and refuse to mint a writer capability for it.
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root")" == "$root_identity" ]] || return 1
   ASIMPOSIUM_E2E_CLAIM_ROOTS+=("$physical_artifacts_root")
+  ASIMPOSIUM_E2E_CLAIM_ROOT_IDENTITIES+=("$root_identity")
   ASIMPOSIUM_E2E_CLAIM_RUN_IDS+=("$run_id")
   ASIMPOSIUM_E2E_CLAIM_IDENTITIES+=("$artifact_identity")
 }
@@ -353,6 +386,7 @@ e2e_write_artifact_diagnostic_at_root() {
     return 1
   fi
 
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
   e2e_format_diagnostic "$suite" "$started_ms" "$status" "$code" "$reproduce" >> "$diagnostic_path" 2>/dev/null || return 1
   printf 'e2e/artifacts/%s/diagnostics.jsonl\n' "$run_id"
 }
@@ -378,6 +412,7 @@ e2e_append_artifact_jsonl_at_root() {
   if [[ -e "$artifact_path" && ! -f "$artifact_path" ]]; then
     return 1
   fi
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
   printf '%s\n' "$record" >> "$artifact_path" 2>/dev/null || return 1
   printf 'e2e/artifacts/%s/%s\n' "$run_id" "$file_name"
 }

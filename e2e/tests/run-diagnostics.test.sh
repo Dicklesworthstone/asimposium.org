@@ -76,6 +76,55 @@ fi
 if [[ -n "$second_claim_output" ]]; then
   fail "REUSED_ARTIFACT_RUN_LEAKED"
 fi
+
+fenced_before_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-fenced-before.XXXXXX")" \
+  || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
+mkdir -p "$fenced_before_root/e2e" || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
+: > "$fenced_before_root/e2e/.artifact-maintenance" \
+  || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
+if e2e_claim_artifact_run_at_root "$fenced_before_root" "fenced-before-run" >/dev/null 2>&1; then
+  fail "MAINTENANCE_FENCE_BEFORE_CLAIM_ACCEPTED"
+fi
+if [[ -e "$fenced_before_root/e2e/artifacts" ]]; then
+  fail "MAINTENANCE_FENCE_BEFORE_CLAIM_MUTATED"
+fi
+
+fenced_after_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-fenced-after.XXXXXX")" \
+  || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
+mkdir -p "$fenced_after_root/e2e" || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_run_at_root "$fenced_after_root" "fenced-after-run" \
+  || fail "MAINTENANCE_FENCE_AFTER_CLAIM_SETUP_FAILED"
+: > "$fenced_after_root/e2e/.artifact-maintenance" \
+  || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
+if e2e_write_artifact_diagnostic_at_root "$fenced_after_root" "fenced-after-run" "$suite" "$started_ms" "fail" "FENCED_WRITE" "$reproduce" >/dev/null 2>&1; then
+  fail "MAINTENANCE_FENCE_AFTER_CLAIM_DIAGNOSTIC_ACCEPTED"
+fi
+if e2e_append_artifact_jsonl_at_root "$fenced_after_root" "fenced-after-run" "steps.jsonl" '{"status":"pass"}' >/dev/null 2>&1; then
+  fail "MAINTENANCE_FENCE_AFTER_CLAIM_STEP_ACCEPTED"
+fi
+if [[ -n "$(find "$fenced_after_root/e2e/artifacts/fenced-after-run" -mindepth 1 -print -quit)" ]]; then
+  fail "MAINTENANCE_FENCE_AFTER_CLAIM_MUTATED"
+fi
+
+root_epoch_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-root-epoch.XXXXXX")" \
+  || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
+mkdir -p "$root_epoch_root/e2e" || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_run_at_root "$root_epoch_root" "root-epoch-run" \
+  || fail "ARTIFACT_ROOT_EPOCH_CLAIM_REJECTED"
+mv "$root_epoch_root/e2e/artifacts" "$root_epoch_root/e2e/artifacts-original" \
+  || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
+mkdir -p "$root_epoch_root/e2e/artifacts/root-epoch-run" \
+  || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
+if e2e_write_artifact_diagnostic_at_root "$root_epoch_root" "root-epoch-run" "$suite" "$started_ms" "fail" "REPLACED_ROOT_WRITE" "$reproduce" >/dev/null 2>&1; then
+  fail "REPLACED_ARTIFACT_ROOT_DIAGNOSTIC_ACCEPTED"
+fi
+if e2e_append_artifact_jsonl_at_root "$root_epoch_root" "root-epoch-run" "steps.jsonl" '{"status":"pass"}' >/dev/null 2>&1; then
+  fail "REPLACED_ARTIFACT_ROOT_STEP_ACCEPTED"
+fi
+if [[ -n "$(find "$root_epoch_root/e2e/artifacts/root-epoch-run" -mindepth 1 -print -quit)" \
+  || -n "$(find "$root_epoch_root/e2e/artifacts-original/root-epoch-run" -mindepth 1 -print -quit)" ]]; then
+  fail "REPLACED_ARTIFACT_ROOT_MUTATED"
+fi
 if fresh_shell_output="$(
   bash -c '
     source "$1"
