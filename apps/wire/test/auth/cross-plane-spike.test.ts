@@ -2660,7 +2660,7 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
     expect(claim).toContain(
       '[[ "$S6_RUN_DIRECTORY" == "${ROOT}/${S6_RUN_RELATIVE_DIRECTORY}" ]]',
     );
-    expect(claim.trimEnd().endsWith("s6_artifact_writer_boundary_is_open\n}")).toBe(true);
+    expect(claim.trimEnd().endsWith("s6_artifact_writer_boundary_is_open")).toBe(true);
 
     const writer = shellFunction(source, "write_evidence_bundle");
     expect(writer).toContain('local dir="${S6_RUN_RELATIVE_DIRECTORY:-}"');
@@ -3121,6 +3121,12 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     ]) {
       expect(main.indexOf(`export -n ${name}`)).toBeLessThan(initialize);
     }
+    expect(main).toContain(`export -n ASIMP_S6_TEST_GOOGLE_PASS 2>/dev/null || true
+  export -n ASIMP_S6_TEST_GOOGLE_USER 2>/dev/null || true
+  export -n ASIMP_S6_FELLOW_TOKEN 2>/dev/null || true
+  export -n ASIMP_S6_SIGNING_KEY_HEX 2>/dev/null || true
+
+  if ! initialize_repository_paths; then`);
     const discovery = shellFunction(source, "initialize_repository_paths");
     expect(discovery).toContain('source_directory="$(cd -P -- "$source_directory" && pwd -P)"');
     expect(discovery).toContain('ROOT="$(cd -P -- "${source_directory}/.." && pwd -P)"');
@@ -3171,8 +3177,14 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     const reap = finish.indexOf("reap_children");
     const evidence = finish.indexOf("write_evidence_bundle", reap);
     const close = finish.indexOf("s6_close_artifact_writer_lease_after_settlement", evidence);
-    const failTerminal = finish.indexOf('emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"fail\\"', close);
-    const passTerminal = finish.indexOf('emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"pass\\"', close);
+    const failTerminal = finish.indexOf(
+      'emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"fail\\"',
+      close,
+    );
+    const passTerminal = finish.indexOf(
+      'emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"pass\\"',
+      close,
+    );
     expect(reap).toBeGreaterThanOrEqual(0);
     expect(evidence).toBeGreaterThan(reap);
     expect(close).toBeGreaterThan(evidence);
