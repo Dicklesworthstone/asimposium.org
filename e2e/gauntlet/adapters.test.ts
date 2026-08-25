@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   HARNESS_ADAPTERS,
   registrationPrompt,
-  transcriptShowsCompletion,
+  transcriptShowsRegistrationMention,
 } from "./adapters.ts";
 
 describe("the cold-agent harness adapters", () => {
@@ -30,9 +30,11 @@ describe("the cold-agent harness adapters", () => {
     expect(prompt).toContain("register");
   });
 
-  test("completion is detected from a hello/session transcript, absent from a failure", () => {
+  test("registration-related mentions are diagnostic only", () => {
     const adapter = HARNESS_ADAPTERS[0]!;
-    expect(transcriptShowsCompletion(adapter, '... "session_id": "S-1" ...')).toBe(true);
-    expect(transcriptShowsCompletion(adapter, "the flow expired")).toBe(false);
+    expect(transcriptShowsRegistrationMention(adapter, '... "session_id": "S-1" ...')).toBe(
+      true,
+    );
+    expect(transcriptShowsRegistrationMention(adapter, "the flow expired")).toBe(false);
   });
 });

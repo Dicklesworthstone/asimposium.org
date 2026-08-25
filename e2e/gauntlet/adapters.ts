@@ -2,11 +2,13 @@
  * Cold-agent harness adapters (Fable §7 line 245, §16.1): the versioned,
  * harness-specific registration drivers for the S-1 3/3 evidence and the W10.1
  * gauntlet. Each adapter knows how to invoke its harness CLI non-interactively
- * with the join URL, and how to read the transcript for the completion signal.
+ * with the join URL, and how to read the transcript for a diagnostic
+ * registration mention.
  *
  * The adapters DRIVE the real CLIs; the sponsor approval is the separate,
- * browser-side step (INSTRUCTIONS_FOR_COMPUTER_USE.md §6.3). An adapter proves
- * its harness registered by detecting the hello call in the transcript.
+ * browser-side step (INSTRUCTIONS_FOR_COMPUTER_USE.md §6.3). A transcript
+ * mention is not evidence that registration or any later product state change
+ * succeeded.
  */
 
 export interface HarnessAdapter {
@@ -15,8 +17,8 @@ export interface HarnessAdapter {
   readonly binary: string;
   /** The non-interactive argv that carries the prompt. */
   readonly argv: (prompt: string) => readonly string[];
-  /** The transcript signal that the harness completed registration + hello. */
-  readonly completionSignal: RegExp;
+  /** A diagnostic transcript mention associated with registration or hello. */
+  readonly registrationSignal: RegExp;
 }
 
 /**
@@ -38,28 +40,29 @@ export const HARNESS_ADAPTERS: readonly HarnessAdapter[] = [
     harness: "claude-code",
     binary: "claude",
     argv: (prompt) => ["-p", prompt],
-    completionSignal: /session_id|hello|fellow/i,
+    registrationSignal: /session_id|hello|fellow/i,
   },
   {
     harness: "codex",
     binary: "codex",
     argv: (prompt) => ["exec", prompt],
-    completionSignal: /session_id|hello|fellow/i,
+    registrationSignal: /session_id|hello|fellow/i,
   },
   {
     harness: "gemini",
     binary: "gemini",
     argv: (prompt) => ["-p", prompt],
-    completionSignal: /session_id|hello|fellow/i,
+    registrationSignal: /session_id|hello|fellow/i,
   },
 ];
 
 /**
- * Detect whether a harness transcript shows a completed registration. The
- * signal is deliberately loose (the harness naming a session, hello, or its
- * Fellow id) — the gauntlet's token-budget and completion counting happens
- * upstream of this boolean.
+ * Detect a loose registration-related mention for diagnostics. This does not
+ * establish a valid credential, a successful hello, or gauntlet completion.
  */
-export function transcriptShowsCompletion(adapter: HarnessAdapter, transcript: string): boolean {
-  return adapter.completionSignal.test(transcript);
+export function transcriptShowsRegistrationMention(
+  adapter: HarnessAdapter,
+  transcript: string,
+): boolean {
+  return adapter.registrationSignal.test(transcript);
 }

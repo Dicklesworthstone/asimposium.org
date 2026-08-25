@@ -46,6 +46,14 @@ run_id="$(e2e_resolve_run_id "$suite" "$explicit_run_id")" || {
   exit 64
 }
 
+# The state-derived Fable §16.1 flow is not implemented. Refuse a provisioned
+# run before any staging probe so this entry cannot launch work or turn a
+# transcript/transport observation into an acceptance pass.
+if [[ -n "${GAUNTLET_JOIN_URLS_FILE:-}" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED" "$reproduce"
+  exit 70
+fi
+
 if e2e_validate_staging_origin "ASIMPOSIUM_STAGING_AGENT_BASE_URL"; then
   :
 else
@@ -63,24 +71,7 @@ if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
   exit 69
 fi
 
-# With join URLs provisioned (the sponsor mint + the computer-use approvals,
-# §6.3), the orchestrator drives the harness adapters across fresh sessions and
-# scores against the Fable §16.1 pass bar. Without them the runner honestly
-# reports the gate as unprovisioned rather than scoring a synthetic run.
-if [[ -n "${GAUNTLET_JOIN_URLS_FILE:-}" && -f "${GAUNTLET_JOIN_URLS_FILE:-}" ]]; then
-  gauntlet_output="$(bun run "$repository_root/e2e/gauntlet/run-gauntlet.ts" 2>&1)" || true
-  gauntlet_status="$(printf '%s' "$gauntlet_output" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read().strip().split("\n")[-1]).get("status","fail"))' 2>/dev/null || printf 'fail')"
-  if [[ "$gauntlet_status" == "pass" ]]; then
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "GAUNTLET_PASS" "$reproduce"
-    exit 0
-  fi
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_FAIL" "$reproduce"
-  exit 1
-fi
-
-# A gauntlet pass needs fresh harness adapters, sponsor-side approval automation,
-# and a real typed promotion/recovery flow. The adapters + scorecard + attempt +
-# orchestrator now exist (e2e/gauntlet/*.ts); what is missing is the provisioned
-# join URLs, so this runner refuses to create a synthetic score.
+# No join URLs were provisioned. The runner reports that prerequisite separately
+# from the product-flow blocker above and never creates a synthetic score.
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "GAUNTLET_JOIN_URLS_UNPROVISIONED" "$reproduce"
 exit 78

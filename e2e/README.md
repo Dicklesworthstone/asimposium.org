@@ -41,12 +41,15 @@ Current scope:
   `REQUIRED_HARNESS_INPUTS_MISSING`, an external execution prerequisite; that result does not say
   whether provider resources are provisioned. Supplying configuration also is not proof: only the
   completed live run and its validated schema-v4 evidence establish the cross-plane claims.
-- `gauntlet/run.sh` blocks when no join-URL file is supplied. With one supplied,
-  the current orchestrator can run and emit a score, but its adapters exercise
-  only registration and `hello`, its transcript classifier is heuristic, and
-  its scorecard does not yet enforce ten complete Fable §16.1 attempts. Treat
-  every current score as harness-development output, never as the Cold-Agent
-  acceptance gate.
+- `gauntlet/run.sh` and the direct `gauntlet/run-gauntlet.ts` entry both fail
+  closed as `GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED` when a join-URL file is
+  supplied. The adapters, transcript stage scanner, orchestrator, and strict
+  ten-attempt scorecard are harness-development components only: transcript
+  text, estimated token counts, and ten distinct ordinal rows cannot establish
+  fresh sessions, pairing, pack use, workshop persistence, a falsifiable
+  promotion, injected-422 recovery, close/handback, or the 25K token criterion.
+  No current path can emit an acceptance pass until those results come from
+  authoritative product and harness evidence.
 
 All runners accept `--self-test`. The smoke, Gauntlet, Playwright, and device-enrollment entry
 points require explicit HTTPS origins through `ASIMPOSIUM_STAGING_AGENT_BASE_URL` and, where

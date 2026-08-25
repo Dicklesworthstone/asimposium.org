@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "typecheck": "bash -n run.sh",
-    "lint": "command -v shellcheck >/dev/null 2>&1 || { printf 'blocked: shellcheck is unavailable\\n' >&2; exit 78; }; cd ../.. && shellcheck -x e2e/gauntlet/run.sh",
-    "test:unit": "bash run.sh --self-test",
+    "typecheck": "tsc --noEmit -p ../tsconfig.json && bash -n run.sh",
+    "lint": "command -v shellcheck >/dev/null 2>&1 || { printf 'blocked: shellcheck is unavailable\\n' >&2; exit 78; }; cd ../.. && biome check e2e/gauntlet/*.ts e2e/gauntlet/package.json && shellcheck -x e2e/gauntlet/run.sh",
+    "test:unit": "bun test /dev/null --timeout=120000 *.test.ts && bash run.sh --self-test",
     "test:e2e": "bash run.sh --write-artifacts"
   }
 }

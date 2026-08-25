@@ -1,15 +1,15 @@
 /**
  * One gauntlet attempt: spawn the adapter's CLI with the registration prompt,
- * capture the transcript, and produce a GauntletResult. The spawner is injected
- * so the runner is testable with fixtures; run.sh wires the real subprocess.
+ * capture the transcript, and produce diagnostic harness-development output.
+ * The spawner is injected so the scanner is testable with fixtures.
  *
- * The attempt drives the harness through the full loop (pair → session →
- * workshop → promote → recover from an injected 422 → close). The stage reached
- * is read from the transcript's markers; the token count comes from the
- * harness's own report when it provides one, else a conservative estimate.
+ * Transcript markers cannot prove any server-side state transition. Until an
+ * authoritative evidence result is wired, this module always reports the
+ * attempt incomplete. Its stage and fallback token values are diagnostics,
+ * never Cold-Agent Gauntlet acceptance evidence.
  */
 
-import { registrationPrompt, transcriptShowsCompletion, type HarnessAdapter } from "./adapters.ts";
+import { registrationPrompt, type HarnessAdapter } from "./adapters.ts";
 import type { GauntletResult } from "./scorecard.ts";
 
 /** The spawn seam: given the adapter + prompt, run the CLI and return its transcript. */
@@ -19,7 +19,7 @@ export type HarnessSpawner = (
 ) => Promise<{ readonly transcript: string; readonly tokensUsed?: number }>;
 
 /** The stage markers a transcript carries, in loop order. */
-const STAGE_MARKERS = ["pair", "session", "pack", "workshop", "promote", "close"] as const;
+export const STAGE_MARKERS = ["pair", "session", "pack", "workshop", "promote", "close"] as const;
 
 /** The deepest loop stage the transcript reached. */
 export function deepestStageReached(transcript: string): string {
@@ -30,10 +30,15 @@ export function deepestStageReached(transcript: string): string {
   return reached;
 }
 
+/** Check whether the transcript merely mentions all loop-stage words. */
+export function transcriptMentionsAllStages(transcript: string): boolean {
+  const lower = transcript.toLowerCase();
+  return STAGE_MARKERS.every((stage) => lower.includes(stage));
+}
+
 /**
- * Run one gauntlet attempt. Completion requires the adapter's completion
- * signal AND the transcript reaching the close stage. Token count is the
- * harness's report, or a conservative per-stage estimate when absent.
+ * Run one diagnostic attempt. Completion remains false until state-derived
+ * evidence and authoritative token accounting are part of the result contract.
  */
 export async function runGauntletAttempt(
   attemptIndex: number,
@@ -43,20 +48,18 @@ export async function runGauntletAttempt(
 ): Promise<GauntletResult> {
   const { transcript, tokensUsed } = await spawn(adapter, registrationPrompt(joinUrl));
   const stageReached = deepestStageReached(transcript);
-  const completed = transcriptShowsCompletion(adapter, transcript) && stageReached === "close";
   return {
     attemptIndex,
     harness: adapter.harness,
-    completed,
+    completed: false,
     tokensUsed: tokensUsed ?? estimateTokens(transcript),
     stageReached,
   };
 }
 
 /**
- * A conservative token estimate when the harness doesn't report one: bytes/4
- * over the transcript, floored per stage reached. Overestimating is honest;
- * underestimating would fake the budget.
+ * A rough transcript-size diagnostic when the harness does not report tokens.
+ * It is not total token usage and must never be used as acceptance authority.
  */
 export function estimateTokens(transcript: string): number {
   return Math.max(Math.ceil(transcript.length / 4), 1);
