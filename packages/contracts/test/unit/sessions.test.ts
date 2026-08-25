@@ -35,6 +35,10 @@ const INVALID_PROMOTE_KIND = new URL(
   "../fixtures/invalid/promote-unknown-kind.json",
   import.meta.url,
 );
+const GENERATED_SESSIONS_SCHEMA = new URL(
+  "../../generated/sessions.schema.json",
+  import.meta.url,
+);
 
 test("session loop contracts pin the golden fixtures", async () => {
   expect(SessionOpenRequestSchema.safeParse(await fixture(VALID_SESSION_OPEN)).success).toBe(true);
@@ -46,16 +50,37 @@ test("session loop contracts pin the golden fixtures", async () => {
 });
 
 test("session loop contracts refuse the invalid fixtures", async () => {
-  // Problem ids are uppercase-path-safe by contract; lowercase never parses.
+  // Consecutive hyphens cannot survive renderer control comments, so they are
+  // refused by the canonical write contract rather than stored for a later
+  // pack/public-face failure.
   expect(SessionOpenRequestSchema.safeParse(await fixture(INVALID_OPEN_PROBLEM)).success).toBe(
     false,
   );
+  for (const problem_id of ["p-4dsp", "P--AB", "P-A--B", "P-A---B", "P-AB--"]) {
+    expect(SessionOpenRequestSchema.safeParse({ problem_id }).success, problem_id).toBe(false);
+  }
   // Writes are strict JSON: an undeclared field is a contract error, not a strip.
   expect(WorkshopPushRequestSchema.safeParse(await fixture(INVALID_PUSH_EXTRA)).success).toBe(
     false,
   );
   // Claim kinds are a closed vocabulary; the validator never sees a stray kind.
   expect(PromoteRequestSchema.safeParse(await fixture(INVALID_PROMOTE_KIND)).success).toBe(false);
+});
+
+test("the generated session-open schema carries the renderer-safe problem-id law", async () => {
+  const generated = (await fixture(GENERATED_SESSIONS_SCHEMA)) as {
+    properties?: {
+      session_open_request?: {
+        properties?: { problem_id?: { pattern?: string } };
+      };
+    };
+  };
+  const pattern = generated.properties?.session_open_request?.properties?.problem_id?.pattern;
+  expect(pattern).toBe("^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$");
+  if (pattern === undefined) throw new Error("generated session problem-id pattern is missing");
+  const generatedProblemId = new RegExp(pattern);
+  expect(generatedProblemId.test("P-4DSP")).toBe(true);
+  expect(generatedProblemId.test("P-A--B")).toBe(false);
 });
 
 test("the falsifier is schema-optional so the validator owns the teaching refusal", () => {

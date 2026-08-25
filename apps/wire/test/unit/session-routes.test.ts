@@ -1019,6 +1019,42 @@ describe("session protocol routes", () => {
     expect(tooLargeText.includes("OVERSIZE")).toBe(false);
   });
 
+  test("renderer-invalid problem ids refuse before any mounted session state is written (ZDZ.10)", async () => {
+    const { call, db } = await fixture();
+    const state = async () => ({
+      problems: (await db.prepare("SELECT COUNT(*) AS n FROM problems").first<{ n: number }>())?.n,
+      sessions: (await db.prepare("SELECT COUNT(*) AS n FROM sessions").first<{ n: number }>())?.n,
+      memberships: (
+        await db.prepare("SELECT COUNT(*) AS n FROM problem_memberships").first<{ n: number }>()
+      )?.n,
+      replays: (
+        await db.prepare("SELECT COUNT(*) AS n FROM session_write_replays").first<{ n: number }>()
+      )?.n,
+    });
+    const before = await state();
+
+    const response = await call("/v1/sessions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "zdz10-invalid-problem-id",
+      },
+      body: JSON.stringify({ problem_id: "P-A--B", intent: "prove" }),
+    });
+    expect(response.status).toBe(422);
+    const responseText = await response.text();
+    const document = ProblemDocumentSchema.parse(JSON.parse(responseText));
+    expect(document).toMatchObject({
+      code: "SESSION_OPEN_BODY_INVALID",
+      status: 422,
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: { problem_id: "P-4DSP", intent: "prove" },
+    });
+    expect(responseText).not.toContain("P-A--B");
+    expect(await state()).toEqual(before);
+  });
+
   test("same-key races atomically elect one open, workshop, promotion, and close", async () => {
     const barrier = stagedReadBarrier();
     const { call, db, binding } = await fixture({

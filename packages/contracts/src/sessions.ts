@@ -28,7 +28,7 @@ export type SessionIntent = z.infer<typeof SessionIntentSchema>;
 
 export const ProblemIdSchema = z
   .string()
-  .regex(/^P-[A-Z0-9][A-Z0-9-]{1,30}$/, "invalid problem id");
+  .regex(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, "invalid problem id");
 export type ProblemId = z.infer<typeof ProblemIdSchema>;
 
 export const SessionIdSchema = z.string().regex(/^S-[A-Za-z0-9]{26}$/, "invalid session id");

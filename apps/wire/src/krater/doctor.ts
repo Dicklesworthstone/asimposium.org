@@ -10,6 +10,8 @@
  * be flagged `stale` and rebuilt, never silently trusted.
  */
 
+import type { D1Database } from "@cloudflare/workers-types";
+
 import type { ClaimProjection, KraterEvent } from "./krater.ts";
 import { eventChainMatches, KRATER_CHAIN_VERSION, replayClaimProjections } from "./krater.ts";
 
@@ -20,6 +22,7 @@ import { eventChainMatches, KRATER_CHAIN_VERSION, replayClaimProjections } from 
  * replayed row plus one per stored row, and rebuildSet by this same row cap.
  */
 export const MAX_PROJECTION_DOCTOR_INPUT_ROWS = 512;
+export const MAX_PROBLEM_ID_AUDIT_FINDINGS = 200;
 
 export class ProjectionDoctorInputError extends Error {
   readonly code = "PROJECTION_DOCTOR_INPUT_INVALID";
@@ -100,6 +103,41 @@ export interface IntegrityDoctorReport {
   readonly eventCount: number;
   readonly sound: boolean;
   readonly detail: string;
+}
+
+export interface ProblemIdentifierDoctorReport {
+  readonly sound: boolean;
+  /** Renderer-invalid durable problem ids, in bytewise SQLite order. */
+  readonly invalidProblemIds: readonly string[];
+  /** More invalid rows exist than this bounded report can safely return. */
+  readonly truncated: boolean;
+}
+
+/**
+ * Audit the durable problem registry for ids admitted by the former session
+ * contract but rejected by renderer control comments. This is intentionally a
+ * read-only report: existing ids are never rewritten or silently filtered.
+ */
+export async function doctorProblemIdentifiers(
+  db: D1Database,
+): Promise<ProblemIdentifierDoctorReport> {
+  const rows = await db
+    .prepare(
+      `SELECT id FROM problems
+       WHERE instr(id, '--') > 0
+       ORDER BY id
+       LIMIT ?`,
+    )
+    .bind(MAX_PROBLEM_ID_AUDIT_FINDINGS + 1)
+    .all<{ id: string }>();
+  const invalidProblemIds = (rows.results ?? [])
+    .slice(0, MAX_PROBLEM_ID_AUDIT_FINDINGS)
+    .map((row) => row.id);
+  return {
+    sound: invalidProblemIds.length === 0,
+    invalidProblemIds,
+    truncated: (rows.results?.length ?? 0) > MAX_PROBLEM_ID_AUDIT_FINDINGS,
+  };
 }
 
 /**

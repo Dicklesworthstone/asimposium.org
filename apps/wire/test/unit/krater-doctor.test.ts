@@ -1,7 +1,11 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import type { D1Database } from "@cloudflare/workers-types";
 import {
   doctorIntegrity,
+  doctorProblemIdentifiers,
   doctorProjections,
+  MAX_PROBLEM_ID_AUDIT_FINDINGS,
   MAX_PROJECTION_DOCTOR_INPUT_ROWS,
   ProjectionDoctorInputError,
 } from "../../src/krater/doctor.ts";
@@ -70,6 +74,51 @@ function denseRowsAtReportCap(): {
     stored: Array.from({ length: 256 }, (_, index) => projection(`C-${index + 1}`, index + 1)),
   };
 }
+
+function sqliteD1(sqlite: Database): D1Database {
+  type Binding = string | number | null;
+  return {
+    prepare(query: string) {
+      return {
+        bind(...bindings: Binding[]) {
+          return {
+            async all<T>() {
+              return {
+                results: sqlite.prepare<unknown, Binding[]>(query).all(...bindings) as T[],
+              };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+}
+
+describe("problem-identifier doctor (ZDZ.10)", () => {
+  test("reports renderer-invalid durable ids without rewriting or filtering them", async () => {
+    expect(MAX_PROBLEM_ID_AUDIT_FINDINGS).toBe(200);
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run("CREATE TABLE problems (id TEXT PRIMARY KEY)");
+    const insert = sqlite.prepare("INSERT INTO problems (id) VALUES (?)");
+    for (const id of ["P-SAFE", "P-B--C", "P-A--B"]) insert.run(id);
+
+    const report = await doctorProblemIdentifiers(sqliteD1(sqlite));
+    expect(report).toEqual({
+      sound: false,
+      invalidProblemIds: ["P-A--B", "P-B--C"],
+      truncated: false,
+    });
+
+    const safeSqlite = new Database(":memory:", { strict: true });
+    safeSqlite.run("CREATE TABLE problems (id TEXT PRIMARY KEY)");
+    safeSqlite.run("INSERT INTO problems (id) VALUES ('P-4DSP')");
+    expect(await doctorProblemIdentifiers(sqliteD1(safeSqlite))).toEqual({
+      sound: true,
+      invalidProblemIds: [],
+      truncated: false,
+    });
+  });
+});
 
 describe("doctor-projections (W2.6)", () => {
   test("PLANTED: the projection-doctor input cap remains the literal safe value", () => {
