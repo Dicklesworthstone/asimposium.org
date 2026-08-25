@@ -1020,7 +1020,15 @@ describe("session protocol routes", () => {
   });
 
   test("renderer-invalid problem ids refuse before any mounted session state is written (ZDZ.10)", async () => {
-    const { call, db } = await fixture();
+    let writeAttempts = 0;
+    const { call, db } = await fixture({
+      beforeRead: async (read) => {
+        if (read.kind === "run" && !/^\s*SELECT\b/i.test(read.sql)) writeAttempts += 1;
+      },
+      beforeBatch: async () => {
+        writeAttempts += 1;
+      },
+    });
     const state = async () => ({
       problems: (await db.prepare("SELECT COUNT(*) AS n FROM problems").first<{ n: number }>())?.n,
       sessions: (await db.prepare("SELECT COUNT(*) AS n FROM sessions").first<{ n: number }>())?.n,
@@ -1032,6 +1040,7 @@ describe("session protocol routes", () => {
       )?.n,
     });
     const before = await state();
+    const writeAttemptsBefore = writeAttempts;
 
     const response = await call("/v1/sessions", {
       method: "POST",
@@ -1053,6 +1062,7 @@ describe("session protocol routes", () => {
     });
     expect(responseText).not.toContain("P-A--B");
     expect(await state()).toEqual(before);
+    expect(writeAttempts).toBe(writeAttemptsBefore);
   });
 
   test("same-key races atomically elect one open, workshop, promotion, and close", async () => {
