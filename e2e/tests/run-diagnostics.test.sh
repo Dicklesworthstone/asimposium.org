@@ -148,7 +148,7 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'printf "<%s>\n" "$@" >"$ASIMPOSIUM_E2E_CURL_ARGS_FILE"' \
-  'env >"$ASIMPOSIUM_E2E_CURL_ENV_FILE"' \
+  'printf "%s\n" "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN-}" >"$ASIMPOSIUM_E2E_CURL_ENV_FILE"' \
   'config_line=""' \
   'read_stdin=0' \
   'previous_argument=""' \
