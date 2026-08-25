@@ -3696,6 +3696,10 @@ self_test() {
   check "env-inspection-detects-inheritance" "$inherit_seen" "1"
 
   reap_children
+  # The bounded-supervisor stdout capture is per-PID and was never removed,
+  # leaking one 0-byte $TMPDIR/s6-bounded.<pid> per self-test run. Drop it here:
+  # this point precedes every self_test exit path.
+  rm -f "$bounded_out" 2>/dev/null || true
   if (( REAP_SURVIVORS != 0 || ${#CHILD_PIDS[@]} != 0 )); then
     emit "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"CLEANUP_UNPROVEN\",\"self_test\":true}"
     exit "$EX_CLEANUP_UNPROVEN"
