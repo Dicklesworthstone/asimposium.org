@@ -12,11 +12,9 @@ import { validatedProblem as problemDocument } from "./http/envelope";
 import { readCursor, readEvents } from "./krater/krater";
 
 /**
- * The first public ledger face (a W6.1 down payment): the problems index.
- * JSON is canonical; Markdown is the reading face. Rows come from the Krater
- * `problems` projection directly, so an empty ledger answers an honest empty
- * list rather than a dressed-up placeholder. `omitted[]` says what the face
- * leaves out.
+ * Public ledger read faces. JSON is canonical; Markdown is the reading face.
+ * Rows come from Krater's public projections directly, so an empty ledger
+ * answers honestly and every bounded digest declares what it omitted.
  */
 const OMITTED = ["titles, statements, and statuses land with the problem lifecycle (W5.1)"];
 
