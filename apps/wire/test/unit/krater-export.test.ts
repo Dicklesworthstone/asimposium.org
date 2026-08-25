@@ -366,9 +366,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
       row.row_digest = await exportedRowDigest(row, "P-OTHER");
       lines[index] = JSON.stringify(row);
     }
-    await expect(
-      verifyProblemExportChain(`${lines.join("\n")}\n`, pin),
-    ).resolves.toEqual({
+    await expect(verifyProblemExportChain(`${lines.join("\n")}\n`, pin)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
       detail: "the external checkpoint pin is invalid or names another problem",
@@ -442,7 +440,8 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     };
     const prefix = header.checkpoints[0];
     const terminal = header.checkpoints[1];
-    if (prefix === undefined || terminal === undefined) throw new Error("checkpoint fixture missing");
+    if (prefix === undefined || terminal === undefined)
+      throw new Error("checkpoint fixture missing");
 
     expect(
       (

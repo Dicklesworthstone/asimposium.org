@@ -1305,7 +1305,9 @@ describe("face wire format", () => {
                 if (query.includes("SELECT id FROM problems WHERE id = ?")) {
                   return { first: async () => ({ id: "P-4DSP" }) };
                 }
-                if (query.includes("SELECT public_seq, chain_digest, chain_version FROM problems")) {
+                if (
+                  query.includes("SELECT public_seq, chain_digest, chain_version FROM problems")
+                ) {
                   return {
                     first: async () => ({
                       public_seq: 7,

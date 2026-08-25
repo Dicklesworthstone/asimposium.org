@@ -152,10 +152,7 @@ function boundedNonBlankString(value: unknown, maximum: number): value is string
   return typeof value === "string" && value.length <= maximum && value.trim().length > 0;
 }
 
-function nullableBoundedNonBlankString(
-  value: unknown,
-  maximum: number,
-): value is string | null {
+function nullableBoundedNonBlankString(value: unknown, maximum: number): value is string | null {
   return value === null || boundedNonBlankString(value, maximum);
 }
 

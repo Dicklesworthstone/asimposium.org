@@ -613,9 +613,7 @@ export async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): 
   );
 }
 
-async function legacyEventEnvelopeRowDigestV1(
-  envelope: EventEnvelopeForDigest,
-): Promise<string> {
+async function legacyEventEnvelopeRowDigestV1(envelope: EventEnvelopeForDigest): Promise<string> {
   requireInputSequence(envelope.seq, "legacy event envelope sequence", false);
   return sha256Hex(
     canonicalJson({
@@ -1314,9 +1312,7 @@ export async function backfillKraterIntegrity(
       !Number.isSafeInteger(event.object_version) ||
       event.object_version < 1
     ) {
-      backfillRequired(
-        "the legacy event stream is not a contiguous canonical envelope history.",
-      );
+      backfillRequired("the legacy event stream is not a contiguous canonical envelope history.");
     }
     const envelope: EventEnvelopeForDigest = {
       eventId: event.id,
@@ -1348,7 +1344,9 @@ export async function backfillKraterIntegrity(
       (event.stored_row_digest !== legacyRowDigest ||
         event.stored_chain_digest !== legacyChainDigest)
     ) {
-      backfillRequired("the stored v1 integrity bytes disagree with their immutable event history.");
+      backfillRequired(
+        "the stored v1 integrity bytes disagree with their immutable event history.",
+      );
     }
     if (legacyWasComplete) {
       const legacyCheckpoint = legacyCheckpoints[index];
@@ -2954,53 +2952,55 @@ export async function readEvents(
       afterSeq,
       limit,
     ).all<EventRow>();
-    return Promise.all(result.results.map(async (rawRow) => {
-      const row = eventRowWithSafeSequence(rawRow);
-      if (row.row_digest === null || row.chain_digest === null) {
-        backfillRequired("event reads require one complete v2 Krater integrity replay.");
-      }
-      requireCurrentChainVersion(row.chain_version);
-      const expectedRowDigest = await eventEnvelopeRowDigest({
-        eventId: row.id,
-        problemId: row.problem_id,
-        seq: row.seq,
-        type: row.type,
-        objectKind: row.object_kind,
-        objectId: row.object_id,
-        objectVersion: row.object_version,
-        payloadSha256: row.payload_sha256,
-        createdAt: row.created_at,
-        actorFellowId: row.actor_fellow_id,
-        actorSponsorId: row.actor_sponsor_id,
-        actorSessionId: row.actor_session_id,
-        modelStringSelfDeclared: row.model_string_self_declared,
-        harness: row.harness,
-        writerCredentialId: row.writer_credential_id,
-      });
-      if (row.row_digest !== expectedRowDigest) {
-        backfillRequired("event reads refuse a v2 row digest that disagrees with its envelope.");
-      }
-      return {
-        eventId: row.id,
-        problemId: row.problem_id,
-        seq: row.seq,
-        type: row.type,
-        objectKind: row.object_kind,
-        objectId: row.object_id,
-        objectVersion: row.object_version,
-        payloadSha256: row.payload_sha256,
-        rowDigest: row.row_digest,
-        chainDigest: row.chain_digest,
-        chainVersion: KRATER_CHAIN_VERSION,
-        createdAt: row.created_at,
-        actorFellowId: row.actor_fellow_id,
-        actorSponsorId: row.actor_sponsor_id,
-        actorSessionId: row.actor_session_id,
-        modelStringSelfDeclared: row.model_string_self_declared,
-        harness: row.harness,
-        writerCredentialId: row.writer_credential_id,
-      };
-    }));
+    return Promise.all(
+      result.results.map(async (rawRow) => {
+        const row = eventRowWithSafeSequence(rawRow);
+        if (row.row_digest === null || row.chain_digest === null) {
+          backfillRequired("event reads require one complete v2 Krater integrity replay.");
+        }
+        requireCurrentChainVersion(row.chain_version);
+        const expectedRowDigest = await eventEnvelopeRowDigest({
+          eventId: row.id,
+          problemId: row.problem_id,
+          seq: row.seq,
+          type: row.type,
+          objectKind: row.object_kind,
+          objectId: row.object_id,
+          objectVersion: row.object_version,
+          payloadSha256: row.payload_sha256,
+          createdAt: row.created_at,
+          actorFellowId: row.actor_fellow_id,
+          actorSponsorId: row.actor_sponsor_id,
+          actorSessionId: row.actor_session_id,
+          modelStringSelfDeclared: row.model_string_self_declared,
+          harness: row.harness,
+          writerCredentialId: row.writer_credential_id,
+        });
+        if (row.row_digest !== expectedRowDigest) {
+          backfillRequired("event reads refuse a v2 row digest that disagrees with its envelope.");
+        }
+        return {
+          eventId: row.id,
+          problemId: row.problem_id,
+          seq: row.seq,
+          type: row.type,
+          objectKind: row.object_kind,
+          objectId: row.object_id,
+          objectVersion: row.object_version,
+          payloadSha256: row.payload_sha256,
+          rowDigest: row.row_digest,
+          chainDigest: row.chain_digest,
+          chainVersion: KRATER_CHAIN_VERSION,
+          createdAt: row.created_at,
+          actorFellowId: row.actor_fellow_id,
+          actorSponsorId: row.actor_sponsor_id,
+          actorSessionId: row.actor_session_id,
+          modelStringSelfDeclared: row.model_string_self_declared,
+          harness: row.harness,
+          writerCredentialId: row.writer_credential_id,
+        };
+      }),
+    );
   } catch (error) {
     if (
       error instanceof KraterValidationError ||
@@ -3428,11 +3428,7 @@ export async function inspectProblem(
         problemId,
       ),
       statement(db, "SELECT COUNT(*) AS count FROM events WHERE problem_id = ?", problemId),
-      statement(
-        db,
-        "SELECT COUNT(*) AS count FROM event_chain_v2 WHERE problem_id = ?",
-        problemId,
-      ),
+      statement(db, "SELECT COUNT(*) AS count FROM event_chain_v2 WHERE problem_id = ?", problemId),
       statement(
         db,
         `SELECT COUNT(*) AS count

@@ -14,12 +14,7 @@
 import type { D1Database } from "@cloudflare/workers-types";
 
 import { EXPORT_FORMAT, serializeProblemExport, verifyProblemExportChain } from "./export.ts";
-import {
-  type KraterEvent,
-  readCheckpoints,
-  readEvents,
-  readIntegrityState,
-} from "./krater.ts";
+import { type KraterEvent, readCheckpoints, readEvents, readIntegrityState } from "./krater.ts";
 
 /** The minimal bucket surface the backup writer needs. */
 export interface BackupBucket {

@@ -1015,11 +1015,7 @@ export function assertS2TerminalDigestParity(
   stateResult: S2StateResult,
   replay: S2ReplayResult,
 ): void {
-  if (
-    write.seq !== event.seq ||
-    write.seq !== stateResult.cursor ||
-    write.seq !== replay.cursor
-  ) {
+  if (write.seq !== event.seq || write.seq !== stateResult.cursor || write.seq !== replay.cursor) {
     fail("S2_TERMINAL_SEQUENCE_MISMATCH");
   }
   if (write.row_digest !== event.row_digest) fail("S2_V2_ROW_DIGEST_MISMATCH");
@@ -1988,13 +1984,13 @@ async function legacyBoundedBackfill(): Promise<void> {
     LEGACY_OVER_LIMIT_PROBLEM,
     "legacy-over-limit-counts-after-refusal",
   );
-  assertEqual(refusedCounts.events, LEGACY_OVER_LIMIT_EVENTS, "S2_LEGACY_OVER_LIMIT_EVENTS_MUTATED");
-  assertEqual(refusedCounts.event_chain_v2, 0, "S2_LEGACY_OVER_LIMIT_EVENT_CHAIN_V2_PARTIAL");
   assertEqual(
-    refusedCounts.integrity_checkpoints,
-    0,
-    "S2_LEGACY_OVER_LIMIT_CHECKPOINT_PARTIAL",
+    refusedCounts.events,
+    LEGACY_OVER_LIMIT_EVENTS,
+    "S2_LEGACY_OVER_LIMIT_EVENTS_MUTATED",
   );
+  assertEqual(refusedCounts.event_chain_v2, 0, "S2_LEGACY_OVER_LIMIT_EVENT_CHAIN_V2_PARTIAL");
+  assertEqual(refusedCounts.integrity_checkpoints, 0, "S2_LEGACY_OVER_LIMIT_CHECKPOINT_PARTIAL");
   assertEqual(
     refusedCounts.checkpoint_chain_v2,
     0,
@@ -3012,11 +3008,7 @@ async function restartVerify(): Promise<void> {
   assertEqual(primary.counts.outbox, 31, "S2_RESTART_OUTBOX_INVALID");
   assertEqual(primary.counts.integrity_checkpoints, 31, "S2_RESTART_CHECKPOINT_INVALID");
   assertEqual(primary.counts.event_chain_v2, 31, "S2_RESTART_EVENT_CHAIN_V2_INVALID");
-  assertEqual(
-    primary.counts.checkpoint_chain_v2,
-    31,
-    "S2_RESTART_CHECKPOINT_CHAIN_V2_INVALID",
-  );
+  assertEqual(primary.counts.checkpoint_chain_v2, 31, "S2_RESTART_CHECKPOINT_CHAIN_V2_INVALID");
   await assertReplay(PRIMARY_PROBLEM, 31, "outbox-worker-restart-replay");
   await assertReplay(LARGE_PROBLEM, 201, "large-replay-after-worker-restart");
   const recoveredOutbox = await waitForOutbox(
@@ -3709,11 +3701,7 @@ async function mountedCrashRecoveryDeliversExactlyOnce(): Promise<void> {
   assertEqual(survived.counts.outbox, 1, "S2_MOUNTED_CRASH_ROW_LOST");
   assertEqual(survived.counts.events, 1, "S2_MOUNTED_CRASH_EVENT_LOST");
   assertEqual(survived.counts.event_chain_v2, 1, "S2_MOUNTED_CRASH_EVENT_CHAIN_V2_LOST");
-  assertEqual(
-    survived.counts.checkpoint_chain_v2,
-    1,
-    "S2_MOUNTED_CRASH_CHECKPOINT_CHAIN_V2_LOST",
-  );
+  assertEqual(survived.counts.checkpoint_chain_v2, 1, "S2_MOUNTED_CRASH_CHECKPOINT_CHAIN_V2_LOST");
   assertEqual(survived.counts.claims, 1, "S2_MOUNTED_CRASH_CLAIM_LOST");
   // The crash row was committed via the binding-failure seam, so the DO never
   // armed an alarm for it; on restart it does not self-deliver, and /status is

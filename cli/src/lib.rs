@@ -54,9 +54,21 @@ const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 pub fn resolve_origin(explicit: Option<&String>) -> Result<String, String> {
     let candidate: String = match explicit {
         Some(value) => value.clone(),
-        None => std::env::var("ASIMP_ORIGIN").unwrap_or_else(|_| DEFAULT_ORIGIN.to_string()),
+        None => resolve_environment_origin(std::env::var("ASIMP_ORIGIN"))?,
     };
     validate_origin(&candidate).map(str::to_string)
+}
+
+fn resolve_environment_origin(
+    configured: Result<String, std::env::VarError>,
+) -> Result<String, String> {
+    match configured {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_ORIGIN.to_string()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("ASIMP_ORIGIN must be valid UTF-8".to_string())
+        }
+    }
 }
 
 fn validate_origin(origin: &str) -> Result<&str, String> {
@@ -277,7 +289,27 @@ mod tests {
         );
         let error = resolve_origin(Some(&"http://insecure.example".to_string())).unwrap_err();
         assert!(error.contains("https"));
-        let _ = resolve_origin(None).unwrap();
+        assert_eq!(
+            resolve_environment_origin(Ok("https://configured.example".to_string())).unwrap(),
+            "https://configured.example"
+        );
+        assert_eq!(
+            resolve_environment_origin(Err(std::env::VarError::NotPresent)).unwrap(),
+            DEFAULT_ORIGIN
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_environment_origin_is_refused_instead_of_falling_back_to_production() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let error = resolve_environment_origin(Err(std::env::VarError::NotUnicode(
+            OsString::from_vec(vec![0xff]),
+        )))
+        .unwrap_err();
+        assert_eq!(error, "ASIMP_ORIGIN must be valid UTF-8");
     }
 
     #[test]

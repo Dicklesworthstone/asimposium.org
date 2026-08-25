@@ -154,10 +154,7 @@ function ensureProblemHarness(): {
         return statement;
       },
       all: async () => {
-        if (
-          sql.includes("END AS terminal_v2_complete") &&
-          sql.includes("FROM problems WHERE id")
-        ) {
+        if (sql.includes("END AS terminal_v2_complete") && sql.includes("FROM problems WHERE id")) {
           return fakeD1Result([
             {
               public_seq: 0,
@@ -253,10 +250,7 @@ function retryingWriteHarness(
         return statement;
       },
       all: async () => {
-        if (
-          sql.includes("END AS terminal_v2_complete") &&
-          sql.includes("FROM problems WHERE id")
-        ) {
+        if (sql.includes("END AS terminal_v2_complete") && sql.includes("FROM problems WHERE id")) {
           if (publicSeq === 0 && options.forceWrongEmptyGenesis !== true) {
             chainDigest = await genesisChainDigest(String(bindings[0]));
           }
@@ -1150,13 +1144,7 @@ describe("Krater deterministic contracts", () => {
     const first = { ...firstDraft, rowDigest: firstRow, chainDigest: firstChain };
     const secondDraft = event(problemId, 2, secondPayload);
     const secondRow = await canonicalEventRow(secondDraft);
-    const secondChain = await eventChainDigest(
-      problemId,
-      2,
-      secondPayload,
-      secondRow,
-      firstChain,
-    );
+    const secondChain = await eventChainDigest(problemId, 2, secondPayload, secondRow, firstChain);
     const second = { ...secondDraft, rowDigest: secondRow, chainDigest: secondChain };
     const valid = [first, second];
 
@@ -1179,17 +1167,15 @@ describe("Krater deterministic contracts", () => {
     const payload = "a".repeat(64);
     const prior = "b".repeat(64);
 
-    await expect(eventChainDigest(input.problemId, max, payload, "c".repeat(64), prior)).resolves.toMatch(
-      /^[a-f0-9]{64}$/,
-    );
+    await expect(
+      eventChainDigest(input.problemId, max, payload, "c".repeat(64), prior),
+    ).resolves.toMatch(/^[a-f0-9]{64}$/);
     await expect(eventRowDigest(input, max, payload)).resolves.toMatch(/^[a-f0-9]{64}$/);
     await expect(checkpointDigest(input.problemId, max, prior)).resolves.toMatch(/^[a-f0-9]{64}$/);
     for (const invalid of [max + 1, 1.5]) {
       await expect(
         eventChainDigest(input.problemId, invalid, payload, "c".repeat(64), prior),
-      ).rejects.toThrow(
-        KraterValidationError,
-      );
+      ).rejects.toThrow(KraterValidationError);
       await expect(eventRowDigest(input, invalid, payload)).rejects.toThrow(KraterValidationError);
       await expect(checkpointDigest(input.problemId, invalid, prior)).rejects.toThrow(
         KraterValidationError,
@@ -1324,10 +1310,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
   const MIGRATIONS = resolve(import.meta.dir, "..", "..", "..", "..", "db", "migrations");
 
   function contiguityMigrationStatements(): readonly string[] {
-    const source = readFileSync(
-      join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"),
-      "utf8",
-    )
+    const source = readFileSync(join(MIGRATIONS, "0040_krater_chain_v2_contiguity.sql"), "utf8")
       .replace(/^\s*--.*$/gmu, "")
       .trim();
     const firstTrigger = source.indexOf("CREATE TRIGGER");
@@ -1339,10 +1322,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       .filter((statement) => statement.length > 0);
     const triggerSource = source.slice(firstTrigger).trim();
     const triggers = triggerSource.match(/CREATE TRIGGER[\s\S]*?\bEND;/gu) ?? [];
-    const reconstructed = [
-      ...prefix.map((statement) => `${statement};`),
-      ...triggers,
-    ].join("\n");
+    const reconstructed = [...prefix.map((statement) => `${statement};`), ...triggers].join("\n");
     if (normalizeSql(reconstructed) !== normalizeSql(source)) {
       throw new Error("0040 statement splitter did not consume the exact executable SQL");
     }
@@ -1579,14 +1559,16 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
           Date.parse("2026-08-24T18:30:00.000Z"),
         ),
       ).rejects.toThrow("stored v1 checkpoint bytes disagree");
+      expect(sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get()).toEqual({
+        count: 0,
+      });
+      expect(sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get()).toEqual({
+        count: 0,
+      });
       expect(
-        sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get(),
-      ).toEqual({ count: 0 });
-      expect(
-        sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get(),
-      ).toEqual({ count: 0 });
-      expect(
-        sqlite.query("SELECT chain_digest, chain_version FROM problems WHERE id = ?").get(problemId),
+        sqlite
+          .query("SELECT chain_digest, chain_version FROM problems WHERE id = ?")
+          .get(problemId),
       ).toEqual({ chain_digest: legacyChainDigest, chain_version: null });
       sqlite
         .query(
@@ -1626,9 +1608,9 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       expect(sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get()).toEqual({
         count: 0,
       });
-      expect(
-        sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get(),
-      ).toEqual({ count: 0 });
+      expect(sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get()).toEqual({
+        count: 0,
+      });
       expect(
         JSON.stringify({
           problem: sqlite
@@ -1670,11 +1652,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         expectedRowDigest,
         await genesisChainDigest(problemId),
       );
-      const expectedCheckpointDigest = await checkpointDigest(
-        problemId,
-        1,
-        expectedChainDigest,
-      );
+      const expectedCheckpointDigest = await checkpointDigest(problemId, 1, expectedChainDigest);
       await expect(
         backfillKraterIntegrity(
           localD1(sqlite, { throwAfterBatchCommit: true }),
@@ -1772,15 +1750,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         .query(
           "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest) VALUES (?, 1, ?, ?, ?), (?, 0, ?, ?, NULL)",
         )
-        .run(
-          problemId,
-          createdAt,
-          createdAt,
-          root,
-          otherProblemId,
-          createdAt,
-          createdAt,
-        );
+        .run(problemId, createdAt, createdAt, root, otherProblemId, createdAt, createdAt);
       sqlite
         .query(
           `INSERT INTO krater_integrity_backfill
@@ -1904,9 +1874,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         .query("UPDATE problems SET public_seq = 2, chain_digest = ? WHERE id = ?")
         .run(root2, problemId);
       sqlite
-        .query(
-          "UPDATE krater_integrity_backfill SET legacy_event_count = 2 WHERE problem_id = ?",
-        )
+        .query("UPDATE krater_integrity_backfill SET legacy_event_count = 2 WHERE problem_id = ?")
         .run(problemId);
       sqlite
         .query(
@@ -2007,9 +1975,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         .query("UPDATE problems SET public_seq = 2, chain_digest = ? WHERE id = ?")
         .run(root2, problemId);
       sqlite
-        .query(
-          "UPDATE krater_integrity_backfill SET legacy_event_count = 2 WHERE problem_id = ?",
-        )
+        .query("UPDATE krater_integrity_backfill SET legacy_event_count = 2 WHERE problem_id = ?")
         .run(problemId);
       sqlite
         .query(
@@ -2046,9 +2012,9 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       expect(sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get()).toEqual({
         count: 1,
       });
-      expect(
-        sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get(),
-      ).toEqual({ count: 1 });
+      expect(sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get()).toEqual({
+        count: 1,
+      });
       expect(() => applyContiguityMigrationAtomically(sqlite)).toThrow(/event_gap_count/u);
       expect(
         sqlite
@@ -2068,9 +2034,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
            VALUES (?, ?, 1, ?, ?, 2)`,
         )
         .run(event1, problemId, "bb".repeat(32), root1);
-      expect(() => applyContiguityMigrationAtomically(sqlite)).toThrow(
-        /checkpoint_gap_count/u,
-      );
+      expect(() => applyContiguityMigrationAtomically(sqlite)).toThrow(/checkpoint_gap_count/u);
 
       // Once both exact ranges are present, 0040 may install its forward-only
       // guards and must retain a zero-gap migration witness.

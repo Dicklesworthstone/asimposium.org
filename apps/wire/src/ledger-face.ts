@@ -148,8 +148,7 @@ function renderProblemFacePair(projection: Projection): ProblemFaceFaces {
 
 function facesFitDigestBudget(faces: ProblemFaceFaces): boolean {
   return (
-    Math.ceil(Math.max(faces.json.bytes, faces.markdown.bytes) / 4) <=
-    PROBLEM_DIGEST_TOKEN_BUDGET
+    Math.ceil(Math.max(faces.json.bytes, faces.markdown.bytes) / 4) <= PROBLEM_DIGEST_TOKEN_BUDGET
   );
 }
 
@@ -209,15 +208,14 @@ async function loadProblemFace(
     throw new Error("the problem digest snapshot returned invalid problem metadata");
   }
 
-  const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> = [];
+  const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> =
+    [];
   for (const row of rows) {
     if (row.problem_id !== first.problem_id || row.public_seq !== first.public_seq) {
       throw new Error("the problem digest snapshot mixed problem heads");
     }
     const { claim_id: claimId, statement, source_seq: sourceSeq } = row;
-    const nullFields = [claimId, statement, sourceSeq].filter(
-      (value) => value === null,
-    ).length;
+    const nullFields = [claimId, statement, sourceSeq].filter((value) => value === null).length;
     if (nullFields === 3) {
       if (rows.length !== 1) throw new Error("the problem digest mixed an empty row with claims");
       continue;

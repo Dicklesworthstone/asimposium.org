@@ -81,9 +81,9 @@ const FaceItemSchema = z
   .strict();
 
 const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security boundary for ASCII control range
-const PUBLIC_ACTION_PATH_PATTERN =
-  /^(?!\/\/)(?!.*[\u0000-\u0020\u007F\\#`])(?![^?]*%)(?![^?]*(?:^|\/)\.{1,2}(?:\/|\?|$))\/.*$/;
+const PUBLIC_ACTION_PATH_PATTERN = new RegExp(
+  "^(?!\\/\\/)(?!.*[\\u0000-\\u0020\\u007F\\\\#`])(?![^?]*%)(?![^?]*(?:^|\\/)\\.{1,2}(?:\\/|\\?|$))\\/.*$",
+);
 
 function hasAsciiControlOrSpace(value: string): boolean {
   for (let offset = 0; offset < value.length; offset += 1) {
