@@ -1775,6 +1775,20 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit.indexOf("cleanup_workers")).toBeLessThan(
       onExit.indexOf("e2e_close_artifact_writer_lease"),
     );
+    const rawInterrupt = shell.slice(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      shell.indexOf('if [[ "${mode}" == "raw-inherited-child-interrupt" ]]'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      shell.indexOf('if [[ "${mode}" == "pre-arm-owner-loss" ]]'),
+    );
+    expect(rawInterrupt).toContain('[[ "$(<"${raw_ready}")" == ready ]]');
+    expect(rawInterrupt).toContain('s2_raw_inherited_child_command_is_exact "${raw_child_pid}"');
+    expect(rawInterrupt).toContain('kill -TERM "$$"');
+    expect(onExit.indexOf("e2e_close_artifact_writer_lease")).toBeLessThan(
+      onExit.indexOf(
+        '"scenario":"outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease"',
+      ),
+    );
     expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
       shell.indexOf("write_s2_cost_publication_commit()"),
     );
@@ -2612,6 +2626,44 @@ describe("registered S2 shell and lifecycle regressions", () => {
       );
     },
     CONCURRENT_CAPTURE_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "outer TERM settles its registered raw inherited child before closing the writer lease",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "raw-inherited-child-interrupt",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "raw-inherited-child-interrupt",
+        () => {
+          const records = ndjsonRecords(run);
+          expect(run.exitCode).toBe(143);
+          expect(run.stdout).toContain(`"run_id":"${runId}"`);
+          expect(records).toContainEqual({
+            tool: "bash+ps+lsof",
+            package: "apps/wire",
+            suite: "s2-krater-shell",
+            status: "pass",
+            scenario:
+              "outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease",
+            reproduce:
+              "S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt scripts/e2e-s2-krater.sh",
+          });
+          expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          expect(run.stdout).not.toContain(
+            '"code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP"',
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
 
   test.each([...selectedS2ShellRegressionModes()])(
