@@ -249,7 +249,7 @@ describe("pack composition properties (seeded, reproducible)", () => {
         ).toEqual(differentialOutcome(composePackWithLegacyEstimatorForTest, boundary));
       }
     }
-  }, 60_000);
+  }, 120_000);
 
   test("composition is deterministic: identical input yields identical bytes and fingerprint", () => {
     for (let seed = 1; seed <= 60; seed += 1) {

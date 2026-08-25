@@ -257,7 +257,7 @@ async function loadProblemFace(
       {
         method: "GET",
         url: `/p/${first.problem_id}.md`,
-        why: "the human-readable agent face",
+        why: "the canonical readable Markdown face",
         public_read: true,
       },
       {
