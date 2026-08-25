@@ -720,8 +720,9 @@ ${publish}
 }
 
 function processTable(): string {
-  const stdoutPath = capturePath("ps-command.stdout");
-  const stderrPath = capturePath("ps-command.stderr");
+  const dir = mkdtempSync(join(tmpdir(), "ps-capture-"));
+  const stdoutPath = join(dir, "ps-command.stdout");
+  const stderrPath = join(dir, "ps-command.stderr");
   closeSync(openSync(stdoutPath, "w", 0o600));
   closeSync(openSync(stderrPath, "w", 0o600));
   const snapshot = Bun.spawnSync({
@@ -735,8 +736,9 @@ function processTable(): string {
 }
 
 function processIdsForMarker(marker: string): number[] {
-  const stdoutPath = capturePath("ps-pid-command.stdout");
-  const stderrPath = capturePath("ps-pid-command.stderr");
+  const dir = mkdtempSync(join(tmpdir(), "ps-pid-capture-"));
+  const stdoutPath = join(dir, "ps-pid-command.stdout");
+  const stderrPath = join(dir, "ps-pid-command.stderr");
   closeSync(openSync(stdoutPath, "w", 0o600));
   closeSync(openSync(stderrPath, "w", 0o600));
   const snapshot = Bun.spawnSync({
