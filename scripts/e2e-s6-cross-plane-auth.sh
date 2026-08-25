@@ -218,15 +218,25 @@ json_string() {
   printf '%s' "$raw"
 }
 
+SELF_TEST_MODE=0
+
 pass_record() {
   ASSERTIONS=$((ASSERTIONS + 1))
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"$(json_string "$2")\",\"reproduce\":\"${REPRODUCE}\"}"
+  if (( SELF_TEST_MODE == 1 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"$(json_string "$2")\"}"
+  else
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"$(json_string "$2")\",\"reproduce\":\"${REPRODUCE}\"}"
+  fi
 }
 
 fail_record() {
   ASSERTIONS=$((ASSERTIONS + 1))
   FAILURES=$((FAILURES + 1))
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"fail\",\"detail\":\"$(json_string "$2")\",\"reproduce\":\"${REPRODUCE}\"}"
+  if (( SELF_TEST_MODE == 1 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"fail\",\"detail\":\"$(json_string "$2")\"}"
+  else
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"fail\",\"detail\":\"$(json_string "$2")\",\"reproduce\":\"${REPRODUCE}\"}"
+  fi
 }
 
 blocked_record() {
@@ -2432,6 +2442,7 @@ self_test() {
   # The deliberately non-settling plants still fit beneath the unchanged outer
   # 100-second self-test ceiling.
   CHILD_SETTLE_ATTEMPTS=80
+  SELF_TEST_MODE=1
   check() {
     if [[ "$2" == "$3" ]]; then
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"self-test\"}"
