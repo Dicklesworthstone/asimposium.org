@@ -26,6 +26,7 @@ import {
   costModelSourceDiscrepancies,
   costModelSourceResolutions,
   createReceiptReader,
+  DISCREPANCY_NO_CLAIM,
   FABLE_WORKED_EXAMPLE,
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   type FableWorkedExampleInput,
@@ -701,6 +702,7 @@ describe("S7 cost verifier", () => {
         sizing_line_requests_per_day: 1_440_000,
         worked_example_base_load_per_day: 29_600,
         unit: "requests / day",
+        no_claim: DISCREPANCY_NO_CLAIM.FABLE_TABLE_SCENARIO_MISMATCH,
       },
       {
         code: "FABLE_DUTY_CYCLE_MISMATCH",
@@ -709,6 +711,7 @@ describe("S7 cost verifier", () => {
         sizing_line_requests_per_day: 1_440_000,
         sizing_line_requests_per_day_at_worked_example_duty_cycle: 240_000,
         unit: "requests / day",
+        no_claim: DISCREPANCY_NO_CLAIM.FABLE_DUTY_CYCLE_MISMATCH,
       },
       {
         code: "FABLE_STORM_ROOM_UNRESOLVED",
@@ -726,6 +729,7 @@ describe("S7 cost verifier", () => {
         reason:
           "The ~45M/mo row is a 1,000-Fellow sizing line that enumerates pack reads only, so subtracting it from the row does not yield storm room. No storm-room, burst-duration, or headroom figure is established until an operator supplies an internally complete scenario.",
         required_operator_inputs: ["accepted_scenario_with_complete_request_class_enumeration"],
+        no_claim: DISCREPANCY_NO_CLAIM.FABLE_STORM_ROOM_UNRESOLVED,
       },
       {
         code: "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
@@ -744,6 +748,7 @@ describe("S7 cost verifier", () => {
         },
         authority: "exact_components",
         unit: "requests / day",
+        no_claim: DISCREPANCY_NO_CLAIM.FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH,
       },
     ]);
     expect(verifyCostModel().source_resolutions).toEqual([
@@ -757,6 +762,56 @@ describe("S7 cost verifier", () => {
       },
     ]);
     expect(verifyCostModel().assumptions).toEqual(FABLE_WORKED_EXAMPLE_ASSUMPTIONS);
+  });
+
+  test("every emitted source discrepancy binds an explicit no-claim boundary", () => {
+    const discrepancies = verifyCostModel().source_discrepancies;
+    // Non-vacuity: the worked example is expected to leave findings open, so the
+    // loop must actually iterate. A run with nothing open would make every
+    // assertion below trivially true.
+    expect(discrepancies.length).toBeGreaterThan(0);
+    for (const entry of discrepancies) {
+      const boundary = entry.no_claim;
+      expect(boundary, entry.code).toBeDefined();
+      expect(boundary.withheld.length, entry.code).toBeGreaterThan(0);
+      expect(boundary.statement.length, entry.code).toBeGreaterThan(0);
+      // A boundary naming nothing that would lift it is a dead end, not a
+      // boundary: the receipt has to say what an operator must supply.
+      expect(boundary.required_operator_inputs.length, entry.code).toBeGreaterThan(0);
+      // It must state what is NOT claimed rather than restate the numbers that
+      // are already in the entry's own fields.
+      expect(boundary.statement.startsWith("Not claimed:"), entry.code).toBe(true);
+      // Emitted from the single roster, not re-authored per construction site.
+      expect(boundary, entry.code).toBe(DISCREPANCY_NO_CLAIM[entry.code]);
+    }
+  });
+
+  test("the no-claim roster covers every code and agrees with each variant's own required inputs", () => {
+    // Pinned literally: a code added without a boundary fails here instead of
+    // shipping a receipt whose boundary is silently absent.
+    expect(Object.keys(DISCREPANCY_NO_CLAIM).sort()).toEqual([
+      "FABLE_BURST_SHAPE_UNDECLARED",
+      "FABLE_CURSOR_RATE_MISMATCH",
+      "FABLE_DUTY_CYCLE_MISMATCH",
+      "FABLE_OPERATOR_CEILING_EXCEEDED",
+      "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
+      "FABLE_STORM_ROOM_UNRESOLVED",
+      "FABLE_TABLE_SCENARIO_MISMATCH",
+    ]);
+    // Two variants already carried their own required_operator_inputs before the
+    // uniform boundary existed. Duplication is only safe if it cannot drift, so
+    // assert the two agree rather than trusting them to stay in step.
+    let checked = 0;
+    for (const entry of verifyCostModel().source_discrepancies) {
+      if ("required_operator_inputs" in entry) {
+        checked += 1;
+        expect([...entry.no_claim.required_operator_inputs], entry.code).toEqual([
+          ...entry.required_operator_inputs,
+        ]);
+      }
+    }
+    // Non-vacuity: at least one such variant is expected in this run.
+    expect(checked).toBeGreaterThan(0);
   });
 
   test("PLANTED: 29,600 is exact and 29,800 is never encoded as the exact base load", () => {

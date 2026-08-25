@@ -494,6 +494,25 @@ export interface CostVerificationResult {
 }
 
 /**
+ * What a discrepancy stops the receipt from asserting.
+ *
+ * G0 closes from the structured receipt, not from this file's comments. A
+ * discrepancy that emits only its numbers leaves the reader to infer the
+ * boundary, and an inferred boundary is exactly the kind of quiet claim this
+ * verifier exists to refuse. Every variant therefore carries one of these, so
+ * the withheld quantity and the input that would release it travel in the
+ * evidence itself.
+ */
+export interface DiscrepancyNoClaim {
+  /** The quantity or verdict this discrepancy prevents the receipt from publishing. */
+  readonly withheld: string;
+  /** Plain statement of what is not claimed, and why the numbers alone do not settle it. */
+  readonly statement: string;
+  /** What must be supplied to lift the boundary. Never inferred by this verifier. */
+  readonly required_operator_inputs: readonly string[];
+}
+
+/**
  * Six independent findings, deliberately not merged.
  *
  * Correcting the 10x cursor slip does not reconcile the table; correcting the
@@ -515,6 +534,7 @@ export type SourceDiscrepancy =
       readonly stated: number;
       readonly computed: number;
       readonly unit: "requests / second";
+      readonly no_claim: DiscrepancyNoClaim;
     }
   | {
       /**
@@ -528,6 +548,7 @@ export type SourceDiscrepancy =
       readonly sizing_line_requests_per_day: number;
       readonly worked_example_base_load_per_day: number;
       readonly unit: "requests / day";
+      readonly no_claim: DiscrepancyNoClaim;
     }
   | {
       /**
@@ -541,6 +562,7 @@ export type SourceDiscrepancy =
       readonly sizing_line_requests_per_day: number;
       readonly sizing_line_requests_per_day_at_worked_example_duty_cycle: number;
       readonly unit: "requests / day";
+      readonly no_claim: DiscrepancyNoClaim;
     }
   | {
       /**
@@ -553,6 +575,7 @@ export type SourceDiscrepancy =
       readonly code: "FABLE_BURST_SHAPE_UNDECLARED";
       readonly computed_peak_requests_per_second: number;
       readonly required_operator_inputs: readonly ["seconds_per_occurrence", "occurrences_per_day"];
+      readonly no_claim: DiscrepancyNoClaim;
     }
   | {
       /**
@@ -565,6 +588,7 @@ export type SourceDiscrepancy =
       readonly ceiling_usd_per_month: number;
       readonly sustained_peak_monthly_cost_usd: number;
       readonly unit: "usd / month";
+      readonly no_claim: DiscrepancyNoClaim;
     }
   | {
       /**
@@ -592,6 +616,7 @@ export type SourceDiscrepancy =
       readonly required_operator_inputs: readonly [
         "accepted_scenario_with_complete_request_class_enumeration",
       ];
+      readonly no_claim: DiscrepancyNoClaim;
     }
   | {
       /**
@@ -617,7 +642,64 @@ export type SourceDiscrepancy =
       };
       readonly authority: "exact_components";
       readonly unit: "requests / day";
+      readonly no_claim: DiscrepancyNoClaim;
     };
+
+/** The closed set of discrepancy codes, derived so the roster cannot drift. */
+export type SourceDiscrepancyCode = SourceDiscrepancy["code"];
+
+/**
+ * One no-claim boundary per code, in one place.
+ *
+ * Keyed by the union's own code type, so adding a variant without a boundary is
+ * a compile error rather than a receipt that silently omits one.
+ */
+export const DISCREPANCY_NO_CLAIM: Readonly<Record<SourceDiscrepancyCode, DiscrepancyNoClaim>> = {
+  FABLE_CURSOR_RATE_MISMATCH: {
+    withheld: "stated_cursor_request_rate",
+    statement:
+      "Not claimed: that the plan's printed cursor rate is the correct one. Both the printed value and the value the plan's own cadence arithmetic yields are reported, and neither is asserted as a deployed rate.",
+    required_operator_inputs: ["corrected_plan_text_or_accepted_stated_rate"],
+  },
+  FABLE_TABLE_SCENARIO_MISMATCH: {
+    withheld: "storm_room_per_day",
+    statement:
+      "Not claimed: that the table row and the worked example describe the same scenario. Because they do not, no difference taken between them is reported as headroom.",
+    required_operator_inputs: ["accepted_scenario_with_complete_request_class_enumeration"],
+  },
+  FABLE_DUTY_CYCLE_MISMATCH: {
+    withheld: "requests_per_day_at_a_decided_duty_cycle",
+    statement:
+      "Not claimed: a duty cycle for the sizing line. Both the four-hour and the full-day readings are reported; neither is chosen, and no figure that depends on choosing one is published.",
+    required_operator_inputs: ["accepted_active_seconds_per_fellow_day"],
+  },
+  FABLE_BURST_SHAPE_UNDECLARED: {
+    withheld: "burst_duration_and_frequency",
+    statement:
+      "Not claimed: a burst duration or frequency. The peak is derived from cadence arithmetic; the shape is an operator decision this verifier refuses to supply.",
+    required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
+  },
+  FABLE_OPERATOR_CEILING_EXCEEDED: {
+    withheld: "affordability_verdict",
+    statement:
+      "Not claimed: that the workload is affordable. A fully sustained peak month exceeds the accepted ceiling at the pinned pricing, so affordability is open rather than refuted.",
+    required_operator_inputs: [
+      "higher_accepted_ceiling_or_declared_burst_shape_or_cheaper_serving",
+    ],
+  },
+  FABLE_STORM_ROOM_UNRESOLVED: {
+    withheld: "storm_room_per_day",
+    statement:
+      "Not claimed: any storm-room, burst-duration, or headroom figure. Two candidates are arithmetically derivable from the row and neither is a headroom, so the decision is reported as outstanding instead of one being picked.",
+    required_operator_inputs: ["accepted_scenario_with_complete_request_class_enumeration"],
+  },
+  FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH: {
+    withheld: "base_load_per_day_as_a_plan_figure",
+    statement:
+      "Not claimed: that the plan's displayed sum is the computed base load. The exact component cadences are authoritative here; the gap is a display-rounding artifact and this verifier does not reconcile it.",
+    required_operator_inputs: ["corrected_plan_display_or_accepted_rounded_figure"],
+  },
+};
 
 /**
  * Decisions that CLOSE a formerly open finding, recorded beside the
@@ -911,6 +993,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   if (workload.cursor_requests_per_second !== workload.fable_stated_cursor_requests_per_second) {
     found.push({
       code: "FABLE_CURSOR_RATE_MISMATCH",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_CURSOR_RATE_MISMATCH,
       stated: workload.fable_stated_cursor_requests_per_second,
       computed: workload.cursor_requests_per_second,
       unit: "requests / second",
@@ -921,6 +1004,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   if (workload.fable_table_requests_per_day !== workload.base_load_per_day) {
     found.push({
       code: "FABLE_TABLE_SCENARIO_MISMATCH",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_TABLE_SCENARIO_MISMATCH,
       table_requests_per_day: workload.fable_table_requests_per_day,
       sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
       worked_example_base_load_per_day: workload.base_load_per_day,
@@ -935,6 +1019,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   ) {
     found.push({
       code: "FABLE_DUTY_CYCLE_MISMATCH",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_DUTY_CYCLE_MISMATCH,
       worked_example_active_seconds: workload.worked_example_active_seconds_per_fellow_day,
       sizing_line_active_seconds: workload.sizing_line_active_seconds_per_fellow_day,
       sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
@@ -952,6 +1037,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   if (workload.declared_burst_requests_per_day === undefined && !ceilingCovers) {
     found.push({
       code: "FABLE_BURST_SHAPE_UNDECLARED",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_BURST_SHAPE_UNDECLARED,
       computed_peak_requests_per_second: workload.cursor_requests_per_second,
       required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
     });
@@ -963,6 +1049,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   ) {
     found.push({
       code: "FABLE_OPERATOR_CEILING_EXCEEDED",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_OPERATOR_CEILING_EXCEEDED,
       ceiling_usd_per_month: ceilingUsdPerMonth,
       sustained_peak_monthly_cost_usd: sustainedCostUsd,
       unit: "usd / month",
@@ -974,6 +1061,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   if (workload.sizing_line_unenumerated_request_classes.length > 0) {
     found.push({
       code: "FABLE_STORM_ROOM_UNRESOLVED",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_STORM_ROOM_UNRESOLVED,
       table_requests_per_day: workload.fable_table_requests_per_day,
       sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
       enumerated_request_classes: workload.sizing_line_enumerated_request_classes,
@@ -986,6 +1074,7 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   if (workload.fable_displayed_base_load_per_day !== workload.base_load_per_day) {
     found.push({
       code: "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
+      no_claim: DISCREPANCY_NO_CLAIM.FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH,
       exact_base_load_per_day: workload.base_load_per_day,
       rounded_display_sum_per_day: workload.fable_displayed_base_load_per_day,
       difference_per_day: workload.fable_displayed_base_load_per_day - workload.base_load_per_day,
