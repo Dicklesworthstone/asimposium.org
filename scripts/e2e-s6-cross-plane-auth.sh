@@ -3603,6 +3603,7 @@ self_test() {
   }
 
   # The planted secrets must be invisible to an ordinary helper.
+  env | grep planted-selftest || true
   environ_plant "real-helper-environ-has-no-secret" "planted-selftest" "absent"
   # Observer-positive control: an explicitly EXPORTED canary must be visible, or
   # "absent" above could simply mean the helper cannot read its own environment.
