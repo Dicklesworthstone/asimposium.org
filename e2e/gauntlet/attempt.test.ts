@@ -8,7 +8,10 @@ import {
   transcriptMentionsAllStages,
 } from "./attempt.ts";
 
-const adapter = HARNESS_ADAPTERS[0]!;
+const [adapter] = HARNESS_ADAPTERS;
+if (!adapter) {
+  throw new Error("Expected at least one harness adapter");
+}
 
 describe("the gauntlet attempt runner", () => {
   test("keyword soup cannot mint completion", async () => {

@@ -93,7 +93,8 @@ describe("the gauntlet orchestrator", () => {
       expect(entry.status).toBe(70);
       const lines = entry.stdout.trimEnd().split("\n");
       expect(lines).toHaveLength(1);
-      expect(JSON.parse(lines[0]!)).toMatchObject({
+      const firstLine = lines[0] ?? "";
+      expect(JSON.parse(firstLine)).toMatchObject({
         status: "blocked",
         code: "GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED",
       });

@@ -27,7 +27,7 @@ export interface GauntletRun {
 export function assignHarnesses(attemptCount: number): readonly string[] {
   return Array.from(
     { length: attemptCount },
-    (_, i) => HARNESS_ADAPTERS[i % HARNESS_ADAPTERS.length]!.harness,
+    (_, i) => HARNESS_ADAPTERS[i % HARNESS_ADAPTERS.length]?.harness ?? "",
   );
 }
 
