@@ -95,11 +95,21 @@ signalled and observed absent. Constructor failures close immediately because
 no child exists yet; callback/storage failures close only after that same
 settlement boundary. An unprovable child settlement,
 Windows process-tree execution, signal exit, or crash deliberately leaves the
-lease open. Direct exported artifact helpers, standalone real-filesystem test
-fixtures, S-2, S-6, and other raw artifact writers do not yet share the full
-lifetime contract, and a deliberately re-daemonized child can escape the owned
-process group. There is also no archive locator or operator maintenance
-acquisition path. Moving or rotating `e2e/artifacts` therefore remains unsafe.
+lease open. The S-2 shell harness now claims
+`e2e/artifacts/s2-krater/<run-id>` beneath the same artifact-root epoch and
+keeps one parent-owned lease open across its recursive controller and lifecycle
+children. Each child receives an exclusively preclaimed run plus the exact
+root, namespace, run, and lease identities; it validates but never closes the
+parent's lease. The parent closes only after its child-aware cleanup and final
+publication boundary are proven. Early signals, crashes, and cleanup ambiguity
+leave the top-level lease open. This is source-level wiring only: the S-2 lane
+has not executed at the current revision under the required low-load RCH gate.
+Direct exported artifact helpers, standalone real-filesystem test fixtures,
+the standalone direct D1 adapter, S-6, and other raw artifact writers do not
+yet share the full lifetime contract, and a deliberately re-daemonized child
+can escape the owned process group. There is also no archive locator or
+operator maintenance acquisition path. Moving or rotating `e2e/artifacts`
+therefore remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.
