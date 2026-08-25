@@ -31,6 +31,27 @@ e2e_artifact_maintenance_absent_at_root() {
   [[ ! -e "$fence" && ! -L "$fence" ]]
 }
 
+e2e_test_acquired_lease_is_closed_for_root() {
+  local checked_repository_root="$1"
+  local root_identity="$2"
+  local epoch_directory
+  local lease_directory="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH"
+  local lease_identity="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY"
+  local closed_marker="$lease_directory/$ASIMPOSIUM_E2E_ARTIFACT_WRITER_LEASE_CLOSED"
+
+  epoch_directory="$(
+    e2e_artifact_writer_lease_epoch_at_root "$checked_repository_root" "$root_identity"
+  )" || return 1
+  [[ -n "$lease_directory" \
+    && "${lease_directory%/*}" == "$epoch_directory" \
+    && -d "$lease_directory" \
+    && ! -L "$lease_directory" \
+    && "$(e2e_artifact_directory_identity "$lease_directory")" == "$lease_identity" \
+    && -d "$closed_marker" \
+    && ! -L "$closed_marker" \
+    && "$(e2e_physical_directory "$closed_marker")" == "$closed_marker" ]]
+}
+
 suite="run-diagnostics-unit"
 started_ms="$(e2e_now_ms)"
 reproduce="bash e2e/tests/run-diagnostics.test.sh"
@@ -114,6 +135,67 @@ if [[ -n "$second_claim_output" ]]; then
   fail "REUSED_ARTIFACT_RUN_LEAKED"
 fi
 
+namespaced_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced.XXXXXX")" \
+  || fail "NAMESPACED_CLAIM_FIXTURE_UNAVAILABLE"
+mkdir -p "$namespaced_root/e2e" || fail "NAMESPACED_CLAIM_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_namespaced_run_at_root "$namespaced_root" s2-krater nested-run \
+  || fail "NAMESPACED_CLAIM_REJECTED"
+namespaced_root_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY"
+namespaced_namespace_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY"
+namespaced_run_identity="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+namespaced_lease_path="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+namespaced_lease_identity="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+if [[ "$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_DIRECTORY" != \
+    "$namespaced_root/e2e/artifacts/s2-krater" \
+  || "$ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY" != \
+    "$namespaced_root/e2e/artifacts/s2-krater/nested-run" ]] \
+  || ! e2e_artifact_namespaced_run_matches_at_root \
+    "$namespaced_root" s2-krater nested-run \
+    "$namespaced_root_identity" "$namespaced_namespace_identity" \
+    "$namespaced_run_identity" "$namespaced_lease_path" "$namespaced_lease_identity" \
+  || e2e_artifact_writer_leases_quiescent_at_root \
+    "$namespaced_root" "$namespaced_root_identity"; then
+  fail "NAMESPACED_CLAIM_CAPABILITY_INVALID"
+fi
+if repeated_namespaced_output="$(
+  e2e_claim_artifact_namespaced_run_at_root "$namespaced_root" s2-krater nested-run 2>&1
+)"; then
+  fail "REUSED_NAMESPACED_RUN_ACCEPTED"
+fi
+if [[ -n "$repeated_namespaced_output" \
+  || -n "$(find "$namespaced_root/e2e/artifacts/s2-krater/nested-run" -mindepth 1 -print -quit)" ]]; then
+  fail "REUSED_NAMESPACED_RUN_MUTATED_OR_LEAKED"
+fi
+e2e_close_artifact_writer_lease "$namespaced_lease_path" "$namespaced_lease_identity" \
+  || fail "NAMESPACED_CLAIM_CLOSE_FAILED"
+if ! e2e_artifact_writer_leases_quiescent_at_root \
+  "$namespaced_root" "$namespaced_root_identity"; then
+  fail "CLOSED_NAMESPACED_CLAIM_REPORTED_OPEN"
+fi
+
+namespaced_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-fence.XXXXXX")" \
+  || fail "NAMESPACED_FENCE_FIXTURE_UNAVAILABLE"
+mkdir -p "$namespaced_fence_root/e2e" || fail "NAMESPACED_FENCE_FIXTURE_UNAVAILABLE"
+e2e_test_maintenance_check_count=0
+e2e_test_fence_on_maintenance_check=3
+if e2e_claim_artifact_namespaced_run_at_root \
+  "$namespaced_fence_root" s2-krater fenced-run >/dev/null 2>&1; then
+  fail "NAMESPACED_RUN_FENCE_RACE_ACCEPTED"
+fi
+e2e_test_fence_on_maintenance_check=0
+namespaced_fence_identity="$(
+  e2e_artifact_directory_identity "$namespaced_fence_root/e2e/artifacts"
+)" || fail "NAMESPACED_FENCE_FIXTURE_UNAVAILABLE"
+if [[ "$e2e_test_maintenance_check_count" -ne 3 \
+  || ! -d "$namespaced_fence_root/e2e/artifacts/s2-krater" \
+  || -e "$namespaced_fence_root/e2e/artifacts/s2-krater/fenced-run" ]] \
+  || ! e2e_test_acquired_lease_is_closed_for_root \
+    "$namespaced_fence_root" "$namespaced_fence_identity" \
+  || ! e2e_artifact_writer_leases_quiescent_at_root \
+    "$namespaced_fence_root" "$namespaced_fence_identity"; then
+  fail "NAMESPACED_RUN_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
+fi
+
 lease_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-lease-fence.XXXXXX")" \
   || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$lease_fence_root/e2e" || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
@@ -125,8 +207,13 @@ fi
 e2e_test_fence_on_maintenance_check=0
 lease_fence_identity="$(e2e_artifact_directory_identity "$lease_fence_root/e2e/artifacts")" \
   || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
-if [[ -e "$lease_fence_root/e2e/artifacts/lease-fenced-run" ]] \
-  || ! e2e_artifact_writer_leases_quiescent_at_root "$lease_fence_root" "$lease_fence_identity"; then
+if [[ "$e2e_test_maintenance_check_count" -ne 2 \
+  || ! -f "$lease_fence_root/e2e/.artifact-maintenance" \
+  || -L "$lease_fence_root/e2e/.artifact-maintenance" \
+  || -e "$lease_fence_root/e2e/artifacts/lease-fenced-run" ]] \
+  || ! e2e_test_acquired_lease_is_closed_for_root "$lease_fence_root" "$lease_fence_identity" \
+  || ! e2e_artifact_writer_leases_quiescent_at_root \
+    "$lease_fence_root" "$lease_fence_identity"; then
   fail "LEASE_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 
@@ -141,8 +228,13 @@ fi
 e2e_test_fence_on_maintenance_check=0
 run_claim_fence_identity="$(e2e_artifact_directory_identity "$run_claim_fence_root/e2e/artifacts")" \
   || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
-if [[ ! -d "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" \
+if [[ "$e2e_test_maintenance_check_count" -ne 3 \
+  || ! -f "$run_claim_fence_root/e2e/.artifact-maintenance" \
+  || -L "$run_claim_fence_root/e2e/.artifact-maintenance" \
+  || ! -d "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" \
   || -n "$(find "$run_claim_fence_root/e2e/artifacts/run-claim-fenced" -mindepth 1 -print -quit)" ]] \
+  || ! e2e_test_acquired_lease_is_closed_for_root \
+    "$run_claim_fence_root" "$run_claim_fence_identity" \
   || ! e2e_artifact_writer_leases_quiescent_at_root \
     "$run_claim_fence_root" "$run_claim_fence_identity"; then
   fail "RUN_CLAIM_FENCE_RACE_MUTATED_OR_LEFT_OPEN"

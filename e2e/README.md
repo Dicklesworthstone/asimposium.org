@@ -88,12 +88,19 @@ top-level exit after synchronous child work has returned. A fatal signal that
 does not prove descendants were reaped, or a crash, leaves it open; neither PID
 nor age automatically reclaims it. The read-only lease census fails closed on
 open matching-epoch leases, symlinks, or malformed registry nodes. The
-TypeScript harness applies the fence and physical-root epoch around namespace
-reservation, event/manifest/JUnit writes, and blob publication, including its
-retained-integration lane, but does not yet hold the lifetime lease. S-2, S-6,
-and other raw artifact writers do not yet share the full lease contract, and
-there is no archive locator or operator maintenance acquisition path. Moving or
-rotating `e2e/artifacts` therefore remains unsafe. S-6 has a separate fixed contract:
+TypeScript `ArtifactStore` now holds the same append-only lifetime lease from
+before its run claim through its final event/JUnit publication. A normal
+`runHarness` close happens only after its detached POSIX process group is
+signalled and observed absent. Constructor failures close immediately because
+no child exists yet; callback/storage failures close only after that same
+settlement boundary. An unprovable child settlement,
+Windows process-tree execution, signal exit, or crash deliberately leaves the
+lease open. Direct exported artifact helpers, standalone real-filesystem test
+fixtures, S-2, S-6, and other raw artifact writers do not yet share the full
+lifetime contract, and a deliberately re-daemonized child can escape the owned
+process group. There is also no archive locator or operator maintenance
+acquisition path. Moving or rotating `e2e/artifacts` therefore remains unsafe.
+S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.
 

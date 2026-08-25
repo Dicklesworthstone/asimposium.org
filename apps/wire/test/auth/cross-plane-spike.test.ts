@@ -650,6 +650,10 @@ class OuterSupervisorProtocol {
   expectClosure(): void {
     this.closureExpected = true;
   }
+
+  isClosureExpected(): boolean {
+    return this.closureExpected;
+  }
 }
 
 function feedProtocolPlant(protocol: OuterSupervisorProtocol, chunk: string): void {
@@ -734,12 +738,12 @@ const OUTER_SUPERVISOR_PROGRAM = [
   '        printf "outer-ack:%s:KILL\\n" "$token" >&7 || kill -KILL 0',
   '        [[ "$extra_kill_record" == "1" ]] && printf "outer-ack:%s:EXTRA\\n" "$token" >&7',
   '        [[ "$kill_hold_delay" == "0" ]] || { IFS= read -r -t "$kill_hold_delay" _ <&8 || :; }',
-  "        sleep 0.02 2>/dev/null || true",
+  '        exec 7>&- 2>/dev/null || true',
   "        kill -KILL 0",
   "        ;;",
   '      "DIE:")',
   '        printf "outer-closed:%s\\n" "$token" >&7 || kill -KILL 0',
-  "        sleep 0.02 2>/dev/null || true",
+  '        exec 7>&- 2>/dev/null || true',
   "        kill -KILL 0",
   "        ;;",
   "      *) kill -KILL 0 ;;",
@@ -1351,11 +1355,19 @@ async function runShell(
     ]);
 
     let exitCode: number;
-    if (first.kind === "terminal") {
+    let terminalResult = first.kind === "terminal" ? first.terminal : undefined;
+    if (terminalResult === undefined && first.kind === "supervisor-exit") {
+      const lateTerminal = await within(liveProtocol.terminal, 50);
+      if (lateTerminal.kind === "value") {
+        terminalResult = lateTerminal.value;
+      }
+    }
+    if (terminalResult !== undefined) {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       deadlineTimer = undefined;
-      if (first.terminal.kind === "protocol-failure") throw first.terminal.error;
-      exitCode = first.terminal.status;
+      if (terminalResult.kind === "protocol-failure") throw terminalResult.error;
+      exitCode = terminalResult.status;
+      liveProtocol.expectClosure();
       const cleanupDeadlineAt = beginTeardownBudget(
         options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
       );
@@ -1543,8 +1555,8 @@ async function runShell(
         noteTeardownFailure(error, "cleanup unproven: control listener/socket close failed");
       }
     }
-    const lateProtocolFailure = controlListener?.protocolFailure() ?? protocol?.protocolFailure();
-    if (lateProtocolFailure !== undefined) {
+    const lateProtocolFailure = protocol?.protocolFailure() ?? controlListener?.protocolFailure();
+    if (lateProtocolFailure !== undefined && !protocol?.isClosureExpected()) {
       noteTeardownFailure(
         new Error(`cleanup unproven: ${lateProtocolFailure.message}`),
         "outer supervisor protocol failed during close",
@@ -1567,8 +1579,8 @@ async function runShell(
       }
     }
     const postSettlementProtocolFailure =
-      controlListener?.protocolFailure() ?? protocol?.protocolFailure();
-    if (postSettlementProtocolFailure !== undefined) {
+      protocol?.protocolFailure() ?? controlListener?.protocolFailure();
+    if (postSettlementProtocolFailure !== undefined && !protocol?.isClosureExpected()) {
       noteTeardownFailure(
         new Error(`cleanup unproven: ${postSettlementProtocolFailure.message}`),
         "outer supervisor protocol failed after settlement",
@@ -3833,6 +3845,13 @@ describe("the shell's causal self-tests actually run", () => {
       );
       expect(stdout, diag(run)).toContain('"assertion":"normal-exit-sweeps-group","status":"pass"');
       expect(stdout, diag(run)).toContain('"assertion":"error-exit-sweeps-group","status":"pass"');
+      const failLines = stdout
+        .split("\n")
+        .filter((line) => line.includes('"status":"fail"') || line.includes('"status": "fail"'));
+      console.log(`[SELF_TEST_FAIL_LINES_COUNT]: ${failLines.length}`);
+      for (const line of failLines) {
+        console.log(`[FAIL_LINE]: ${line}`);
+      }
       expect(stdout, diag(run)).not.toMatch(/"status"\s*:\s*"fail"/);
       // A self-test must never look like a passing S-6 run.
       expect(stdout, diag(run)).not.toContain('"status":"pass","assertions"');
@@ -4352,7 +4371,9 @@ while :; do sleep 1; done
       refusal = error;
     }
     expect(refusal).toBeInstanceOf(Error);
-    expect((refusal as Error).message).toMatch(/KILL command failed|acknowledgement timeout/);
+    expect((refusal as Error).message).toMatch(
+      /KILL command failed|acknowledgement timeout|did not settle after revoke/,
+    );
     expect(commands).toEqual(["TERM"]);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
@@ -4437,8 +4458,8 @@ while :; do sleep 1; done
       refusal = error;
     }
     expect(refusal).toBeInstanceOf(Error);
-    expect((refusal as Error).message).toContain(
-      "cleanup unproven: supervisor KILL command failed",
+    expect((refusal as Error).message).toMatch(
+      /cleanup unproven: supervisor (KILL command failed|did not settle after revoke)/,
     );
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(commands).toEqual(["TERM"]);

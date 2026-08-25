@@ -7,6 +7,22 @@
 
 set -euo pipefail
 
+S2_SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+if [[ -L "${S2_SCRIPT_SOURCE}" ]]; then
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_SCRIPT_PATH_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+S2_SCRIPT_DIRECTORY="$(cd -P -- "$(dirname -- "${S2_SCRIPT_SOURCE}")" && pwd -P)" || exit 1
+S2_REPOSITORY_ROOT="$(cd -P -- "${S2_SCRIPT_DIRECTORY}/.." && pwd -P)" || exit 1
+if [[ "${S2_SCRIPT_DIRECTORY}" != "${S2_REPOSITORY_ROOT}/scripts" ]]; then
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_SCRIPT_PATH_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+readonly S2_SCRIPT_SOURCE S2_SCRIPT_DIRECTORY S2_REPOSITORY_ROOT
+cd "${S2_REPOSITORY_ROOT}"
+# shellcheck source=../e2e/lib/run-diagnostics.sh
+source "${S2_REPOSITORY_ROOT}/e2e/lib/run-diagnostics.sh"
+
 readonly S2_WRANGLER="apps/wire/node_modules/.bin/wrangler"
 readonly S2_WRANGLER_CONFIG="apps/wire/src/krater/wrangler.s2.toml"
 # The legacy fixture stack: an exact pre-integrity 0001 schema and nothing else.
@@ -132,6 +148,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0040_krater_chain_v2_contiguity.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
+  e2e/lib/run-diagnostics.sh
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
   # other input it reads was listed, so the digest attested a source state that
   # excluded live executable bytes: editing the runner or the diagnostic-safety
@@ -987,21 +1004,6 @@ if [[ ! -d e2e || -L e2e ]]; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_PARENT_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-for evidence_dir in e2e/artifacts "${S2_EVIDENCE_ROOT}"; do
-  if [[ -e "${evidence_dir}" || -L "${evidence_dir}" ]]; then
-    if [[ ! -d "${evidence_dir}" || -L "${evidence_dir}" ]]; then
-      printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_ROOT_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
-      exit 1
-    fi
-  elif ! mkdir "${evidence_dir}" 2>/dev/null; then
-    # Another isolated run may have won the same parent-directory creation race. Accept only the
-    # exact safe postcondition; a symlink or non-directory still fails closed.
-    if [[ ! -d "${evidence_dir}" || -L "${evidence_dir}" ]]; then
-      printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_ROOT_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
-      exit 1
-    fi
-  fi
-done
 # Callers may provide a stable evidence handle, but it remains a path component rather than an
 # opaque pathname.  An absent handle gets a collision-resistant generated one; an empty or
 # malformed explicit handle is refused before it can select an artifact directory.
@@ -1020,8 +1022,51 @@ fi
 export -n S2_RUN_ID
 readonly S2_RUN_ID
 readonly S2_RUN_DIR="${S2_EVIDENCE_ROOT}/${S2_RUN_ID}"
-if ! mkdir "${S2_RUN_DIR}" || ! mkdir "${S2_RUN_DIR}/main"; then
+if ! e2e_claim_artifact_namespaced_run_at_root \
+  "${S2_REPOSITORY_ROOT}" s2-krater "${S2_RUN_ID}"; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_RUN_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+S2_ARTIFACT_ROOT_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY}"
+S2_EVIDENCE_ROOT_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY}"
+S2_RUN_DIR_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY}"
+S2_WRITER_LEASE_PATH="${ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY}"
+S2_WRITER_LEASE_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY}"
+readonly S2_ARTIFACT_ROOT_IDENTITY S2_EVIDENCE_ROOT_IDENTITY S2_RUN_DIR_IDENTITY
+readonly S2_WRITER_LEASE_PATH S2_WRITER_LEASE_IDENTITY
+
+s2_artifact_writer_boundary_is_open() {
+  e2e_artifact_namespaced_run_matches_at_root \
+    "${S2_REPOSITORY_ROOT}" s2-krater "${S2_RUN_ID}" \
+    "${S2_ARTIFACT_ROOT_IDENTITY}" "${S2_EVIDENCE_ROOT_IDENTITY}" \
+    "${S2_RUN_DIR_IDENTITY}" "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"
+}
+
+s2_close_initial_writer_lease_on_exit() {
+  local original_status="$?"
+  ((BASH_SUBSHELL == 0)) || return "${original_status}"
+  trap - EXIT INT TERM HUP
+  if ! e2e_close_artifact_writer_lease \
+    "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
+    original_status=125
+  fi
+  exit "${original_status}"
+}
+
+# Until the full child-aware EXIT handler below is installed, only bounded
+# provenance setup runs. Close normally there, but leave the lease open if a
+# signal makes descendant settlement unknowable.
+trap s2_close_initial_writer_lease_on_exit EXIT
+trap 'e2e_leave_artifact_writer_leases_open_on_signal 130' INT
+trap 'e2e_leave_artifact_writer_leases_open_on_signal 143' TERM
+trap 'e2e_leave_artifact_writer_leases_open_on_signal 129' HUP
+
+if ! s2_artifact_writer_boundary_is_open || ! mkdir "${S2_RUN_DIR}/main"; then
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_RUN_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+if ! s2_artifact_writer_boundary_is_open; then
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_ROOT_CHANGED","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
 readonly S2_COST_RECEIPT_PATH="${S2_RUN_DIR}/${S2_COST_RECEIPT_RELATIVE_PATH}"
@@ -4786,7 +4831,7 @@ create_evidence_subdir() {
 
 # shellcheck disable=SC2329
 on_exit() {
-  local original_status="$?" final_status cleanup_proven=true
+  local original_status="$?" final_status cleanup_proven=true signal_exit=false
   trap - EXIT
   # A first signal has already selected the preserved status. Ignore follow-up
   # termination signals while exact cleanup and immutable evidence publication run.
@@ -4806,10 +4851,16 @@ on_exit() {
     S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
   fi
   final_status="${original_status}"
+  case "${original_status}" in
+    129|130|143) signal_exit=true ;;
+  esac
   S2_ON_EXIT_CLEANUP_ACTIVE=1
   if ! cleanup_workers; then
     final_status=125
     cleanup_proven=false
+  fi
+  if [[ "${cleanup_proven}" == true ]] && ! s2_artifact_writer_boundary_is_open; then
+    final_status=125
   fi
   if [[ ${final_status} -eq 78 && \
     ( ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 || ${S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT} -eq 1 ) ]]; then
@@ -4820,12 +4871,17 @@ on_exit() {
     fi
   fi
   if [[ ${final_status} -eq 78 && ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 ]]; then
-    if ! write_evidence_receipt "${final_status}" 1 || \
+    if ! s2_artifact_writer_boundary_is_open || \
+      ! write_evidence_receipt "${final_status}" 1 || \
+      ! s2_artifact_writer_boundary_is_open || \
       ! s2_source_provenance_matches_start || \
       ! write_s2_cost_publication || \
+      ! s2_artifact_writer_boundary_is_open || \
       ! s2_source_provenance_matches_start || \
       ! write_s2_source_snapshot || \
-      ! write_s2_cost_publication_commit; then
+      ! s2_artifact_writer_boundary_is_open || \
+      ! write_s2_cost_publication_commit || \
+      ! s2_artifact_writer_boundary_is_open; then
       final_status=125
     fi
   elif [[ "${cleanup_proven}" != true ]]; then
@@ -4840,8 +4896,16 @@ on_exit() {
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_PARTIAL_OBSERVATION","reproduce":"scripts/e2e-s2-krater.sh"}'
   elif [[ ${S2_EVIDENCE_SEALING_REFUSED_FOR_CONTROLLER_EXIT_RACE} -eq 1 ]]; then
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_CONTROLLER_EXIT_RACE","reproduce":"S2_SHELL_REGRESSION_TEST=post-release-controller-term-identity-exit-race scripts/e2e-s2-krater.sh"}'
-  elif ! write_evidence_receipt "${final_status}" 0; then
+  elif ! s2_artifact_writer_boundary_is_open || \
+    ! write_evidence_receipt "${final_status}" 0 || \
+    ! s2_artifact_writer_boundary_is_open; then
     final_status=125
+  fi
+  if [[ "${cleanup_proven}" == true && "${signal_exit}" == false ]]; then
+    if ! e2e_close_artifact_writer_lease \
+      "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
+      final_status=125
+    fi
   fi
   exit "${final_status}"
 }

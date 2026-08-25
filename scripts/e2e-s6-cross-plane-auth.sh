@@ -1418,6 +1418,7 @@ run_bounded() {
   else
     consume_group_terminal_during_grace 1 || cleanup_unproven=1
   fi
+  sleep "$CHILD_SETTLE_POLL_SECONDS"
   if ! request_group_signal "$pid" KILL; then cleanup_unproven=1; fi
   GROUP_ALLOW_CHILD_BEFORE_ACK=0
 
@@ -3195,7 +3196,7 @@ self_test() {
     # only after that trap is installed, so the plant has a causal readiness
     # barrier but never probes or signals the number after cleanup.
     run_bounded "$bound" "$bounded_out" - \
-      bash -c "bash \"\$1\" --self-test-ack-victim \"\$2\" \"\$3\" & waited=0; while [[ ! -f \"\$2\" && \$waited -lt 250 ]]; do sleep 0.02; waited=\$((waited + 1)); done; ${trailer}" \
+      bash -c "bash \"\$1\" --self-test-ack-victim \"\$2\" \"\$3\" & waited=0; while [[ ! -f \"\$2\" && \$waited -lt 250 ]]; do sleep 0.02; waited=\$((waited + 1)); done; sleep 0.05; ${trailer}" \
       _ "$SCRIPT_SELF" "$marker" "$terminated" || true
     local child=""
     [[ -f "$marker" ]] && child="$(cat "$marker" 2>/dev/null || printf '')"
@@ -3826,11 +3827,14 @@ main() {
   if [[ "${1:-}" == "--self-test-ack-victim" ]]; then
     local ready_marker="${2:?ready marker required}"
     local terminated_marker="${3:?terminated marker required}"
+    local hold_fifo="${ready_marker}.hold"
     trap '' HUP
     trap 'printf term-observed > "$terminated_marker"; exit 0' TERM
+    rm -f "$hold_fifo" 2>/dev/null || true
+    mkfifo -m 600 "$hold_fifo" || exit "$EX_FAIL"
+    exec 6<>"$hold_fifo" || exit "$EX_FAIL"
     printf '%s' "$BASHPID" > "$ready_marker"
-    coproc HOLD { sleep 3600; }
-    while :; do IFS= read -r -t 3600 _ <&"${HOLD[0]}" || true; done
+    while :; do IFS= read -r -t 3600 _ <&6 || true; done
   fi
 
   # Hidden hostile-target mode. It receives only a non-secret search root. If a

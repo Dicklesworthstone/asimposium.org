@@ -33,6 +33,8 @@ ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH=""
 ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY=""
 ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT=""
 ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY=""
+ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_DIRECTORY=""
+ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY=""
 ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY=""
 ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY=""
 ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY=""
@@ -700,6 +702,158 @@ e2e_claim_artifact_run_at_root() {
   ASIMPOSIUM_E2E_CLAIM_IDENTITIES+=("$artifact_identity")
   ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS+=("$lease_directory")
   ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES+=("$lease_identity")
+}
+
+# Claim one exclusive run below a shared, safe namespace such as
+# `e2e/artifacts/s2-krater/<run-id>`. The append-only lease still belongs to the
+# top-level artifact-root epoch, so whole-root maintenance sees both direct and
+# namespaced writers in the same census.
+e2e_claim_artifact_namespaced_run_at_root() {
+  local repository_root="$1"
+  local namespace="$2"
+  local run_id="$3"
+  local physical_artifacts_root
+  local root_identity
+  local namespace_directory
+  local physical_namespace_directory
+  local namespace_identity
+  local run_directory
+  local physical_run_directory
+  local run_identity
+  local lease_directory
+  local lease_identity
+
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT=""
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY=""
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_DIRECTORY=""
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY=""
+  ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY=""
+  ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY=""
+  ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY=""
+  ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY=""
+
+  e2e_validate_run_id "$namespace" || return 1
+  e2e_validate_run_id "$run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root" 1)" || return 1
+  root_identity="$(e2e_artifact_directory_identity "$physical_artifacts_root")" || return 1
+  e2e_acquire_artifact_writer_lease_at_root "$repository_root" "$root_identity" || return 1
+  lease_directory="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_PATH"
+  lease_identity="$ASIMPOSIUM_E2E_ACQUIRED_LEASE_IDENTITY"
+
+  if ! e2e_artifact_maintenance_absent_at_root "$repository_root" \
+    || [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root" 2>/dev/null || true)" != "$root_identity" ]] \
+    || ! e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity"; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  namespace_directory="$physical_artifacts_root/$namespace"
+  if [[ -e "$namespace_directory" || -L "$namespace_directory" ]]; then
+    [[ -d "$namespace_directory" && ! -L "$namespace_directory" ]] || {
+      e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+      return 1
+    }
+  elif ! mkdir "$namespace_directory" 2>/dev/null; then
+    # Concurrent runs may establish the one shared namespace. Accept only the
+    # exact direct directory that both intended to use.
+    [[ -d "$namespace_directory" && ! -L "$namespace_directory" ]] || {
+      e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+      return 1
+    }
+  fi
+  physical_namespace_directory="$(e2e_physical_directory "$namespace_directory")" || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  [[ "$physical_namespace_directory" == "$namespace_directory" ]] || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  namespace_identity="$(e2e_artifact_directory_identity "$physical_namespace_directory")" || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  run_directory="$physical_namespace_directory/$run_id"
+  [[ ! -e "$run_directory" && ! -L "$run_directory" ]] || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  if ! e2e_artifact_maintenance_absent_at_root "$repository_root" \
+    || [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root" 2>/dev/null || true)" != "$root_identity" ]] \
+    || [[ "$(e2e_artifact_directory_identity "$physical_namespace_directory" 2>/dev/null || true)" != "$namespace_identity" ]] \
+    || ! e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity" \
+    || ! mkdir "$run_directory" 2>/dev/null; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+  physical_run_directory="$(e2e_physical_directory "$run_directory")" || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  [[ "$physical_run_directory" == "$run_directory" ]] || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  run_identity="$(e2e_artifact_directory_identity "$physical_run_directory")" || {
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  if ! e2e_artifact_namespaced_run_matches_at_root \
+    "$repository_root" "$namespace" "$run_id" \
+    "$root_identity" "$namespace_identity" "$run_identity" \
+    "$lease_directory" "$lease_identity"; then
+    e2e_close_artifact_writer_lease "$lease_directory" "$lease_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT="$physical_artifacts_root"
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY="$root_identity"
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_DIRECTORY="$physical_namespace_directory"
+  ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY="$namespace_identity"
+  ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY="$physical_run_directory"
+  ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY="$run_identity"
+  ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY="$lease_directory"
+  ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY="$lease_identity"
+}
+
+e2e_artifact_namespaced_run_matches_at_root() {
+  local repository_root="$1"
+  local namespace="$2"
+  local run_id="$3"
+  local expected_root_identity="$4"
+  local expected_namespace_identity="$5"
+  local expected_run_identity="$6"
+  local lease_directory="$7"
+  local lease_identity="$8"
+  local physical_artifacts_root
+  local namespace_directory
+  local physical_namespace_directory
+  local run_directory
+  local physical_run_directory
+  local epoch_directory
+
+  e2e_validate_run_id "$namespace" || return 1
+  e2e_validate_run_id "$run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root")" == "$expected_root_identity" ]] \
+    || return 1
+  namespace_directory="$physical_artifacts_root/$namespace"
+  physical_namespace_directory="$(e2e_physical_directory "$namespace_directory")" || return 1
+  [[ "$physical_namespace_directory" == "$namespace_directory" \
+    && "$(e2e_artifact_directory_identity "$physical_namespace_directory")" == "$expected_namespace_identity" ]] \
+    || return 1
+  run_directory="$physical_namespace_directory/$run_id"
+  physical_run_directory="$(e2e_physical_directory "$run_directory")" || return 1
+  [[ "$physical_run_directory" == "$run_directory" \
+    && "$(e2e_artifact_directory_identity "$physical_run_directory")" == "$expected_run_identity" ]] \
+    || return 1
+  epoch_directory="$(e2e_artifact_writer_lease_epoch_at_root \
+    "$repository_root" "$expected_root_identity")" || return 1
+  [[ "${lease_directory%/*}" == "$epoch_directory" ]] || return 1
+  e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root"
 }
 
 e2e_write_artifact_diagnostic_at_root() {

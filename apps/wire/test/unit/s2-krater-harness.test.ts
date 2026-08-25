@@ -1680,6 +1680,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("apps/wire/package.json");
     expect(shell).toContain("packages/contracts/package.json");
     expect(shell).toContain("packages/contracts/src/index.ts");
+    expect(shell).toContain("e2e/lib/run-diagnostics.sh");
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     const runIdValidation = shell.indexOf('if [[ ! "${S2_RUN_ID}" =~');
@@ -1688,6 +1689,13 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(runIdValidation).toBeGreaterThan(-1);
     expect(runIdValidation).toBeLessThan(runIdUnexport);
     expect(runIdUnexport).toBeLessThan(runIdReadonly);
+    const nestedClaim = shell.indexOf("e2e_claim_artifact_namespaced_run_at_root");
+    const mainDirectoryClaim = shell.indexOf('mkdir "${S2_RUN_DIR}/main"');
+    const provenanceCapture = shell.indexOf("S2_PRE_CLOSURE_SOURCE_PROVENANCE=");
+    expect(nestedClaim).toBeGreaterThan(runIdReadonly);
+    expect(nestedClaim).toBeLessThan(mainDirectoryClaim);
+    expect(mainDirectoryClaim).toBeLessThan(provenanceCapture);
+    expect(shell).toContain("s2_artifact_writer_boundary_is_open");
     expect(shell).toContain("s2_cost_receipt: costReceiptSummary");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('if [[ "${phase}" == "exercise" ]]');
@@ -1701,6 +1709,10 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit).toContain("! s2_source_provenance_matches_start");
     expect(onExit).toContain("cleanup_workers");
     expect(onExit).toContain("S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP");
+    expect(onExit.lastIndexOf("s2_artifact_writer_boundary_is_open")).toBeLessThan(
+      onExit.lastIndexOf("e2e_close_artifact_writer_lease"),
+    );
+    expect(onExit).toContain('"${cleanup_proven}" == true && "${signal_exit}" == false');
     expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
       shell.indexOf("write_s2_cost_publication_commit()"),
     );
