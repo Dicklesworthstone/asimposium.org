@@ -29,6 +29,10 @@ while [[ "$#" -gt 0 ]]; do
         e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_MISSING" "$reproduce"
         exit 64
       }
+      if [[ "$2" == --* || -z "$2" ]]; then
+        e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_MISSING" "$reproduce"
+        exit 64
+      fi
       explicit_run_id="$2"
       shift
       ;;
@@ -39,6 +43,13 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ -n "$explicit_run_id" ]]; then
+  e2e_validate_run_id "$explicit_run_id" || {
+    e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_INVALID" "$reproduce"
+    exit 64
+  }
+fi
 
 if [[ "$self_test" -eq 1 ]]; then
   e2e_run_harness_self_test "$suite" "$started_ms" "$reproduce"
@@ -85,7 +96,10 @@ fi
 # prompt to an anonymous visitor and carry no sponsor data (no Fellow names,
 # workshop objects, or proposals). The product copy may describe the workshop;
 # it must never render one.
-console_anonymous="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGORA_BASE_URL/console" 2>/dev/null)"
+if ! console_anonymous="$(e2e_curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGORA_BASE_URL/console" 2>/dev/null)"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GALLERY_CONSOLE_SURFACE_UNAVAILABLE" "$reproduce"
+  exit 69
+fi
 # The leak assertion lives in scripts/gallery-console-leak-check.py so it can be
 # driven against seeded fixtures without a staging origin. Exit 0 = safe,
 # 1 = no sign-in prompt, 2 = a sponsor-scoped identifier leaked anonymously.

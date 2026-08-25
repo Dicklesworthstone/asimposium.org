@@ -43,7 +43,7 @@
  * absolute path, an environment value, or SQL containing caller data.
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import {
   D1_ARTIFACT_CAPABILITY_ENV,
   type D1ArtifactWriterCapability,
@@ -76,7 +76,7 @@ function say(record: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ adapter: "d1", ...record })}\n`);
 }
 
-const REPOSITORY_ROOT = resolve(import.meta.dir, "..", "..", "..");
+const REPOSITORY_ROOT = repositoryRoot();
 
 /**
  * A short, non-reversible tag for the disposable state directory.
@@ -512,7 +512,11 @@ async function main(): Promise<number> {
   // The adapter repeats the write-free real-authority/capacity preflight so a
   // copied command cannot bypass its parent runner and create state at a cap.
   // This runs before the namespace leaf or any state/config file is created.
-  const capacity = realFilesystemRetentionPreflight(repositoryRoot(), undefined, artifactNamespace);
+  const capacity = realFilesystemRetentionPreflight(
+    REPOSITORY_ROOT,
+    undefined,
+    artifactNamespace,
+  );
   if (capacity.exceeded) {
     say({
       status: "blocked",

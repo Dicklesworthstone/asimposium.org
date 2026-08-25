@@ -325,6 +325,10 @@ while [[ "$#" -gt 0 ]]; do
         e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_MISSING" "$reproduce"
         exit 64
       }
+      if [[ "$2" == --* || -z "$2" ]]; then
+        e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_MISSING" "$reproduce"
+        exit 64
+      fi
       explicit_run_id="$2"
       shift
       ;;
@@ -335,6 +339,13 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ -n "$explicit_run_id" ]]; then
+  e2e_validate_run_id "$explicit_run_id" || {
+    e2e_emit_diagnostic "$suite" "$started_ms" "fail" "RUN_ID_INVALID" "$reproduce"
+    exit 64
+  }
+fi
 
 if [[ "$self_test" -eq 1 ]]; then
   e2e_run_harness_self_test "$suite" "$started_ms" "$reproduce"

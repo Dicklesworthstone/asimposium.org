@@ -1640,6 +1640,9 @@ test("the inherited D1 writer capability binds one exact open retained run", () 
   } as const;
   const storage = fixtureStorage();
   const store = new ArtifactStore(root, runId, false, identity, storage, namespace);
+  expect(() => store.d1ArtifactWriterCapability()).toThrow(
+    /D1_ARTIFACT_CAPABILITY_UNAVAILABLE|real D1 adapter requires/,
+  );
   const capability = simulatedD1ArtifactCapability(store, root, namespace, storage);
   expect(
     assertD1ArtifactWriterCapability(capability, root, namespace, store.directory, storage),
@@ -1647,9 +1650,14 @@ test("the inherited D1 writer capability binds one exact open retained run", () 
   for (const planted of [
     undefined,
     { ...capability, extra: true },
+    { ...capability, schema_version: 2 },
+    { ...capability, repository_root: `${root}-foreign` },
     { ...capability, artifact_root_identity: "memory:999999" },
+    { ...capability, namespace: `${namespace}-foreign` },
     { ...capability, namespace_identity: "memory:999999" },
+    { ...capability, run_id: `${runId}-foreign` },
     { ...capability, run_identity: "memory:999999" },
+    { ...capability, lease_directory: `${capability.lease_directory}-foreign` },
     { ...capability, lease_identity: "memory:999999" },
   ]) {
     expect(() =>

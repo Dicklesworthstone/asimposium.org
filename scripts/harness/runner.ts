@@ -2825,7 +2825,7 @@ export interface RunIdentity {
   readonly reproduction: string;
   readonly artifactNamespace: string | null;
   readonly gitRevision: string;
-  /** The exact fixed environment contract used for every child process. */
+  /** Fixed base environment plus every adapter-scoped inherited-value schema. */
   readonly childEnvironmentDigest: string;
   readonly bindingVersions: Readonly<Record<string, string>>;
 }
@@ -2876,12 +2876,27 @@ function runIdentityFor(options: HarnessRunOptions, seed: number): RunIdentity {
 }
 
 /**
- * Children receive no ambient environment. Hash the fixed allowlist into the
- * run identity so a change to that contract cannot silently resume old work.
+ * Children receive no ambient environment. Hash the fixed base allowlist and
+ * each adapter-scoped inherited-value schema into the run identity so a change
+ * to either contract cannot silently resume old work. Volatile capability
+ * values are deliberately excluded: a resume owns a new lease while retaining
+ * the same protocol contract.
  */
 function environmentContractDigest(): string {
   return createHash("sha256")
-    .update(JSON.stringify(orderedBindingVersions(scrubbedChildEnvironment())), "utf8")
+    .update(
+      JSON.stringify({
+        base: orderedBindingVersions(scrubbedChildEnvironment()),
+        adapter_scoped: {
+          d1: {
+            environment_key: D1_ARTIFACT_CAPABILITY_ENV,
+            schema_version: 1,
+            fields: D1_ARTIFACT_CAPABILITY_KEYS,
+          },
+        },
+      }),
+      "utf8",
+    )
     .digest("hex");
 }
 
