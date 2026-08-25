@@ -2592,7 +2592,7 @@ self_test() {
   if [[ -n "$resistant_dir" ]]; then
     resistant_ready="${resistant_dir}/ready"
     run_bounded 2 "$bounded_out" - \
-      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
       _ "$resistant_ready" || resistant_status=$?
   fi
   [[ -f "${resistant_ready:-}" ]] && resistant_ready_value="$(cat "$resistant_ready" 2>/dev/null || printf '')"
@@ -2704,7 +2704,7 @@ self_test() {
   SIGNAL_TERM_FAILURE_PLANT=1
   SIGNAL_KILL_FAILURE_PLANT=1
   run_bounded 10 "$bounded_out" - \
-    bash -c 'trap "exit 0" TERM; while :; do IFS= read -r -t 30 _ || true; done' \
+    bash -c 'trap "exit 0" TERM; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
     || reaper_child_before_ack_status=$?
   reaper_child_before_ack_records="${#CHILD_PIDS[@]}"
   SIGNAL_TERM_FAILURE_PLANT=0
@@ -3867,7 +3867,7 @@ main() {
     # child terminal to await during the causal plant's retirement grace.
     REAP_GRACE_SECONDS=0
     run_bounded 45 /dev/null - \
-      bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
       _ "$prereg_payload_marker" || true
     exit 0
   fi
@@ -3884,7 +3884,7 @@ main() {
     SIGNAL_TERM_FAILURE_PLANT=1
     SIGNAL_KILL_FAILURE_PLANT=1
     run_bounded 10 /dev/null - \
-      bash -c 'trap "" TERM; while :; do IFS= read -r -t 30 _ || true; done' || true
+      bash -c 'trap "" TERM; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' || true
     exit 0
   fi
 
@@ -3897,7 +3897,7 @@ main() {
     local multi_ready="${3:?ready marker required}"
     REAP_GRACE_SECONDS=2
     run_bounded 45 /dev/null - \
-      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
       _ "$multi_ready" || true
     exit 0
   fi
