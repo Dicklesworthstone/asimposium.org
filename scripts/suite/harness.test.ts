@@ -674,7 +674,7 @@ describe("execution lifecycle", () => {
       const grandchild =
         'process.on("disconnect", () => { ' +
         `setTimeout(async () => { await fetch(${JSON.stringify(ipc.endpoint("/escaped-descendant"))}); ` +
-        'process.exit(0); }, 250); setTimeout(() => process.exit(2), 1000); }); ' +
+        "process.exit(0); }, 250); setTimeout(() => process.exit(2), 1000); }); " +
         'if (process.send) process.send("ready");';
       const parent =
         'const cp = require("node:child_process"); ' +
@@ -2519,9 +2519,7 @@ describe("content-addressed failure artifacts", () => {
       ...base,
       directoryIdentity: (path) => {
         const identity = base.directoryIdentity(path);
-        return path === artifactsDirectory && epochChanged
-          ? `${identity}:replacement`
-          : identity;
+        return path === artifactsDirectory && epochChanged ? `${identity}:replacement` : identity;
       },
     };
     const body = "root epoch link refusal\n";
@@ -3526,10 +3524,7 @@ describe("new-run artifact namespace ownership", () => {
         const size = base.size(path);
         if (path === join(run, "events.jsonl") && !fenced) {
           fenced = true;
-          base.writeExclusive(
-            join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
-            "maintenance\n",
-          );
+          base.writeExclusive(join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME), "maintenance\n");
         }
         return size;
       },

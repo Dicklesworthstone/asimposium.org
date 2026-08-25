@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 # Shared, secret-safe diagnostics for executable E2E entry points.
 # This file is sourced by the runners; it intentionally never prints input
 # values, origins, credentials, artifact roots, or local absolute paths.

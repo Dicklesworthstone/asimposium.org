@@ -3326,13 +3326,8 @@ export function reserveArtifactNamespace(
 ): string {
   assertExactArtifactsDirectory(root, artifactsDirectory, storage);
   const rootDirectory = realDirectory(resolve(root), "ARTIFACT_PATH_UNSAFE", storage);
-  const artifactRoot = realDirectory(
-    resolve(artifactsDirectory),
-    "ARTIFACT_PATH_UNSAFE",
-    storage,
-  );
-  const expectedIdentity =
-    expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
+  const artifactRoot = realDirectory(resolve(artifactsDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  const expectedIdentity = expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
   assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
   assertArtifactNamespaceBudget(root, namespace, limit, storage);
   assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
@@ -3360,13 +3355,8 @@ function reserveNewArtifactNamespace(
 ): string {
   assertExactArtifactsDirectory(root, artifactsDirectory, storage);
   const rootDirectory = realDirectory(resolve(root), "ARTIFACT_PATH_UNSAFE", storage);
-  const artifactRoot = realDirectory(
-    resolve(artifactsDirectory),
-    "ARTIFACT_PATH_UNSAFE",
-    storage,
-  );
-  const expectedIdentity =
-    expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
+  const artifactRoot = realDirectory(resolve(artifactsDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  const expectedIdentity = expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
   assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
   if (!validateRunId(namespace)) {
     throw new HarnessError(
@@ -3562,12 +3552,7 @@ export function reserveRetainedIntegrationDirectory(
     storage,
   );
   const expectedArtifactRootIdentity = storage.directoryIdentity(artifactRoot);
-  assertArtifactWriterBoundary(
-    writerRoot,
-    artifactRoot,
-    expectedArtifactRootIdentity,
-    storage,
-  );
+  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
   const target = join(root, name);
   if (!storage.exists(target)) {
     assertRetainedIntegrationCapacity(
@@ -3576,19 +3561,9 @@ export function reserveRetainedIntegrationDirectory(
       storage,
     );
   }
-  assertArtifactWriterBoundary(
-    writerRoot,
-    artifactRoot,
-    expectedArtifactRootIdentity,
-    storage,
-  );
+  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
   const reserved = ensureDirectDirectory(root, name, storage);
-  assertArtifactWriterBoundary(
-    writerRoot,
-    artifactRoot,
-    expectedArtifactRootIdentity,
-    storage,
-  );
+  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
   return reserved;
 }
 
@@ -3613,14 +3588,9 @@ function reserveNewRetainedIntegrationDirectory(
     "ARTIFACT_PATH_UNSAFE",
     storage,
   );
-  const expectedIdentity =
-    expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
+  const expectedIdentity = expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
   assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
-  assertRetainedIntegrationCapacity(
-    root,
-    { additionalDirectories: projectedDirectories },
-    storage,
-  );
+  assertRetainedIntegrationCapacity(root, { additionalDirectories: projectedDirectories }, storage);
   assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
   const reserved = createNewRunDirectory(root, name, storage);
   assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
@@ -3690,10 +3660,7 @@ function assertExactArtifactsDirectory(
 }
 
 /** Refuse all writer activity while an operator-owned maintenance fence exists. */
-function assertArtifactMaintenanceAbsent(
-  root: string,
-  storage: HarnessArtifactStorage,
-): void {
+function assertArtifactMaintenanceAbsent(root: string, storage: HarnessArtifactStorage): void {
   const fence = join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME);
   assertContained(root, fence, "ARTIFACT_PATH_UNSAFE");
   // Any filesystem node at the reserved name closes the gate. A symlink or
@@ -3768,11 +3735,7 @@ function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
     lease.artifactRootIdentity,
     lease.storage,
   );
-  const actual = realDirectory(
-    lease.directory,
-    "ARTIFACT_WRITER_LEASE_INVALID",
-    lease.storage,
-  );
+  const actual = realDirectory(lease.directory, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
   const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
   if (
     actual !== lease.directory ||
@@ -3794,11 +3757,7 @@ function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
 }
 
 function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
-  const actual = realDirectory(
-    lease.directory,
-    "ARTIFACT_WRITER_LEASE_INVALID",
-    lease.storage,
-  );
+  const actual = realDirectory(lease.directory, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
   if (actual !== lease.directory || lease.storage.directoryIdentity(actual) !== lease.identity) {
     throw new HarnessError(
       "ARTIFACT_WRITER_LEASE_INVALID",
@@ -3807,11 +3766,7 @@ function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
   }
   const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
   if (lease.storage.exists(closed) || lease.storage.isSymlink(closed)) {
-    const physicalClosed = realDirectory(
-      closed,
-      "ARTIFACT_WRITER_LEASE_INVALID",
-      lease.storage,
-    );
+    const physicalClosed = realDirectory(closed, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
     if (physicalClosed !== closed || lease.storage.readdir(physicalClosed).length !== 0) {
       throw new HarnessError(
         "ARTIFACT_WRITER_LEASE_INVALID",
@@ -3821,11 +3776,7 @@ function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
     return;
   }
   lease.storage.mkdir(closed);
-  const physicalClosed = realDirectory(
-    closed,
-    "ARTIFACT_WRITER_LEASE_INVALID",
-    lease.storage,
-  );
+  const physicalClosed = realDirectory(closed, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
   if (physicalClosed !== closed || lease.storage.readdir(physicalClosed).length !== 0) {
     throw new HarnessError(
       "ARTIFACT_WRITER_LEASE_INVALID",
@@ -3858,11 +3809,7 @@ function acquireArtifactWriterLease(
       if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
       throw error;
     }
-    const physicalDirectory = realDirectory(
-      directory,
-      "ARTIFACT_WRITER_LEASE_INVALID",
-      storage,
-    );
+    const physicalDirectory = realDirectory(directory, "ARTIFACT_WRITER_LEASE_INVALID", storage);
     if (physicalDirectory !== directory) {
       throw new HarnessError(
         "ARTIFACT_WRITER_LEASE_INVALID",
