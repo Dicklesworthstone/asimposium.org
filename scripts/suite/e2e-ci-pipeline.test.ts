@@ -251,11 +251,7 @@ async function cancelPipeline(
 ): Promise<PipelineRun> {
   const paths = fixture(`${stage}-cancel-${point}`);
   const resultPath = join(paths.artifactDirectory, "cancel-result.json");
-  const environment = plantedEnvironment(
-    stage,
-    point === "during-stage" ? "hang" : "pass",
-    paths,
-  );
+  const environment = plantedEnvironment(stage, point === "during-stage" ? "hang" : "pass", paths);
   if (point === "after-record") {
     environment.ASIMP_CI_PROCESS_PAUSE_AFTER_STAGE_RECORD = stage;
   }
@@ -392,9 +388,7 @@ describe("OPS.2b review pipeline orchestration", () => {
 
     expect(source).toContain('if "link" in document:');
     expect(source).not.toContain('document.get("link") is not None');
-    expect(source).toContain(
-      'if state != "READY" or document.get("target") != "preview":',
-    );
+    expect(source).toContain('if state != "READY" or document.get("target") != "preview":');
     expect(source).toContain(
       'if state != "READY" or "target" not in document or document["target"] is not None:',
     );

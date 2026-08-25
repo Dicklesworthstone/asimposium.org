@@ -1191,9 +1191,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     ).toMatchObject({ sequences: [1], nextCursor: 1, hasMore: false });
 
     for (const invalid of [undefined, null, 1, 3]) {
-      expect(() =>
-        parseS2WriteResult({ ...FIRST_COST_WRITE, chain_version: invalid }),
-      ).toThrow("S2_CHAIN_VERSION_INVALID");
+      expect(() => parseS2WriteResult({ ...FIRST_COST_WRITE, chain_version: invalid })).toThrow(
+        "S2_CHAIN_VERSION_INVALID",
+      );
       expect(() => parseS2StateResult({ ...validState, chain_version: invalid })).toThrow(
         "S2_CHAIN_VERSION_INVALID",
       );
@@ -1209,12 +1209,7 @@ describe("S2 to S7 normalized cost receipt", () => {
       );
     }
 
-    for (const invalid of [
-      "A".repeat(64),
-      "0".repeat(63),
-      "0".repeat(65),
-      "g".repeat(64),
-    ]) {
+    for (const invalid of ["A".repeat(64), "0".repeat(63), "0".repeat(65), "g".repeat(64)]) {
       for (const field of [
         "payload_sha256",
         "row_digest",
@@ -1301,9 +1296,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(() => assertS2TerminalDigestParity(write, event, state, replay)).not.toThrow();
 
     const changed = "6".repeat(64);
-    expect(() =>
-      assertS2TerminalDigestParity(write, { ...event, seq: 2 }, state, replay),
-    ).toThrow("S2_TERMINAL_SEQUENCE_MISMATCH");
+    expect(() => assertS2TerminalDigestParity(write, { ...event, seq: 2 }, state, replay)).toThrow(
+      "S2_TERMINAL_SEQUENCE_MISMATCH",
+    );
     expect(() =>
       assertS2TerminalDigestParity(write, { ...event, row_digest: changed }, state, replay),
     ).toThrow("S2_V2_ROW_DIGEST_MISMATCH");
@@ -1317,12 +1312,7 @@ describe("S2 to S7 normalized cost receipt", () => {
       assertS2TerminalDigestParity(write, event, state, { ...replay, chain_digest: changed }),
     ).toThrow("S2_V2_CHAIN_DIGEST_MISMATCH");
     expect(() =>
-      assertS2TerminalDigestParity(
-        write,
-        event,
-        { ...state, checkpoint_digest: changed },
-        replay,
-      ),
+      assertS2TerminalDigestParity(write, event, { ...state, checkpoint_digest: changed }, replay),
     ).toThrow("S2_V2_CHECKPOINT_DIGEST_MISMATCH");
     expect(() =>
       assertS2TerminalDigestParity(write, event, state, {

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import {
   LedgerContractsSchema,
@@ -13,10 +14,7 @@ const INVALID_INDEX = new URL(
   "../fixtures/invalid/ledger-problems-index-no-omitted.json",
   import.meta.url,
 );
-const VALID_PROBLEM_FACE = new URL(
-  "../fixtures/valid/ledger-problem-face.json",
-  import.meta.url,
-);
+const VALID_PROBLEM_FACE = new URL("../fixtures/valid/ledger-problem-face.json", import.meta.url);
 const INVALID_WORKSHOP_FACE = new URL(
   "../fixtures/invalid/ledger-problem-face-workshop-item.json",
   import.meta.url,
@@ -106,6 +104,43 @@ test("the public face cannot claim trusted items, unsafe actions, or composer-on
   const first = duplicate.items[0];
   if (first !== undefined) duplicate.items.push(structuredClone(first));
   expect(ProblemFaceResponseSchema.safeParse(duplicate).success).toBe(false);
+});
+
+test("the published ledger schema preserves the public next-action boundary", () => {
+  const generated = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  ) as {
+    properties: {
+      problem_face_response: {
+        properties: {
+          next_actions: {
+            items: {
+              properties: {
+                method: { enum: string[] };
+                url: { maxLength?: number; pattern?: string };
+              };
+            };
+          };
+        };
+      };
+    };
+  };
+  const action = generated.properties.problem_face_response.properties.next_actions.items.properties;
+  expect(action.method.enum).toEqual(["GET"]);
+  expect(action.url.maxLength).toBe(400);
+  expect(typeof action.url.pattern).toBe("string");
+  const publishedPath = new RegExp(action.url.pattern as string);
+  expect(publishedPath.test("/problems.json?after=P-A%20B")).toBe(true);
+  for (const unsafe of [
+    "https://attacker.example/collect",
+    "//attacker.example/collect",
+    "/../internal/health",
+    "/%2e%2e/internal/health",
+    "/p/P-4DSP.md#forged",
+    "/p/P-4DSP.md `forged`",
+  ]) {
+    expect(publishedPath.test(unsafe), unsafe).toBe(false);
+  }
 });
 
 test("the public ledger id grammar is renderer-safe without rewriting Krater's full ingress law", () => {

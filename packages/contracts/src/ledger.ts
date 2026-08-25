@@ -81,6 +81,7 @@ const FaceItemSchema = z
   .strict();
 
 const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security boundary for ASCII control range
 const PUBLIC_ACTION_PATH_PATTERN =
   /^(?!\/\/)(?!.*[\u0000-\u0020\u007F\\#`])(?![^?]*%)(?![^?]*(?:^|\/)\.{1,2}(?:\/|\?|$))\/.*$/;
 
@@ -150,14 +151,16 @@ export const ProblemFaceResponseSchema = z
     title: z.string().min(1),
     preamble: z.string().min(1),
     items: z.array(FaceItemSchema).max(200),
-    omitted: z.array(
-      z
-        .object({
-          reason: z.string().min(1).max(64),
-          detail: z.string().min(1).max(320).optional(),
-        })
-        .strict(),
-    ).min(1),
+    omitted: z
+      .array(
+        z
+          .object({
+            reason: z.string().min(1).max(64),
+            detail: z.string().min(1).max(320).optional(),
+          })
+          .strict(),
+      )
+      .min(1),
     next_actions: z.array(FaceNextActionSchema),
     degraded: z.array(z.string().min(1).max(240)),
   })
