@@ -4257,9 +4257,10 @@ clear_raw_inherited_child_owner() {
   S2_RAW_INHERITED_CHILD_RUN_IDENTITY=""
 }
 
-# Stop and reap the exact direct child, then prove no process or open descriptor
-# still names its identity-bound retained run before clearing the sole cleanup
-# capability. A failure keeps the slot populated and the parent lease open.
+# Stop and reap the exact private child group, then prove no process or open
+# descriptor still names its identity-bound retained run before clearing the
+# sole cleanup capability. A failure keeps the slot populated and the parent
+# lease open.
 cleanup_raw_inherited_child() {
   local pid="${S2_RAW_INHERITED_CHILD_PID}" pgid="${S2_RAW_INHERITED_CHILD_PGID}"
   local tick rows line child_run_directory
@@ -4308,9 +4309,10 @@ cleanup_raw_inherited_child() {
       sleep 0.05
     done
     if kill -0 -- "-${pgid}" 2>/dev/null; then
-      # The still-unreaped exact group leader keeps this private session
-      # authority live even if it is already a zombie. Kill the whole group so
-      # a TERM-resistant descendant cannot outlive the writer lease.
+      # The wrapper deliberately remains a live, identifiable group leader
+      # while any non-zombie member survives. Re-prove that live authority
+      # immediately before KILL; a stale numeric PGID is never sufficient.
+      s2_raw_inherited_child_command_is_exact "${pid}" || return 1
       kill -KILL -- "-${pgid}" 2>/dev/null || {
         kill -0 -- "-${pgid}" 2>/dev/null && return 1
       }
