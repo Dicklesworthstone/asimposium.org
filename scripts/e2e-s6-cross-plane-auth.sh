@@ -1121,7 +1121,7 @@ run_bounded() {
         # resets TERM/HUP/INT immediately before exec; real curl/Bun/browser
         # children therefore remain cooperative instead of inheriting ignores.
         (
-          exec 7<&- 8<&-
+          exec 5>&- 7<&- 8<&-
           command_status=0
           (
             trap - TERM HUP INT PIPE
