@@ -19,6 +19,7 @@ import { join, resolve } from "node:path";
 
 const BLOCKED_EXIT_CODE = 78;
 const PACKAGE_ROOT = resolve(import.meta.dir, "../..");
+const BEADS_LEDGER = resolve(PACKAGE_ROOT, "../../.beads/issues.jsonl");
 const RUNNER = "scripts/suites.ts";
 const REAL_BINDING_LANE = resolve(PACKAGE_ROOT, "test/integration/s2-krater-real-bindings.test.ts");
 
@@ -51,6 +52,18 @@ interface Run {
   records: Diagnostic[];
   /** The suite's own final record. */
   record: Diagnostic;
+}
+
+function beadStatuses(): ReadonlyMap<string, string> {
+  const statuses = new Map<string, string>();
+  for (const line of readFileSync(BEADS_LEDGER, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    const issue = JSON.parse(line) as { id?: unknown; status?: unknown };
+    if (typeof issue.id === "string" && typeof issue.status === "string") {
+      statuses.set(issue.id, issue.status);
+    }
+  }
+  return statuses;
 }
 
 async function runRunner(suite: string, cwd = runnerFixture()): Promise<Run> {
@@ -222,21 +235,24 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
       expect(run.stderr).toContain("must not be faked with:");
       expect(run.stderr).toContain(`cd apps/wire && bun run test:${suite}`);
       expect((run.record.blocked_on ?? "").length).toBeGreaterThan(40);
+      expect((run.record.blocked_on ?? "").length).toBeLessThanOrEqual(400);
+      expect((run.record.forbidden_substitutes ?? "").length).toBeLessThanOrEqual(400);
     }, 20_000);
   }
 
-  test("the integration blocker distinguishes local D1 evidence from the missing mounted binding suite", async () => {
+  test("the integration blocker distinguishes local D1 and declared DO source from cross-slice proof", async () => {
     const run = await runRunner("integration");
     const blockedOn = run.record.blocked_on ?? "";
     const forbidden = run.record.forbidden_substitutes ?? "";
-    // The existing local-D1 runner is useful evidence but is not transmuted into
-    // proof for the unmounted cross-slice surface or the absent R2/DO bindings.
-    expect(blockedOn).toContain("asimposiumorg-p1g");
+    // The existing local-D1 runner and declared DO are useful source evidence but
+    // are not transmuted into a cross-slice D1/R2 or deployed-staging result.
+    expect(blockedOn).toContain("asimposiumorg-rhg");
     expect(blockedOn).toContain("e2e-s2-krater.sh");
     expect(blockedOn).toContain("local Workerd D1");
-    expect(blockedOn).toContain("mounted Worker surfaces");
-    expect(blockedOn).toContain("R2 namespace");
-    expect(blockedOn).toContain("Durable Object alarm");
+    expect(blockedOn).toContain("source/config declare the KraterOutboxDrainer export");
+    expect(blockedOn).toContain("across mounted D1 plus private/public R2");
+    expect(blockedOn).not.toContain("missing Durable Object alarm");
+    expect(blockedOn).not.toContain("Durable Object alarm binding");
     expect(forbidden).toContain("mocked or stubbed D1/R2");
     expect(forbidden).toContain("bun:sqlite");
     expect(forbidden).toContain("test/support/bindings.ts");
@@ -245,8 +261,42 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
 
   test("the performance blocker still names the missing §15 budget", async () => {
     const run = await runRunner("performance");
-    expect(run.record.blocked_on ?? "").toContain("asimposiumorg-233");
+    expect(run.record.blocked_on ?? "").toContain("asimposiumorg-0fs");
     expect(run.record.forbidden_substitutes ?? "").toContain("micro-benchmark");
+  }, 20_000);
+
+  test("pending suites name only existing unfinished Beads", async () => {
+    const statuses = beadStatuses();
+    for (const suite of ["integration", "performance"] as const) {
+      const run = await runRunner(suite);
+      const named =
+        (run.record.blocked_on ?? "").match(/\basimposiumorg-[a-z0-9]+(?:\.[a-z0-9]+)*\b/g) ?? [];
+      expect(named.length).toBeGreaterThan(0);
+      for (const blocker of named) {
+        expect(statuses.has(blocker)).toBe(true);
+        const status = statuses.get(blocker);
+        expect(status === "open" || status === "in_progress").toBe(true);
+      }
+    }
+  }, 30_000);
+
+  test("the integration diagnostic agrees with the outbox alarm source/config declarations", async () => {
+    const run = await runRunner("integration");
+    const blockedOn = run.record.blocked_on ?? "";
+    const workerSource = readFileSync(resolve(PACKAGE_ROOT, "src/index.ts"), "utf8");
+    const outboxSource = readFileSync(resolve(PACKAGE_ROOT, "src/krater/outbox-do.ts"), "utf8");
+    const wranglerSource = readFileSync(resolve(PACKAGE_ROOT, "../../infra/wrangler.toml"), "utf8");
+
+    expect(workerSource).toContain("export { createApp, KraterOutboxDrainer }");
+    expect(workerSource).toContain('requestKraterOutbox(env, "/nudge")');
+    expect(outboxSource).toContain("async alarm(): Promise<void>");
+    expect(outboxSource).toContain("this.state.storage.setAlarm");
+    expect(wranglerSource).toContain('name = "KRATER_OUTBOX"');
+    expect(wranglerSource).toContain('class_name = "KraterOutboxDrainer"');
+    expect(wranglerSource).toContain('crons = ["*/5 * * * *"]');
+    expect(blockedOn).toContain("source/config declare");
+    expect(blockedOn).not.toContain("missing Durable Object alarm");
+    expect(blockedOn).not.toContain("Durable Object alarm binding");
   }, 20_000);
 
   test("every emitted record leaks no absolute path, home directory or credential shape", async () => {

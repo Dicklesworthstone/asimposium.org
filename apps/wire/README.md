@@ -55,11 +55,14 @@ bun run suites           # what each suite covers, or what blocks it
 its implemented local auth/Workerd preflight and then refuses to overclaim the still-missing
 cross-slice/provider proof:
 
-- **integration** still needs the registered mock-free mounted D1/R2 cross-slice proof, a configured
-  R2 namespace, the Durable Object alarm seam, and staging edge-cache evidence. Mocked D1/R2,
-  `bun:sqlite`, or a Workerd process that performs no binding read/write are not substitutes.
-- **performance** needs a budget. Blocked on OPS.2a and the Fable §15 numbers. It must not be faked
-  with a micro-benchmark of the local handler or a threshold read off the first run.
+- **integration** still needs W6.9's registered mock-free artifact-surface run across mounted D1 and
+  private/public R2, followed by exact-revision staging verification. The source and Wrangler
+  configuration declare the `KraterOutboxDrainer` export, binding, alarm
+  handler, and cron nudge; neither those declarations nor local-Workerd coverage prove mounted
+  exact-revision behavior. Mocked D1/R2, `bun:sqlite`, or a Workerd process that performs no binding
+  read/write are not substitutes.
+- **performance** needs W10.7's revision-bound measurements against the Fable §15 budgets. It must
+  not be faked with a micro-benchmark of the local handler or a threshold read off the first run.
 
 ## Worker configuration
 

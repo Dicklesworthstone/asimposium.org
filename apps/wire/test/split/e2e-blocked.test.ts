@@ -4059,7 +4059,35 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   const pgidExpansion = `${dollar}{pgid}`;
   const stopGroupSource = sourceRegion(script, "stop_group() {", "stop_worker() {");
   const killEscalationSource = stopGroupSource.slice(
-    stopGroupSource.indexOf(`signal_exact_group KILL "${supervisorPidExpansion}"`),
+    stopGroupSource.indexOf("dispatch_exact_group_kill \\"),
+  );
+  const groupKillDispatchSource = sourceRegion(
+    script,
+    "dispatch_exact_group_kill() {",
+    "plant_startup_window_signal() {",
+  );
+  const finishKillDispatchSource = sourceRegion(
+    script,
+    "finish_kill_dispatch_transition() {",
+    "dispatch_exact_direct_supervisor_kill() {",
+  );
+  const runtimeKillDispatchHandoffSource = finishKillDispatchSource.slice(
+    finishKillDispatchSource.indexOf("runtime) install_runtime_signal_traps"),
+  );
+  const startupTransferCall = "transfer_kill_dispatch_signal_to_startup";
+  const firstStartupTransfer = finishKillDispatchSource.indexOf(startupTransferCall);
+  const secondStartupTransfer = finishKillDispatchSource.indexOf(
+    startupTransferCall,
+    firstStartupTransfer + 1,
+  );
+  const thirdStartupTransfer = finishKillDispatchSource.indexOf(
+    startupTransferCall,
+    secondStartupTransfer + 1,
+  );
+  const exitCleanupSource = sourceRegion(
+    script,
+    "on_exit() {",
+    "run_term_resistant_descendant_self_test() {",
   );
   const reapedGroupWaitSource = sourceRegion(
     script,
@@ -4071,12 +4099,27 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "start_checker_resource_fixture() {",
     "run_checker_timeout_self_test() {",
   );
+  const serverResourceSource = sourceRegion(
+    script,
+    "read_server_resource_port() {",
+    "run_provisional_exact_check_self_test() {",
+  );
+  const ownedListenerRetirementSource = sourceRegion(
+    script,
+    "assert_owned_server_listener_retired() {",
+    "assert_checker_state_holders_empty() {",
+  );
   const publicShapePoisonAssertionSource = sourceRegion(
     checker,
     '"post_promotion_public_projection_search_and_export_apply_shape_guards",',
     '  check(\n    "all_fourteen_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",',
   );
   const readinessLoopSource = sourceRegion(script, "ready=0\n", `if [[ \${ready} -ne 1 ]]`);
+  const ownedOriginDiscoverySource = sourceRegion(
+    script,
+    "owned_listener_ports_in_group() {",
+    "state_holder_pids() {",
+  );
   const healthHandlerSource = sourceRegion(
     worker,
     'if (request.method === "GET" && url.pathname === "/__s3/health") {',
@@ -4086,9 +4129,46 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("S3_PORT_OCCUPIED");
   expect(script).toMatch(/--var "S3_RUN_TOKEN:\$\{S3_RUN_TOKEN\}"/);
   expect(script).toMatch(/--var "S3_READINESS_NONCE:\$\{S3_READINESS_NONCE\}"/);
-  expect(readinessLoopSource).toContain("readiness_nonce");
-  expect(readinessLoopSource).toContain("S3_READINESS_NONCE");
+  expect(readinessLoopSource).toContain("discover_owned_worker_origin");
   expect(readinessLoopSource).not.toContain("S3_RUN_TOKEN");
+  expect(ownedOriginDiscoverySource).toContain("group_members");
+  expect(ownedOriginDiscoverySource).toContain("-iTCP@127.0.0.1");
+  expect(ownedOriginDiscoverySource).toContain("readiness_nonce");
+  expect(ownedOriginDiscoverySource).toContain("S3_READINESS_NONCE");
+  const exactHealthComparison = `[[ "${dollar}{health}" == "${dollar}{expected_health}" ]]`;
+  expect(ownedOriginDiscoverySource).toContain(exactHealthComparison);
+  expect(ownedOriginDiscoverySource).toContain("--noproxy '*'");
+  expect(ownedOriginDiscoverySource).toContain("candidate_count <= 32");
+  const explicitCandidateFilter = `if (( S3_PORT_EXPLICIT == 1 )) && [[ "${dollar}{candidate}" != "${dollar}{S3_PORT}" ]]`;
+  expect(ownedOriginDiscoverySource).toContain(explicitCandidateFilter);
+  expect(ownedOriginDiscoverySource.indexOf(explicitCandidateFilter)).toBeLessThan(
+    ownedOriginDiscoverySource.indexOf(`"${dollar}{candidate_origin}/__s3/health"`),
+  );
+  expect(
+    ownedOriginDiscoverySource.match(/\[\[ "\$\{health\}" == "\$\{expected_health\}" \]\]/g),
+  ).toHaveLength(2);
+  const selectedOriginProbe = `candidate_origin="http://127.0.0.1:${dollar}{discovered}"`;
+  expect(ownedOriginDiscoverySource).toContain(selectedOriginProbe);
+  expect(ownedOriginDiscoverySource.indexOf(selectedOriginProbe)).toBeLessThan(
+    ownedOriginDiscoverySource.lastIndexOf(exactHealthComparison),
+  );
+  expect(ownedOriginDiscoverySource.lastIndexOf(exactHealthComparison)).toBeLessThan(
+    ownedOriginDiscoverySource.lastIndexOf("supervisor_identity_is_exact"),
+  );
+  expect(ownedOriginDiscoverySource).toContain("listener_pids_are_in_group");
+  expect(ownedOriginDiscoverySource).toContain("supervisor_identity_is_exact");
+  expect(ownedOriginDiscoverySource).toContain("S3_PORT_EXPLICIT");
+  expect(ownedOriginDiscoverySource).toContain(`SERVER_RESOURCE_PORT="${dollar}{discovered}"`);
+  expect(ownedOriginDiscoverySource).toContain(
+    `ORIGIN="http://127.0.0.1:${dollar}{SERVER_RESOURCE_PORT}"`,
+  );
+  expect(script).not.toContain("allocate_port() {");
+  expect(script).toContain("S3_PORT_EXPLICIT=1");
+  expect(script).toContain("S3_PORT=0");
+  expect(script).toContain("--ip 127.0.0.1");
+  expect(script).toContain(`--port "${dollar}{S3_PORT}"`);
+  expect(script).toContain(`port_is_busy "${dollar}{S3_PORT}"`);
+  expect(script).toContain(`"-iTCP@127.0.0.1:${dollar}{port}" -sTCP:LISTEN`);
   expect(healthHandlerSource).toContain("readiness_nonce: readinessNonce");
   expect(healthHandlerSource).not.toContain("run_token");
   expect(script).toContain("CHECKER_DEADLINE_SECONDS");
@@ -4097,6 +4177,8 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("S3_SELF_TEST_IDENTITY_MISMATCH");
   expect(script).toContain("S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP");
   expect(script).toContain("S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE");
+  expect(script).toContain("S3_SELF_TEST_POST_KILL_REAP_UNCERTAINTY");
+  expect(script).toContain("S3_SELF_TEST_KILL_DISPATCH_SIGNAL_OWNER");
   expect(script).toContain("S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE");
   expect(script).toContain("S3_SELF_TEST_STARTUP_SIGNAL_WINDOW");
   expect(script).toContain("S3_SELF_TEST_CHECKER_TIMEOUT");
@@ -4112,12 +4194,86 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("listener_pids_are_in_group");
   expect(script).toContain("assert_no_survivors");
   expect(script).toContain("signal_exact_group KILL");
+  expect(killEscalationSource).toContain("dispatch_exact_group_kill \\");
+  expect(groupKillDispatchSource).toContain("signal_exact_group KILL");
+  expect(groupKillDispatchSource).toContain("plant_kill_dispatch_window_signal");
+  expect(groupKillDispatchSource).toContain("SERVER_SUPERVISOR_KILL_DISPATCHED=1");
+  expect(groupKillDispatchSource).toContain("CHECKER_SUPERVISOR_KILL_DISPATCHED=1");
+  expect(groupKillDispatchSource).toContain("finish_kill_dispatch_transition");
   expect(
     killEscalationSource.indexOf(`wait_for_killed_direct_child_reap "${supervisorPidExpansion}"`),
   ).toBeGreaterThanOrEqual(0);
   expect(
     killEscalationSource.indexOf(`wait_for_killed_direct_child_reap "${supervisorPidExpansion}"`),
   ).toBeLessThan(killEscalationSource.indexOf(`wait_for_reaped_group_empty "${pgidExpansion}"`));
+  expect(groupKillDispatchSource.indexOf("signal_exact_group KILL")).toBeLessThan(
+    groupKillDispatchSource.indexOf("plant_kill_dispatch_window_signal"),
+  );
+  expect(groupKillDispatchSource.indexOf("plant_kill_dispatch_window_signal")).toBeLessThan(
+    groupKillDispatchSource.indexOf("SERVER_SUPERVISOR_KILL_DISPATCHED=1"),
+  );
+  expect(groupKillDispatchSource.indexOf("CHECKER_SUPERVISOR_KILL_DISPATCHED=1")).toBeLessThan(
+    groupKillDispatchSource.indexOf("finish_kill_dispatch_transition"),
+  );
+  expect(firstStartupTransfer).toBeGreaterThanOrEqual(0);
+  expect(secondStartupTransfer).toBeGreaterThan(firstStartupTransfer);
+  expect(thirdStartupTransfer).toBeGreaterThan(secondStartupTransfer);
+  expect(finishKillDispatchSource).toContain("STARTUP_SIGNAL_HANDOFF_ACTIVE=1");
+  expect(finishKillDispatchSource).toContain("STARTUP_SIGNAL_HANDOFF_ACTIVE=0");
+  expect(finishKillDispatchSource).toContain("install_startup_signal_traps");
+  expect(firstStartupTransfer).toBeLessThan(
+    finishKillDispatchSource.indexOf("STARTUP_SIGNAL_HANDOFF_ACTIVE=1"),
+  );
+  expect(finishKillDispatchSource.indexOf("STARTUP_SIGNAL_HANDOFF_ACTIVE=1")).toBeLessThan(
+    finishKillDispatchSource.indexOf("install_startup_signal_traps"),
+  );
+  expect(finishKillDispatchSource.indexOf("install_startup_signal_traps")).toBeLessThan(
+    secondStartupTransfer,
+  );
+  expect(secondStartupTransfer).toBeLessThan(
+    finishKillDispatchSource.indexOf("STARTUP_SIGNAL_HANDOFF_ACTIVE=0"),
+  );
+  expect(finishKillDispatchSource.indexOf("STARTUP_SIGNAL_HANDOFF_ACTIVE=0")).toBeLessThan(
+    thirdStartupTransfer,
+  );
+  expect(thirdStartupTransfer).toBeLessThan(
+    finishKillDispatchSource.indexOf("KILL_DISPATCH_SIGNAL_STATUS=0"),
+  );
+  expect(runtimeKillDispatchHandoffSource).toContain("runtime) install_runtime_signal_traps");
+  expect(runtimeKillDispatchHandoffSource).toContain(
+    `remembered_status="${dollar}{KILL_DISPATCH_SIGNAL_STATUS}"`,
+  );
+  expect(runtimeKillDispatchHandoffSource).toContain(
+    `kill -"${dollar}{remembered_name}" "${dollar}{BASHPID:-${dollar}${dollar}}"`,
+  );
+  expect(runtimeKillDispatchHandoffSource).toContain("KILL_DISPATCH_SIGNAL_STATUS=0");
+  expect(
+    runtimeKillDispatchHandoffSource.indexOf(
+      `remembered_status="${dollar}{KILL_DISPATCH_SIGNAL_STATUS}"`,
+    ),
+  ).toBeLessThan(
+    runtimeKillDispatchHandoffSource.indexOf(
+      `kill -"${dollar}{remembered_name}" "${dollar}{BASHPID:-${dollar}${dollar}}"`,
+    ),
+  );
+  expect(
+    runtimeKillDispatchHandoffSource.indexOf(
+      `kill -"${dollar}{remembered_name}" "${dollar}{BASHPID:-${dollar}${dollar}}"`,
+    ),
+  ).toBeLessThan(runtimeKillDispatchHandoffSource.indexOf("KILL_DISPATCH_SIGNAL_STATUS=0"));
+  expect(exitCleanupSource).toContain(`original_status="${dollar}{KILL_DISPATCH_SIGNAL_STATUS}"`);
+  expect(exitCleanupSource).toContain("trap '' HUP INT TERM");
+  expect(exitCleanupSource).toContain("KILL_DISPATCH_SIGNAL_STATUS=0");
+  expect(exitCleanupSource).toContain("cleanup_with_retry");
+  expect(
+    exitCleanupSource.indexOf(`original_status="${dollar}{KILL_DISPATCH_SIGNAL_STATUS}"`),
+  ).toBeLessThan(exitCleanupSource.indexOf("KILL_DISPATCH_SIGNAL_STATUS=0"));
+  expect(exitCleanupSource.indexOf("trap '' HUP INT TERM")).toBeLessThan(
+    exitCleanupSource.indexOf("KILL_DISPATCH_SIGNAL_STATUS=0"),
+  );
+  expect(exitCleanupSource.indexOf("KILL_DISPATCH_SIGNAL_STATUS=0")).toBeLessThan(
+    exitCleanupSource.indexOf("cleanup_with_retry"),
+  );
   expect(reapedGroupWaitSource).toContain(`inspect_reaped_group_members "${pgidExpansion}"`);
   expect(reapedGroupWaitSource).not.toContain("signal_exact");
   expect(reapedGroupWaitSource).not.toMatch(/\bkill\s+-/u);
@@ -4135,13 +4291,29 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(checkerResourceSource).toContain("read_checker_resource_port");
   expect(checkerResourceSource).not.toContain("allocate_port");
   expect(checkerResourceSource).not.toContain("port_is_busy");
+  expect(serverResourceSource).toContain("port: 0");
+  expect(serverResourceSource).toContain("SERVER_RESOURCE_PORT_FILE");
+  expect(serverResourceSource).toContain("read_server_resource_port");
+  expect(serverResourceSource).toContain("listener_pids_are_in_group");
+  expect(serverResourceSource).not.toContain("allocate_port");
+  expect(serverResourceSource).not.toContain("port_is_busy");
+  expect(ownedListenerRetirementSource).toContain("SERVER_LISTENER_OWNERSHIP_OBSERVED");
+  expect(ownedListenerRetirementSource).toContain("CHECKER_LISTENER_OWNERSHIP_OBSERVED");
+  expect(ownedListenerRetirementSource).toContain("assert_group_empty");
+  expect(ownedListenerRetirementSource).not.toContain("listener_pids");
+  expect(ownedListenerRetirementSource).not.toContain("port_accepts_bind");
   expect(script).toContain("LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED");
   const containmentDispatch =
     "if (( checker_containment_mode == 1 )); then\n  run_checker_containment_self_test;";
   const productionWorkerDispatch = `start_supervised_payload server "${dollar}{SERVER_LOG}" "${dollar}{WRANGLER}" dev "${dollar}{ENTRYPOINT}"`;
+  const productionLifecycleSource = script.slice(script.indexOf(productionWorkerDispatch));
   expect(script.indexOf(containmentDispatch)).toBeGreaterThanOrEqual(0);
   expect(script.indexOf(containmentDispatch)).toBeLessThan(
     script.indexOf(productionWorkerDispatch),
+  );
+  expect(productionLifecycleSource.indexOf("discover_owned_worker_origin")).toBeGreaterThan(0);
+  expect(productionLifecycleSource.indexOf("discover_owned_worker_origin")).toBeLessThan(
+    productionLifecycleSource.indexOf("run_owned_checker"),
   );
   expect(script).toContain("checker_exit_diagnostics");
   expect(script).toContain("checker_exit_status");
@@ -4704,10 +4876,12 @@ for (const window of [
       expect(stdout).toContain(
         `"assertion":"startup_signal_window_${window}_retained_exact_ownership"`,
       );
+      expect(stdout).toContain(`"assertion":"startup_signal_window_${window}_uses_no_worker_port"`);
       expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
     },
-    // Each window starts a real Workerd-backed lifecycle. A shared deadline
-    // makes earlier legal startup consume a later case's proof budget.
+    // Each window starts a real pinned-supervisor lifecycle, but deliberately
+    // no Worker listener. A shared deadline makes earlier legal startup consume
+    // a later case's proof budget.
     { timeout: 120_000 },
   );
 }
@@ -4729,12 +4903,114 @@ for (const owner of ["server", "checker"] as const) {
       const combined = `${stdout}\n${stderr}`;
       expect(performance.now() - startedAt).toBeLessThan(60_000);
       expect(stdout).toContain(`"assertion":"dispatch_startup_signal_${owner}_preserves_exit_129"`);
+      expect(stdout).toContain(
+        `"assertion":"dispatch_startup_signal_${owner}_uses_no_preallocated_worker_port"`,
+      );
       expect(combined).not.toContain('"code":"LOCAL_WORKER_SUPERVISOR_UNAVAILABLE"');
       expect(combined).not.toContain('"code":"LOCAL_SPLIT_ASSERTION_FAILED"');
     },
     // The 60-second assertion above remains the semantic prompt-exit bound;
     // this larger limit is only a leak-safe outer watchdog.
     { timeout: 120_000 },
+  );
+}
+
+for (const owner of ["server", "checker", "provisional"] as const) {
+  test(
+    `PLANTED: ${owner} KILL dispatch publishes wait-only state before a pending HUP`,
+    async () => {
+      const label = `S3_KILL_DISPATCH_SIGNAL_${owner}`;
+      const result = await runS3HarnessPlant(
+        "S3_SELF_TEST_KILL_DISPATCH_SIGNAL_OWNER",
+        owner,
+        label,
+        60_000,
+      );
+      expectBoundedS3ChildExit(result, label, 129);
+      const { stdout, stderr } = result;
+      expect(stdout).toContain(
+        `"assertion":"kill_dispatch_window_${owner}_publishes_wait_only_state_before_hup"`,
+      );
+      expect(stdout).toContain(
+        `"assertion":"kill_dispatch_window_${owner}_uses_no_preallocated_worker_port"`,
+      );
+      expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+    },
+    { timeout: 60_000 },
+  );
+}
+
+test(
+  "PLANTED: a restored INT cannot overtake the first deferred KILL-window HUP",
+  async () => {
+    const label = "S3_KILL_DISPATCH_RESTORE_INT_FIRST_SIGNAL";
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_KILL_DISPATCH_SIGNAL_OWNER",
+      "provisional_restore_int",
+      label,
+      60_000,
+    );
+    expectBoundedS3ChildExit(result, label, 129);
+    const { stdout, stderr } = result;
+    expect(stdout).toContain(
+      '"assertion":"kill_dispatch_restore_int_preserves_first_deferred_hup"',
+    );
+    expect(stdout).toContain(
+      '"assertion":"kill_dispatch_window_provisional_publishes_wait_only_state_before_hup"',
+    );
+    expect(stdout).toContain(
+      '"assertion":"kill_dispatch_window_provisional_uses_no_preallocated_worker_port"',
+    );
+    expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+  },
+  { timeout: 60_000 },
+);
+
+test(
+  "PLANTED: a startup-restored INT cannot overtake the first deferred KILL-window HUP",
+  async () => {
+    const label = "S3_KILL_DISPATCH_STARTUP_RESTORE_INT_FIRST_SIGNAL";
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_KILL_DISPATCH_SIGNAL_OWNER",
+      "provisional_startup_restore_int",
+      label,
+      60_000,
+    );
+    expectBoundedS3ChildExit(result, label, 129);
+    const { stdout, stderr } = result;
+    expect(stdout).toContain(
+      '"assertion":"kill_dispatch_startup_restore_int_preserves_first_deferred_hup"',
+    );
+    expect(stdout).toContain(
+      '"assertion":"kill_dispatch_window_provisional_publishes_wait_only_state_before_hup"',
+    );
+    expect(stdout).toContain(
+      '"assertion":"kill_dispatch_window_provisional_uses_no_preallocated_worker_port"',
+    );
+    expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+  },
+  { timeout: 60_000 },
+);
+
+for (const direction of ["runtime_to_startup", "startup_to_runtime"] as const) {
+  test(
+    `PLANTED: ordinary ${direction} trap restoration preserves the first HUP over a later INT`,
+    async () => {
+      const label = `S3_ORDINARY_SIGNAL_HANDOFF_${direction}`;
+      const result = await runS3HarnessPlant(
+        "S3_SELF_TEST_ORDINARY_SIGNAL_HANDOFF",
+        direction,
+        label,
+        60_000,
+      );
+      expectBoundedS3ChildExit(result, label, 129);
+      const { stdout, stderr } = result;
+      expect(stdout).toContain(
+        `"assertion":"ordinary_signal_handoff_${direction}_preserves_first_hup"`,
+      );
+      expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+    },
+    { timeout: 60_000 },
   );
 }
 
@@ -4752,7 +5028,7 @@ test(
     for (const assertion of [
       "checker_timeout_uses_exact_bounded_term_kill_and_wait",
       "checker_timeout_has_zero_group_or_descendant_survivors",
-      "checker_timeout_releases_its_test_port",
+      "checker_timeout_retires_its_owned_listener",
       "checker_timeout_has_zero_state_fd_survivors",
     ]) {
       expect(stdout).toContain(`"assertion":"${assertion}"`);
@@ -4762,7 +5038,7 @@ test(
   { timeout: 120_000 },
 );
 
-async function runCheckerContainmentPlant(): Promise<{
+async function runCheckerContainmentPlant(deadlineMs = 60_000): Promise<{
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
@@ -4773,19 +5049,22 @@ async function runCheckerContainmentPlant(): Promise<{
     "S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE",
     "1",
     "S3_CHECKER_CONTAINMENT_PLANT",
-    60_000,
+    deadlineMs,
   );
   expectBoundedS3ChildExit(result, "S3_CHECKER_CONTAINMENT_PLANT", 1);
   return { ...result, durationMs: performance.now() - startedAt };
 }
 
-function expectCheckerContainmentPlant(result: {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number;
-  readonly durationMs: number;
-}): void {
-  expect(result.durationMs).toBeLessThan(60_000);
+function expectCheckerContainmentPlant(
+  result: {
+    readonly stdout: string;
+    readonly stderr: string;
+    readonly exitCode: number;
+    readonly durationMs: number;
+  },
+  maxDurationMs = 60_000,
+): void {
+  expect(result.durationMs).toBeLessThan(maxDurationMs);
   expect(result.stdout).toContain('"code":"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED"');
   for (const assertion of [
     "checker_containment_fixture_has_owned_group_listener_and_state_fd",
@@ -4806,7 +5085,7 @@ function expectCheckerContainmentPlant(result: {
 test(
   "PLANTED: an uninspectable checker group reports containment failure and EXIT reclaims it",
   async () => {
-    expectCheckerContainmentPlant(await runCheckerContainmentPlant());
+    expectCheckerContainmentPlant(await runCheckerContainmentPlant(90_000), 90_000);
   },
   // The assertion above is the semantic prompt-exit bound; this larger limit
   // is only a leak-safe outer watchdog that leaves room for typed cleanup.
@@ -4817,13 +5096,13 @@ test(
   "PLANTED: concurrent checker-containment plants cannot divert through Worker startup",
   async () => {
     const results = await Promise.all(
-      Array.from({ length: 6 }, () => runCheckerContainmentPlant()),
+      Array.from({ length: 6 }, () => runCheckerContainmentPlant(90_000)),
     );
-    for (const result of results) expectCheckerContainmentPlant(result);
+    for (const result of results) expectCheckerContainmentPlant(result, 90_000);
   },
-  // Each result retains its 60-second semantic bound. This outer ceiling must
+  // Each result retains its semantic bound. This outer ceiling must
   // not TERM a still-cleaning child before its typed evidence can converge.
-  { timeout: 120_000 },
+  { timeout: 180_000 },
 );
 
 test(
@@ -4884,7 +5163,7 @@ test(
       "payload_leader_exits_while_pinned_supervisor_and_resistant_descendant_remain",
       "term_resistant_supervisor_reaped_before_group_zero_scan",
       "term_resistant_group_has_zero_survivors",
-      "term_resistant_fixture_releases_its_test_port",
+      "term_resistant_fixture_retires_its_owned_listener",
       "term_resistant_state_fd_has_zero_survivors",
     ]) {
       expect(stdout).toContain(`"assertion":"${assertion}"`);
@@ -4909,8 +5188,35 @@ test(
       "post_reap_inspection_failure_retains_inspection_only_ownership",
       "post_reap_retry_inspects_without_resignalling_remembered_pgid",
       "post_reap_retry_has_zero_group_survivors",
-      "post_reap_retry_releases_its_test_port",
+      "post_reap_retry_retires_its_owned_listener",
       "post_reap_retry_has_zero_state_fd_survivors",
+    ]) {
+      expect(stdout).toContain(`"assertion":"${assertion}"`);
+    }
+    expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+  },
+  { timeout: 60_000 },
+);
+
+test(
+  "PLANTED: transient post-KILL reap uncertainty retries by waiting without re-signalling",
+  async () => {
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_POST_KILL_REAP_UNCERTAINTY",
+      "1",
+      "S3_POST_KILL_REAP_UNCERTAINTY_PLANT",
+      60_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_POST_KILL_REAP_UNCERTAINTY_PLANT", 0);
+    const { stdout, stderr } = result;
+    for (const assertion of [
+      "post_kill_reap_uncertainty_server_retries_wait_only",
+      "post_kill_reap_uncertainty_checker_retries_wait_only",
+      "post_kill_reap_uncertainty_provisional_retries_wait_only",
+      "post_kill_reap_retries_never_resignal_remembered_identity",
+      "post_kill_reap_retry_has_zero_group_survivors",
+      "post_kill_reap_retry_retires_all_owned_listeners",
+      "post_kill_reap_retry_has_zero_state_fd_survivors",
     ]) {
       expect(stdout).toContain(`"assertion":"${assertion}"`);
     }
@@ -4967,7 +5273,7 @@ test(
   "the S-3 command proves local bindings and blocks only staging proof",
   async () => {
     const { stdout, stderr, exitCode } = await runBoundedS3Child(
-      ["bash", "scripts/e2e-s3-split.sh"],
+      ["env", "-u", "S3_PORT", "bash", "scripts/e2e-s3-split.sh"],
       "S3_COMMAND",
       { timeoutMs: S3_OWNED_COMMAND_TIMEOUT_MS },
     );
@@ -5033,6 +5339,9 @@ test(
     expect(`${stdout}\n${stderr}`).not.toContain(root);
     expect(`${stdout}\n${stderr}`).not.toContain("/Users/");
     expect(`${stdout}\n${stderr}`).not.toMatch(/asimp_ag_[A-Za-z0-9_-]{4,}/);
+    expect(stdout).toContain(
+      '"assertion":"default_worker_port_is_child_owned_and_nonce_discovered"',
+    );
   },
   { timeout: 120_000 },
 );

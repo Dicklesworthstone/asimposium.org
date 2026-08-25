@@ -6,7 +6,8 @@
 // protocol's token interpolation visually distinct from the embedded shell source.
 
 /**
- * S-6 DEPLOYED-spike harness invariants (bead asimposiumorg-vw3).
+ * S-6 DEPLOYED-spike harness invariants (historical acceptance-evidence bead
+ * asimposiumorg-vw3).
  *
  * `scripts/e2e-s6-cross-plane-auth.sh` and `e2e/playwright/s6-cross-plane-runner.ts`
  * are the only runners allowed to claim the cross-plane seam works against real
@@ -79,6 +80,35 @@ const code = (relative: string): string =>
 const SCRIPT = "scripts/e2e-s6-cross-plane-auth.sh";
 const RUNNER = "e2e/playwright/s6-cross-plane-runner.ts";
 const SHELL_TIMEOUT_MS = 120_000;
+const REQUIRED_S6_HARNESS_INPUTS = [
+  "ASIMP_S6_PREVIEW_URL",
+  "ASIMP_S6_WORKER_URL",
+  "ASIMP_S6_TEST_GOOGLE_USER",
+  "ASIMP_S6_TEST_GOOGLE_PASS",
+  "ASIMP_S6_FELLOW_TOKEN",
+  "ASIMP_S6_SIGNING_KEY_HEX",
+  "ASIMP_S6_SIGNING_KID",
+  "ASIMP_S6_SPONSOR_ID",
+  "ASIMP_S6_REVISION",
+  "ASIMP_S6_DEPLOYMENT_ID",
+  "ASIMP_S6_EVIDENCE_DIR",
+] as const;
+const S6_MISSING_INPUT_FORBIDDEN_SUBSTITUTES =
+  "a mocked Worker or stubbed Auth.js presented as runtime proof; the in-process unit vectors relabelled as a live run; a hand-written transcript; a recorded fixture replayed as a deployment; a storage-state file presented as live cookie evidence";
+const S6_MISSING_INPUT_UNIT_COVERAGE =
+  "apps/wire/test/unit/service-envelope.test.ts, apps/wire/test/unit/principal-routing.test.ts, apps/wire/test/security/cross-plane-refusals.test.ts, apps/web/test/unit/service-envelope.test.ts";
+
+function isCanonicalS6HarnessInputSubset(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  let previousIndex = -1;
+  for (const name of value) {
+    if (typeof name !== "string") return false;
+    const index = (REQUIRED_S6_HARNESS_INPUTS as readonly string[]).indexOf(name);
+    if (index <= previousIndex) return false;
+    previousIndex = index;
+  }
+  return true;
+}
 
 /**
  * The body of one shell function, from `name() {` to the first line that is
@@ -797,16 +827,25 @@ function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifec
     record.detail.length > 0;
   const aggregateKeys = ["suite", "status", "assertions", "failures", "reproduce"] as const;
   const selfTestKeys = ["suite", "status", "self_test", "failures"] as const;
-  const blockedKeys = ["suite", "status", "code", "bead", "detail", "reproduce"] as const;
+  const blockedKeys = [
+    "suite",
+    "status",
+    "code",
+    "historical_evidence_bead",
+    "detail",
+    "reproduce",
+  ] as const;
   const missingEnvironmentKeys = [
     "suite",
     "status",
     "code",
-    "bead",
     "missing_env",
     "blocked_on",
+    "historical_evidence_bead",
+    "proof_boundary",
     "forbidden_substitutes",
     "unit_coverage",
+    "reproduce",
   ] as const;
   const supervisorBootstrapKeys = [
     "suite",
@@ -852,7 +891,8 @@ function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifec
     productTerminal.status === "blocked" &&
     typeof productTerminal.code === "string" &&
     /^[A-Z][A-Z0-9_]{0,63}$/.test(productTerminal.code) &&
-    productTerminal.bead === "asimposiumorg-vw3" &&
+    productTerminal.code !== "REQUIRED_HARNESS_INPUTS_MISSING" &&
+    productTerminal.historical_evidence_bead === "asimposiumorg-vw3" &&
     typeof productTerminal.detail === "string" &&
     productTerminal.detail.length > 0 &&
     productTerminal.reproduce === "bash scripts/e2e-s6-cross-plane-auth.sh" &&
@@ -862,14 +902,16 @@ function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifec
     assertionsBeforeTerminal.length === 0 &&
     exitCode === 78 &&
     productTerminal.status === "blocked" &&
-    productTerminal.code === "PREVIEW_NOT_PROVISIONED" &&
-    productTerminal.bead === "asimposiumorg-vw3" &&
-    Array.isArray(productTerminal.missing_env) &&
-    productTerminal.missing_env.length > 0 &&
-    productTerminal.missing_env.every((name) => typeof name === "string" && name.length > 0) &&
-    typeof productTerminal.blocked_on === "string" &&
-    typeof productTerminal.forbidden_substitutes === "string" &&
-    typeof productTerminal.unit_coverage === "string";
+    productTerminal.code === "REQUIRED_HARNESS_INPUTS_MISSING" &&
+    isCanonicalS6HarnessInputSubset(productTerminal.missing_env) &&
+    productTerminal.blocked_on ===
+      "external execution prerequisite: supply every required S-6 harness input for the configured paired Agora and Worker target" &&
+    productTerminal.historical_evidence_bead === "asimposiumorg-vw3" &&
+    productTerminal.proof_boundary ===
+      "configuration presence is not executed cross-plane proof, and missing caller inputs do not establish provider provisioning state" &&
+    productTerminal.forbidden_substitutes === S6_MISSING_INPUT_FORBIDDEN_SUBSTITUTES &&
+    productTerminal.unit_coverage === S6_MISSING_INPUT_UNIT_COVERAGE &&
+    productTerminal.reproduce === "bash scripts/e2e-s6-cross-plane-auth.sh";
   // This sole two-record mode is intentionally named and value-bound. A generic
   // assertion record may never stand in for the product terminal, and a leading
   // duplicate necessarily makes `assertionsBeforeTerminal` non-empty.
@@ -2508,19 +2550,7 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
       if (name === undefined) throw new Error("required-variable capture was absent");
       return name;
     });
-    expect(names).toEqual([
-      "ASIMP_S6_PREVIEW_URL",
-      "ASIMP_S6_WORKER_URL",
-      "ASIMP_S6_TEST_GOOGLE_USER",
-      "ASIMP_S6_TEST_GOOGLE_PASS",
-      "ASIMP_S6_FELLOW_TOKEN",
-      "ASIMP_S6_SIGNING_KEY_HEX",
-      "ASIMP_S6_SIGNING_KID",
-      "ASIMP_S6_SPONSOR_ID",
-      "ASIMP_S6_REVISION",
-      "ASIMP_S6_DEPLOYMENT_ID",
-      "ASIMP_S6_EVIDENCE_DIR",
-    ]);
+    expect(names).toEqual([...REQUIRED_S6_HARNESS_INPUTS]);
     expect(source).not.toMatch(/ASIMP_S6_(?:AGORA|STOA)_DEPLOYMENT/);
     expect(shellFunction(source, "missing_vars")).toBe(`missing_vars() {
   local name
@@ -3809,12 +3839,30 @@ describe("the shell's causal self-tests actually run", () => {
       const run = await runShell([], withoutS6Env());
       expect(run.timedOut, diag(run)).toBe(false);
       expect(run.exitCode, diag(run)).toBe(78);
+      expect(run.cleanupUnproven, diag(run)).toBe(false);
       // The blocked record is the whole contract here, so an empty stdout is a
       // failure in its own right rather than something the next assertion
       // happens to catch.
       expect(run.stdout.length, diag(run)).toBeGreaterThan(0);
-      expect(run.stdout, diag(run)).toContain('"code":"PREVIEW_NOT_PROVISIONED"');
+      expect(run.stdout, diag(run)).toContain('"code":"REQUIRED_HARNESS_INPUTS_MISSING"');
+      expect(run.stdout, diag(run)).toContain('"blocked_on":"external execution prerequisite:');
+      expect(run.stdout, diag(run)).toContain('"historical_evidence_bead":"asimposiumorg-vw3"');
+      expect(run.stdout, diag(run)).not.toContain('"bead":"asimposiumorg-vw3"');
+      expect(run.stdout, diag(run)).toContain(
+        '"proof_boundary":"configuration presence is not executed cross-plane proof, and missing caller inputs do not establish provider provisioning state"',
+      );
       expect(run.stdout, diag(run)).not.toContain('"assertion"');
+      expect(run.stdout, diag(run)).not.toContain("PREVIEW_NOT_PROVISIONED");
+      expect(run.stderr, diag(run)).not.toContain("no infrastructure to run against");
+      expect(run.stderr, diag(run)).not.toContain("preview with Auth.js Google credentials");
+      const records = run.stdout
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(2);
+      expect(records[0]?.missing_env).toEqual(REQUIRED_S6_HARNESS_INPUTS);
+      expect(records[0]?.forbidden_substitutes).toBe(S6_MISSING_INPUT_FORBIDDEN_SUBSTITUTES);
+      expect(records[0]?.unit_coverage).toBe(S6_MISSING_INPUT_UNIT_COVERAGE);
     },
     SHELL_TIMEOUT_MS,
   );
@@ -3889,20 +3937,23 @@ describe("the outer capability protocol is strict under stream framing", () => {
 
   test("PLANTED: split READY and coalesced STARTED+CHILD parse exactly once", async () => {
     const pair = await testSocketPair();
-    const token = "planttoken0123456789";
-    const protocol = new OuterSupervisorProtocol(pair.parent, token);
+    const supervisorMarker = "plantmarker0123456789";
+    const protocol = new OuterSupervisorProtocol(pair.parent, supervisorMarker);
     try {
       const boot = protocol.bootstrap(Date.now() + 500);
       feedProtocolPlant(protocol, "outer-rea");
-      feedProtocolPlant(protocol, `dy:${token}\n`);
+      feedProtocolPlant(protocol, `dy:${supervisorMarker}\n`);
       expect(await boot).toBe(true);
 
       const start = protocol.start(Date.now() + 500);
-      feedProtocolPlant(protocol, `outer-started:${token}\nouter-child:${token}:0\n`);
+      feedProtocolPlant(
+        protocol,
+        `outer-started:${supervisorMarker}\nouter-child:${supervisorMarker}:0\n`,
+      );
       expect(await start).toBe(true);
       expect(await protocol.terminal).toEqual({ kind: "child", status: 0 });
 
-      feedProtocolPlant(protocol, `outer-child:${token}:0\n`);
+      feedProtocolPlant(protocol, `outer-child:${supervisorMarker}:0\n`);
       expect(protocol.protocolFailure()?.message).toContain("duplicate CHILD");
     } finally {
       protocol.expectClosure();
@@ -3911,7 +3962,7 @@ describe("the outer capability protocol is strict under stream framing", () => {
   });
 
   test("PLANTED: write backpressure waits for callback and callback timeout refuses", async () => {
-    const token = "planttokenbackpressure";
+    const supervisorMarker = "plantmarkerbackpressure";
     const successPair = await testSocketPair();
     let callbackObserved = false;
     const delayedWrite: OuterSocketWrite = (_bytes, callback) => {
@@ -3921,10 +3972,14 @@ describe("the outer capability protocol is strict under stream framing", () => {
       }, 10);
       return false;
     };
-    const successProtocol = new OuterSupervisorProtocol(successPair.parent, token, delayedWrite);
+    const successProtocol = new OuterSupervisorProtocol(
+      successPair.parent,
+      supervisorMarker,
+      delayedWrite,
+    );
     try {
       const boot = successProtocol.bootstrap(Date.now() + 500);
-      feedProtocolPlant(successProtocol, `outer-ready:${token}\n`);
+      feedProtocolPlant(successProtocol, `outer-ready:${supervisorMarker}\n`);
       expect(await boot).toBe(true);
       expect(callbackObserved).toBe(true);
     } finally {
@@ -3934,10 +3989,14 @@ describe("the outer capability protocol is strict under stream framing", () => {
 
     const timeoutPair = await testSocketPair();
     const stalledWrite: OuterSocketWrite = () => false;
-    const timeoutProtocol = new OuterSupervisorProtocol(timeoutPair.parent, token, stalledWrite);
+    const timeoutProtocol = new OuterSupervisorProtocol(
+      timeoutPair.parent,
+      supervisorMarker,
+      stalledWrite,
+    );
     try {
       const boot = timeoutProtocol.bootstrap(Date.now() + 100);
-      feedProtocolPlant(timeoutProtocol, `outer-ready:${token}\n`);
+      feedProtocolPlant(timeoutProtocol, `outer-ready:${supervisorMarker}\n`);
       expect(await boot).toBe(false);
       expect(timeoutProtocol.protocolFailure()?.message).toContain("write callback timeout");
     } finally {
@@ -3947,12 +4006,12 @@ describe("the outer capability protocol is strict under stream framing", () => {
   });
 
   test("PLANTED: unsolicited ACK and close at each bootstrap boundary refuse", async () => {
-    const token = "planttokenbootstrap";
+    const supervisorMarker = "plantmarkerbootstrap";
     const earlyPair = await testSocketPair();
-    const earlyProtocol = new OuterSupervisorProtocol(earlyPair.parent, token);
+    const earlyProtocol = new OuterSupervisorProtocol(earlyPair.parent, supervisorMarker);
     try {
       const boot = earlyProtocol.bootstrap(Date.now() + 500);
-      feedProtocolPlant(earlyProtocol, `outer-ack:${token}:TERM\n`);
+      feedProtocolPlant(earlyProtocol, `outer-ack:${supervisorMarker}:TERM\n`);
       expect(await boot).toBe(false);
       expect(earlyProtocol.protocolFailure()?.message).toContain("out-of-order record");
     } finally {
@@ -3961,7 +4020,10 @@ describe("the outer capability protocol is strict under stream framing", () => {
     }
 
     const beforeReadyPair = await testSocketPair();
-    const beforeReadyProtocol = new OuterSupervisorProtocol(beforeReadyPair.parent, token);
+    const beforeReadyProtocol = new OuterSupervisorProtocol(
+      beforeReadyPair.parent,
+      supervisorMarker,
+    );
     try {
       const boot = beforeReadyProtocol.bootstrap(Date.now() + 500);
       beforeReadyPair.peer.destroy();
@@ -3975,10 +4037,13 @@ describe("the outer capability protocol is strict under stream framing", () => {
     }
 
     const beforeStartPair = await testSocketPair();
-    const beforeStartProtocol = new OuterSupervisorProtocol(beforeStartPair.parent, token);
+    const beforeStartProtocol = new OuterSupervisorProtocol(
+      beforeStartPair.parent,
+      supervisorMarker,
+    );
     try {
       const boot = beforeStartProtocol.bootstrap(Date.now() + 500);
-      feedProtocolPlant(beforeStartProtocol, `outer-ready:${token}\n`);
+      feedProtocolPlant(beforeStartProtocol, `outer-ready:${supervisorMarker}\n`);
       expect(await boot).toBe(true);
       const start = beforeStartProtocol.start(Date.now() + 500);
       beforeStartPair.peer.destroy();
@@ -4412,6 +4477,62 @@ while :; do sleep 1; done
     }
     expect(shellLifecycleFromRecords(exact, 1)).toEqual(refused);
     expect(shellLifecycleFromRecords(exact, 125)).toEqual(refused);
+  });
+
+  test("PLANTED: the missing-input terminal is external, exact, and not a provisioning claim", () => {
+    const missing = JSON.stringify({
+      suite: "s6-cross-plane-auth",
+      status: "blocked",
+      code: "REQUIRED_HARNESS_INPUTS_MISSING",
+      missing_env: ["ASIMP_S6_PREVIEW_URL"],
+      blocked_on:
+        "external execution prerequisite: supply every required S-6 harness input for the configured paired Agora and Worker target",
+      historical_evidence_bead: "asimposiumorg-vw3",
+      proof_boundary:
+        "configuration presence is not executed cross-plane proof, and missing caller inputs do not establish provider provisioning state",
+      forbidden_substitutes: S6_MISSING_INPUT_FORBIDDEN_SUBSTITUTES,
+      unit_coverage: S6_MISSING_INPUT_UNIT_COVERAGE,
+      reproduce: "bash scripts/e2e-s6-cross-plane-auth.sh",
+    });
+    const lifecycle =
+      '{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled"}';
+    const exact = `${missing}\n${lifecycle}\n`;
+    const genericReservedCode = `${JSON.stringify({
+      suite: "s6-cross-plane-auth",
+      status: "blocked",
+      code: "REQUIRED_HARNESS_INPUTS_MISSING",
+      historical_evidence_bead: "asimposiumorg-vw3",
+      detail: "generic blocked record must not impersonate the reserved terminal",
+      reproduce: "bash scripts/e2e-s6-cross-plane-auth.sh",
+    })}\n${lifecycle}\n`;
+    const refused = { cleanupUnproven: true, ownedSameProcessGroupsSettled: false };
+    expect(shellLifecycleFromRecords(exact, 78)).toEqual({
+      cleanupUnproven: false,
+      ownedSameProcessGroupsSettled: true,
+    });
+    for (const transcript of [
+      exact.replace("REQUIRED_HARNESS_INPUTS_MISSING", "PREVIEW_NOT_PROVISIONED"),
+      exact.replace(
+        "external execution prerequisite: supply every required S-6 harness input for the configured paired Agora and Worker target",
+        "a preview is not provisioned",
+      ),
+      exact.replace("historical_evidence_bead", "bead"),
+      exact.replace(
+        "configuration presence is not executed cross-plane proof, and missing caller inputs do not establish provider provisioning state",
+        "configured means proven",
+      ),
+      exact.replace(S6_MISSING_INPUT_FORBIDDEN_SUBSTITUTES, ""),
+      exact.replace(S6_MISSING_INPUT_UNIT_COVERAGE, ""),
+      exact.replace('"reproduce":', '"extra":true,"reproduce":'),
+      `${missing}\n${missing}\n${lifecycle}\n`,
+      exact.replace("ASIMP_S6_PREVIEW_URL", "ASIMP_S6_UNKNOWN_INPUT"),
+      exact.replace('["ASIMP_S6_PREVIEW_URL"]', '["ASIMP_S6_PREVIEW_URL","ASIMP_S6_PREVIEW_URL"]'),
+      exact.replace('["ASIMP_S6_PREVIEW_URL"]', '["ASIMP_S6_WORKER_URL","ASIMP_S6_PREVIEW_URL"]'),
+      genericReservedCode,
+    ]) {
+      expect(shellLifecycleFromRecords(transcript, 78)).toEqual(refused);
+    }
+    expect(shellLifecycleFromRecords(exact, 0)).toEqual(refused);
   });
 
   test("PLANTED: an in-budget typed cleanup refusal reaches the outer verdict", async () => {

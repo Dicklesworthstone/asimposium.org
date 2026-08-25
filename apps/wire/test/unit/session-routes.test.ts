@@ -424,17 +424,16 @@ async function fixture(options: LocalD1Options = {}) {
   if (issuedBody.token === undefined) throw new Error("fixture token was not issued");
   // The seed problem exists so session open finds it.
   const now = new Date().toISOString();
-  await db
-    .prepare(
-      "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES ('P-4DSP', 0, ?, ?)",
-    )
-    .bind(now, now)
-    .run();
   const genesis = await genesisChainDigest("P-4DSP");
-  await db.prepare("UPDATE problems SET chain_digest = ? WHERE id = 'P-4DSP'").bind(genesis).run();
   await db
     .prepare(
-      "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at) VALUES ('P-4DSP', 'complete', 0, ?)",
+      "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('P-4DSP', 0, ?, ?, ?, 2)",
+    )
+    .bind(now, now, genesis)
+    .run();
+  await db
+    .prepare(
+      "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES ('P-4DSP', 'complete', 0, ?, 2)",
     )
     .bind(now)
     .run();
@@ -1127,8 +1126,8 @@ describe("session protocol routes", () => {
 
     barrier.arm([
       /FROM session_write_replays/,
-      /SELECT public_seq, chain_digest FROM problems/,
-      /SELECT public_seq, chain_digest FROM problems/,
+      /SELECT public_seq, chain_digest.*FROM problems/,
+      /SELECT public_seq, chain_digest.*FROM problems/,
     ]);
     const promoted = await race(
       `/v1/sessions/${String(sessionId)}/promote`,
@@ -1183,11 +1182,18 @@ describe("session protocol routes", () => {
     const { call, db, binding, env, replayProtector } = await fixture();
     const now = new Date().toISOString();
     for (const id of ["P-OTHER", "P-THIRD", "P-FOURTH"]) {
+      const genesis = await genesisChainDigest(id);
       await db
         .prepare(
-          "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, ?, ?)",
+          "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES (?, 0, ?, ?, ?, 2)",
         )
-        .bind(id, now, now)
+        .bind(id, now, now, genesis)
+        .run();
+      await db
+        .prepare(
+          "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES (?, 'complete', 0, ?, 2)",
+        )
+        .bind(id, now)
         .run();
     }
 
@@ -1458,8 +1464,8 @@ describe("session protocol routes", () => {
 
     barrier.arm([
       /FROM session_write_replays/,
-      /SELECT public_seq, chain_digest FROM problems/,
-      /SELECT public_seq, chain_digest FROM problems/,
+      /SELECT public_seq, chain_digest.*FROM problems/,
+      /SELECT public_seq, chain_digest.*FROM problems/,
     ]);
     const responses = await Promise.all([
       promote("The first concurrent body may own this key."),
@@ -1508,7 +1514,11 @@ describe("session protocol routes", () => {
     });
     const { call, db } = await fixture({
       afterFirstRead: async (query) => {
-        if (armed && !observedHead && /SELECT public_seq, chain_digest FROM problems/.test(query)) {
+        if (
+          armed &&
+          !observedHead &&
+          /SELECT public_seq, chain_digest.*FROM problems/.test(query)
+        ) {
           observedHead = true;
           markHeadReached();
           await headRelease;

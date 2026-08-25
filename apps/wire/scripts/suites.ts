@@ -114,14 +114,14 @@ const SUITES: Record<string, Suite> = {
       },
     },
     blockedOn:
-      "asimposiumorg-p1g (OPS.3) and W2 Krater. `scripts/e2e-s2-krater.sh` already applies the numbered migrations and exercises local Workerd D1, but it is not a registered cross-slice integration suite and deliberately blocks on the missing Durable Object alarm and staging edge-cache evidence. What remains missing is a mock-free D1/R2 integration suite for the mounted Worker surfaces plus a configured R2 namespace and Durable Object alarm binding",
+      "asimposiumorg-rhg (W6.9). `scripts/e2e-s2-krater.sh` exercises local Workerd D1; source/config declare the KraterOutboxDrainer export, alarm handler, binding, and cron nudge. Missing proof is the artifact surface's registered mock-free cross-slice run across mounted D1 plus private/public R2 and exact-revision staging",
     forbiddenSubstitutes:
       "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2 in integration tests); bun:sqlite standing in for D1; the shape-only shims in test/support/bindings.ts; an in-process fetch relabelled as integration; a `wrangler dev` process that starts, serves the health face and is reported as binding proof without a read or write crossing D1 or R2",
   },
   performance: {
     status: "pending",
     blockedOn:
-      "asimposiumorg-233 (OPS.2a) and the Fable §15 budgets: no measured budget exists for this Worker, so there is no threshold to assert against",
+      "asimposiumorg-0fs (W10.7): the Fable §15 budgets have not been measured against a revision-bound environment, so there is no accepted threshold or result to assert",
     forbiddenSubstitutes:
       "a wall-clock micro-benchmark of the local handler presented as the §15 budget; a threshold derived from the first observed run; asserting only that the handler returns at all",
   },

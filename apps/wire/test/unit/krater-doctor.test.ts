@@ -75,12 +75,16 @@ function denseRowsAtReportCap(): {
   };
 }
 
-function sqliteD1(sqlite: Database): D1Database {
+function sqliteD1(
+  sqlite: Database,
+  observe?: (query: string, bindings: readonly (string | number | null)[]) => void,
+): D1Database {
   type Binding = string | number | null;
   return {
     prepare(query: string) {
       return {
         bind(...bindings: Binding[]) {
+          observe?.(query, bindings);
           return {
             async all<T>() {
               return {
@@ -117,6 +121,35 @@ describe("problem-identifier doctor (ZDZ.10)", () => {
       invalidProblemIds: [],
       truncated: false,
     });
+  });
+
+  test("bounds the durable-id report and declares the 201st invalid row", async () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run("CREATE TABLE problems (id TEXT PRIMARY KEY)");
+    const insert = sqlite.prepare("INSERT INTO problems (id) VALUES (?)");
+    for (let index = 0; index <= MAX_PROBLEM_ID_AUDIT_FINDINGS; index += 1) {
+      insert.run(`P-${String(index).padStart(3, "0")}--X`);
+    }
+    insert.run("P-SAFE");
+
+    let observedQuery = "";
+    let observedBindings: readonly (string | number | null)[] = [];
+    const report = await doctorProblemIdentifiers(
+      sqliteD1(sqlite, (query, bindings) => {
+        observedQuery = query;
+        observedBindings = bindings;
+      }),
+    );
+    expect(report.sound).toBe(false);
+    expect(report.truncated).toBe(true);
+    expect(report.invalidProblemIds).toHaveLength(MAX_PROBLEM_ID_AUDIT_FINDINGS);
+    expect(report.invalidProblemIds[0]).toBe("P-000--X");
+    expect(report.invalidProblemIds.at(-1)).toBe("P-199--X");
+    expect(report.invalidProblemIds).not.toContain("P-200--X");
+    expect(report.invalidProblemIds).not.toContain("P-SAFE");
+    expect(observedQuery).toContain("WHERE instr(id, '--') > 0");
+    expect(observedQuery).toContain("LIMIT ?");
+    expect(observedBindings).toEqual([MAX_PROBLEM_ID_AUDIT_FINDINGS + 1]);
   });
 });
 

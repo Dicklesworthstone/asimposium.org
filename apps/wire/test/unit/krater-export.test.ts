@@ -357,9 +357,23 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     };
     expect((await verifyProblemExportChain(intact, pin)).intact).toBe(true);
 
-    const header = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    const header = JSON.parse(lines[0] ?? "{}") as {
+      checkpoints: Record<string, unknown>[];
+    } & Record<string, unknown>;
     const trailer = JSON.parse(lines[lines.length - 1] ?? "{}") as Record<string, unknown>;
-    lines[0] = JSON.stringify({ ...header, problem: "P-OTHER" });
+    header.problem = "P-OTHER";
+    header.checkpoints = await Promise.all(
+      header.checkpoints.map(async (cp) => ({
+        ...cp,
+        problem: "P-OTHER",
+        checkpoint_digest: await checkpointDigest(
+          "P-OTHER",
+          Number(cp.checkpoint_seq),
+          String(cp.root_chain_digest),
+        ),
+      })),
+    );
+    lines[0] = JSON.stringify(header);
     lines[lines.length - 1] = JSON.stringify({ ...trailer, problem: "P-OTHER" });
     for (let index = 1; index < lines.length - 1; index += 1) {
       const row = JSON.parse(lines[index] ?? "{}") as Record<string, unknown>;
