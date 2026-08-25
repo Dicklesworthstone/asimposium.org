@@ -14,11 +14,13 @@ if [[ -L "${S2_SCRIPT_SOURCE}" ]]; then
 fi
 S2_SCRIPT_DIRECTORY="$(cd -P -- "$(dirname -- "${S2_SCRIPT_SOURCE}")" && pwd -P)" || exit 1
 S2_REPOSITORY_ROOT="$(cd -P -- "${S2_SCRIPT_DIRECTORY}/.." && pwd -P)" || exit 1
-if [[ "${S2_SCRIPT_DIRECTORY}" != "${S2_REPOSITORY_ROOT}/scripts" ]]; then
+S2_SCRIPT_PATH="${S2_SCRIPT_DIRECTORY}/e2e-s2-krater.sh"
+if [[ "${S2_SCRIPT_DIRECTORY}" != "${S2_REPOSITORY_ROOT}/scripts" \
+  || ! -f "${S2_SCRIPT_PATH}" || -L "${S2_SCRIPT_PATH}" ]]; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_SCRIPT_PATH_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-readonly S2_SCRIPT_SOURCE S2_SCRIPT_DIRECTORY S2_REPOSITORY_ROOT
+readonly S2_SCRIPT_SOURCE S2_SCRIPT_DIRECTORY S2_REPOSITORY_ROOT S2_SCRIPT_PATH
 cd "${S2_REPOSITORY_ROOT}"
 # shellcheck source=../e2e/lib/run-diagnostics.sh
 source "${S2_REPOSITORY_ROOT}/e2e/lib/run-diagnostics.sh"
@@ -1022,18 +1024,41 @@ fi
 export -n S2_RUN_ID
 readonly S2_RUN_ID
 readonly S2_RUN_DIR="${S2_EVIDENCE_ROOT}/${S2_RUN_ID}"
-if ! e2e_claim_artifact_namespaced_run_at_root \
-  "${S2_REPOSITORY_ROOT}" s2-krater "${S2_RUN_ID}"; then
-  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_RUN_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+S2_WRITER_LEASE_OWNED=1
+if [[ "${S2_INHERIT_WRITER_LEASE:-0}" == 1 ]]; then
+  S2_ARTIFACT_ROOT_IDENTITY="${S2_INHERITED_ARTIFACT_ROOT_IDENTITY:-}"
+  S2_EVIDENCE_ROOT_IDENTITY="${S2_INHERITED_EVIDENCE_ROOT_IDENTITY:-}"
+  S2_RUN_DIR_IDENTITY="${S2_INHERITED_RUN_DIR_IDENTITY:-}"
+  S2_WRITER_LEASE_PATH="${S2_INHERITED_WRITER_LEASE_PATH:-}"
+  S2_WRITER_LEASE_IDENTITY="${S2_INHERITED_WRITER_LEASE_IDENTITY:-}"
+  if ! e2e_artifact_namespaced_run_matches_at_root \
+    "${S2_REPOSITORY_ROOT}" s2-krater "${S2_RUN_ID}" \
+    "${S2_ARTIFACT_ROOT_IDENTITY}" "${S2_EVIDENCE_ROOT_IDENTITY}" \
+    "${S2_RUN_DIR_IDENTITY}" "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_INHERITED_WRITER_LEASE_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  S2_WRITER_LEASE_OWNED=0
+elif [[ "${S2_INHERIT_WRITER_LEASE:-0}" == 0 ]]; then
+  if ! e2e_claim_artifact_namespaced_run_at_root \
+    "${S2_REPOSITORY_ROOT}" s2-krater "${S2_RUN_ID}"; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_RUN_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  S2_ARTIFACT_ROOT_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY}"
+  S2_EVIDENCE_ROOT_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY}"
+  S2_RUN_DIR_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY}"
+  S2_WRITER_LEASE_PATH="${ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY}"
+  S2_WRITER_LEASE_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY}"
+else
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_INHERITED_WRITER_LEASE_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-S2_ARTIFACT_ROOT_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY}"
-S2_EVIDENCE_ROOT_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY}"
-S2_RUN_DIR_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY}"
-S2_WRITER_LEASE_PATH="${ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY}"
-S2_WRITER_LEASE_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY}"
+unset S2_INHERIT_WRITER_LEASE S2_INHERITED_ARTIFACT_ROOT_IDENTITY
+unset S2_INHERITED_EVIDENCE_ROOT_IDENTITY S2_INHERITED_RUN_DIR_IDENTITY
+unset S2_INHERITED_WRITER_LEASE_PATH S2_INHERITED_WRITER_LEASE_IDENTITY
 readonly S2_ARTIFACT_ROOT_IDENTITY S2_EVIDENCE_ROOT_IDENTITY S2_RUN_DIR_IDENTITY
-readonly S2_WRITER_LEASE_PATH S2_WRITER_LEASE_IDENTITY
+readonly S2_WRITER_LEASE_PATH S2_WRITER_LEASE_IDENTITY S2_WRITER_LEASE_OWNED
 
 s2_artifact_writer_boundary_is_open() {
   e2e_artifact_namespaced_run_matches_at_root \
@@ -1042,11 +1067,26 @@ s2_artifact_writer_boundary_is_open() {
     "${S2_RUN_DIR_IDENTITY}" "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"
 }
 
+S2_PREPARED_CHILD_RUN_IDENTITY=""
+s2_prepare_inherited_child_run() {
+  local child_run_id="$1"
+
+  S2_PREPARED_CHILD_RUN_IDENTITY=""
+  s2_artifact_writer_boundary_is_open || return 1
+  e2e_claim_artifact_namespaced_run_with_lease_at_root \
+    "${S2_REPOSITORY_ROOT}" s2-krater "${child_run_id}" \
+    "${S2_ARTIFACT_ROOT_IDENTITY}" "${S2_EVIDENCE_ROOT_IDENTITY}" \
+    "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}" || return 1
+  S2_PREPARED_CHILD_RUN_IDENTITY="${ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY}"
+  [[ -n "${S2_PREPARED_CHILD_RUN_IDENTITY}" ]] || return 1
+  s2_artifact_writer_boundary_is_open
+}
+
 s2_close_initial_writer_lease_on_exit() {
   local original_status="$?"
   ((BASH_SUBSHELL == 0)) || return "${original_status}"
   trap - EXIT INT TERM HUP
-  if ! e2e_close_artifact_writer_lease \
+  if [[ "${S2_WRITER_LEASE_OWNED}" == 1 ]] && ! e2e_close_artifact_writer_lease \
     "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
     original_status=125
   fi
@@ -3938,12 +3978,15 @@ post_release_controller_refuse() {
 # shell operation.  The controller's own run gets a distinct artifact root; these sidecars are
 # only the parent-owned cross-process contract and remain under this run's state directory.
 start_post_release_controller() {
-  local predicate_mode="$1" controller_base controller_run_id controller_stdout controller_stderr controller_path
+  local predicate_mode="$1" controller_base controller_run_id controller_run_identity
+  local controller_stdout controller_stderr controller_path
   [[ "${predicate_mode}" == none || "${predicate_mode}" == malformed || \
     "${predicate_mode}" == partial || "${predicate_mode}" == exit-race ]] || return 1
   [[ -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
   controller_base="${S2_STATE_DIR}/post-release-safe-controller-$(random_hex 8)" || return 1
   controller_run_id="s2u-$(random_hex 24)" || return 1
+  s2_prepare_inherited_child_run "${controller_run_id}" || return 1
+  controller_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
   S2_POST_RELEASE_CONTROLLER_MARKER="s2-post-release-controller-${controller_run_id}"
   S2_POST_RELEASE_CONTROLLER_STATE_DIR="${S2_STATE_DIR}"
   S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR="${S2_EVIDENCE_ROOT}/${controller_run_id}/main"
@@ -3976,13 +4019,19 @@ start_post_release_controller() {
   done
   env \
     S2_RUN_ID="${controller_run_id}" \
+    S2_INHERIT_WRITER_LEASE=1 \
+    S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+    S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+    S2_INHERITED_RUN_DIR_IDENTITY="${controller_run_identity}" \
+    S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+    S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
     S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint-child \
     S2_POST_RELEASE_SAFE_CONTROLLER_BASE="${controller_base}" \
     S2_POST_RELEASE_SAFE_CONTROLLER_MARKER="${S2_POST_RELEASE_CONTROLLER_MARKER}" \
     S2_POST_RELEASE_SAFE_CONTROLLER_IDENTITY="${S2_POST_RELEASE_CONTROLLER_IDENTITY}" \
     S2_PLANT_POST_RELEASE_READY_PREDICATE="${predicate_mode}" \
     S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE=0 \
-    bash "${BASH_SOURCE[0]}" \
+    bash "${S2_SCRIPT_PATH}" \
       >"${controller_stdout}" 2>"${controller_stderr}" &
   # This assignment is intentionally adjacent to `$!`: an EXIT trap must already have the exact
   # direct child while all later validation, parsing, and controller-side observations run.
@@ -4831,7 +4880,7 @@ create_evidence_subdir() {
 
 # shellcheck disable=SC2329
 on_exit() {
-  local original_status="$?" final_status cleanup_proven=true signal_exit=false
+  local original_status="$?" final_status cleanup_proven=true
   trap - EXIT
   # A first signal has already selected the preserved status. Ignore follow-up
   # termination signals while exact cleanup and immutable evidence publication run.
@@ -4851,9 +4900,6 @@ on_exit() {
     S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
   fi
   final_status="${original_status}"
-  case "${original_status}" in
-    129|130|143) signal_exit=true ;;
-  esac
   S2_ON_EXIT_CLEANUP_ACTIVE=1
   if ! cleanup_workers; then
     final_status=125
@@ -4875,9 +4921,11 @@ on_exit() {
       ! write_evidence_receipt "${final_status}" 1 || \
       ! s2_artifact_writer_boundary_is_open || \
       ! s2_source_provenance_matches_start || \
+      ! s2_artifact_writer_boundary_is_open || \
       ! write_s2_cost_publication || \
       ! s2_artifact_writer_boundary_is_open || \
       ! s2_source_provenance_matches_start || \
+      ! s2_artifact_writer_boundary_is_open || \
       ! write_s2_source_snapshot || \
       ! s2_artifact_writer_boundary_is_open || \
       ! write_s2_cost_publication_commit || \
@@ -4901,7 +4949,7 @@ on_exit() {
     ! s2_artifact_writer_boundary_is_open; then
     final_status=125
   fi
-  if [[ "${cleanup_proven}" == true && "${signal_exit}" == false ]]; then
+  if [[ "${cleanup_proven}" == true && "${S2_WRITER_LEASE_OWNED}" == 1 ]]; then
     if ! e2e_close_artifact_writer_lease \
       "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
       final_status=125
@@ -5823,12 +5871,22 @@ run_s2_shell_regression_test() {
   fi
 
   if [[ "${mode}" == "pre-arm-owner-loss" ]]; then
-    local planted_helper_pid child_persist child_port
+    local planted_helper_pid child_persist child_port child_run_id child_run_identity
     parent_loss_record="${S2_STATE_DIR}/pre-arm-owner-loss-record-$(random_hex 8)"
+    child_run_id="s2c-$(random_hex 24)" || return 1
+    s2_prepare_inherited_child_run "${child_run_id}" || return 1
+    child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
     env \
+      S2_RUN_ID="${child_run_id}" \
+      S2_INHERIT_WRITER_LEASE=1 \
+      S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+      S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+      S2_INHERITED_RUN_DIR_IDENTITY="${child_run_identity}" \
+      S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+      S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss-child \
       S2_PRE_ARM_OWNER_LOSS_RECORD="${parent_loss_record}" \
-      bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
+      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     parent_loss_child=$!
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while [[ ! -f "${parent_loss_record}" || -L "${parent_loss_record}" ]]; do
@@ -5890,11 +5948,22 @@ run_s2_shell_regression_test() {
   fi
 
   if [[ "${mode}" == "parent-loss" ]]; then
+    local child_run_id child_run_identity
     parent_loss_record="${S2_STATE_DIR}/parent-loss-record-$(random_hex 8)"
+    child_run_id="s2c-$(random_hex 24)" || return 1
+    s2_prepare_inherited_child_run "${child_run_id}" || return 1
+    child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
     env \
+      S2_RUN_ID="${child_run_id}" \
+      S2_INHERIT_WRITER_LEASE=1 \
+      S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+      S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+      S2_INHERITED_RUN_DIR_IDENTITY="${child_run_identity}" \
+      S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+      S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=parent-loss-child \
       S2_PARENT_LOSS_RECORD="${parent_loss_record}" \
-      bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
+      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     parent_loss_child=$!
     if wait "${parent_loss_child}" 2>/dev/null; then
       parent_loss_status=0
@@ -5970,12 +6039,22 @@ run_s2_shell_regression_test() {
   fi
 
   if [[ "${mode}" == "owner-loss-uncertain" ]]; then
-    local child_persist child_port
+    local child_persist child_port child_run_id child_run_identity
     parent_loss_record="${S2_STATE_DIR}/owner-loss-uncertain-record-$(random_hex 8)"
+    child_run_id="s2c-$(random_hex 24)" || return 1
+    s2_prepare_inherited_child_run "${child_run_id}" || return 1
+    child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
     env \
+      S2_RUN_ID="${child_run_id}" \
+      S2_INHERIT_WRITER_LEASE=1 \
+      S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+      S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+      S2_INHERITED_RUN_DIR_IDENTITY="${child_run_identity}" \
+      S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+      S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=owner-loss-uncertain-child \
       S2_PARENT_LOSS_RECORD="${parent_loss_record}" \
-      bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
+      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     parent_loss_child=$!
     if wait "${parent_loss_child}" 2>/dev/null; then
       parent_loss_status=0
@@ -6212,13 +6291,24 @@ run_s2_shell_regression_test() {
   fi
 
   if [[ "${mode}" == "term-interrupt-cleanup" ]]; then
+    local child_run_id child_run_identity
     interrupt_record="${S2_STATE_DIR}/parent-term-control-record-$(random_hex 8)"
     interrupt_secret="s2-parent-term-secret-must-not-appear"
+    child_run_id="s2c-$(random_hex 24)" || return 1
+    s2_prepare_inherited_child_run "${child_run_id}" || return 1
+    child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
     env \
+      S2_RUN_ID="${child_run_id}" \
+      S2_INHERIT_WRITER_LEASE=1 \
+      S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+      S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+      S2_INHERITED_RUN_DIR_IDENTITY="${child_run_identity}" \
+      S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+      S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup-child \
       S2_PARENT_INTERRUPT_RECORD="${interrupt_record}" \
       S2_PARENT_INTERRUPT_SECRET="${interrupt_secret}" \
-      bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
+      bash "${S2_SCRIPT_PATH}" >/dev/null 2>&1 &
     interrupt_child=$!
     if wait "${interrupt_child}" 2>/dev/null; then
       interrupt_status=0
@@ -7795,20 +7885,30 @@ fi
 
 launch_lifecycle_child() {
   local port="$1" log="$2" interrupt_after_ready="$3" state_dir="$4" block_after_ready="${5:-0}"
-  local on_exit_second_signal="${6:-0}" ready_file
+  local on_exit_second_signal="${6:-0}" ready_file child_run_id child_run_identity
   [[ "${block_after_ready}" == 0 || "${block_after_ready}" == 1 ]] || return 1
   [[ "${on_exit_second_signal}" == 0 || "${on_exit_second_signal}" == 1 ]] || return 1
   ready_file="${state_dir}/ready-${port}-$(random_hex 8)"
+  child_run_id="s2l-$(random_hex 24)" || return 1
+  s2_prepare_inherited_child_run "${child_run_id}" || return 1
+  child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
   start_pinned_supervisor "${state_dir}/child-${port}-$(random_hex 8).status" "lifecycle-${port}" \
     "${state_dir}" "${port}" client \
     env \
+      S2_RUN_ID="${child_run_id}" \
+      S2_INHERIT_WRITER_LEASE=1 \
+      S2_INHERITED_ARTIFACT_ROOT_IDENTITY="${S2_ARTIFACT_ROOT_IDENTITY}" \
+      S2_INHERITED_EVIDENCE_ROOT_IDENTITY="${S2_EVIDENCE_ROOT_IDENTITY}" \
+      S2_INHERITED_RUN_DIR_IDENTITY="${child_run_identity}" \
+      S2_INHERITED_WRITER_LEASE_PATH="${S2_WRITER_LEASE_PATH}" \
+      S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_PORT="${port}" \
       S2_LIFECYCLE_TEST="none" \
       S2_INTERRUPT_AFTER_READY="${interrupt_after_ready}" \
       S2_LIFECYCLE_BLOCK_AFTER_READY="${block_after_ready}" \
       S2_PLANT_ON_EXIT_SECOND_SIGNAL="${on_exit_second_signal}" \
       S2_LIFECYCLE_READY_FILE="${ready_file}" \
-      bash "${BASH_SOURCE[0]}" >"${log}" 2>&1 || return 1
+      bash "${S2_SCRIPT_PATH}" >"${log}" 2>&1 || return 1
   S2_LIFECYCLE_CHILD_PID="${S2_STARTED_PID}"
   S2_LIFECYCLE_CHILD_PGID="${S2_STARTED_PGID}"
   S2_LIFECYCLE_CHILD_MARKER="${S2_STARTED_MARKER}"

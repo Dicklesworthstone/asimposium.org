@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import worker from "../../apps/wire/src/index";
 import type {
   ScreeningCorpusExample,
   ScreeningObservation,
   ScreeningRunIdentity,
 } from "../../apps/wire/src/screening";
+import { WORKERS_AI_MODEL } from "../../apps/wire/src/screening/workers-ai";
 import {
   assertS4CorpusShape,
   assertS4ManifestReadyForLiveRun,
@@ -22,6 +24,7 @@ import {
 
 const root = resolve(import.meta.dir, "../..");
 const STAGING_CONFIGURATION_DIGEST = `sha256:${"f".repeat(64)}`;
+const MOUNTED_SCREENING_BEARER = "s4-mounted-runner-bearer-0123456789";
 
 function scoreBands(): ScreeningObservation["category_score_bands"] {
   return {
@@ -58,21 +61,22 @@ function validObservations(
   }));
 }
 
-async function readyProtectedCorpus(): Promise<readonly ScreeningCorpusExample[]> {
-  const corpus = await createS4Corpus();
-  return corpus.map((example, index) =>
-    example.source.kind === "protected-staging"
-      ? {
-          ...example,
-          body_digest: `sha256:${(index + 1).toString(16).padStart(64, "0")}`,
-          source: {
-            ...example.source,
-            availability: "available" as const,
-            version: "staging-bound-v1",
-          },
-        }
-      : example,
-  );
+/** Contract stub only: it proves mounted routing, never screening accuracy. */
+function mountedContractAi() {
+  const calls: string[] = [];
+  return {
+    calls,
+    async run(model: string) {
+      calls.push(model);
+      return {
+        response: JSON.stringify({
+          decision: "pass",
+          coarse_category: "benign-context",
+          bands: { "benign-context": "low" },
+        }),
+      };
+    },
+  };
 }
 
 describe("S-4 frozen corpus", () => {
@@ -137,57 +141,67 @@ describe("S-4 frozen corpus", () => {
     );
   });
 
-  test("a ready protected descriptor reaches staging with a canonical digest identity and never stores its body", async () => {
-    const corpus = await readyProtectedCorpus();
-    assertS4CorpusShape(corpus);
-    expect(inspectS4ManifestReadiness(corpus)).toEqual({ status: "ready", blockers: [] });
-    await expect(assertS4ManifestReadyForLiveRun(corpus)).resolves.toBeUndefined();
-    const identity = await deriveS4EvaluatedCorpusIdentity(corpus);
+  test("the current evaluable corpus traverses the mounted route while absent hard-reject bodies remain blocked", async () => {
+    // Supply the real 200-row manifest to the runner. Its honest partial path
+    // sends only the 150 digest-bound inline bodies to the route; the 50
+    // protected rows have neither bodies nor digests and remain unmeasured.
+    const corpus = await createS4Corpus();
+    const ai = mountedContractAi();
+    const env = {
+      AI: ai,
+      S4_SCREENING_BEARER: MOUNTED_SCREENING_BEARER,
+    } as unknown as Parameters<typeof worker.fetch>[1];
+    const context = {
+      waitUntil: () => undefined,
+      passThroughOnException: () => undefined,
+    } as unknown as Parameters<typeof worker.fetch>[2];
     const writes: string[] = [];
-    let submitted:
-      | (Record<string, unknown> & { readonly examples: readonly unknown[] })
-      | undefined;
+    let failure: unknown;
+    try {
+      await runLiveScreening({
+        corpus,
+        screening_url: new URL("https://a-staging.asimposium.org/internal/screen"),
+        bearer: MOUNTED_SCREENING_BEARER,
+        fetch_impl: async (url, init) =>
+          worker.fetch(
+            new Request(url.toString(), init),
+            env,
+            context,
+          ),
+        write: (line) => writes.push(line),
+      });
+    } catch (error) {
+      failure = error;
+    }
 
-    await runLiveScreening({
-      corpus,
-      screening_url: new URL("https://screening.example.test/v1/s4"),
-      bearer: "test-bearer-token-with-sufficient-length",
-      fetch_live_json: async (_url, init) => {
-        submitted = JSON.parse(String(init.body)) as Record<string, unknown> & {
-          readonly examples: readonly unknown[];
-        };
-        return {
-          corpus_revision: identity.corpus_revision,
-          corpus_digest: identity.corpus_digest,
-          // This corpus is READY, so the runner submits the whole of it; staging
-          // attests that scope back and the runner binds the two.
-          partial_run: false,
-          model_version: "staging-model-v1",
-          policy_version: "staging-policy-v1",
-          configuration_digest: STAGING_CONFIGURATION_DIGEST,
-          observations: validObservations(corpus, {
-            ...identity,
-            model_version: "staging-model-v1",
-            policy_version: "staging-policy-v1",
-            configuration_digest: STAGING_CONFIGURATION_DIGEST,
-          }),
-        };
-      },
-      write: (line) => writes.push(line),
+    expect(failure).toMatchObject({
+      code: "S4_PARTIAL_RUN_HARD_REJECT_UNMEASURED",
+      exit_code: 78,
     });
-
-    expect(submitted).toMatchObject({
-      corpus_revision: identity.corpus_revision,
-      corpus_digest: identity.corpus_digest,
-      partial_run: false,
-    });
-    expect(submitted?.examples).toHaveLength(200);
     expect(writes).toHaveLength(1);
-    expect(writes[0]).toContain(identity.corpus_digest);
+    // The intercepted record has the production live-run label because the
+    // runner cannot know this test supplied a contract stub. It is asserted as
+    // response wiring only and is not retained or cited as model evidence.
+    expect(JSON.parse(writes[0] ?? "{}")).toMatchObject({
+      record_type: "screening-partial-aggregate",
+      evidence_class: "provider-measured",
+      verdict: "blocked",
+      evaluated_count: 150,
+      reserved_count: 50,
+      exit_code: 78,
+    });
+    expect(ai.calls).toHaveLength(150);
+    expect(ai.calls.every((model) => model === WORKERS_AI_MODEL)).toBe(true);
+    expect(corpus.filter((example) => example.source.kind === "protected-staging")).toHaveLength(50);
     expect(
       corpus
         .filter((example) => example.source.kind === "protected-staging")
-        .every((example) => example.body === undefined),
+        .every(
+          (example) =>
+            example.body === undefined &&
+            example.body_digest === undefined &&
+            example.source.availability === "blocked",
+        ),
     ).toBe(true);
   });
 

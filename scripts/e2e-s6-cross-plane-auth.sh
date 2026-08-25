@@ -475,7 +475,7 @@ request_group_signal() {
   esac
   if (( SIGNAL_TERM_FAILURE_PLANT == 1 )) && [[ "$signal" == "TERM" ]]; then return 1; fi
   if (( SIGNAL_KILL_FAILURE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then return 1; fi
-  if (( SIGNAL_KILL_NO_SETTLE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then return 0; fi
+  if (( SIGNAL_KILL_NO_SETTLE_PLANT == 1 )) && [[ "$signal" == "KILL" || "$signal" == "DIE" ]]; then return 0; fi
   if [[ "$signal" == "DIE" ]]; then
     expected="control-closed:${token}"
   else
@@ -572,6 +572,7 @@ consume_group_terminal_during_grace() {
      validate_group_child_record "$record"; then
     GROUP_TERMINAL_SEEN=1
     GROUP_PROTOCOL_STATE="terminal"
+    sleep "$CHILD_SETTLE_POLL_SECONDS"
     return 0
   fi
   GROUP_RECORD_INVALID=1
@@ -1418,7 +1419,6 @@ run_bounded() {
   else
     consume_group_terminal_during_grace 1 || cleanup_unproven=1
   fi
-  sleep "$CHILD_SETTLE_POLL_SECONDS"
   if ! request_group_signal "$pid" KILL; then cleanup_unproven=1; fi
   GROUP_ALLOW_CHILD_BEFORE_ACK=0
 

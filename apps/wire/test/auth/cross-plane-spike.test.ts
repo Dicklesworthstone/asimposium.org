@@ -452,7 +452,7 @@ class OuterSupervisorProtocol {
       this.fail("trailing partial frame");
       return;
     }
-    if (this.expected !== undefined) {
+    if (this.expected !== undefined && !this.closureExpected) {
       this.fail("socket " + reason + " before expected acknowledgement: " + this.expected.record);
       return;
     }

@@ -196,6 +196,166 @@ if [[ "$e2e_test_maintenance_check_count" -ne 3 \
   fail "NAMESPACED_RUN_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 
+namespaced_post_claim_fence_root="$(
+  mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-post-claim-fence.XXXXXX"
+)" || fail "NAMESPACED_POST_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+mkdir -p "$namespaced_post_claim_fence_root/e2e" \
+  || fail "NAMESPACED_POST_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+e2e_test_maintenance_check_count=0
+e2e_test_fence_on_maintenance_check=5
+if e2e_claim_artifact_namespaced_run_at_root \
+  "$namespaced_post_claim_fence_root" s2-krater fenced-run >/dev/null 2>&1; then
+  fail "NAMESPACED_POST_CLAIM_FENCE_RACE_ACCEPTED"
+fi
+e2e_test_fence_on_maintenance_check=0
+namespaced_post_claim_fence_identity="$(
+  e2e_artifact_directory_identity "$namespaced_post_claim_fence_root/e2e/artifacts"
+)" || fail "NAMESPACED_POST_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+if [[ "$e2e_test_maintenance_check_count" -ne 5 \
+  || ! -d "$namespaced_post_claim_fence_root/e2e/artifacts/s2-krater/fenced-run" \
+  || -n "$(
+    find "$namespaced_post_claim_fence_root/e2e/artifacts/s2-krater/fenced-run" \
+      -mindepth 1 -print -quit
+  )" ]] \
+  || ! e2e_test_acquired_lease_is_closed_for_root \
+    "$namespaced_post_claim_fence_root" "$namespaced_post_claim_fence_identity" \
+  || ! e2e_artifact_writer_leases_quiescent_at_root \
+    "$namespaced_post_claim_fence_root" "$namespaced_post_claim_fence_identity"; then
+  fail "NAMESPACED_POST_CLAIM_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
+fi
+
+namespaced_namespace_swap_root="$(
+  mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-namespace-swap.XXXXXX"
+)" || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
+mkdir -p "$namespaced_namespace_swap_root/e2e" \
+  || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_namespaced_run_at_root \
+  "$namespaced_namespace_swap_root" s2-krater swap-run \
+  || fail "NAMESPACED_NAMESPACE_SWAP_CLAIM_REJECTED"
+namespace_swap_root_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY"
+namespace_swap_namespace_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY"
+namespace_swap_run_identity="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+namespace_swap_lease_path="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+namespace_swap_lease_identity="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+mv "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater" \
+  "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater-original" \
+  || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
+mkdir "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater" \
+  || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
+mv "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater-original/swap-run" \
+  "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater/swap-run" \
+  || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
+if e2e_artifact_namespaced_run_matches_at_root \
+  "$namespaced_namespace_swap_root" s2-krater swap-run \
+  "$namespace_swap_root_identity" "$namespace_swap_namespace_identity" \
+  "$namespace_swap_run_identity" "$namespace_swap_lease_path" \
+  "$namespace_swap_lease_identity"; then
+  fail "REPLACED_ARTIFACT_NAMESPACE_ACCEPTED"
+fi
+if [[ -n "$(
+    find "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater/swap-run" \
+      -mindepth 1 -print -quit
+  )" \
+  || -n "$(
+    find "$namespaced_namespace_swap_root/e2e/artifacts/s2-krater-original" \
+      -mindepth 1 -print -quit
+  )" ]]; then
+  fail "REPLACED_ARTIFACT_NAMESPACE_MUTATED"
+fi
+e2e_close_artifact_writer_lease "$namespace_swap_lease_path" "$namespace_swap_lease_identity" \
+  || fail "NAMESPACED_NAMESPACE_SWAP_CLOSE_FAILED"
+
+namespaced_run_swap_root="$(
+  mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-run-swap.XXXXXX"
+)" || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
+mkdir -p "$namespaced_run_swap_root/e2e" \
+  || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_namespaced_run_at_root "$namespaced_run_swap_root" s2-krater swap-run \
+  || fail "NAMESPACED_RUN_SWAP_CLAIM_REJECTED"
+run_swap_root_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY"
+run_swap_namespace_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY"
+run_swap_run_identity="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+run_swap_lease_path="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+run_swap_lease_identity="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+mv "$namespaced_run_swap_root/e2e/artifacts/s2-krater/swap-run" \
+  "$namespaced_run_swap_root/e2e/artifacts/s2-krater/swap-run-original" \
+  || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
+mkdir "$namespaced_run_swap_root/e2e/artifacts/s2-krater/swap-run" \
+  || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
+if e2e_artifact_namespaced_run_matches_at_root \
+  "$namespaced_run_swap_root" s2-krater swap-run \
+  "$run_swap_root_identity" "$run_swap_namespace_identity" "$run_swap_run_identity" \
+  "$run_swap_lease_path" "$run_swap_lease_identity"; then
+  fail "REPLACED_NAMESPACED_RUN_ACCEPTED"
+fi
+if [[ -n "$(
+    find "$namespaced_run_swap_root/e2e/artifacts/s2-krater/swap-run" \
+      -mindepth 1 -print -quit
+  )" \
+  || -n "$(
+    find "$namespaced_run_swap_root/e2e/artifacts/s2-krater/swap-run-original" \
+      -mindepth 1 -print -quit
+  )" ]]; then
+  fail "REPLACED_NAMESPACED_RUN_MUTATED"
+fi
+e2e_close_artifact_writer_lease "$run_swap_lease_path" "$run_swap_lease_identity" \
+  || fail "NAMESPACED_RUN_SWAP_CLOSE_FAILED"
+
+foreign_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-foreign-lease.XXXXXX")" \
+  || fail "FOREIGN_LEASE_FIXTURE_UNAVAILABLE"
+mkdir -p "$foreign_lease_root/e2e" || fail "FOREIGN_LEASE_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_namespaced_run_at_root "$foreign_lease_root" s2-krater foreign-run \
+  || fail "FOREIGN_LEASE_CLAIM_REJECTED"
+foreign_lease_path="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+foreign_lease_identity="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+if e2e_artifact_namespaced_run_matches_at_root \
+  "$namespaced_root" s2-krater nested-run \
+  "$namespaced_root_identity" "$namespaced_namespace_identity" "$namespaced_run_identity" \
+  "$foreign_lease_path" "$foreign_lease_identity"; then
+  fail "FOREIGN_EPOCH_LEASE_ACCEPTED"
+fi
+e2e_close_artifact_writer_lease "$foreign_lease_path" "$foreign_lease_identity" \
+  || fail "FOREIGN_LEASE_CLOSE_FAILED"
+
+inherited_child_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-inherited-child.XXXXXX")" \
+  || fail "INHERITED_CHILD_FIXTURE_UNAVAILABLE"
+mkdir -p "$inherited_child_root/e2e" || fail "INHERITED_CHILD_FIXTURE_UNAVAILABLE"
+e2e_claim_artifact_namespaced_run_at_root "$inherited_child_root" s2-krater parent-run \
+  || fail "INHERITED_CHILD_PARENT_CLAIM_REJECTED"
+inherited_root_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY"
+inherited_namespace_identity="$ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_IDENTITY"
+inherited_parent_run_identity="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+inherited_lease_path="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY"
+inherited_lease_identity="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY"
+inherited_epoch="${inherited_lease_path%/*}"
+inherited_leases_before="$(find "$inherited_epoch" -mindepth 1 -type d -print | LC_ALL=C sort)"
+e2e_claim_artifact_namespaced_run_with_lease_at_root \
+  "$inherited_child_root" s2-krater child-run \
+  "$inherited_root_identity" "$inherited_namespace_identity" \
+  "$inherited_lease_path" "$inherited_lease_identity" \
+  || fail "INHERITED_CHILD_CLAIM_REJECTED"
+inherited_child_run_identity="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY"
+inherited_leases_after="$(find "$inherited_epoch" -mindepth 1 -type d -print | LC_ALL=C sort)"
+if [[ "$inherited_leases_before" != "$inherited_leases_after" \
+  || -z "$inherited_child_run_identity" \
+  || -n "$(find "$inherited_child_root/e2e/artifacts/s2-krater/child-run" -mindepth 1 -print -quit)" ]] \
+  || ! e2e_artifact_namespaced_run_matches_at_root \
+    "$inherited_child_root" s2-krater parent-run \
+    "$inherited_root_identity" "$inherited_namespace_identity" \
+    "$inherited_parent_run_identity" "$inherited_lease_path" "$inherited_lease_identity" \
+  || ! e2e_artifact_namespaced_run_matches_at_root \
+    "$inherited_child_root" s2-krater child-run \
+    "$inherited_root_identity" "$inherited_namespace_identity" \
+    "$inherited_child_run_identity" "$inherited_lease_path" "$inherited_lease_identity"; then
+  fail "INHERITED_CHILD_CAPABILITY_INVALID"
+fi
+e2e_close_artifact_writer_lease "$inherited_lease_path" "$inherited_lease_identity" \
+  || fail "INHERITED_CHILD_LEASE_CLOSE_FAILED"
+if ! e2e_artifact_writer_leases_quiescent_at_root \
+  "$inherited_child_root" "$inherited_root_identity"; then
+  fail "INHERITED_CHILD_LEASE_REPORTED_OPEN_AFTER_PARENT_CLOSE"
+fi
+
 lease_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-lease-fence.XXXXXX")" \
   || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$lease_fence_root/e2e" || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"

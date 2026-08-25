@@ -856,6 +856,64 @@ e2e_artifact_namespaced_run_matches_at_root() {
   e2e_artifact_maintenance_absent_at_root "$repository_root"
 }
 
+# Exclusively claim another run beneath an already-open namespaced writer
+# lease. The caller remains the sole lease owner and must keep it open until it
+# has proved every child using the returned run capability has settled.
+e2e_claim_artifact_namespaced_run_with_lease_at_root() {
+  local repository_root="$1"
+  local namespace="$2"
+  local run_id="$3"
+  local expected_root_identity="$4"
+  local expected_namespace_identity="$5"
+  local lease_directory="$6"
+  local lease_identity="$7"
+  local physical_artifacts_root
+  local physical_namespace_directory
+  local run_directory
+  local physical_run_directory
+  local run_identity
+  local epoch_directory
+
+  ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY=""
+  ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY=""
+  e2e_validate_run_id "$namespace" || return 1
+  e2e_validate_run_id "$run_id" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root")" == "$expected_root_identity" ]] \
+    || return 1
+  physical_namespace_directory="$(
+    e2e_physical_directory "$physical_artifacts_root/$namespace"
+  )" || return 1
+  [[ "$physical_namespace_directory" == "$physical_artifacts_root/$namespace" \
+    && "$(e2e_artifact_directory_identity "$physical_namespace_directory")" == \
+      "$expected_namespace_identity" ]] || return 1
+  epoch_directory="$(e2e_artifact_writer_lease_epoch_at_root \
+    "$repository_root" "$expected_root_identity")" || return 1
+  [[ "${lease_directory%/*}" == "$epoch_directory" ]] || return 1
+  e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+
+  run_directory="$physical_namespace_directory/$run_id"
+  [[ ! -e "$run_directory" && ! -L "$run_directory" ]] || return 1
+  [[ "$(e2e_artifact_directory_identity "$physical_artifacts_root" 2>/dev/null || true)" == \
+      "$expected_root_identity" \
+    && "$(e2e_artifact_directory_identity "$physical_namespace_directory" 2>/dev/null || true)" == \
+      "$expected_namespace_identity" ]] || return 1
+  e2e_artifact_writer_lease_is_open "$lease_directory" "$lease_identity" || return 1
+  e2e_artifact_maintenance_absent_at_root "$repository_root" || return 1
+  mkdir "$run_directory" 2>/dev/null || return 1
+  physical_run_directory="$(e2e_physical_directory "$run_directory")" || return 1
+  [[ "$physical_run_directory" == "$run_directory" ]] || return 1
+  run_identity="$(e2e_artifact_directory_identity "$physical_run_directory")" || return 1
+  e2e_artifact_namespaced_run_matches_at_root \
+    "$repository_root" "$namespace" "$run_id" \
+    "$expected_root_identity" "$expected_namespace_identity" "$run_identity" \
+    "$lease_directory" "$lease_identity" || return 1
+  ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY="$physical_run_directory"
+  ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY="$run_identity"
+}
+
 e2e_write_artifact_diagnostic_at_root() {
   local repository_root="$1"
   local run_id="$2"

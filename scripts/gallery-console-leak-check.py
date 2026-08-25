@@ -22,6 +22,7 @@ never render a real object id.
 
 import re
 import sys
+from html import unescape
 
 # `\b` anchors each id to a token boundary. Both F- and W- use the Crockford
 # uppercase/digit class the minter actually emits; ASIMP-EN- is the enrollment
@@ -31,9 +32,10 @@ SIGN_IN_PATTERN = re.compile(r"sign in|google|authenticate", re.IGNORECASE)
 
 
 def classify(html: str) -> int:
-    if not SIGN_IN_PATTERN.search(html):
+    rendered_html = unescape(html)
+    if not SIGN_IN_PATTERN.search(rendered_html):
         return 1
-    if LEAK_PATTERN.search(html):
+    if LEAK_PATTERN.search(rendered_html):
         return 2
     return 0
 

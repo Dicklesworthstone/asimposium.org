@@ -86,6 +86,11 @@ export class BoundedLiveJsonError extends Error {
 export interface BoundedLiveJsonOptions {
   readonly timeout_ms?: number;
   readonly max_bytes?: number;
+  /**
+   * Test seam for exercising the mounted Worker without bypassing this
+   * bounded response reader. Production always uses the global HTTPS fetch.
+   */
+  readonly fetch_impl?: (url: URL, init: RequestInit) => Promise<Response>;
 }
 
 interface BoundedResponseReader {
@@ -157,6 +162,8 @@ export async function fetchBoundedLiveJson(
     throw new TypeError("S-4 live-response bounds must be positive integers.");
   }
   const controller = new AbortController();
+  const fetchImpl =
+    options.fetch_impl ?? ((target: URL, request: RequestInit) => fetch(target, request));
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -172,7 +179,7 @@ export async function fetchBoundedLiveJson(
       // A screening attestation is bound to this exact endpoint. Following a
       // redirect could silently send its bearer/body to a different origin and
       // turn an outage page into a different response class, so reject it.
-      fetch(url, { ...init, redirect: "manual", signal: controller.signal }),
+      fetchImpl(url, { ...init, redirect: "manual", signal: controller.signal }),
       deadline,
     ]);
     if (!response.ok) throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_UNAVAILABLE");
@@ -337,6 +344,11 @@ export interface LiveScreeningOptions {
   readonly corpus?: readonly ScreeningCorpusExample[];
   /** Test-only transport injection; production uses bounded HTTPS fetch. */
   readonly fetch_live_json?: typeof fetchBoundedLiveJson;
+  /**
+   * Test-only fetch implementation. Unlike `fetch_live_json`, this still runs
+   * the production deadline, redirect, byte-ceiling, and JSON parser path.
+   */
+  readonly fetch_impl?: (url: URL, init: RequestInit) => Promise<Response>;
   /** Keeps focused tests from writing staged-shaped records to process stdout. */
   readonly write?: (line: string) => void;
   readonly screening_url?: URL;
@@ -368,7 +380,14 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
   else await assertS4ManifestReadyForLiveRun(corpus);
   const screeningUrl = options.screening_url ?? requiredHttpsUrl("S4_STAGING_SCREENING_URL");
   const bearer = options.bearer ?? requiredBearer();
-  const fetchLiveJson = options.fetch_live_json ?? fetchBoundedLiveJson;
+  const fetchLiveJson =
+    options.fetch_live_json ??
+    ((url: URL, init: RequestInit) =>
+      fetchBoundedLiveJson(
+        url,
+        init,
+        options.fetch_impl === undefined ? {} : { fetch_impl: options.fetch_impl },
+      ));
   const write = options.write ?? ((line: string) => process.stdout.write(line));
   const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(submitted);
   let response: unknown;

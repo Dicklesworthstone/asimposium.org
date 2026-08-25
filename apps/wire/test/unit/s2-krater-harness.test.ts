@@ -1681,6 +1681,8 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("packages/contracts/package.json");
     expect(shell).toContain("packages/contracts/src/index.ts");
     expect(shell).toContain("e2e/lib/run-diagnostics.sh");
+    expect(shell).toContain('S2_SCRIPT_PATH="${S2_SCRIPT_DIRECTORY}/e2e-s2-krater.sh"');
+    expect(shell).not.toContain('bash "${BASH_SOURCE[0]}"');
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     const runIdValidation = shell.indexOf('if [[ ! "${S2_RUN_ID}" =~');
@@ -1709,13 +1711,45 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit).toContain("! s2_source_provenance_matches_start");
     expect(onExit).toContain("cleanup_workers");
     expect(onExit).toContain("S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP");
+    expect(onExit).toContain(
+      "! s2_source_provenance_matches_start || \\\n" +
+        "      ! s2_artifact_writer_boundary_is_open || \\\n" +
+        "      ! write_s2_cost_publication",
+    );
+    expect(onExit).toContain(
+      "! s2_source_provenance_matches_start || \\\n" +
+        "      ! s2_artifact_writer_boundary_is_open || \\\n" +
+        "      ! write_s2_source_snapshot",
+    );
     expect(onExit.lastIndexOf("s2_artifact_writer_boundary_is_open")).toBeLessThan(
       onExit.lastIndexOf("e2e_close_artifact_writer_lease"),
     );
-    expect(onExit).toContain('"${cleanup_proven}" == true && "${signal_exit}" == false');
+    expect(onExit).toContain(
+      '"${cleanup_proven}" == true && "${S2_WRITER_LEASE_OWNED}" == 1',
+    );
+    const recursiveLaunches = Array.from(shell.matchAll(/bash "\$\{S2_SCRIPT_PATH\}"/g));
+    expect(recursiveLaunches.length).toBeGreaterThanOrEqual(6);
+    for (const launch of recursiveLaunches) {
+      const index = launch.index ?? 0;
+      const inheritedCapability = shell.slice(Math.max(0, index - 900), index);
+      expect(inheritedCapability).toContain("S2_INHERIT_WRITER_LEASE=1");
+      expect(inheritedCapability).toContain("S2_INHERITED_RUN_DIR_IDENTITY=");
+      expect(inheritedCapability).toContain("s2_prepare_inherited_child_run");
+    }
     expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
       shell.indexOf("write_s2_cost_publication_commit()"),
     );
+  });
+
+  test("resolves recursive script authority from a non-root caller cwd", () => {
+    const run = spawnSync("bash", ["../../scripts/e2e-s2-krater.sh"], {
+      cwd: resolve(REPOSITORY_ROOT, "apps/wire"),
+      env: { ...process.env, S2_RUN_ID: "../invalid" },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('"code":"S2_EVIDENCE_RUN_ID_INVALID"');
   });
 
   test("publishes exact supervisor cleanup scope before every normal release write", () => {
