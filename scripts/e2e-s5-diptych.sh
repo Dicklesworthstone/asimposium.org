@@ -723,7 +723,9 @@ for _attempt in {1..40}; do
   if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
     break
   fi
-  if curl --silent --output /dev/null --max-time 2 "${ORIGIN}/__s5/face?format=md"; then
+  if curl --silent --output /dev/null --max-time 2 \
+    --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+    "${ORIGIN}/__s5/face?format=md"; then
     ready=1
     break
   fi

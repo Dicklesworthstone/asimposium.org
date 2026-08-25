@@ -79,6 +79,12 @@ test("the public face cannot claim trusted items, unsafe actions, or composer-on
   if (posting.next_actions[0] !== undefined) posting.next_actions[0].method = "POST";
   expect(ProblemFaceResponseSchema.safeParse(posting).success).toBe(false);
 
+  const encodedQuery = structuredClone(valid);
+  if (encodedQuery.next_actions[0] !== undefined) {
+    encodedQuery.next_actions[0].url = "/problems.json?after=P-A%20B";
+  }
+  expect(ProblemFaceResponseSchema.safeParse(encodedQuery).success).toBe(true);
+
   for (const url of [
     "https://attacker.example/collect",
     "//attacker.example/collect",

@@ -81,6 +81,8 @@ const FaceItemSchema = z
   .strict();
 
 const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const PUBLIC_ACTION_PATH_PATTERN =
+  /^(?!\/\/)(?!.*[\u0000-\u0020\u007F\\#`])(?![^?]*%)(?![^?]*(?:^|\/)\.{1,2}(?:\/|\?|$))\/.*$/;
 
 function hasAsciiControlOrSpace(value: string): boolean {
   for (let offset = 0; offset < value.length; offset += 1) {
@@ -132,6 +134,7 @@ const FaceNextActionSchema = NextActionSchema.extend({
     .string()
     .min(1)
     .max(400)
+    .regex(PUBLIC_ACTION_PATH_PATTERN, "invalid public Worker action path")
     .refine(isSafePublicActionPath, "invalid public Worker action path"),
 }).strict();
 

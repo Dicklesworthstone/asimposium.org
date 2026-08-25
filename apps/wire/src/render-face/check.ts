@@ -36,6 +36,7 @@ import {
 import { provenance } from "../../../../packages/render/scripts/provenance.ts";
 
 const REPRO = "bash scripts/e2e-s5-diptych.sh";
+const REQUEST_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 let origin: string;
 let seed: string;
 let canary: string;
@@ -232,6 +233,12 @@ function check(
   emit({ assertion, status: ok ? "pass" : "fail", detail: ok ? "as expected" : detail, ...extra });
 }
 
+function s5Fetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("user-agent", REQUEST_USER_AGENT);
+  return fetch(`${origin}${path}`, { ...init, headers });
+}
+
 /** First differing offset plus both digests. Never the bytes themselves. */
 function boundedDiff(left: string, right: string): Record<string, unknown> {
   let at = 0;
@@ -255,7 +262,7 @@ async function main(): Promise<void> {
     for (const format of formats) {
       const local = renderProjection(s5SpikeProjection(variant, seed), format);
       const started = performance.now();
-      const response = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`);
+      const response = await s5Fetch(`/__s5/face?variant=${variant}&format=${format}`);
       const served = await response.text();
       const duration = Math.round(performance.now() - started);
       const context = { variant, face: format, duration_ms: duration };
@@ -305,7 +312,7 @@ async function main(): Promise<void> {
       );
 
       // HEAD must agree with GET on every validator-bearing header, and carry no body.
-      const head = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+      const head = await s5Fetch(`/__s5/face?variant=${variant}&format=${format}`, {
         method: "HEAD",
       });
       check(
@@ -319,7 +326,7 @@ async function main(): Promise<void> {
       );
 
       // Conditional replay: same validator, no body, same headers.
-      const conditional = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+      const conditional = await s5Fetch(`/__s5/face?variant=${variant}&format=${format}`, {
         headers: { "if-none-match": servedEtag },
       });
       const conditionalBody = await conditional.text();
@@ -344,7 +351,7 @@ async function main(): Promise<void> {
 
       // `*` matches whenever a representation exists (RFC 9110 §13.1.2), and a weak
       // validator for the same representation matches under weak comparison.
-      const wildcard = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+      const wildcard = await s5Fetch(`/__s5/face?variant=${variant}&format=${format}`, {
         headers: { "if-none-match": "*" },
       });
       check(
@@ -353,7 +360,7 @@ async function main(): Promise<void> {
         `status ${wildcard.status}`,
         context,
       );
-      const weak = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+      const weak = await s5Fetch(`/__s5/face?variant=${variant}&format=${format}`, {
         headers: { "if-none-match": `W/${servedEtag}` },
       });
       check(
@@ -364,7 +371,7 @@ async function main(): Promise<void> {
       );
 
       // A stale validator must still get the full body.
-      const stale = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+      const stale = await s5Fetch(`/__s5/face?variant=${variant}&format=${format}`, {
         headers: { "if-none-match": `"sha256:${"0".repeat(64)}"` },
       });
       check(
@@ -396,10 +403,10 @@ async function main(): Promise<void> {
   // ETag can satisfy the json or html face, a client is told a copy it does not hold is
   // fresh, and it receives no body to discover otherwise.
   {
-    const mdResponse = await fetch(`${origin}/__s5/face?variant=public&format=md`);
+    const mdResponse = await s5Fetch("/__s5/face?variant=public&format=md");
     const mdEtag = mdResponse.headers.get("etag") ?? "";
     for (const other of ["json", "html-fragment"] as const) {
-      const crossed = await fetch(`${origin}/__s5/face?variant=public&format=${other}`, {
+      const crossed = await s5Fetch(`/__s5/face?variant=public&format=${other}`, {
         headers: { "if-none-match": mdEtag },
       });
       const crossedBody = await crossed.text();
@@ -410,7 +417,7 @@ async function main(): Promise<void> {
         { variant: "public", face: other },
       );
     }
-    const crossedVariant = await fetch(`${origin}/__s5/face?variant=sponsor&format=md`, {
+    const crossedVariant = await s5Fetch("/__s5/face?variant=sponsor&format=md", {
       headers: { "if-none-match": mdEtag },
     });
     check(
@@ -422,7 +429,7 @@ async function main(): Promise<void> {
   }
 
   // Teaching refusals.
-  const unknownFormat = await fetch(`${origin}/__s5/face?format=toon`);
+  const unknownFormat = await s5Fetch("/__s5/face?format=toon");
   const unknownBody = (await unknownFormat.json()) as Record<string, unknown>;
   check("unknown_format_is_400", unknownFormat.status === 400, `status ${unknownFormat.status}`);
   check(
@@ -440,17 +447,17 @@ async function main(): Promise<void> {
     JSON.stringify(unknownBody.allowed),
   );
 
-  const unknownVariant = await fetch(`${origin}/__s5/face?variant=everything`);
+  const unknownVariant = await s5Fetch("/__s5/face?variant=everything");
   check("unknown_variant_is_400", unknownVariant.status === 400, `status ${unknownVariant.status}`);
 
-  const unknownRoute = await fetch(`${origin}/p/demo-bounded-sums.md`);
+  const unknownRoute = await s5Fetch("/p/demo-bounded-sums.md");
   check(
     "the harness serves no product route",
     unknownRoute.status === 404,
     `status ${unknownRoute.status} — a spike must not pre-empt the contracted product face surface`,
   );
 
-  const write = await fetch(`${origin}/__s5/face`, { method: "POST" });
+  const write = await s5Fetch("/__s5/face", { method: "POST" });
   check("the harness refuses writes", write.status === 400, `status ${write.status}`);
 
   emit({
