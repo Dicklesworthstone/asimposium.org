@@ -487,7 +487,9 @@ plant_stage() {
           printf 'descendant-survived:%s\n' "$stage" >> "$ASIMP_CI_PROCESS_TRACE"
         ) &
       fi
-      sleep 30
+      while true; do
+        sleep 1
+      done
       ;;
     fail-orphan)
       if [[ -n "${ASIMP_CI_PROCESS_TRACE:-}" ]]; then

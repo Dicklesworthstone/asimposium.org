@@ -46,6 +46,7 @@ pub enum Command {
 
 pub const DEFAULT_ORIGIN: &str = "https://a.asimposium.org";
 pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+pub const OUTBOUND_USER_AGENT: &str = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 /// Public faces are bounded well below this; the cap only stops a hostile
 /// or misconfigured origin from streaming forever into a terminal.
 const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
@@ -167,6 +168,7 @@ pub enum FetchError {
 
 fn agent_with_timeout(timeout: std::time::Duration) -> Agent {
     AgentBuilder::new()
+        .user_agent(OUTBOUND_USER_AGENT)
         .timeout(timeout)
         .timeout_connect(timeout)
         .timeout_read(timeout)
@@ -368,6 +370,46 @@ mod tests {
     fn the_connect_and_read_budget_is_fifteen_seconds_not_milliseconds_as_seconds() {
         assert_eq!(READ_TIMEOUT, std::time::Duration::from_secs(15));
         assert_ne!(READ_TIMEOUT, std::time::Duration::from_secs(15_000));
+    }
+
+    #[test]
+    fn the_http_agent_sends_the_required_exact_user_agent() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "client closed before sending complete headers");
+                request.extend_from_slice(&chunk[..count]);
+                assert!(request.len() <= 16 * 1024, "request headers exceeded test bound");
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let fetched = fetch_text_with_agent(
+            &agent_with_timeout(std::time::Duration::from_secs(1)),
+            &format!("http://{address}/user-agent"),
+        )
+        .unwrap();
+        let request = server.join().unwrap();
+        let user_agent = request
+            .split("\r\n")
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("user-agent")
+                    .then_some(value.trim())
+            })
+            .expect("request must carry a User-Agent header");
+
+        assert_eq!(fetched.status, 200);
+        assert_eq!(fetched.body, "ok");
+        assert_eq!(user_agent, OUTBOUND_USER_AGENT);
     }
 
     #[test]
