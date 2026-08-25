@@ -364,7 +364,7 @@ export class HarnessError extends Error {
   }
 }
 
-class ArtifactStore {
+export class ArtifactStore {
   readonly directory: string;
   readonly jsonl: string;
   readonly failureLogs: string[] = [];
@@ -3272,7 +3272,7 @@ export function reserveRetainedIntegrationDirectory(
 }
 
 /** The retained-integration form of the same exclusive new-run claim. */
-export function reserveNewRetainedIntegrationDirectory(
+function reserveNewRetainedIntegrationDirectory(
   integrationDirectory: string,
   name: string,
   storage: HarnessArtifactStorage = nodeArtifactStorage,

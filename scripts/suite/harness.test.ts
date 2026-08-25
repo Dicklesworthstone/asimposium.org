@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARTIFACT_BLOB_DIRECTORY,
+  ArtifactStore,
   adapterProbePath,
   artifactCapacityReport,
   assertArtifactNamespaceBudget,
@@ -71,7 +72,6 @@ import {
   redactNeverLog,
   repositoryRoot,
   reserveArtifactNamespace,
-  reserveNewRetainedIntegrationDirectory,
   reserveRetainedIntegrationDirectory,
   restoreProtectedSha256Marker,
   retainedD1StateDirectory,
@@ -3280,39 +3280,33 @@ describe("run options are covered at compile time", () => {
 });
 
 describe("new-run artifact namespace ownership", () => {
-  const plantCompetingWinner = (
-    storage: ReturnType<typeof createMemoryArtifactStorage>,
-    target: string,
-  ): { readonly storage: HarnessArtifactStorage; readonly won: () => boolean } => {
-    const mkdir = storage.mkdir.bind(storage);
-    let won = false;
-    return {
-      won: () => won,
-      storage: {
-        ...storage,
-        mkdir: (path) => {
-          if (path === target && !won) {
-            won = true;
-            mkdir(path);
-            storage.writeExclusive(join(path, "foreign.marker"), "foreign\n");
-          }
-          mkdir(path);
-        },
-      },
-    };
-  };
-
   test("PLANTED: a top-level mkdir winner cannot be adopted by the new run", async () => {
     const root = fixtureRoot("new-run-claim-race");
     const artifacts = join(root, "e2e", "artifacts");
     const target = join(artifacts, "contended-run");
     const base = fixtureStorage();
-    const race = plantCompetingWinner(base, target);
+    let observations = 0;
+    let won = false;
+    const mkdir = base.mkdir.bind(base);
+    const racingStorage: HarnessArtifactStorage = {
+      ...base,
+      exists: (path) => {
+        if (path === target) {
+          observations += 1;
+          if (observations === 2 && !won) {
+            won = true;
+            mkdir(path);
+            base.writeExclusive(join(path, "foreign.marker"), "foreign\n");
+          }
+        }
+        return base.exists(path);
+      },
+    };
 
     await expect(
       runHarness({
         root,
-        storage: race.storage,
+        storage: racingStorage,
         suite: "unit",
         runId: "contended-run",
         steps: [passStep("ok")],
@@ -3320,7 +3314,8 @@ describe("new-run artifact namespace ownership", () => {
         onOutput: () => undefined,
       }),
     ).rejects.toThrow(/RUN_ID_EXISTS|already owns/);
-    expect(race.won()).toBe(true);
+    expect(won).toBe(true);
+    expect(observations).toBeGreaterThanOrEqual(2);
     expect(base.readFile(join(target, "foreign.marker"))).toBe("foreign\n");
     expect(base.exists(join(target, "events.jsonl"))).toBe(false);
   });
@@ -3331,16 +3326,45 @@ describe("new-run artifact namespace ownership", () => {
     const target = join(integration, "contended-retained-run");
     const base = fixtureStorage();
     base.seedDirectory(integration);
-    const race = plantCompetingWinner(base, target);
+    let won = false;
+    const mkdir = base.mkdir.bind(base);
+    const racingStorage: HarnessArtifactStorage = {
+      ...base,
+      readdir: (path) => {
+        const entries = base.readdir(path);
+        if (path === integration && !won) {
+          won = true;
+          mkdir(target);
+          base.writeExclusive(join(target, "foreign.marker"), "foreign\n");
+        }
+        return entries;
+      },
+    };
+    const identity = {
+      runId: "contended-retained-run",
+      suite: "unit",
+      seed: 7,
+      stepIds: ["ok"],
+      stepContractDigests: ["a".repeat(64)],
+      reproduction: SELF_TEST_REPRODUCTION,
+      artifactNamespace: "retained-race",
+      gitRevision: "unavailable",
+      childEnvironmentDigest: "b".repeat(64),
+      bindingVersions: {},
+    } as const;
 
-    expect(() =>
-      reserveNewRetainedIntegrationDirectory(
-        integration,
-        "contended-retained-run",
-        race.storage,
-      ),
+    expect(
+      () =>
+        new ArtifactStore(
+          root,
+          "contended-retained-run",
+          false,
+          identity,
+          racingStorage,
+          "retained-race",
+        ),
     ).toThrow(/RUN_ID_EXISTS|already owns/);
-    expect(race.won()).toBe(true);
+    expect(won).toBe(true);
     expect(base.readFile(join(target, "foreign.marker"))).toBe("foreign\n");
     expect(base.exists(join(target, "events.jsonl"))).toBe(false);
   });
