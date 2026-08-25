@@ -3068,7 +3068,7 @@ export function reserveArtifactNamespace(
  * the mkdir race, and this writer must receive EEXIST rather than adopt the
  * winner's evidence directory.
  */
-export function reserveNewArtifactNamespace(
+function reserveNewArtifactNamespace(
   root: string,
   artifactsDirectory: string,
   namespace: string,
@@ -3272,7 +3272,7 @@ export function reserveRetainedIntegrationDirectory(
 }
 
 /** The retained-integration form of the same exclusive new-run claim. */
-function reserveNewRetainedIntegrationDirectory(
+export function reserveNewRetainedIntegrationDirectory(
   integrationDirectory: string,
   name: string,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
