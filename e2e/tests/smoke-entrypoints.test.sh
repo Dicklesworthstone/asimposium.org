@@ -311,7 +311,7 @@ printf '%s\n' \
   'case "$url" in' \
   '  */problems.json)' \
   '    problem_status="200"' \
-  '    problem_content_type="application/json; charset=utf-8"' \
+  '    problem_content_type="Application/JSON; Charset=UTF-8"' \
   '    case "${SMOKE_FAKE_PROBLEMS_MODE:-fail}" in' \
   '      malformed) printf "not-json" ;;' \
   '      leak) printf "%s" '\''{"problems":[{"workshop_id":"synthetic-canary"}],"omitted":[]}'\'' ;;' \
@@ -343,7 +343,7 @@ printf '%s\n' \
   '  */v1/sponsors/workshop*)' \
   '    workshop_body='\''{"type":"https://asimposium.org/errors/UNAUTHORIZED","title":"Authorization was not accepted","status":401,"code":"UNAUTHORIZED","detail":"The request did not include an authorization accepted by this route.","fix_hint":"Obtain a fresh sponsor authorization and retry the request."}'\''' \
   '    workshop_status="401"' \
-  '    workshop_content_type="application/problem+json; charset=utf-8"' \
+  '    workshop_content_type="Application/Problem+JSON; Charset=UTF-8"' \
   '    case "${SMOKE_FAKE_PROBLEMS_MODE:-fail}" in' \
   '      reachable) workshop_body='\''{}'\''; workshop_status="200" ;;' \
   '      parser) workshop_body='\''{}'\''; workshop_status="422" ;;' \

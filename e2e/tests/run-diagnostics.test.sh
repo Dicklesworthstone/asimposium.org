@@ -111,7 +111,8 @@ fi
 if e2e_append_artifact_jsonl_at_root "$temporary_root" "replaced-run" "steps.jsonl" '{"status":"pass"}' >/dev/null 2>&1; then
   fail "REPLACED_RUN_STEP_ACCEPTED"
 fi
-if [[ -n "$(find "$temporary_root/e2e/artifacts/replaced-run" -mindepth 1 -print -quit)" ]]; then
+if [[ -n "$(find "$temporary_root/e2e/artifacts/replaced-run" -mindepth 1 -print -quit)" \
+  || -n "$(find "$temporary_root/e2e/artifacts/replaced-run-original" -mindepth 1 -print -quit)" ]]; then
   fail "REPLACED_RUN_MUTATED"
 fi
 
@@ -171,7 +172,8 @@ if [[ -n "$symlink_output" ]] || [[ -e "$temporary_root/outside/diagnostics.json
   fail "SYMLINK_RUN_DIRECTORY_LEAKED"
 fi
 
-mkdir "$temporary_root/e2e/artifacts/leaf-run" || fail "LEAF_FIXTURE_LAYOUT_FAILED"
+e2e_claim_artifact_run_at_root "$temporary_root" "leaf-run" \
+  || fail "LEAF_FIXTURE_LAYOUT_FAILED"
 ln -s "$temporary_root/outside/diagnostics.jsonl" "$temporary_root/e2e/artifacts/leaf-run/diagnostics.jsonl" || fail "LEAF_SYMLINK_FIXTURE_UNAVAILABLE"
 if leaf_symlink_output="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "leaf-run" "$suite" "$started_ms" "fail" "LEAF_SYMLINK_ESCAPE_TEST" "$reproduce" 2>&1)"; then
   fail "SYMLINK_DIAGNOSTIC_FILE_ACCEPTED"
@@ -181,7 +183,8 @@ if [[ -n "$leaf_symlink_output" ]] || [[ -e "$temporary_root/outside/diagnostics
   fail "SYMLINK_DIAGNOSTIC_FILE_LEAKED"
 fi
 
-mkdir "$temporary_root/e2e/artifacts/step-leaf-run" || fail "STEP_LEAF_FIXTURE_LAYOUT_FAILED"
+e2e_claim_artifact_run_at_root "$temporary_root" "step-leaf-run" \
+  || fail "STEP_LEAF_FIXTURE_LAYOUT_FAILED"
 ln -s "$temporary_root/outside/steps.jsonl" "$temporary_root/e2e/artifacts/step-leaf-run/steps.jsonl" \
   || fail "STEP_LEAF_SYMLINK_FIXTURE_UNAVAILABLE"
 if step_symlink_output="$(e2e_append_artifact_jsonl_at_root "$temporary_root" "step-leaf-run" "steps.jsonl" "$safe_step" 2>&1)"; then
