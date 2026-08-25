@@ -1421,13 +1421,19 @@ describe("face wire format", () => {
   test.each(PUBLIC_TEXT_DOCUMENTS)(
     "GET $served_at serves the exact registered $id bytes without D1",
     async (document) => {
-      const res = await callWorker(document.served_at, {});
+      const format = document.media_type.startsWith("text/plain") ? "txt" : "md";
+      const responses = [
+        await callWorker(document.served_at, {}),
+        await callWorker(`${document.served_at}?format=${format}`, {}),
+      ];
 
-      expect(res.status).toBe(200);
-      expect(res.contentType).toBe(document.media_type);
-      expect(res.headers.get("etag")).toBe(`"${document.digest}"`);
-      expect(res.headers.get("cache-control")).toContain("max-age=60");
-      expect(res.bodyText).toBe(document.body);
+      for (const response of responses) {
+        expect(response.status).toBe(200);
+        expect(response.contentType).toBe(document.media_type);
+        expect(response.headers.get("etag")).toBe(`"${document.digest}"`);
+        expect(response.headers.get("cache-control")).toContain("max-age=60");
+        expect(response.bodyText).toBe(document.body);
+      }
     },
   );
 

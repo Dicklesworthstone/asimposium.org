@@ -8,12 +8,13 @@ W11.1 wires the read slice: `asimp capabilities`, `asimp problems [--json]`,
 and `asimp get <path>` issue real HTTPS GETs against the agent origin
 (the `--origin` flag, else `ASIMP_ORIGIN`, else
 `https://a.asimposium.org`) with a 15-second timeout and an 8 MiB
-response cap. Redirects are refused so a configured origin cannot silently
-move a read elsewhere; an oversized body is an error rather than a truncated
-success. Error diagnostics report status/category only and never replay a
-peer's response body or a credential-shaped URL. Pairing, sessions, offline
-validation, token storage, and release distribution arrive with later W11
-slices.
+response cap. Every request carries the repository-required exact User-Agent,
+`OpenAI File Downloader, XaiImageApiFetch/1.0`. Redirects are refused so a
+configured origin cannot silently move a read elsewhere; an oversized body is
+an error rather than a truncated success. Error diagnostics report
+status/category only and never replay a peer's response body or a
+credential-shaped URL. Pairing, sessions, offline validation, token storage,
+and release distribution arrive with later W11 slices.
 
 ## Local verification
 
@@ -26,6 +27,8 @@ cargo test --locked
 ```
 
 The pinned toolchain installs Clippy, and the denied-warning Clippy gate is
-required alongside format, check, and test. The test suite exercises the
-compiled binary's help/version output, empty-invocation help failure, and
-unknown-command failure path.
+required alongside format, check, and test. Library tests cover origin/path
+confusion, environment fail-closed behavior, the exact timeout, redirect
+refusal, response-cap boundaries, and the wire-level User-Agent. Compiled-binary
+tests cover help/version output, empty-invocation help failure, unknown commands,
+and credential-safe invalid-origin diagnostics.
