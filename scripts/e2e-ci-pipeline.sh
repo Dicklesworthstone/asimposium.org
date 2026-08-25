@@ -816,7 +816,7 @@ if not deployments:
 if len(deployments) != 1:
     sys.exit(1)
 baseline = deployments[0]
-# Vercel's API encodes Preview as a null target; production and custom staging
+# The Vercel API encodes Preview as a null target; production and custom staging
 # have named targets. Normalize only after proving the provider value is null.
 if not isinstance(baseline, dict) or "target" not in baseline or baseline["target"] is not None:
     sys.exit(1)
