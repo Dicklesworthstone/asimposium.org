@@ -77,11 +77,7 @@ fn validate_origin(origin: &str) -> Result<&str, String> {
     // Refuse those bytes before parsing so an accepted origin has no ignored
     // prefix or suffix outside the parsed authority. Normal URL serialization
     // may still canonicalize equivalent host spelling or a default port.
-    if origin
-        .bytes()
-        .any(|byte| byte <= b' ' || byte == 0x7f)
-        || origin.contains('\\')
-    {
+    if origin.bytes().any(|byte| byte <= b' ' || byte == 0x7f) || origin.contains('\\') {
         return Err(
             "origin must not contain spaces, control characters, or backslashes".to_string(),
         );
@@ -97,7 +93,9 @@ fn validate_origin(origin: &str) -> Result<&str, String> {
         || authority.contains('?')
         || authority.contains('#')
     {
-        return Err("origin must contain only an https authority with no trailing slash".to_string());
+        return Err(
+            "origin must contain only an https authority with no trailing slash".to_string(),
+        );
     }
     let parsed = Url::parse(origin).map_err(|_| "origin must be a valid https URL".to_string())?;
     if parsed.scheme() != "https" || parsed.host().is_none() {
@@ -161,7 +159,9 @@ pub enum FetchError {
     Status(u16),
     /// The peer sent more bytes than the public read contract permits. No
     /// partial body crosses this variant.
-    BodyTooLarge { limit_bytes: u64 },
+    BodyTooLarge {
+        limit_bytes: u64,
+    },
     Network,
     InvalidUtf8,
 }
@@ -347,10 +347,7 @@ mod tests {
     fn capped_reader_distinguishes_exact_limit_from_truncation() {
         assert_eq!(read_capped_at("abcd".as_bytes(), 4).unwrap(), "abcd");
         let error = read_capped_at("abcde".as_bytes(), 4).unwrap_err();
-        assert!(matches!(
-            error,
-            FetchError::BodyTooLarge { limit_bytes: 4 }
-        ));
+        assert!(matches!(error, FetchError::BodyTooLarge { limit_bytes: 4 }));
 
         let exact = vec![b'x'; MAX_BODY_BYTES as usize];
         assert_eq!(
@@ -384,7 +381,10 @@ mod tests {
                 let count = stream.read(&mut chunk).unwrap();
                 assert!(count > 0, "client closed before sending complete headers");
                 request.extend_from_slice(&chunk[..count]);
-                assert!(request.len() <= 16 * 1024, "request headers exceeded test bound");
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "request headers exceeded test bound"
+                );
             }
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
@@ -421,9 +421,8 @@ mod tests {
             let mut first_request_byte = [0_u8; 1];
             stream.read_exact(&mut first_request_byte).unwrap();
             thread::sleep(std::time::Duration::from_millis(200));
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
         });
 
         let started = std::time::Instant::now();
@@ -435,7 +434,10 @@ mod tests {
         server.join().unwrap();
 
         assert!(matches!(result, Err(FetchError::Network)));
-        assert!(elapsed < std::time::Duration::from_secs(1), "elapsed={elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
     }
 
     #[test]
@@ -444,8 +446,17 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut first_request_byte = [0_u8; 1];
-            stream.read_exact(&mut first_request_byte).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0, "client closed before sending complete headers");
+                request.extend_from_slice(&chunk[..count]);
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "request headers exceeded test bound"
+                );
+            }
             stream
                 .write_all(
                     b"HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\nContent-Length: 31\r\nConnection: close\r\n\r\ncredential-shaped-response-body",
@@ -456,10 +467,10 @@ mod tests {
         let result = fetch_text(&format!("http://{address}/start"));
         server.join().unwrap();
         assert!(!format!("{result:?}").contains("credential-shaped-response-body"));
-        match result {
-            Err(FetchError::Status(302)) => {}
-            other => panic!("expected a refused 302 response, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(FetchError::Status(302))),
+            "expected a refused 302 response, got {result:?}"
+        );
     }
 
     #[test]

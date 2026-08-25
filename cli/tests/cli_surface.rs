@@ -115,7 +115,10 @@ fn invalid_origin_refusal_does_not_echo_credentials() {
 
     assert_eq!(invocation.output.status.code(), Some(2), "{context}");
     assert!(invocation.output.stdout.is_empty(), "{context}");
-    assert!(stderr.contains("origin must not contain user information"), "{context}");
+    assert!(
+        stderr.contains("origin must not contain user information"),
+        "{context}"
+    );
     assert!(!stderr.contains("credential-shaped-value"), "{context}");
     assert!(!stderr.contains("example.test"), "{context}");
 }
