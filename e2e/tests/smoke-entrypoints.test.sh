@@ -25,6 +25,33 @@ for self_test in \
   fi
 done
 
+# The shared artifact writer now refuses unclaimed namespaces. Pin each common
+# entry point's ordering so a future refactor cannot start validation, emit a
+# recorded blocker, or launch product work before its exclusive mkdir claim.
+for artifact_entrypoint in \
+  "$repository_root/scripts/smoke-agent.sh" \
+  "$repository_root/scripts/smoke-gallery.sh" \
+  "$repository_root/e2e/run-playwright.sh" \
+  "$repository_root/e2e/gauntlet/run.sh"; do
+  if ! awk '
+    /^run_id="\$\(e2e_resolve_run_id / { resolved = NR }
+    resolved > 0 && /&& ! e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
+    resolved > 0 && /e2e_validate_staging_origin / && first_validation == 0 {
+      first_validation = NR
+    }
+    resolved > 0 && /e2e_emit_and_optionally_record / && first_record == 0 {
+      first_record = NR
+    }
+    END {
+      exit(!(resolved > 0 && claim > resolved &&
+        first_validation > claim && first_record > claim))
+    }
+  ' "$artifact_entrypoint"; then
+    emit "fail" "ARTIFACT_CLAIM_ORDER_INVALID"
+    exit 1
+  fi
+done
+
 synthetic_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 if ! ASIMPOSIUM_SMOKE_FELLOW_TOKEN="$synthetic_fellow_token" \
   "$repository_root/scripts/smoke-agent.sh" --self-test >/dev/null; then
