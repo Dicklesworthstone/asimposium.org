@@ -691,11 +691,16 @@ describe("execution lifecycle", () => {
         failurePoint === "storage.append"
           ? {
               ...base,
-              append: () => failAtHook("planted storage append failure"),
+              append: (path, data) => {
+                if (data.includes('"record":"step"') || data.includes('"record":"summary"')) {
+                  failAtHook("planted storage append failure");
+                }
+                return base.append(path, data);
+              },
             }
           : base;
       const grandchild = `setTimeout(() => void fetch(${JSON.stringify(ipc.endpoint("/escaped-descendant"))}), 250); setTimeout(() => process.exit(0), 1000);`;
-      const parent = `const cp = require("node:child_process"); const child = cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { detached: true, stdio: "ignore" }); child.unref(); process.stderr.write("callback-trigger:ready\\n");`;
+      const parent = `const cp = require("node:child_process"); cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", detached: false }); process.stdout.write("callback-trigger:ready\\n"); process.exit(0);`;
 
       try {
         await expect(

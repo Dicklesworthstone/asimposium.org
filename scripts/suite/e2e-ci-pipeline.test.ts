@@ -308,7 +308,9 @@ interface LeaseSettlementPlant {
   readonly leaseIdentity: string;
 }
 
-function runLeaseSettlementPlant(forceUnsettled: boolean): LeaseSettlementPlant {
+function runLeaseSettlementPlant(
+  mode: "settled" | "settled-125" | "forced-unsettled" | "wrapper-crash",
+): LeaseSettlementPlant {
   runCounter += 1;
   const root = join(SCRATCH, `lease-settlement-${runCounter}`);
   const runId = `ci-lease-settlement-${process.pid}-${runCounter}`;
@@ -333,6 +335,7 @@ PIPELINE_TEST_MODE=1
 PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
 CURRENT_WRAPPER_PID=""
 ASIMP_CI_PROCESS_FORCE_UNSETTLED="$5"
+ASIMP_CI_PROCESS_KILL_WRAPPER_AFTER_SPAWN="$6"
 ${closer}
 ${bounded}
 e2e_claim_artifact_run_at_root "$2" "$3" || exit 90
@@ -340,7 +343,7 @@ printf '%s\\n%s\\n' \
   "\${ASIMPOSIUM_E2E_CLAIM_LEASE_PATHS[0]}" \
   "\${ASIMPOSIUM_E2E_CLAIM_LEASE_IDENTITIES[0]}" > "$4" || exit 91
 trap 'ci_pipeline_artifact_writer_leases_on_exit' EXIT
-run_bounded 2 /bin/bash -c 'sleep 30 & exit 0'
+run_bounded 2 /bin/bash -c "$7"
 exit $?
 `;
   const result = spawnSync(
@@ -353,7 +356,13 @@ exit $?
       root,
       runId,
       receipt,
-      forceUnsettled ? "1" : "0",
+      mode === "forced-unsettled" ? "1" : "0",
+      mode === "wrapper-crash" ? "1" : "0",
+      mode === "wrapper-crash"
+        ? "exec >/dev/null 2>&1 </dev/null; sleep 2"
+        : mode === "settled-125"
+          ? "exit 125"
+          : "sleep 30 & exit 0",
     ],
     { env: HELPER_ENV, encoding: "utf8", timeout: 10_000 },
   );
@@ -622,17 +631,31 @@ describe("OPS.2b review pipeline orchestration", () => {
   });
 
   test("the parent closes its actual lease only after process-group settlement proof", () => {
-    const settled = runLeaseSettlementPlant(false);
+    const settled = runLeaseSettlementPlant("settled");
     expect(settled.signal).toBeNull();
     expect(settled.status).toBe(0);
     expect(directoryIdentity(settled.leaseDirectory)).toBe(settled.leaseIdentity);
     expect(existsSync(join(settled.leaseDirectory, "closed"))).toBe(true);
 
-    const unsettled = runLeaseSettlementPlant(true);
+    const settled125 = runLeaseSettlementPlant("settled-125");
+    expect(settled125.signal).toBeNull();
+    expect(settled125.status).toBe(125);
+    expect(directoryIdentity(settled125.leaseDirectory)).toBe(settled125.leaseIdentity);
+    expect(existsSync(join(settled125.leaseDirectory, "closed"))).toBe(true);
+
+    const unsettled = runLeaseSettlementPlant("forced-unsettled");
     expect(unsettled.signal).toBeNull();
     expect(unsettled.status).toBe(125);
     expect(directoryIdentity(unsettled.leaseDirectory)).toBe(unsettled.leaseIdentity);
     expect(existsSync(join(unsettled.leaseDirectory, "closed"))).toBe(false);
+
+    const crashedWrapper = runLeaseSettlementPlant("wrapper-crash");
+    expect(crashedWrapper.signal).toBeNull();
+    expect(crashedWrapper.status).toBe(125);
+    expect(directoryIdentity(crashedWrapper.leaseDirectory)).toBe(
+      crashedWrapper.leaseIdentity,
+    );
+    expect(existsSync(join(crashedWrapper.leaseDirectory, "closed"))).toBe(false);
   });
 
   test("recursive deployment children are wired to the parent capability boundary", () => {
@@ -672,7 +695,11 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(bounded).toContain(
       "return wait_for_group_absence() and not force_unsettled",
     );
-    expect(bounded).toContain("if [[ \"$status\" -ne 125 ]]; then");
+    expect(bounded).toContain("os.set_inheritable(3, False)");
+    expect(bounded).toContain('os.write(3, b"settled\\n")');
+    expect(bounded).toContain(
+      'if IFS= read -r settlement_ack <&9 && [[ "$settlement_ack" == "settled" ]]; then',
+    );
 
     const parentClaimIndex = source.lastIndexOf(
       'e2e_claim_artifact_run_at_root "$repository_root" "$RUN_ID"',

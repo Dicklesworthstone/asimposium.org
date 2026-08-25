@@ -130,12 +130,14 @@ copies that handoff into unexported shell state, removes it from the environment
 before starting provider tools, and re-proves the capability before provider
 operations and retained receipt writes. Only the top-level pipeline closes the
 lease. Its bounded stage wrapper polls the owned process group after SIGKILL and
-uses exit 125 when absence cannot be proved; that terminal leaves the parent
-lease open. The focused tests include one live-capability positive control,
-reject root/run/lease identity mismatches, a foreign lease, a closed lease, and
-an artifact-maintenance fence, and exercise an actual claimed lease on both the
-settled-close and deliberately-unprovable-open paths. This CI wiring is also
-source-level only; neither its process controls nor a hosted deployment have
+acknowledges proven absence over a private descriptor that stage descendants do
+not inherit. A missing acknowledgement becomes exit 125 and leaves the parent
+lease open regardless of the wrapper's own exit status. The focused tests
+include one live-capability positive control, reject root/run/lease identity
+mismatches, a foreign lease, a closed lease, and an artifact-maintenance fence,
+and exercise an actual claimed lease on the settled-close,
+deliberately-unprovable-open, and abnormal-wrapper-open paths. This CI wiring is
+also source-level only; neither its process controls nor a hosted deployment has
 executed at this revision under the required low-load RCH gate. Direct exported
 artifact helpers, standalone real-filesystem test fixtures, and remaining raw
 artifact writers do not yet share the full lifetime contract, and a deliberately

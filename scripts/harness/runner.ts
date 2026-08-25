@@ -2205,20 +2205,34 @@ function signalOwnedProcessGroupOnly(
     if (code === "ESRCH") return "absent";
     if (code === "EPERM" && process.platform === "darwin") {
       // On Darwin, killpg throws EPERM when the process group leader has exited.
-      // Verify via pgrep whether any process actually exists in the group.
+      // Inspect running non-zombie processes in the group via ps.
       try {
-        const pgrep = Bun.spawnSync({
-          cmd: ["/usr/bin/pgrep", "-g", String(processGroupId), ".*"],
+        const ps = Bun.spawnSync({
+          cmd: ["/bin/ps", "-o", "pid=,state=", "-g", String(processGroupId)],
           stdout: "pipe",
           stderr: "ignore",
         });
-        const out = new TextDecoder().decode(pgrep.stdout).trim();
-        if (pgrep.exitCode === 1 || out.length === 0) {
+        const out = new TextDecoder().decode(ps.stdout).trim();
+        if (ps.exitCode !== 0 || out.length === 0) {
+          return "absent";
+        }
+        const lines = out.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+        const alivePids: number[] = [];
+        for (const line of lines) {
+          const match = /^([0-9]+)\s+([A-Za-z+]+)/.exec(line);
+          if (match) {
+            const pid = Number(match[1]);
+            const state = match[2];
+            if (!state.startsWith("Z")) {
+              alivePids.push(pid);
+            }
+          }
+        }
+        if (alivePids.length === 0) {
           return "absent";
         }
         if (signal !== 0) {
-          const pids = out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0);
-          for (const pid of pids) {
+          for (const pid of alivePids) {
             try {
               process.kill(pid, signal);
             } catch {

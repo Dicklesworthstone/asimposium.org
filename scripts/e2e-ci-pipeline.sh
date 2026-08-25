@@ -401,7 +401,8 @@ record_current_stage_result() {
 }
 
 run_bounded() {
-  local timeout_seconds="$1" termination_grace_seconds=10 force_unsettled=0 status
+  local timeout_seconds="$1" termination_grace_seconds=10
+  local force_unsettled=0 kill_wrapper_after_spawn=0 settlement_ack="" status
   shift
   # Process controls use a short grace so the planted matrix stays fast. Live
   # stages get enough bounded time for their own failure traps to retire remote
@@ -417,8 +418,25 @@ run_bounded() {
       ;;
     *) return 64 ;;
   esac
+  case "${ASIMP_CI_PROCESS_KILL_WRAPPER_AFTER_SPAWN:-0}" in
+    0) ;;
+    1)
+      [[ "$PIPELINE_TEST_MODE" == "1" ]] || return 64
+      kill_wrapper_after_spawn=1
+      ;;
+    *) return 64 ;;
+  esac
   PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=0
-  python3 - "$timeout_seconds" "$termination_grace_seconds" "$force_unsettled" "$@" <<'PY' &
+  # fd 9 is a private positive acknowledgement pipe. fd 3 is made
+  # non-inheritable before the stage starts, while ordinary stage output stays
+  # on the caller's stdout through fd 8. A wrapper crash therefore closes the
+  # pipe without a token; no descendant can forge settlement.
+  exec 8>&1
+  exec 9< <(
+    exec python3 - \
+      "$timeout_seconds" "$termination_grace_seconds" \
+      "$force_unsettled" "$kill_wrapper_after_spawn" "$@" \
+      3>&1 1>&8 <<'PY'
 import os
 import signal
 import subprocess
@@ -428,12 +446,26 @@ import time
 timeout_seconds = int(sys.argv[1])
 termination_grace_seconds = int(sys.argv[2])
 force_unsettled = sys.argv[3] == "1"
-command = sys.argv[4:]
+kill_wrapper_after_spawn = sys.argv[4] == "1"
+command = sys.argv[5:]
 unsettled_exit = 125
+
+def settled_exit(status: int) -> None:
+    try:
+        os.write(3, b"settled\n")
+    except OSError:
+        sys.exit(unsettled_exit)
+    sys.exit(status)
+
 try:
+    os.set_inheritable(3, False)
     child = subprocess.Popen(command, start_new_session=True)
 except BaseException:
-    sys.exit(unsettled_exit)
+    # No stage process exists, so even a launch refusal has a positive empty-set
+    # proof. Preserve a distinct wrapper failure without stranding the lease.
+    settled_exit(126)
+if kill_wrapper_after_spawn:
+    os.kill(os.getpid(), signal.SIGKILL)
 caught = None
 settlement_proven = True
 
@@ -494,12 +526,12 @@ while child.poll() is None and caught is None and time.monotonic() < deadline:
 if caught is not None:
     if not wait_for_leader() or not settlement_proven:
         sys.exit(unsettled_exit)
-    sys.exit(128 + caught)
+    settled_exit(128 + caught)
 if child.poll() is None:
     settlement_proven = terminate_group(signal.SIGTERM)
     if not wait_for_leader() or not settlement_proven:
         sys.exit(unsettled_exit)
-    sys.exit(124)
+    settled_exit(124)
 
 status = child.returncode
 # A terminal group leader does not prove its stage is quiescent: failed tools
@@ -507,15 +539,20 @@ status = child.returncode
 # members on every outcome before returning the leader's exact status.
 if not terminate_group(signal.SIGTERM):
     sys.exit(unsettled_exit)
-sys.exit(128 - status if status < 0 else status)
+settled_exit(128 - status if status < 0 else status)
 PY
+  )
   CURRENT_WRAPPER_PID=$!
   wait "$CURRENT_WRAPPER_PID"
   status=$?
   CURRENT_WRAPPER_PID=""
-  if [[ "$status" -ne 125 ]]; then
+  if IFS= read -r settlement_ack <&9 && [[ "$settlement_ack" == "settled" ]]; then
     PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+  else
+    status=125
   fi
+  exec 9<&-
+  exec 8>&-
   return "$status"
 }
 
