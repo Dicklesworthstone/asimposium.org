@@ -4194,31 +4194,11 @@ async function readBounded(
   limit: number,
 ): Promise<{ text: string; truncated: boolean }> {
   if (stream === null) return { text: "", truncated: false };
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-  let truncated = false;
-  for (;;) {
-    const result = await reader.read();
-    if (result.done) break;
-    const decoded = decoder.decode(result.value, { stream: true });
-    if (text.length < limit) {
-      const remaining = limit - text.length;
-      text += decoded.slice(0, remaining);
-      truncated ||= decoded.length > remaining;
-    } else {
-      truncated = true;
-    }
+  const raw = await Bun.readableStreamToText(stream);
+  if (raw.length <= limit) {
+    return { text: raw, truncated: false };
   }
-  const ending = decoder.decode();
-  if (text.length < limit) {
-    const remaining = limit - text.length;
-    text += ending.slice(0, remaining);
-    truncated ||= ending.length > remaining;
-  } else if (ending.length > 0) {
-    truncated = true;
-  }
-  return { text, truncated };
+  return { text: raw.slice(0, limit), truncated: true };
 }
 
 function command(code: string): readonly string[] {

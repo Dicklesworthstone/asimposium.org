@@ -518,7 +518,8 @@ function fixtureRunId(name: string): string {
 }
 
 function command(code: string): readonly string[] {
-  return [process.execPath, "-e", code];
+  const wrapped = `const fs = require("node:fs"); process.stderr.write = (chunk, cb) => { fs.writeSync(2, typeof chunk === "string" ? chunk : Buffer.from(chunk)); if (typeof cb === "function") cb(); return true; }; process.stdout.write = (chunk, cb) => { fs.writeSync(1, typeof chunk === "string" ? chunk : Buffer.from(chunk)); if (typeof cb === "function") cb(); return true; }; ${code}`;
+  return [process.execPath, "-e", wrapped];
 }
 
 function passStep(id: string, scenario = "unit"): HarnessStep {
@@ -718,7 +719,6 @@ describe("execution lifecycle", () => {
               },
             ],
             onOutput: (text) => {
-              console.error(`[TEST onOutput ${failurePoint}]`, JSON.stringify(text));
               if (text.includes("callback-trigger:ready")) {
                 readyOutputSeen = true;
                 if (failurePoint === "onOutput") {
@@ -1067,6 +1067,7 @@ describe("secret-safe, bounded artifacts", () => {
     const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
     const opaqueValue = "A".repeat(32);
     let visible = "";
+    console.error("[DIAG] STARTING REDACTION TEST");
     const result = await runHarness({
       root,
       storage,
@@ -1088,11 +1089,15 @@ describe("secret-safe, bounded artifacts", () => {
           actual: `directive_body=${secret}`,
         },
       ],
-      onEvent: () => undefined,
+      onEvent: (ev) => {
+        console.error("[DIAG EVENT]", ev.record, ev.step, ev.status);
+      },
       onOutput: (text) => {
+        console.error("[DIAG OUTPUT]", JSON.stringify(text));
         visible += text;
       },
     });
+    console.error("[DIAG FINISHED]", { exitCode: result.exitCode, visible });
     expect(result.exitCode).toBe(1);
     expect(visible).toContain("<redacted>");
     expect(visible).not.toContain(secret);
