@@ -1724,11 +1724,12 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit.lastIndexOf("s2_artifact_writer_boundary_is_open")).toBeLessThan(
       onExit.lastIndexOf("e2e_close_artifact_writer_lease"),
     );
-    expect(onExit).toContain(
-      '"${cleanup_proven}" == true && "${S2_WRITER_LEASE_OWNED}" == 1',
-    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash string check
+    expect(onExit).toContain('"${cleanup_proven}" == true && "${S2_WRITER_LEASE_OWNED}" == 1');
     const snapshotRegression = shell.slice(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash string check
       shell.indexOf('if [[ "${mode}" == "source-snapshot-freeze" ]]'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash string check
       shell.indexOf('if [[ "${mode}" == "foreign-listener-attribution" ]]'),
     );
     expect(snapshotRegression).toContain(

@@ -807,6 +807,7 @@ e2e_claim_artifact_namespaced_run_at_root() {
     return 1
   fi
 
+  # shellcheck disable=SC2034
   ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT="$physical_artifacts_root"
   ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY="$root_identity"
   ASIMPOSIUM_E2E_SELECTED_ARTIFACT_NAMESPACE_DIRECTORY="$physical_namespace_directory"
@@ -910,6 +911,7 @@ e2e_claim_artifact_namespaced_run_with_lease_at_root() {
     "$repository_root" "$namespace" "$run_id" \
     "$expected_root_identity" "$expected_namespace_identity" "$run_identity" \
     "$lease_directory" "$lease_identity" || return 1
+  # shellcheck disable=SC2034
   ASIMPOSIUM_E2E_SELECTED_RUN_DIRECTORY="$physical_run_directory"
   ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY="$run_identity"
 }

@@ -143,6 +143,7 @@ mkdir "$collision_bin" || {
   exit 1
 }
 for trapped_binary in curl bunx bun python3; do
+  # shellcheck disable=SC2016
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'printf "%s\n" "$0" >> "$ARTIFACT_CLAIM_PRODUCT_MARKER"' \
