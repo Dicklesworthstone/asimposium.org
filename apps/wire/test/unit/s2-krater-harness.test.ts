@@ -1755,6 +1755,14 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.matchAll(/bash -c "\$\{S2_RAW_INHERITED_CHILD_WRAPPER\}"/g),
     );
     expect(rawInheritedLaunches).toHaveLength(5);
+    const rawWrapper = shell.slice(
+      shell.indexOf("readonly S2_RAW_INHERITED_CHILD_WRAPPER="),
+      shell.indexOf("s2_begin_raw_inherited_child_owner()"),
+    );
+    expect(rawWrapper).toContain('trap "" TERM HUP INT');
+    expect(rawWrapper).toContain('exec -a "${marker}-payload"');
+    expect(rawWrapper).toContain("perl -MPOSIX=setsid");
+    expect(rawWrapper).toContain('[[ ${group_busy} -eq 1 ]] || exit "${payload_status}"');
     for (const launch of rawInheritedLaunches) {
       const index = launch.index ?? 0;
       const inheritedCapability = shell.slice(Math.max(0, index - 1_200), index);
@@ -1793,6 +1801,18 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(rawCleanup).toContain('kill -TERM -- "-${pgid}"');
     expect(rawCleanup).toContain('kill -KILL -- "-${pgid}"');
     expect(rawCleanup).toContain('s2_raw_inherited_child_command_is_exact "${pid}"');
+    expect(rawCleanup).not.toContain('kill -TERM "${pid}"');
+    expect(rawCleanup.indexOf('kill -KILL -- "-${pgid}"')).toBeLessThan(
+      rawCleanup.indexOf("S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN=1"),
+    );
+    const preArmOwnerLoss = shell.slice(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      shell.indexOf('if [[ "${mode}" == "pre-arm-owner-loss" ]]'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      shell.indexOf('if [[ "${mode}" == "parent-loss-child" ]]'),
+    );
+    expect(preArmOwnerLoss).toContain('kill -KILL -- "-${parent_loss_child}"');
+    expect(preArmOwnerLoss).not.toContain('kill -KILL "${parent_loss_child}"');
     expect(onExit.indexOf("e2e_close_artifact_writer_lease")).toBeLessThan(
       onExit.indexOf(
         '"scenario":"outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease"',

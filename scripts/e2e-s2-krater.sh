@@ -6218,7 +6218,9 @@ run_s2_shell_regression_test() {
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while [[ ! -f "${parent_loss_record}" || -L "${parent_loss_record}" ]]; do
       if (( SECONDS >= deadline )); then
-        kill -KILL "${parent_loss_child}" 2>/dev/null || :
+        if s2_raw_inherited_child_command_is_exact "${parent_loss_child}"; then
+          kill -KILL -- "-${parent_loss_child}" 2>/dev/null || :
+        fi
         wait "${parent_loss_child}" 2>/dev/null || :
         cleanup_raw_inherited_child || :
         return 1
@@ -6232,7 +6234,8 @@ run_s2_shell_regression_test() {
     [[ "${supervisor_pid}" == "${supervisor_pgid}" && -n "${supervisor_marker}" && \
       -d "${child_persist}" && ! -L "${child_persist}" ]] || return 1
     kill -0 "${planted_helper_pid}" 2>/dev/null || return 1
-    kill -KILL "${parent_loss_child}" 2>/dev/null || return 1
+    s2_raw_inherited_child_command_is_exact "${parent_loss_child}" || return 1
+    kill -KILL -- "-${parent_loss_child}" 2>/dev/null || return 1
     if wait "${parent_loss_child}" 2>/dev/null; then
       parent_loss_status=0
     else
