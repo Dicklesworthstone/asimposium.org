@@ -32,9 +32,7 @@ describe("the cold-agent harness adapters", () => {
 
   test("registration-related mentions are diagnostic only", () => {
     const adapter = HARNESS_ADAPTERS[0]!;
-    expect(transcriptShowsRegistrationMention(adapter, '... "session_id": "S-1" ...')).toBe(
-      true,
-    );
+    expect(transcriptShowsRegistrationMention(adapter, '... "session_id": "S-1" ...')).toBe(true);
     expect(transcriptShowsRegistrationMention(adapter, "the flow expired")).toBe(false);
   });
 });

@@ -12,7 +12,12 @@ const KEYWORD_SOUP = "pair session pack workshop promote close\nsession_id: S-1"
 describe("the gauntlet orchestrator", () => {
   test("harnesses rotate across the adapters (diversity is structural)", () => {
     expect(assignHarnesses(6)).toEqual([
-      "claude-code", "codex", "gemini", "claude-code", "codex", "gemini",
+      "claude-code",
+      "codex",
+      "gemini",
+      "claude-code",
+      "codex",
+      "gemini",
     ]);
     expect(assignHarnesses(3)).toEqual(["claude-code", "codex", "gemini"]);
   });

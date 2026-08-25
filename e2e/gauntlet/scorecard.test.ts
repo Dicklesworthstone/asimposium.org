@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   GAUNTLET_MAX_MEDIAN_TOKENS,
+  type GauntletResult,
   medianTokens,
   scoreGauntlet,
-  type GauntletResult,
 } from "./scorecard.ts";
 
 function result(
@@ -55,12 +55,7 @@ describe("the gauntlet scorecard (Fable §16.1)", () => {
 
   test("a run fails when the median token budget is exceeded", () => {
     const results = Array.from({ length: 10 }, (_, i) =>
-      result(
-        i,
-        ["claude-code", "codex", "gemini"][i % 3]!,
-        true,
-        GAUNTLET_MAX_MEDIAN_TOKENS + 1,
-      ),
+      result(i, ["claude-code", "codex", "gemini"][i % 3]!, true, GAUNTLET_MAX_MEDIAN_TOKENS + 1),
     );
     expect(scoreGauntlet(results).passed).toBe(false);
   });

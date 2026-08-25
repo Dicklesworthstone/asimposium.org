@@ -66,13 +66,10 @@ describe("the gauntlet attempt runner", () => {
     expect(result.stageReached).toBe("none");
   });
 
-  test(
-    "a transcript missing intermediate stages fails completion even if close appears",
-    async () => {
-      const transcript = "pair session close\nsession_id: S-1";
-      const result = await runGauntletAttempt(0, adapter, "u", async () => ({ transcript }));
-      expect(result.completed).toBe(false);
-      expect(result.stageReached).toBe("close");
-    },
-  );
+  test("a transcript missing intermediate stages fails completion even if close appears", async () => {
+    const transcript = "pair session close\nsession_id: S-1";
+    const result = await runGauntletAttempt(0, adapter, "u", async () => ({ transcript }));
+    expect(result.completed).toBe(false);
+    expect(result.stageReached).toBe("close");
+  });
 });

@@ -668,6 +668,7 @@ clear_child_records() {
   CHILD_PIDS=()
   CHILD_OWNER_TOKENS=()
   CHILD_KINDS=()
+  [[ -z "$GROUP_CONTROL_PID" ]] || release_group_control "$GROUP_CONTROL_PID"
 }
 
 # Sets REAP_SURVIVORS. It must NOT print its result: a caller writing

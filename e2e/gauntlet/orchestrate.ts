@@ -10,8 +10,8 @@
  */
 
 import { HARNESS_ADAPTERS } from "./adapters.ts";
-import { runGauntletAttempt, type HarnessSpawner } from "./attempt.ts";
-import { scoreGauntlet, type GauntletResult, type GauntletScorecard } from "./scorecard.ts";
+import { type HarnessSpawner, runGauntletAttempt } from "./attempt.ts";
+import { type GauntletResult, type GauntletScorecard, scoreGauntlet } from "./scorecard.ts";
 
 export interface GauntletRun {
   readonly results: readonly GauntletResult[];

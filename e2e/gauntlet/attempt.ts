@@ -9,7 +9,7 @@
  * never Cold-Agent Gauntlet acceptance evidence.
  */
 
-import { registrationPrompt, type HarnessAdapter } from "./adapters.ts";
+import { type HarnessAdapter, registrationPrompt } from "./adapters.ts";
 import type { GauntletResult } from "./scorecard.ts";
 
 /** The spawn seam: given the adapter + prompt, run the CLI and return its transcript. */

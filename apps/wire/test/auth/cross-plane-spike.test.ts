@@ -1132,7 +1132,8 @@ async function runShell(
       supervisorProgram = OUTER_EXIT_BEFORE_CONNECT_PROGRAM;
     }
     deadlineAt =
-      Date.now() + (options.armAfterFileExists !== undefined ? OUTER_CONTROL_STEP_MS : runTimeoutMs);
+      Date.now() +
+      (options.armAfterFileExists !== undefined ? OUTER_CONTROL_STEP_MS : runTimeoutMs);
     const supervisorProcess = Bun.spawn({
       cmd: [
         "/usr/bin/perl",
