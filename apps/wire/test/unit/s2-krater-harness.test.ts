@@ -1743,7 +1743,7 @@ describe("S2 to S7 normalized cost receipt", () => {
         "    s2_artifact_writer_boundary_is_open || return 1",
     );
     const recursiveLaunches = Array.from(shell.matchAll(/bash "\$\{S2_SCRIPT_PATH\}"/g));
-    expect(recursiveLaunches.length).toBeGreaterThanOrEqual(6);
+    expect(recursiveLaunches.length).toBeGreaterThanOrEqual(2);
     for (const launch of recursiveLaunches) {
       const index = launch.index ?? 0;
       const inheritedCapability = shell.slice(Math.max(0, index - 900), index);
@@ -1751,6 +1751,30 @@ describe("S2 to S7 normalized cost receipt", () => {
       expect(inheritedCapability).toContain("S2_INHERITED_RUN_DIR_IDENTITY=");
       expect(inheritedCapability).toContain("s2_prepare_inherited_child_run");
     }
+    const rawInheritedLaunches = Array.from(
+      shell.matchAll(/bash -c "\$\{S2_RAW_INHERITED_CHILD_WRAPPER\}"/g),
+    );
+    expect(rawInheritedLaunches).toHaveLength(5);
+    for (const launch of rawInheritedLaunches) {
+      const index = launch.index ?? 0;
+      const inheritedCapability = shell.slice(Math.max(0, index - 1_200), index);
+      const adjacentRegistration = shell.slice(index, index + 500);
+      expect(inheritedCapability).toContain("S2_INHERIT_WRITER_LEASE=1");
+      expect(inheritedCapability).toContain("S2_INHERITED_RUN_DIR_IDENTITY=");
+      expect(inheritedCapability).toContain("s2_prepare_inherited_child_run");
+      expect(inheritedCapability).toContain("s2_begin_raw_inherited_child_owner");
+      expect(adjacentRegistration).toMatch(
+        /&\n    (?:parent_loss_child|interrupt_child|raw_child_pid)=\$!\n    s2_register_raw_inherited_child "\$\{(?:parent_loss_child|interrupt_child|raw_child_pid)\}"/u,
+      );
+    }
+    const cleanupWorkers = shell.slice(
+      shell.indexOf("cleanup_workers() {"),
+      shell.indexOf("write_evidence_receipt()", shell.indexOf("cleanup_workers() {")),
+    );
+    expect(cleanupWorkers).toContain("cleanup_raw_inherited_child || result=1");
+    expect(onExit.indexOf("cleanup_workers")).toBeLessThan(
+      onExit.indexOf("e2e_close_artifact_writer_lease"),
+    );
     expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
       shell.indexOf("write_s2_cost_publication_commit()"),
     );
