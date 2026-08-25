@@ -41,6 +41,13 @@ interface CliResult {
   stderr: string;
 }
 
+let testCaptureRoot: string | undefined;
+
+function capturePath(name: string): string {
+  testCaptureRoot ??= mkdtempSync(join(tmpdir(), "asimposium-suite-capture-"));
+  return join(testCaptureRoot, name);
+}
+
 const FILE_CAPTURE_EXEC = `
 use strict;
 use warnings;
