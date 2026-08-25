@@ -59,7 +59,14 @@ done
 unset ASIMPOSIUM_TEST_STAGING_ORIGIN
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-artifact.XXXXXX")" || fail "TEMPORARY_FIXTURE_UNAVAILABLE"
-mkdir -p "$temporary_root/e2e/artifacts" "$temporary_root/outside" || fail "TEMPORARY_FIXTURE_LAYOUT_FAILED"
+mkdir -p "$temporary_root/e2e" "$temporary_root/outside" || fail "TEMPORARY_FIXTURE_LAYOUT_FAILED"
+
+if absent_root_output="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "absent-run" "$suite" "$started_ms" "fail" "ABSENT_ROOT_TEST" "$reproduce" 2>&1)"; then
+  fail "UNCLAIMED_ABSENT_ROOT_WRITE_ACCEPTED"
+fi
+if [[ -n "$absent_root_output" || -e "$temporary_root/e2e/artifacts" ]]; then
+  fail "UNCLAIMED_ABSENT_ROOT_WRITE_MUTATED_OR_LEAKED"
+fi
 
 e2e_claim_artifact_run_at_root "$temporary_root" "claimed-run" \
   || fail "UNIQUE_ARTIFACT_RUN_REJECTED"
@@ -68,6 +75,26 @@ if second_claim_output="$(e2e_claim_artifact_run_at_root "$temporary_root" "clai
 fi
 if [[ -n "$second_claim_output" ]]; then
   fail "REUSED_ARTIFACT_RUN_LEAKED"
+fi
+if fresh_shell_output="$(
+  bash -c '
+    source "$1"
+    e2e_write_artifact_diagnostic_at_root "$2" "claimed-run" "fresh-shell" "0" "fail" "FOREIGN_WRITE" "reproduce"
+  ' _ "$repository_root/e2e/lib/run-diagnostics.sh" "$temporary_root" 2>&1
+)"; then
+  fail "FOREIGN_CLAIMED_ARTIFACT_WRITE_ACCEPTED"
+fi
+if [[ -n "$fresh_shell_output" || -e "$temporary_root/e2e/artifacts/claimed-run/diagnostics.jsonl" ]]; then
+  fail "FOREIGN_CLAIMED_ARTIFACT_WRITE_MUTATED_OR_LEAKED"
+fi
+if bash -c '
+  source "$1"
+  e2e_append_artifact_jsonl_at_root "$2" "claimed-run" "steps.jsonl" '\''{"status":"pass"}'\''
+' _ "$repository_root/e2e/lib/run-diagnostics.sh" "$temporary_root" >/dev/null 2>&1; then
+  fail "FOREIGN_CLAIMED_STEP_WRITE_ACCEPTED"
+fi
+if [[ -e "$temporary_root/e2e/artifacts/claimed-run/steps.jsonl" ]]; then
+  fail "FOREIGN_CLAIMED_STEP_WRITE_MUTATED"
 fi
 
 if unclaimed_write_output="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "regular-run" "$suite" "$started_ms" "fail" "UNCLAIMED_ARTIFACT_TEST" "$reproduce" 2>&1)"; then

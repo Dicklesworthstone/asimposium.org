@@ -9,6 +9,15 @@ readonly ASIMPOSIUM_E2E_HTTP_USER_AGENT
 ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES=1048576
 readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES
 
+# Successful artifact namespace claims are process capabilities. Bash arrays
+# survive the command-substitution subshells used by the writer helpers, but
+# they are not exported to an independently started shell. Binding the claim to
+# the directory's device/inode also prevents path-only adoption after a rename
+# or replacement.
+declare -ag ASIMPOSIUM_E2E_CLAIM_ROOTS=()
+declare -ag ASIMPOSIUM_E2E_CLAIM_RUN_IDS=()
+declare -ag ASIMPOSIUM_E2E_CLAIM_IDENTITIES=()
+
 e2e_curl_header_preserves_user_agent() {
   local header_value="$1"
 
@@ -219,6 +228,7 @@ e2e_physical_directory() {
 
 e2e_artifacts_root_at_root() {
   local repository_root="$1"
+  local create_if_missing="${2:-0}"
   local physical_repository_root
   local e2e_root
   local physical_e2e_root
@@ -234,11 +244,43 @@ e2e_artifacts_root_at_root() {
   if [[ -e "$artifacts_root" || -L "$artifacts_root" ]]; then
     [[ -d "$artifacts_root" && ! -L "$artifacts_root" ]] || return 1
   else
+    [[ "$create_if_missing" == "1" ]] || return 1
     mkdir "$artifacts_root" 2>/dev/null || return 1
   fi
   physical_artifacts_root="$(e2e_physical_directory "$artifacts_root")" || return 1
   [[ "$physical_artifacts_root" == "$physical_e2e_root/artifacts" ]] || return 1
   printf '%s\n' "$physical_artifacts_root"
+}
+
+e2e_artifact_directory_identity() {
+  local directory="$1"
+  local identity
+
+  [[ -d "$directory" && ! -L "$directory" ]] || return 1
+  # GNU stat uses -c for file device/inode; BSD/macOS stat uses -f. Try the
+  # unambiguous GNU form first because GNU `stat -f` reports filesystem fields,
+  # not this directory's inode.
+  identity="$(command stat -c '%d:%i' "$directory" 2>/dev/null)" \
+    || identity="$(command stat -f '%d:%i' "$directory" 2>/dev/null)" \
+    || return 1
+  [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+e2e_artifact_claim_matches() {
+  local physical_artifacts_root="$1"
+  local run_id="$2"
+  local identity="$3"
+  local index
+
+  for ((index = 0; index < ${#ASIMPOSIUM_E2E_CLAIM_RUN_IDS[@]}; index++)); do
+    if [[ "${ASIMPOSIUM_E2E_CLAIM_ROOTS[$index]}" == "$physical_artifacts_root" \
+      && "${ASIMPOSIUM_E2E_CLAIM_RUN_IDS[$index]}" == "$run_id" \
+      && "${ASIMPOSIUM_E2E_CLAIM_IDENTITIES[$index]}" == "$identity" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 e2e_artifact_directory_at_root() {
@@ -247,6 +289,7 @@ e2e_artifact_directory_at_root() {
   local physical_artifacts_root
   local artifact_directory
   local physical_artifact_directory
+  local artifact_identity
 
   e2e_validate_run_id "$run_id" || return 1
   physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
@@ -259,6 +302,8 @@ e2e_artifact_directory_at_root() {
   [[ -d "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
   physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
   [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
+  artifact_identity="$(e2e_artifact_directory_identity "$physical_artifact_directory")" || return 1
+  e2e_artifact_claim_matches "$physical_artifacts_root" "$run_id" "$artifact_identity" || return 1
   printf '%s\n' "$physical_artifact_directory"
 }
 
@@ -268,14 +313,19 @@ e2e_claim_artifact_run_at_root() {
   local physical_artifacts_root
   local artifact_directory
   local physical_artifact_directory
+  local artifact_identity
 
   e2e_validate_run_id "$run_id" || return 1
-  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root" 1)" || return 1
   artifact_directory="$physical_artifacts_root/$run_id"
   [[ ! -e "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
   mkdir "$artifact_directory" 2>/dev/null || return 1
   physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
   [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
+  artifact_identity="$(e2e_artifact_directory_identity "$physical_artifact_directory")" || return 1
+  ASIMPOSIUM_E2E_CLAIM_ROOTS+=("$physical_artifacts_root")
+  ASIMPOSIUM_E2E_CLAIM_RUN_IDS+=("$run_id")
+  ASIMPOSIUM_E2E_CLAIM_IDENTITIES+=("$artifact_identity")
 }
 
 e2e_write_artifact_diagnostic_at_root() {

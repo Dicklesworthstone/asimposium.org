@@ -52,6 +52,71 @@ for artifact_entrypoint in \
   fi
 done
 
+collision_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-entrypoint-claim.XXXXXX")" || {
+  emit "fail" "ARTIFACT_CLAIM_FIXTURE_UNAVAILABLE"
+  exit 1
+}
+mkdir -p \
+  "$collision_root/e2e/artifacts/collision-run" \
+  "$collision_root/e2e/lib" \
+  "$collision_root/e2e/gauntlet" \
+  "$collision_root/scripts" || {
+  emit "fail" "ARTIFACT_CLAIM_FIXTURE_UNAVAILABLE"
+  exit 1
+}
+cp "$repository_root/e2e/lib/run-diagnostics.sh" "$collision_root/e2e/lib/run-diagnostics.sh"
+cp "$repository_root/e2e/run-playwright.sh" "$collision_root/e2e/run-playwright.sh"
+cp "$repository_root/e2e/gauntlet/run.sh" "$collision_root/e2e/gauntlet/run.sh"
+cp "$repository_root/scripts/smoke-agent.sh" "$collision_root/scripts/smoke-agent.sh"
+cp "$repository_root/scripts/smoke-gallery.sh" "$collision_root/scripts/smoke-gallery.sh"
+
+collision_bin="$collision_root/trapped-product-bin"
+collision_marker="$collision_root/product-command-invoked"
+mkdir "$collision_bin" || {
+  emit "fail" "ARTIFACT_CLAIM_FIXTURE_UNAVAILABLE"
+  exit 1
+}
+for trapped_binary in curl bunx bun python3; do
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$0" >> "$ARTIFACT_CLAIM_PRODUCT_MARKER"' \
+    'exit 66' > "$collision_bin/$trapped_binary" || {
+    emit "fail" "ARTIFACT_CLAIM_FIXTURE_UNAVAILABLE"
+    exit 1
+  }
+  chmod 700 "$collision_bin/$trapped_binary" || {
+    emit "fail" "ARTIFACT_CLAIM_FIXTURE_UNAVAILABLE"
+    exit 1
+  }
+done
+
+for collision_entrypoint in \
+  "$collision_root/scripts/smoke-agent.sh" \
+  "$collision_root/scripts/smoke-gallery.sh" \
+  "$collision_root/e2e/run-playwright.sh" \
+  "$collision_root/e2e/gauntlet/run.sh"; do
+  set +e
+  collision_output="$(
+    env -u ASIMPOSIUM_E2E_RUN_ID \
+      PATH="$collision_bin:$PATH" \
+      ARTIFACT_CLAIM_PRODUCT_MARKER="$collision_marker" \
+      /bin/bash "$collision_entrypoint" --write-artifacts --run-id collision-run 2>&1
+  )"
+  collision_status=$?
+  set -e
+  if [[ "$collision_status" -ne 78 \
+    || "$collision_output" != *'"status":"blocked"'* \
+    || "$collision_output" != *'"code":"ARTIFACT_RUN_ALREADY_EXISTS"'* ]]; then
+    emit "fail" "REUSED_ARTIFACT_RUN_NOT_BLOCKED"
+    exit 1
+  fi
+done
+if [[ -e "$collision_marker" \
+  || -n "$(find "$collision_root/e2e/artifacts/collision-run" -mindepth 1 -print -quit)" ]]; then
+  emit "fail" "REUSED_ARTIFACT_RUN_STARTED_PRODUCT_WORK_OR_MUTATED"
+  exit 1
+fi
+
 synthetic_fellow_token="asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 if ! ASIMPOSIUM_SMOKE_FELLOW_TOKEN="$synthetic_fellow_token" \
   "$repository_root/scripts/smoke-agent.sh" --self-test >/dev/null; then
