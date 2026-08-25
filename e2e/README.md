@@ -79,12 +79,14 @@ whole-root maintenance lease. Common shell writers now bind their claim to the
 artifact root's device/inode as well as the run directory's, revalidate both
 before each append, and refuse any node at the reserved sibling fence
 `e2e/.artifact-maintenance` before claim and publication. The TypeScript
-harness and S-6 do not yet share that epoch/fence contract, there is no lifetime
-writer lease or archive locator, and the final pathname append still has a
-check/use window. Moving or rotating `e2e/artifacts` therefore remains unsafe
-while any writer may exist. S-6 has a separate fixed contract: it requires
-`ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and accepts neither
-of those command-line flags.
+harness applies the same fence and physical-root epoch around namespace
+reservation, event/manifest/JUnit writes, and blob publication, including its
+retained-integration lane. S-6 does not yet share that contract, there is no
+lifetime writer lease or archive locator, and each final pathname mutation
+still has a check/use window. Moving or rotating `e2e/artifacts` therefore
+remains unsafe while any writer may exist. S-6 has a separate fixed contract:
+it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
+accepts neither of those command-line flags.
 
 No current-revision automated smoke, Playwright, S-6 cross-plane, or Cold-Agent Gauntlet product
 flow has passed from these entry points yet.

@@ -892,8 +892,6 @@ export interface HarnessRootFilesystem {
   exists(path: string): boolean;
   isSymlink(path: string): boolean;
   isDirectory(path: string): boolean;
-  /** Stable device/inode identity for one real directory. */
-  directoryIdentity(path: string): string;
   realpath(path: string): string;
   repositoryRoot(): string;
   homeDirectory(): string;
@@ -3391,6 +3389,19 @@ export function reserveRetainedIntegrationDirectory(
     );
   }
   const root = realDirectory(resolve(integrationDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  const artifactRoot = realDirectory(resolve(root, ".."), "ARTIFACT_PATH_UNSAFE", storage);
+  const writerRoot = realDirectory(
+    resolve(artifactRoot, "..", ".."),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
+  const expectedArtifactRootIdentity = storage.directoryIdentity(artifactRoot);
+  assertArtifactWriterBoundary(
+    writerRoot,
+    artifactRoot,
+    expectedArtifactRootIdentity,
+    storage,
+  );
   const target = join(root, name);
   if (!storage.exists(target)) {
     assertRetainedIntegrationCapacity(
@@ -3399,7 +3410,20 @@ export function reserveRetainedIntegrationDirectory(
       storage,
     );
   }
-  return ensureDirectDirectory(root, name, storage);
+  assertArtifactWriterBoundary(
+    writerRoot,
+    artifactRoot,
+    expectedArtifactRootIdentity,
+    storage,
+  );
+  const reserved = ensureDirectDirectory(root, name, storage);
+  assertArtifactWriterBoundary(
+    writerRoot,
+    artifactRoot,
+    expectedArtifactRootIdentity,
+    storage,
+  );
+  return reserved;
 }
 
 /** The retained-integration form of the same exclusive new-run claim. */
