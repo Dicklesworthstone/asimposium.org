@@ -25,7 +25,7 @@ described as one.
 | Session-gated sponsor console and device-code approval page | A deployed/verified Google OAuth client in every environment |
 | Signed Worker calls for sponsor bootstrap, mint, pending decisions, Fellow inventory, lifecycle actions, and bounded private workshop previews | Direct D1 access (never in this package); the full mock-free sponsor/browser E2E |
 | `GET /api/health` and Tailwind v4 presentation | Complete design system, dark-mode pass, KaTeX, OG routes (W8) |
-| Route-contract validator + suites | `.md` agent faces for these pages — the Diptych faces are served by the Worker (W6) |
+| Route-contract validator + suites | Same-projection Agora HTML counterparts for the current Worker agent ledger faces (W8); A1 pairing remains incomplete |
 
 `/` states that the product is still in build and distinguishes implemented
 source from launch evidence. That is Rule A4 applied to ourselves: source code

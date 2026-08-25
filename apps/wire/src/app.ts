@@ -710,12 +710,11 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
 
   // W6.4 source exists, but its response contract and dependencies do not.
   // Refuse this shape before the broader /p/<id>.json face can reinterpret an
-  // event-tail request as a problem id ending in `.events` and touch D1.
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", (c) => routeNotFound(c.req.url));
+  // event-tail request and touch D1.
+  app.on(["GET", "HEAD"], "/p/:id/events.json", (c) => routeNotFound(c.req.url));
 
   // The contracted public ledger faces (no auth, ever). The event-tail guard
-  // above remains first so `/p/<id>.events.json` cannot be reinterpreted as a
-  // problem id by the broader JSON digest face.
+  // above remains first so the nested W6.4 route stays explicitly unavailable.
   app.route("/", createLedgerFaceRoutes());
 
   // The session protocol (Fable §7) and the public cursor. The session router

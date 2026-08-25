@@ -30,7 +30,6 @@ interface RawRoute {
 }
 
 const SUFFIXED_LEDGER_FACE_PATHS: Readonly<Record<string, string>> = {
-  "/p/:id{.+\\.events\\.json$}": "/p/<id>.events.json",
   "/p/:id{.+\\.json$}": "/p/<id>.json",
   "/p/:id{.+\\.md$}": "/p/<id>.md",
 };
@@ -103,7 +102,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
   const UNDISCLOSED_REASON_BY_ROUTE: Record<string, string> = {
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
-    "GET /p/<id>.events.json":
+    "GET /p/<id>/events.json":
       "the W6.4 event-tail source remains fail-closed until its response contract and nested public route land",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",

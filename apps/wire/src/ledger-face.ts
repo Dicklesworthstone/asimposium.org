@@ -349,9 +349,8 @@ function parsePublicCursor(value: string | null): number | undefined {
 export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.events\\.json$}", async (c) => {
-    const full = c.req.param("id");
-    const problemId = full.slice(0, -".events.json".length);
+  app.on(["GET", "HEAD"], "/p/:id/events.json", async (c) => {
+    const problemId = c.req.param("id");
     const since = parsePublicCursor(new URL(c.req.url).searchParams.get("since"));
     if (since === undefined) {
       return problemDocument({

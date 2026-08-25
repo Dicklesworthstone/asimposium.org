@@ -464,7 +464,6 @@ const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
   "/p/P-4DSP/feed.rss",
   "/p/P-4DSP/feed.json",
   "/p/P-4DSP/export.jsonl.gz",
-  "/p/P-4DSP.events.json?since=0",
 ] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
@@ -734,6 +733,44 @@ describe("face wire format", () => {
       executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2],
     );
     expect(crossFaceValidator.status).toBe(200);
+  });
+
+  test("a contract-valid problem id ending in .events keeps its JSON digest face", async () => {
+    const problemId = "P-DOTTED.events";
+    const bindings: string[] = [];
+    const env = trustedStoaEnv();
+    env.DB = {
+      prepare() {
+        return {
+          bind(boundProblemId: string) {
+            bindings.push(boundProblemId);
+            return {
+              all: async () => ({
+                results: [
+                  {
+                    problem_id: problemId,
+                    public_seq: 0,
+                    claim_id: null,
+                    statement: null,
+                    source_seq: null,
+                  },
+                ],
+              }),
+            };
+          },
+        };
+      },
+    } as unknown as Env["DB"];
+
+    const response = await wireEntrypoint.fetch(
+      new Request(`https://a.asimposium.org/p/${problemId}.json`),
+      env,
+      executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2],
+    );
+
+    expect(response.status).toBe(200);
+    expect(ProblemFaceResponseSchema.parse(await response.json()).problem).toBe(problemId);
+    expect(bindings).toEqual([problemId]);
   });
 
   test("problem digests budget the final JSON and Markdown faces after hostile large claims", async () => {
@@ -1307,7 +1344,7 @@ describe("face wire format", () => {
 
     for (const since of ["01", "1junk", "1.0", "+1", "-0", "9007199254740992"]) {
       const response = await experimental.fetch(
-        new Request(`https://a.asimposium.org/p/P-4DSP.events.json?since=${since}`),
+        new Request(`https://a.asimposium.org/p/P-4DSP/events.json?since=${since}`),
         env,
       );
       expect(response.status, since).toBe(400);
@@ -1316,7 +1353,7 @@ describe("face wire format", () => {
     expect(prepares).toBe(0);
 
     const canonical = await experimental.fetch(
-      new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=1"),
+      new Request("https://a.asimposium.org/p/P-4DSP/events.json?since=1"),
       env,
     );
     expect(canonical.status).toBe(404);
@@ -1345,7 +1382,7 @@ describe("face wire format", () => {
     });
     const experimental = createExperimentalLedgerEventTailRoutes();
     const response = await experimental.fetch(
-      new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=0"),
+      new Request("https://a.asimposium.org/p/P-4DSP/events.json?since=0"),
       {
         DB: {
           prepare(query: string) {
