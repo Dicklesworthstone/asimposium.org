@@ -4248,6 +4248,33 @@ s2_raw_inherited_child_command_is_exact() {
     "${S2_RAW_CHILD_SEEN_COMMAND}" == *"${S2_SCRIPT_PATH}"* ]]
 }
 
+s2_raw_inherited_descendant_is_exact() {
+  local payload_pid="$1" descendant_pid="$2" descendant_marker="$3"
+  local line seen_pid seen_pgid seen_ppid seen_stat seen_command
+  is_decimal "${payload_pid}" && is_decimal "${descendant_pid}" && \
+    [[ -n "${descendant_marker}" ]] || return 1
+  capture_detached_process_table \
+    -o pid=,pgid=,ppid=,stat=,command= -p "${payload_pid}" || return 1
+  line="${S2_DETACHED_PROCESS_TABLE}"
+  [[ -n "${line}" && "${line}" != *$'\n'* ]] || return 1
+  read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+  [[ "${seen_pid}" == "${payload_pid}" && \
+    "${seen_pgid}" == "${S2_RAW_INHERITED_CHILD_PGID}" && \
+    "${seen_ppid}" == "${S2_RAW_INHERITED_CHILD_PID}" && \
+    "${seen_stat}" != Z* && \
+    "${seen_command}" == *"${S2_RAW_INHERITED_CHILD_MARKER}-payload"* && \
+    "${seen_command}" == *"${S2_SCRIPT_PATH}"* ]] || return 1
+  capture_detached_process_table \
+    -o pid=,pgid=,ppid=,stat=,command= -p "${descendant_pid}" || return 1
+  line="${S2_DETACHED_PROCESS_TABLE}"
+  [[ -n "${line}" && "${line}" != *$'\n'* ]] || return 1
+  read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+  [[ "${seen_pid}" == "${descendant_pid}" && \
+    "${seen_pgid}" == "${S2_RAW_INHERITED_CHILD_PGID}" && \
+    "${seen_ppid}" == "${payload_pid}" && "${seen_stat}" != Z* && \
+    "${seen_command}" == *"${descendant_marker}"* ]]
+}
+
 clear_raw_inherited_child_owner() {
   S2_RAW_INHERITED_CHILD_PID=""
   S2_RAW_INHERITED_CHILD_PGID=""
@@ -5180,8 +5207,9 @@ on_exit() {
       "${S2_WRITER_LEASE_PATH}" "${S2_WRITER_LEASE_IDENTITY}"; then
       final_status=125
     elif [[ "${S2_SHELL_REGRESSION_TEST:-}" == "raw-inherited-child-interrupt" && \
-      ${S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN} -eq 1 ]]; then
-      emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease","reproduce":"S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt scripts/e2e-s2-krater.sh"}'
+      ${S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN} -eq 1 && \
+      ${S2_RAW_INHERITED_CHILD_DESCENDANT_PROVEN} -eq 1 ]]; then
+      emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"outer-interrupt-settles-raw-inherited-child-before-closing-parent-writer-lease","term_resistant_descendant_proven":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt scripts/e2e-s2-krater.sh"}'
     fi
   fi
   exit "${final_status}"
@@ -6105,15 +6133,27 @@ run_s2_shell_regression_test() {
 
   if [[ "${mode}" == "raw-inherited-child-interrupt-child" ]]; then
     local raw_ready="${S2_RAW_INHERITED_CHILD_READY:-}"
+    local raw_descendant_marker="${S2_RAW_INHERITED_CHILD_DESCENDANT_MARKER:-}"
+    local raw_descendant_pid
     [[ -n "${raw_ready}" && "${raw_ready}" == "${S2_EVIDENCE_ROOT}/"* && \
       ! -e "${raw_ready}" && ! -L "${raw_ready}" ]] || return 2
-    (umask 077; set -o noclobber; printf 'ready\n' >"${raw_ready}") 2>/dev/null || return 1
-    while :; do sleep 30; done
+    [[ "${raw_descendant_marker}" =~ ^s2-raw-interrupt-[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || \
+      return 2
+    bash -c 'trap "" TERM HUP INT; while :; do sleep 30; done' \
+      "${raw_descendant_marker}" &
+    raw_descendant_pid=$!
+    (umask 077; set -o noclobber; \
+      printf 'ready %s %s\n' "$$" "${raw_descendant_pid}" >"${raw_ready}") \
+      2>/dev/null || return 1
+    wait "${raw_descendant_pid}"
+    return $?
   fi
 
   if [[ "${mode}" == "raw-inherited-child-interrupt" ]]; then
     local raw_ready child_run_id child_run_identity raw_child_pid
+    local raw_descendant_marker raw_payload_pid raw_descendant_pid ready_state ready_extra
     raw_ready="${S2_STATE_DIR}/raw-inherited-interrupt-ready-$(random_hex 8)"
+    raw_descendant_marker="s2-raw-interrupt-${S2_RUN_ID}"
     child_run_id="s2c-$(random_hex 24)" || return 1
     s2_prepare_inherited_child_run "${child_run_id}" || return 1
     child_run_identity="${S2_PREPARED_CHILD_RUN_IDENTITY}"
@@ -6128,6 +6168,7 @@ run_s2_shell_regression_test() {
       S2_INHERITED_WRITER_LEASE_IDENTITY="${S2_WRITER_LEASE_IDENTITY}" \
       S2_SHELL_REGRESSION_TEST=raw-inherited-child-interrupt-child \
       S2_RAW_INHERITED_CHILD_READY="${raw_ready}" \
+      S2_RAW_INHERITED_CHILD_DESCENDANT_MARKER="${raw_descendant_marker}" \
       perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
       bash -c "${S2_RAW_INHERITED_CHILD_WRAPPER}" s2-raw-wrapper \
         "${S2_PARENT_PID}" "${S2_RAW_INHERITED_CHILD_GATE}" \
@@ -6140,8 +6181,13 @@ run_s2_shell_regression_test() {
       (( SECONDS < deadline )) || return 1
       sleep 0.05
     done
-    [[ "$(<"${raw_ready}")" == ready ]] || return 1
+    read -r ready_state raw_payload_pid raw_descendant_pid ready_extra \
+      <"${raw_ready}" || return 1
+    [[ "${ready_state}" == ready && -z "${ready_extra:-}" ]] || return 1
     s2_raw_inherited_child_command_is_exact "${raw_child_pid}" || return 1
+    s2_raw_inherited_descendant_is_exact \
+      "${raw_payload_pid}" "${raw_descendant_pid}" "${raw_descendant_marker}" || return 1
+    S2_RAW_INHERITED_CHILD_DESCENDANT_PROVEN=1
     kill -TERM "$$"
     return 125
   fi
