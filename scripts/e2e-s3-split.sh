@@ -49,10 +49,6 @@ mint_hex_token() {
   od -An -N"${byte_count}" -tx1 /dev/urandom | tr -d ' \n'
 }
 
-allocate_port() {
-  bun --eval 'const server = Bun.serve({ port: 0, fetch() { return new Response("ready"); } }); console.log(server.port); server.stop(true);'
-}
-
 port_is_busy() {
   (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && exec 3<&- && return 0
   return 1
@@ -62,26 +58,40 @@ S3_NO_WORKER_PORT_PRESTART=0
 if [[ "${S3_SELF_TEST_CHECKER_TIMEOUT:-0}" == "1" || \
   "${S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE:-0}" == "1" || \
   "${S3_SELF_TEST_CHECKER_EXIT_1:-0}" == "1" || \
-  "${S3_SELF_TEST_IDENTITY_MISMATCH:-0}" == "1" ]]; then
+  "${S3_SELF_TEST_IDENTITY_MISMATCH:-0}" == "1" || \
+  "${S3_SELF_TEST_TERM_RESISTANT_CHILD:-0}" == "1" || \
+  "${S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP:-0}" == "1" || \
+  "${S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE:-0}" == "1" || \
+  "${S3_SELF_TEST_POST_KILL_REAP_UNCERTAINTY:-0}" == "1" || \
+  -n "${S3_SELF_TEST_KILL_DISPATCH_SIGNAL_OWNER:-}" || \
+  -n "${S3_SELF_TEST_ORDINARY_SIGNAL_HANDOFF:-}" || \
+  -n "${S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL:-}" || \
+  -n "${S3_SELF_TEST_STARTUP_SIGNAL_WINDOW:-}" ]]; then
   S3_NO_WORKER_PORT_PRESTART=1
 fi
 readonly S3_NO_WORKER_PORT_PRESTART
+S3_PORT_EXPLICIT=0
 if [[ -n "${S3_PORT:-}" ]]; then
   if ! [[ "${S3_PORT}" =~ ^[0-9]{2,5}$ ]] || (( S3_PORT < 1024 || S3_PORT > 65535 )); then
     emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_PORT_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
     exit 1
   fi
+  S3_PORT_EXPLICIT=1
 elif (( S3_NO_WORKER_PORT_PRESTART == 1 )); then
-  # This self-test exits before the Worker launch. Allocating and releasing an
-  # unrelated Worker port here created a bind gap in which a concurrent local
-  # process could claim the port and divert the checker-only proof through the
-  # global S3_PORT_OCCUPIED preflight.
+  # These self-tests either exit before Worker launch or terminate the exact
+  # startup supervisor before listener proof. Allocating and releasing an
+  # unrelated fixed port here created a bind gap in which a concurrent local
+  # process could divert the ownership proof through S3_PORT_OCCUPIED. Port 0
+  # leaves any startup bind atomically owned by the child.
   S3_PORT=0
 else
-  S3_PORT="$(allocate_port)"
+  # The production child binds port 0 itself. The controller discovers the
+  # already-owned listener by exact process group plus its random readiness
+  # nonce; there is no parent allocate/close/later-bind gap to steal.
+  S3_PORT=0
 fi
-readonly S3_PORT
-readonly ORIGIN="http://127.0.0.1:${S3_PORT}"
+readonly S3_PORT S3_PORT_EXPLICIT
+ORIGIN="http://127.0.0.1:${S3_PORT}"
 S3_RUN_TOKEN="$(mint_hex_token 32)" || {
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_AUTHORITY_TOKEN_UNAVAILABLE","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
@@ -96,7 +106,7 @@ if ! [[ "${S3_RUN_TOKEN}" =~ ^[a-f0-9]{64}$ && "${S3_READINESS_NONCE}" =~ ^s3-re
 fi
 readonly S3_RUN_TOKEN S3_READINESS_NONCE
 
-if (( S3_PORT != 0 )) && port_is_busy "${S3_PORT}"; then
+if (( S3_PORT_EXPLICIT == 1 )) && port_is_busy "${S3_PORT}"; then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_PORT_OCCUPIED","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
 fi
@@ -107,6 +117,7 @@ readonly STATE_DIR
 readonly SERVER_LOG="${STATE_DIR}/wrangler.log"
 readonly CHECK_LOG="${STATE_DIR}/check.log"
 readonly TERM_RESISTANT_STATE_FILE="${STATE_DIR}/term-resistant-held-open"
+readonly SERVER_RESOURCE_PORT_FILE="${STATE_DIR}/server-resource-port"
 readonly CHECKER_RESISTANT_STATE_FILE="${STATE_DIR}/checker-resistant-held-open"
 readonly CHECKER_RESOURCE_PORT_FILE="${STATE_DIR}/checker-resource-port"
 if [[ ! -d "${STATE_DIR}" || -L "${STATE_DIR}" ]]; then
@@ -122,6 +133,9 @@ SERVER_PAYLOAD_PID=""
 SERVER_PAYLOAD_PID_FILE=""
 SERVER_PAYLOAD_STATUS_FILE=""
 SERVER_SUPERVISOR_REAPED=0
+SERVER_SUPERVISOR_KILL_DISPATCHED=0
+SERVER_RESOURCE_PORT=""
+SERVER_LISTENER_OWNERSHIP_OBSERVED=0
 CLEANUP_PENDING_PGID=""
 CHECKER_SUPERVISOR_PID=""
 CHECKER_PGID=""
@@ -131,8 +145,10 @@ CHECKER_PAYLOAD_PID=""
 CHECKER_PAYLOAD_PID_FILE=""
 CHECKER_PAYLOAD_STATUS_FILE=""
 CHECKER_SUPERVISOR_REAPED=0
+CHECKER_SUPERVISOR_KILL_DISPATCHED=0
 CHECKER_CLEANUP_PENDING_PGID=""
 CHECKER_RESOURCE_PORT=""
+CHECKER_LISTENER_OWNERSHIP_OBSERVED=0
 CONTROLLER_PGID=""
 SUPERVISOR_PID=""
 SUPERVISOR_PGID=""
@@ -142,8 +158,15 @@ SUPERVISOR_PAYLOAD_PID_FILE=""
 SUPERVISOR_PAYLOAD_STATUS_FILE=""
 SUPERVISOR_DIRECT_CHILD=0
 SUPERVISOR_READY=0
+SUPERVISOR_KILL_DISPATCHED=0
 STARTUP_SIGNAL_STATUS=0
 STARTUP_SIGNAL_NAME=""
+STARTUP_SIGNAL_HANDOFF_ACTIVE=0
+ORDINARY_SIGNAL_HANDOFF_ACTIVE=0
+SIGNAL_TRAP_PHASE="uninstalled"
+KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE=""
+KILL_DISPATCH_SIGNAL_STATUS=0
+KILL_DISPATCH_SIGNAL_NAME=""
 TEST_STARTUP_SIGNAL_WINDOW=""
 TEST_STARTUP_SIGNAL_TRIGGERED=0
 TEST_DISPATCH_STARTUP_SIGNAL_OWNER=""
@@ -157,6 +180,22 @@ TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING=0
 TEST_POST_REAP_GROUP_INSPECTION_FAILURE_OBSERVED=0
 TEST_POST_REAP_INSPECTION_ONLY_RETRY_OBSERVED=0
 TEST_POST_REAP_SIGNAL_ATTEMPTS=0
+TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING=0
+TEST_POST_KILL_REAP_UNCERTAINTY_OBSERVED_COUNT=0
+TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT=0
+TEST_POST_KILL_SIGNAL_ATTEMPTS=0
+TEST_KILL_DISPATCH_SIGNAL_OWNER=""
+TEST_KILL_DISPATCH_SIGNAL_TRIGGERED=0
+TEST_KILL_DISPATCH_STATE_VISIBLE_BEFORE_REDELIVERY=0
+TEST_KILL_DISPATCH_SIGNAL_REDELIVERED=0
+TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE=0
+TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_STARTUP_RESTORE=0
+TEST_KILL_DISPATCH_SECOND_SIGNAL_TRIGGERED=0
+TEST_KILL_DISPATCH_SIGNAL_PGID=""
+TEST_ORDINARY_SIGNAL_HANDOFF=""
+TEST_ORDINARY_SIGNAL_FIRST_TRIGGERED=0
+TEST_ORDINARY_SIGNAL_SECOND_TRIGGERED=0
+TEST_ORDINARY_SIGNAL_HANDOFF_COMPLETED=0
 REAPED_GROUP_MEMBERS=""
 TEST_IDENTITY_RECOVERY=0
 TEST_IDENTITY_REAL_STARTED_AT=""
@@ -182,6 +221,7 @@ term_mode="${S3_SELF_TEST_TERM_RESISTANT_CHILD:-0}"
 identity_mode="${S3_SELF_TEST_IDENTITY_MISMATCH:-0}"
 second_signal_mode="${S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP:-0}"
 post_reap_inspection_mode="${S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE:-0}"
+post_kill_reap_mode="${S3_SELF_TEST_POST_KILL_REAP_UNCERTAINTY:-0}"
 provisional_exact_mode="${S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE:-0}"
 pid_reuse_mode="${S3_SELF_TEST_PID_REUSE:-0}"
 checker_timeout_mode="${S3_SELF_TEST_CHECKER_TIMEOUT:-0}"
@@ -190,18 +230,31 @@ checker_exit_one_mode="${S3_SELF_TEST_CHECKER_EXIT_1:-0}"
 state_holder_recheck_mode="${S3_SELF_TEST_STATE_HOLDER_RECHECK:-0}"
 TEST_DISPATCH_STARTUP_SIGNAL_OWNER="${S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL:-}"
 TEST_STARTUP_SIGNAL_WINDOW="${S3_SELF_TEST_STARTUP_SIGNAL_WINDOW:-}"
+TEST_KILL_DISPATCH_SIGNAL_OWNER="${S3_SELF_TEST_KILL_DISPATCH_SIGNAL_OWNER:-}"
+TEST_ORDINARY_SIGNAL_HANDOFF="${S3_SELF_TEST_ORDINARY_SIGNAL_HANDOFF:-}"
+if [[ "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" == "provisional_startup_restore_int" ]]; then
+  TEST_KILL_DISPATCH_SIGNAL_OWNER="provisional"
+  TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_STARTUP_RESTORE=1
+elif [[ "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" == *_restore_int ]]; then
+  TEST_KILL_DISPATCH_SIGNAL_OWNER="${TEST_KILL_DISPATCH_SIGNAL_OWNER%_restore_int}"
+  TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE=1
+fi
 if [[ ! "${term_mode}" =~ ^[01]$ || ! "${identity_mode}" =~ ^[01]$ || \
   ! "${second_signal_mode}" =~ ^[01]$ || ! "${post_reap_inspection_mode}" =~ ^[01]$ || \
+  ! "${post_kill_reap_mode}" =~ ^[01]$ || \
   ! "${provisional_exact_mode}" =~ ^[01]$ || \
   ! "${pid_reuse_mode}" =~ ^[01]$ || ! "${checker_timeout_mode}" =~ ^[01]$ || \
   ! "${checker_containment_mode}" =~ ^[01]$ || ! "${checker_exit_one_mode}" =~ ^[01]$ || \
   ! "${state_holder_recheck_mode}" =~ ^[01]$ ]] || \
   { [[ -n "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" ]] && [[ ! "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" =~ ^(server|checker)$ ]]; } || \
   { [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]] && [[ ! "${TEST_STARTUP_SIGNAL_WINDOW}" =~ ^(background_spawn|scratch_assignment|stop_proof|adoption|cont_release|return)$ ]]; } || \
-  (( term_mode + identity_mode + second_signal_mode + post_reap_inspection_mode + provisional_exact_mode + \
+  { [[ -n "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" ]] && [[ ! "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" =~ ^(server|checker|provisional)$ ]]; } || \
+  { [[ -n "${TEST_ORDINARY_SIGNAL_HANDOFF}" ]] && [[ ! "${TEST_ORDINARY_SIGNAL_HANDOFF}" =~ ^(runtime_to_startup|startup_to_runtime)$ ]]; } || \
+  (( term_mode + identity_mode + second_signal_mode + post_reap_inspection_mode + post_kill_reap_mode + provisional_exact_mode + \
     pid_reuse_mode + checker_timeout_mode + checker_containment_mode + checker_exit_one_mode + \
     state_holder_recheck_mode + \
-    (${#TEST_STARTUP_SIGNAL_WINDOW} > 0) + (${#TEST_DISPATCH_STARTUP_SIGNAL_OWNER} > 0) > 1 )); then
+    (${#TEST_STARTUP_SIGNAL_WINDOW} > 0) + (${#TEST_DISPATCH_STARTUP_SIGNAL_OWNER} > 0) + \
+    (${#TEST_KILL_DISPATCH_SIGNAL_OWNER} > 0) + (${#TEST_ORDINARY_SIGNAL_HANDOFF} > 0) > 1 )); then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_SELF_TEST_MODE_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
 fi
@@ -209,15 +262,17 @@ if [[ ! -x "${WRANGLER}" ]]; then
   emit '{"tool":"wrangler","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
 fi
-# The seven shell-only self-test modes run bash/sleep/lsof fixtures and exit
+# The shell-only self-test modes run bash/sleep/lsof fixtures and exit
 # before any Worker launch or checker phase; their transcripts never embed
 # WRANGLER_VERSION_JSON. The version probe is a full Node/Wrangler boot
 # (2-3.5s under load) on every such plant's critical path ahead of its
 # semantic deadline, so it runs only where a transcript can consume it.
 shell_only_selftest=0
 if (( term_mode == 1 || identity_mode == 1 || second_signal_mode == 1 || \
-  post_reap_inspection_mode == 1 || provisional_exact_mode == 1 || \
-  pid_reuse_mode == 1 || state_holder_recheck_mode == 1 )); then
+  post_reap_inspection_mode == 1 || post_kill_reap_mode == 1 || provisional_exact_mode == 1 || \
+  pid_reuse_mode == 1 || state_holder_recheck_mode == 1 )) || \
+  [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" || -n "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" || \
+    -n "${TEST_ORDINARY_SIGNAL_HANDOFF}" ]]; then
   shell_only_selftest=1
 fi
 readonly SHELL_ONLY_SELFTEST="${shell_only_selftest}"
@@ -329,18 +384,31 @@ pin_provisional_supervisor_identity() {
 
 signal_exact_direct_supervisor() {
   local signal="$1" pid="$2" started_at="$3" token="$4"
+  # A successful KILL dispatch consumes the provisional supervisor's live
+  # identity authority. Until reap is confirmed, retries may wait only.
+  if (( SUPERVISOR_KILL_DISPATCHED == 1 )) && [[ "${pid}" == "${SUPERVISOR_PID}" ]]; then
+    TEST_POST_KILL_SIGNAL_ATTEMPTS=$((TEST_POST_KILL_SIGNAL_ATTEMPTS + 1))
+    return 1
+  fi
   supervisor_direct_child_is_exact "${pid}" "${started_at}" "${token}" || return 1
   kill -"${signal}" "${pid}" 2>/dev/null
 }
 
 signal_exact_group() {
   local signal="$1" pid="$2" pgid="$3" started_at="$4" token="$5"
-  # Once an owned supervisor has been killed and reaped, its remembered PGID is
-  # observation state only. It is no longer a live identity anchor that can
-  # authorize another group signal, even if a retry reaches this helper.
-  if { (( SERVER_SUPERVISOR_REAPED == 1 )) && [[ "${pid}" == "${SERVER_SUPERVISOR_PID}" && "${pgid}" == "${SERVER_PGID}" ]]; } || \
-    { (( CHECKER_SUPERVISOR_REAPED == 1 )) && [[ "${pid}" == "${CHECKER_SUPERVISOR_PID}" && "${pgid}" == "${CHECKER_PGID}" ]]; }; then
-    TEST_POST_REAP_SIGNAL_ATTEMPTS=$((TEST_POST_REAP_SIGNAL_ATTEMPTS + 1))
+  # Once KILL has been dispatched, the remembered PGID is observation state
+  # only, including the interval before the direct-child reap is confirmed.
+  # It can never authorize another group signal on a cleanup retry.
+  if (( SERVER_SUPERVISOR_KILL_DISPATCHED == 1 || SERVER_SUPERVISOR_REAPED == 1 )) && \
+    [[ "${pid}" == "${SERVER_SUPERVISOR_PID}" && "${pgid}" == "${SERVER_PGID}" ]]; then
+    TEST_POST_KILL_SIGNAL_ATTEMPTS=$((TEST_POST_KILL_SIGNAL_ATTEMPTS + 1))
+    (( SERVER_SUPERVISOR_REAPED == 1 )) && TEST_POST_REAP_SIGNAL_ATTEMPTS=$((TEST_POST_REAP_SIGNAL_ATTEMPTS + 1))
+    return 1
+  fi
+  if (( CHECKER_SUPERVISOR_KILL_DISPATCHED == 1 || CHECKER_SUPERVISOR_REAPED == 1 )) && \
+    [[ "${pid}" == "${CHECKER_SUPERVISOR_PID}" && "${pgid}" == "${CHECKER_PGID}" ]]; then
+    TEST_POST_KILL_SIGNAL_ATTEMPTS=$((TEST_POST_KILL_SIGNAL_ATTEMPTS + 1))
+    (( CHECKER_SUPERVISOR_REAPED == 1 )) && TEST_POST_REAP_SIGNAL_ATTEMPTS=$((TEST_POST_REAP_SIGNAL_ATTEMPTS + 1))
     return 1
   fi
   supervisor_identity_is_exact "${pid}" "${pgid}" "${started_at}" "${token}" || return 1
@@ -349,6 +417,11 @@ signal_exact_group() {
 
 signal_exact_group_supervisor() {
   local signal="$1" pid="$2" pgid="$3" started_at="$4" token="$5"
+  if { (( SERVER_SUPERVISOR_KILL_DISPATCHED == 1 || SERVER_SUPERVISOR_REAPED == 1 )) && [[ "${pid}" == "${SERVER_SUPERVISOR_PID}" && "${pgid}" == "${SERVER_PGID}" ]]; } || \
+    { (( CHECKER_SUPERVISOR_KILL_DISPATCHED == 1 || CHECKER_SUPERVISOR_REAPED == 1 )) && [[ "${pid}" == "${CHECKER_SUPERVISOR_PID}" && "${pgid}" == "${CHECKER_PGID}" ]]; }; then
+    TEST_POST_KILL_SIGNAL_ATTEMPTS=$((TEST_POST_KILL_SIGNAL_ATTEMPTS + 1))
+    return 1
+  fi
   supervisor_identity_is_exact "${pid}" "${pgid}" "${started_at}" "${token}" || return 1
   kill -"${signal}" "${pid}" 2>/dev/null
 }
@@ -357,17 +430,25 @@ wait_supports_full_completion() {
   LC_ALL=C help wait 2>/dev/null | LC_ALL=C grep -Eq '^wait: wait \[-[^]]*f'
 }
 
+kill_dispatch_matches_pid() {
+  local pid="$1"
+  { (( SUPERVISOR_KILL_DISPATCHED == 1 )) && [[ "${pid}" == "${SUPERVISOR_PID}" ]]; } || \
+    { (( SERVER_SUPERVISOR_KILL_DISPATCHED == 1 )) && [[ "${pid}" == "${SERVER_SUPERVISOR_PID}" ]]; } || \
+    { (( CHECKER_SUPERVISOR_KILL_DISPATCHED == 1 )) && [[ "${pid}" == "${CHECKER_SUPERVISOR_PID}" ]]; }
+}
+
 wait_for_killed_direct_child_reap() {
-  local pid="$1" state status wait_status
+  local pid="$1" state status wait_status process_absent
   [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
   # `wait` is a reap only after the kernel has observed death. In particular,
   # plain `wait PID` can return for a stopped job on Bash versions without -f.
   # Polling first also keeps this cleanup bounded if an assumed SIGKILL ever did
   # not terminate the exact direct child.
   for _wait in $(seq 1 "${CLEANUP_KILL_ATTEMPTS}"); do
+    process_absent=0
     state="$(ps -o stat= -p "${pid}" 2>/dev/null)"; status=$?
     if (( status == 1 )) && [[ -z "${state}" ]]; then
-      :
+      process_absent=1
     elif (( status != 0 )); then
       return 1
     elif [[ "${state}" != *Z* ]]; then
@@ -379,8 +460,23 @@ wait_for_killed_direct_child_reap() {
     else
       if wait "${pid}" 2>/dev/null; then wait_status=0; else wait_status=$?; fi
     fi
-    (( wait_status != 127 ))
-    return
+    if (( wait_status == 127 )); then
+      # Bash may already have collected the dead direct child after the exact
+      # KILL. An absent PID plus the matching dispatch record is sufficient to
+      # confirm there is no child left to reap, but never authorizes a signal.
+      if (( process_absent == 1 )) && kill_dispatch_matches_pid "${pid}"; then
+        return 0
+      fi
+      return 1
+    fi
+    if (( TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING > 0 )); then
+      # Plant uncertainty after the kernel/Bash reap so the retry must handle
+      # an already-collected direct child without re-signalling its old PGID.
+      TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING=$((TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING - 1))
+      TEST_POST_KILL_REAP_UNCERTAINTY_OBSERVED_COUNT=$((TEST_POST_KILL_REAP_UNCERTAINTY_OBSERVED_COUNT + 1))
+      return 1
+    fi
+    return 0
   done
   return 1
 }
@@ -394,6 +490,7 @@ clear_supervisor_scratch() {
   SUPERVISOR_PAYLOAD_STATUS_FILE=""
   SUPERVISOR_DIRECT_CHILD=0
   SUPERVISOR_READY=0
+  SUPERVISOR_KILL_DISPATCHED=0
 }
 
 reap_provisional_supervisor() {
@@ -403,34 +500,254 @@ reap_provisional_supervisor() {
   # An unreaped child relationship is not identity authority: the numeric PID
   # can be stale or planted. Unknown or mismatched marker+lstart retains these
   # ownership fields for the next bounded cleanup attempt and sends no signal.
-  pin_provisional_supervisor_identity || return 1
-  signal_exact_direct_supervisor KILL \
-    "${pid}" "${SUPERVISOR_STARTED_AT}" "${SUPERVISOR_TOKEN}" || return 1
+  if (( SUPERVISOR_KILL_DISPATCHED == 0 )); then
+    pin_provisional_supervisor_identity || return 1
+    dispatch_exact_direct_supervisor_kill \
+      "${pid}" "${SUPERVISOR_STARTED_AT}" "${SUPERVISOR_TOKEN}" || return $?
+  else
+    TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT=$((TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT + 1))
+  fi
   wait_for_killed_direct_child_reap "${pid}" || return 1
   clear_supervisor_scratch
 }
 
-# shellcheck disable=SC2329 # Runtime traps invoke this signal deferral handler.
+# shellcheck disable=SC2329 # Startup traps invoke this signal deferral handler.
 remember_startup_signal() {
   local status="$1" name="$2"
-  if (( STARTUP_SIGNAL_STATUS == 0 )); then
-    STARTUP_SIGNAL_STATUS="${status}"
-    STARTUP_SIGNAL_NAME="${name}"
+  if (( STARTUP_SIGNAL_HANDOFF_ACTIVE == 1 )); then
+    remember_kill_dispatch_signal "${status}" "${name}"
+    return
   fi
+  if (( STARTUP_SIGNAL_STATUS == 0 )); then
+    # A KILL-dispatch record predates any signal that can reach a restored
+    # startup handler. Promote that older record before considering this one.
+    if (( KILL_DISPATCH_SIGNAL_STATUS != 0 )); then
+      STARTUP_SIGNAL_STATUS="${KILL_DISPATCH_SIGNAL_STATUS}"
+      STARTUP_SIGNAL_NAME="${KILL_DISPATCH_SIGNAL_NAME}"
+    else
+      STARTUP_SIGNAL_STATUS="${status}"
+      STARTUP_SIGNAL_NAME="${name}"
+    fi
+  fi
+}
+
+install_startup_signal_traps() {
+  local previous_phase="${SIGNAL_TRAP_PHASE}" ordinary_handoff=0
+  if [[ "${previous_phase}" == "runtime" ]]; then
+    ORDINARY_SIGNAL_HANDOFF_ACTIVE=1
+    ordinary_handoff=1
+  fi
+  trap 'remember_startup_signal 129 HUP' HUP
+  if [[ "${TEST_ORDINARY_SIGNAL_HANDOFF}" == "runtime_to_startup" && \
+    "${previous_phase}" == "runtime" ]]; then
+    TEST_ORDINARY_SIGNAL_FIRST_TRIGGERED=1
+    kill -HUP "${BASHPID:-$$}" 2>/dev/null
+    TEST_ORDINARY_SIGNAL_SECOND_TRIGGERED=1
+    kill -INT "${BASHPID:-$$}" 2>/dev/null
+  fi
+  trap 'remember_startup_signal 130 INT' INT
+  if (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_STARTUP_RESTORE == 1 )) && \
+    [[ "${previous_phase}" == "kill_dispatch" ]]; then
+    TEST_KILL_DISPATCH_SECOND_SIGNAL_TRIGGERED=1
+    kill -INT "${BASHPID:-$$}" 2>/dev/null
+  fi
+  trap 'remember_startup_signal 143 TERM' TERM
+  SIGNAL_TRAP_PHASE="startup"
+  if (( ordinary_handoff == 1 )); then ORDINARY_SIGNAL_HANDOFF_ACTIVE=0; fi
 }
 
 begin_startup_ownership_transition() {
   STARTUP_SIGNAL_STATUS=0
   STARTUP_SIGNAL_NAME=""
-  trap 'remember_startup_signal 129 HUP' HUP
-  trap 'remember_startup_signal 130 INT' INT
-  trap 'remember_startup_signal 143 TERM' TERM
+  install_startup_signal_traps
+}
+
+# shellcheck disable=SC2329 # Runtime traps invoke this handler.
+handle_runtime_signal() {
+  local status="$1" name="$2"
+  if (( ORDINARY_SIGNAL_HANDOFF_ACTIVE == 1 )); then
+    remember_startup_signal "${status}" "${name}"
+    return
+  fi
+  exit "${status}"
 }
 
 install_runtime_signal_traps() {
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'exit 129' HUP
+  local previous_phase="${SIGNAL_TRAP_PHASE}" ordinary_handoff=0
+  if [[ "${previous_phase}" == "startup" ]]; then
+    ORDINARY_SIGNAL_HANDOFF_ACTIVE=1
+    ordinary_handoff=1
+  fi
+  trap 'handle_runtime_signal 130 INT' INT
+  if [[ "${TEST_ORDINARY_SIGNAL_HANDOFF}" == "startup_to_runtime" && \
+    "${previous_phase}" == "startup" ]]; then
+    TEST_ORDINARY_SIGNAL_FIRST_TRIGGERED=1
+    kill -HUP "${BASHPID:-$$}" 2>/dev/null
+    TEST_ORDINARY_SIGNAL_SECOND_TRIGGERED=1
+    kill -INT "${BASHPID:-$$}" 2>/dev/null
+  fi
+  if (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE == 1 )) && \
+    [[ "${previous_phase}" == "kill_dispatch" ]]; then
+    TEST_KILL_DISPATCH_SECOND_SIGNAL_TRIGGERED=1
+    kill -INT "${BASHPID:-$$}" 2>/dev/null
+  fi
+  trap 'handle_runtime_signal 143 TERM' TERM
+  trap 'handle_runtime_signal 129 HUP' HUP
+  SIGNAL_TRAP_PHASE="runtime"
+  if (( ordinary_handoff == 1 )); then ORDINARY_SIGNAL_HANDOFF_ACTIVE=0; fi
+}
+
+# shellcheck disable=SC2329 # The temporary dispatch traps invoke this handler.
+remember_kill_dispatch_signal() {
+  local status="$1" name="$2"
+  if (( KILL_DISPATCH_SIGNAL_STATUS == 0 )); then
+    KILL_DISPATCH_SIGNAL_STATUS="${status}"
+    KILL_DISPATCH_SIGNAL_NAME="${name}"
+  fi
+}
+
+begin_kill_dispatch_transition() {
+  case "${SIGNAL_TRAP_PHASE}" in
+    exit)
+      # EXIT cleanup has already ignored all three signals for its bounded
+      # retry. Preserve that policy instead of making it interruptible again.
+      KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE="exit"
+      ;;
+    runtime | startup)
+      KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE="${SIGNAL_TRAP_PHASE}"
+      KILL_DISPATCH_SIGNAL_STATUS=0
+      KILL_DISPATCH_SIGNAL_NAME=""
+      trap 'remember_kill_dispatch_signal 129 HUP' HUP
+      trap 'remember_kill_dispatch_signal 130 INT' INT
+      trap 'remember_kill_dispatch_signal 143 TERM' TERM
+      SIGNAL_TRAP_PHASE="kill_dispatch"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+plant_kill_dispatch_window_signal() {
+  local owner="$1"
+  [[ "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" == "${owner}" ]] || return 0
+  TEST_KILL_DISPATCH_SIGNAL_TRIGGERED=1
+  kill -HUP "${BASHPID:-$$}" 2>/dev/null
+}
+
+kill_dispatch_state_visible_for_test_owner() {
+  case "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" in
+    server) (( SERVER_SUPERVISOR_KILL_DISPATCHED == 1 )) ;;
+    checker) (( CHECKER_SUPERVISOR_KILL_DISPATCHED == 1 )) ;;
+    provisional) (( SUPERVISOR_KILL_DISPATCHED == 1 )) ;;
+    *) return 1 ;;
+  esac
+}
+
+kill_dispatch_signal_record_is_valid() {
+  local status="$1" name="$2"
+  [[ "${status}:${name}" =~ ^(129:HUP|130:INT|143:TERM)$ ]]
+}
+
+transfer_kill_dispatch_signal_to_startup() {
+  local remembered_status="${KILL_DISPATCH_SIGNAL_STATUS}"
+  local remembered_name="${KILL_DISPATCH_SIGNAL_NAME}"
+  (( remembered_status != 0 )) || return 0
+  kill_dispatch_signal_record_is_valid "${remembered_status}" "${remembered_name}" || return 1
+  if (( STARTUP_SIGNAL_STATUS == 0 )); then
+    STARTUP_SIGNAL_STATUS="${remembered_status}"
+    STARTUP_SIGNAL_NAME="${remembered_name}"
+  fi
+}
+
+finish_kill_dispatch_transition() {
+  local dispatch_status="$1" remembered_status remembered_name
+  case "${KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE}" in
+    exit)
+      SIGNAL_TRAP_PHASE="exit"
+      KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE=""
+      return "${dispatch_status}"
+      ;;
+    startup)
+      # Keep every partially restored handler writing the same first-wins KILL
+      # record. Transfer before restoration, while bridged, and after lowering
+      # the bridge; a signal in any snapshot window remains observable.
+      transfer_kill_dispatch_signal_to_startup || return 1
+      STARTUP_SIGNAL_HANDOFF_ACTIVE=1
+      install_startup_signal_traps
+      transfer_kill_dispatch_signal_to_startup || return 1
+      STARTUP_SIGNAL_HANDOFF_ACTIVE=0
+      transfer_kill_dispatch_signal_to_startup || return 1
+      KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE=""
+      KILL_DISPATCH_SIGNAL_STATUS=0
+      KILL_DISPATCH_SIGNAL_NAME=""
+      if (( STARTUP_SIGNAL_STATUS != 0 )); then
+        if [[ -n "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" ]]; then
+          [[ "${STARTUP_SIGNAL_NAME}" == "HUP" ]] || return 1
+          kill_dispatch_state_visible_for_test_owner || return 1
+          TEST_KILL_DISPATCH_STATE_VISIBLE_BEFORE_REDELIVERY=1
+        fi
+        return "${STARTUP_SIGNAL_STATUS}"
+      fi
+      return "${dispatch_status}"
+      ;;
+    runtime) install_runtime_signal_traps ;;
+    *) return 1 ;;
+  esac
+  # Read the deferred record only after restoring the prior policy. A signal
+  # before restoration updates this record; one after restoration is handled
+  # directly by that policy, and cannot be lost between a stale read and it.
+  remembered_status="${KILL_DISPATCH_SIGNAL_STATUS}"
+  remembered_name="${KILL_DISPATCH_SIGNAL_NAME}"
+  KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE=""
+  if (( remembered_status != 0 )); then
+    kill_dispatch_signal_record_is_valid "${remembered_status}" "${remembered_name}" || return 1
+    # The old policy sees the signal only after KILL_DISPATCHED is visible.
+    if [[ -n "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" ]]; then
+      [[ "${remembered_name}" == "HUP" ]] || return 1
+      kill_dispatch_state_visible_for_test_owner || return 1
+      TEST_KILL_DISPATCH_STATE_VISIBLE_BEFORE_REDELIVERY=1
+      TEST_KILL_DISPATCH_SIGNAL_REDELIVERED=1
+    fi
+    # Keep the first record live through redelivery. If another restored signal
+    # enters EXIT first, on_exit consumes this earlier status. A normal runtime
+    # redelivery exits through the restored trap and never reaches the clears.
+    kill -"${remembered_name}" "${BASHPID:-$$}" 2>/dev/null || return 1
+    KILL_DISPATCH_SIGNAL_STATUS=0
+    KILL_DISPATCH_SIGNAL_NAME=""
+    return "${remembered_status}"
+  fi
+  KILL_DISPATCH_SIGNAL_STATUS=0
+  KILL_DISPATCH_SIGNAL_NAME=""
+  return "${dispatch_status}"
+}
+
+dispatch_exact_direct_supervisor_kill() {
+  local pid="$1" started_at="$2" token="$3" dispatch_status plant_status=0
+  begin_kill_dispatch_transition || return 1
+  if signal_exact_direct_supervisor KILL "${pid}" "${started_at}" "${token}"; then
+    plant_kill_dispatch_window_signal provisional || plant_status=$?
+    SUPERVISOR_KILL_DISPATCHED=1
+    dispatch_status="${plant_status}"
+  else
+    dispatch_status=$?
+  fi
+  finish_kill_dispatch_transition "${dispatch_status}"
+}
+
+dispatch_exact_group_kill() {
+  local pid="$1" pgid="$2" started_at="$3" token="$4" owner="$5" dispatch_status plant_status=0
+  [[ "${owner}" =~ ^(server|checker)$ ]] || return 1
+  begin_kill_dispatch_transition || return 1
+  if signal_exact_group KILL "${pid}" "${pgid}" "${started_at}" "${token}"; then
+    plant_kill_dispatch_window_signal "${owner}" || plant_status=$?
+    case "${owner}" in
+      server) SERVER_SUPERVISOR_KILL_DISPATCHED=1 ;;
+      checker) CHECKER_SUPERVISOR_KILL_DISPATCHED=1 ;;
+    esac
+    dispatch_status="${plant_status}"
+  else
+    dispatch_status=$?
+  fi
+  finish_kill_dispatch_transition "${dispatch_status}"
 }
 
 plant_startup_window_signal() {
@@ -521,6 +838,7 @@ adopt_supervisor() {
       SERVER_PAYLOAD_PID_FILE="${SUPERVISOR_PAYLOAD_PID_FILE}"
       SERVER_PAYLOAD_STATUS_FILE="${SUPERVISOR_PAYLOAD_STATUS_FILE}"
       SERVER_SUPERVISOR_REAPED=0
+      SERVER_SUPERVISOR_KILL_DISPATCHED=0
       CLEANUP_PENDING_PGID="${SERVER_PGID}"
       ;;
     checker)
@@ -532,6 +850,7 @@ adopt_supervisor() {
       CHECKER_PAYLOAD_PID_FILE="${SUPERVISOR_PAYLOAD_PID_FILE}"
       CHECKER_PAYLOAD_STATUS_FILE="${SUPERVISOR_PAYLOAD_STATUS_FILE}"
       CHECKER_SUPERVISOR_REAPED=0
+      CHECKER_SUPERVISOR_KILL_DISPATCHED=0
       CHECKER_CLEANUP_PENDING_PGID="${CHECKER_PGID}"
       ;;
     *) return 1 ;;
@@ -619,7 +938,7 @@ group_members() {
 listener_pids() {
   local port="$1" pids pid status
   command -v lsof >/dev/null 2>&1 || return 2
-  pids="$(lsof -ti "tcp:${port}" 2>/dev/null)"
+  pids="$(lsof -nP -a -t "-iTCP@127.0.0.1:${port}" -sTCP:LISTEN 2>&1)"
   status=$?
   if (( status > 1 )) || { (( status == 1 )) && [[ -n "${pids}" ]]; }; then return 2; fi
   while IFS= read -r pid; do
@@ -641,6 +960,91 @@ listener_pids_are_in_group() {
     observed_pgid="$(process_group_of "${pid}")"; status=$?
     (( status == 0 && observed_pgid == expected_pgid )) || return 1
   done <<<"${pids}"
+}
+
+owned_listener_ports_in_group() {
+  local pgid="$1" members status pid rows line port ports="" seen_pid
+  [[ "${pgid}" =~ ^[0-9]+$ ]] || return 2
+  members="$(group_members "${pgid}")"; status=$?
+  (( status == 0 )) || return 2
+  [[ -n "${members}" ]] || return 1
+  while IFS= read -r pid; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 2
+    rows="$(lsof -nP -a -p "${pid}" -iTCP@127.0.0.1 -sTCP:LISTEN -Fpn 2>&1)"
+    status=$?
+    if (( status == 1 )) && [[ -z "${rows}" ]]; then continue; fi
+    (( status == 0 )) && [[ -n "${rows}" ]] || return 2
+    seen_pid=0
+    while IFS= read -r line; do
+      case "${line}" in
+        "p${pid}")
+          (( seen_pid == 0 )) || return 2
+          seen_pid=1
+          ;;
+        f[0-9]*)
+          (( seen_pid == 1 )) && [[ "${line}" =~ ^f[0-9]+[A-Za-z]*$ ]] || return 2
+          ;;
+        n127.0.0.1:*)
+          (( seen_pid == 1 )) || return 2
+          port="${line#n127.0.0.1:}"
+          [[ "${port}" =~ ^[0-9]+$ ]] || return 2
+          (( port >= 1024 && port <= 65535 )) || return 2
+          ports="${ports}${ports:+$'\n'}${port}"
+          ;;
+        *) return 2 ;;
+      esac
+    done <<<"${rows}"
+    (( seen_pid == 1 )) || return 2
+  done <<<"${members}"
+  [[ -n "${ports}" ]] || return 1
+  printf '%s\n' "${ports}" | sort -n -u
+}
+
+discover_owned_worker_origin() {
+  local pgid="$1" ports status candidate candidate_origin health discovered=""
+  local expected_health candidate_count=0
+  supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${pgid}" \
+    "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" || return 1
+  ports="$(owned_listener_ports_in_group "${pgid}")"; status=$?
+  (( status == 0 )) || return 1
+  expected_health="{\"status\":\"ok\",\"bindings\":[\"DB\",\"ARTIFACTS\"],\"readiness_nonce\":\"${S3_READINESS_NONCE}\"}"
+  while IFS= read -r candidate; do
+    [[ "${candidate}" =~ ^[0-9]+$ ]] || return 1
+    candidate_count=$((candidate_count + 1))
+    (( candidate_count <= 32 )) || return 1
+    if (( S3_PORT_EXPLICIT == 1 )) && [[ "${candidate}" != "${S3_PORT}" ]]; then
+      continue
+    fi
+    candidate_origin="http://127.0.0.1:${candidate}"
+    health="$(curl --silent --fail --noproxy '*' --connect-timeout 1 --max-time 1 \
+      --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+      "${candidate_origin}/__s3/health" 2>/dev/null || true)"
+    if [[ "${health}" == "${expected_health}" ]]; then
+      supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${pgid}" \
+        "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" || return 1
+      listener_pids_are_in_group "${candidate}" "${pgid}" || return 1
+      # Wrangler may expose the same exact local Worker through more than one
+      # owned loopback entry when `--port 0` is used. Candidate ports are
+      # numerically sorted; retain the first exact nonce+ownership match, then
+      # let the unchanged full checker prove that selected origin end to end.
+      if [[ -z "${discovered}" ]]; then discovered="${candidate}"; fi
+    fi
+  done <<<"${ports}"
+  [[ -n "${discovered}" ]] || return 1
+  if (( S3_PORT_EXPLICIT == 1 )) && [[ "${discovered}" != "${S3_PORT}" ]]; then
+    return 1
+  fi
+  candidate_origin="http://127.0.0.1:${discovered}"
+  health="$(curl --silent --fail --noproxy '*' --connect-timeout 1 --max-time 1 \
+    --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+    "${candidate_origin}/__s3/health" 2>/dev/null || true)"
+  [[ "${health}" == "${expected_health}" ]] || return 1
+  supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${pgid}" \
+    "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" || return 1
+  listener_pids_are_in_group "${discovered}" "${pgid}" || return 1
+  SERVER_RESOURCE_PORT="${discovered}"
+  ORIGIN="http://127.0.0.1:${SERVER_RESOURCE_PORT}"
+  SERVER_LISTENER_OWNERSHIP_OBSERVED=1
 }
 
 state_holder_pids() {
@@ -742,16 +1146,6 @@ checker_state_holder_pids() {
   return 0
 }
 
-port_accepts_bind() {
-  local port="$1"
-  S3_BIND_PORT="${port}" bun --eval '
-    const port = Number(process.env.S3_BIND_PORT);
-    if (!Number.isSafeInteger(port)) process.exit(1);
-    const server = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response() });
-    server.stop(true);
-  ' >/dev/null 2>&1
-}
-
 assert_group_empty() {
   local pgid="$1" members status
   members="$(group_members "${pgid}")"
@@ -760,17 +1154,14 @@ assert_group_empty() {
   [[ -z "${members}" ]]
 }
 
-assert_listener_empty() {
-  local listeners status
-  # Port zero is the explicit no-Worker self-test sentinel. Those modes prove
-  # their owned process group empty and never launch a server listener; asking
-  # lsof for tcp:0 instead enumerates unrelated listeners rather than a port.
-  (( S3_PORT == 0 )) && return 0
-  listeners="$(listener_pids "${S3_PORT}")"
-  status=$?
-  (( status == 0 )) || return 1
-  [[ -z "${listeners}" ]] || return 1
-  port_accepts_bind "${S3_PORT}"
+assert_owned_server_listener_retired() {
+  local pgid="$1"
+  # Readiness already proved every listener on the published port belonged to
+  # this exact group. After release, the durable invariant is that owned group
+  # is empty—not that an unrelated process has not legitimately reused the
+  # now-free numeric port.
+  (( SERVER_LISTENER_OWNERSHIP_OBSERVED == 1 )) || return 1
+  assert_group_empty "${pgid}"
 }
 
 assert_state_holders_empty() {
@@ -781,14 +1172,10 @@ assert_state_holders_empty() {
   [[ -z "${holders}" ]]
 }
 
-assert_checker_listener_empty() {
-  local listeners status
-  [[ "${CHECKER_RESOURCE_PORT}" =~ ^[0-9]+$ ]] || return 0
-  listeners="$(listener_pids "${CHECKER_RESOURCE_PORT}")"
-  status=$?
-  (( status == 0 )) || return 1
-  [[ -z "${listeners}" ]] || return 1
-  port_accepts_bind "${CHECKER_RESOURCE_PORT}"
+assert_owned_checker_listener_retired() {
+  local pgid="$1"
+  (( CHECKER_LISTENER_OWNERSHIP_OBSERVED == 1 )) || return 1
+  assert_group_empty "${pgid}"
 }
 
 assert_checker_state_holders_empty() {
@@ -802,7 +1189,6 @@ assert_checker_state_holders_empty() {
 assert_no_survivors() {
   local pgid="$1"
   assert_group_empty "${pgid}" || return 1
-  assert_listener_empty || return 1
   assert_state_holders_empty
 }
 
@@ -850,17 +1236,37 @@ wait_for_reaped_group_empty() {
 
 stop_group() {
   local pgid="$1" supervisor_pid="$2" started_at="$3" token="$4" owner="$5"
-  local members status compact listeners holders release_sent=0 supervisor_reaped
+  local members status compact listeners holders release_sent=0 supervisor_reaped kill_dispatched
   [[ "${pgid}" =~ ^[0-9]+$ ]] || return 1
   [[ "${pgid}" != "${CONTROLLER_PGID}" ]] || return 1
 
   case "${owner}" in
-    server) supervisor_reaped="${SERVER_SUPERVISOR_REAPED}" ;;
-    checker) supervisor_reaped="${CHECKER_SUPERVISOR_REAPED}" ;;
+    server)
+      supervisor_reaped="${SERVER_SUPERVISOR_REAPED}"
+      kill_dispatched="${SERVER_SUPERVISOR_KILL_DISPATCHED}"
+      ;;
+    checker)
+      supervisor_reaped="${CHECKER_SUPERVISOR_REAPED}"
+      kill_dispatched="${CHECKER_SUPERVISOR_KILL_DISPATCHED}"
+      ;;
     *) return 1 ;;
   esac
-  [[ "${supervisor_reaped}" =~ ^[01]$ ]] || return 1
+  [[ "${supervisor_reaped}" =~ ^[01]$ && "${kill_dispatched}" =~ ^[01]$ ]] || return 1
+  # Reaped without a recorded exact KILL dispatch is an impossible state and
+  # must not be allowed to inherit the inspection-only authority below.
+  (( supervisor_reaped == 0 || kill_dispatched == 1 )) || return 1
   if (( supervisor_reaped == 1 )); then
+    wait_for_reaped_group_empty "${pgid}"
+    return
+  fi
+  if (( kill_dispatched == 1 )); then
+    TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT=$((TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT + 1))
+    wait_for_killed_direct_child_reap "${supervisor_pid}" || return 1
+    case "${owner}" in
+      server) SERVER_SUPERVISOR_REAPED=1 ;;
+      checker) CHECKER_SUPERVISOR_REAPED=1 ;;
+      *) return 1 ;;
+    esac
     wait_for_reaped_group_empty "${pgid}"
     return
   fi
@@ -889,7 +1295,7 @@ stop_group() {
     if [[ "${owner}" == "server" ]] && (( TEST_EXPECT_PAYLOAD_LEADER_EXIT == 1 )) && \
       supervisor_reports_payload_exit "${SERVER_PAYLOAD_PID}" && \
       [[ "${compact}" != "${supervisor_pid}" ]]; then
-      listeners="$(listener_pids "${S3_PORT}")"; status=$?
+      listeners="$(listener_pids "${SERVER_RESOURCE_PORT:-${S3_PORT}}")"; status=$?
       (( status == 0 )) || return 1
       holders="$(fixture_state_holder_pids)"; status=$?
       (( status == 0 )) || return 1
@@ -905,7 +1311,8 @@ stop_group() {
   if [[ -n "${members}" ]]; then
     # The exact supervisor deliberately survives TERM, so it pins the group id
     # until the escalation decision. A remembered numeric PGID is never enough.
-    signal_exact_group KILL "${supervisor_pid}" "${pgid}" "${started_at}" "${token}" || return 1
+    dispatch_exact_group_kill \
+      "${supervisor_pid}" "${pgid}" "${started_at}" "${token}" "${owner}" || return $?
     # Reap the direct supervisor before asking `ps` for an empty group. Waiting
     # only after stop_group returned made the post-KILL scan depend on Bash's
     # asynchronous child reaper and could exhaust the bounded scan under load.
@@ -946,6 +1353,7 @@ stop_worker() {
   SERVER_PAYLOAD_PID_FILE=""
   SERVER_PAYLOAD_STATUS_FILE=""
   SERVER_SUPERVISOR_REAPED=0
+  SERVER_SUPERVISOR_KILL_DISPATCHED=0
   SUPERVISOR_DIRECT_CHILD=0
   SUPERVISOR_READY=0
 }
@@ -970,6 +1378,7 @@ stop_checker() {
   CHECKER_PAYLOAD_PID_FILE=""
   CHECKER_PAYLOAD_STATUS_FILE=""
   CHECKER_SUPERVISOR_REAPED=0
+  CHECKER_SUPERVISOR_KILL_DISPATCHED=0
 }
 
 cleanup_checker_and_verify() {
@@ -977,7 +1386,6 @@ cleanup_checker_and_verify() {
   [[ -n "${pgid}" ]] || return 0
   stop_checker || return 1
   assert_group_empty "${pgid}" || return 1
-  assert_checker_listener_empty || return 1
   assert_checker_state_holders_empty || return 1
   CHECKER_CLEANUP_PENDING_PGID=""
 }
@@ -1006,7 +1414,7 @@ cleanup_with_retry() {
       kill -TERM "${BASHPID:-$$}" 2>/dev/null || return 1
       TEST_REPEATED_SIGNALS_SENT=1
     fi
-    (( attempt < CLEANUP_RETRY_ATTEMPTS )) && sleep 0.1
+    (( attempt < CLEANUP_RETRY_ATTEMPTS )) && sleep 0.25
   done
   return 1
 }
@@ -1247,37 +1655,66 @@ CONTROLLER_PGID="$(process_group_of "$$")" || {
 }
 readonly CONTROLLER_PGID
 
+read_server_resource_port() {
+  local mode size port extra
+  [[ -f "${SERVER_RESOURCE_PORT_FILE}" && ! -L "${SERVER_RESOURCE_PORT_FILE}" ]] || return 1
+  mode="$(stat -f '%Lp' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  size="$(stat -f '%z' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  [[ "${mode}" == "600" && "${size}" =~ ^[0-9]+$ ]] || return 1
+  {
+    IFS= read -r port || return 1
+    if IFS= read -r extra; then return 1; fi
+  } <"${SERVER_RESOURCE_PORT_FILE}"
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+  (( port >= 1024 && port <= 65535 && size == ${#port} + 1 )) || return 1
+  SERVER_RESOURCE_PORT="${port}"
+}
+
 start_term_resistant_fixture() {
   TEST_EXPECT_PAYLOAD_LEADER_EXIT=1
   TEST_PAYLOAD_LEADER_EXIT_OBSERVED=0
+  SERVER_RESOURCE_PORT=""
+  SERVER_LISTENER_OWNERSHIP_OBSERVED=0
+  [[ ! -e "${SERVER_RESOURCE_PORT_FILE}" && ! -L "${SERVER_RESOURCE_PORT_FILE}" ]] || return 1
   # shellcheck disable=SC2016 # This program expands only in the payload shell.
   start_supervised_payload server "${SERVER_LOG}" bash -c '
     state_file="$1"
-    port="$2"
+    port_file="$2"
     trap "exit 0" TERM
     (
       trap "" TERM INT HUP
       exec 9>"${state_file}"
-      S3_FIXTURE_PORT="${port}" exec bun --eval '\''
-        const port = Number(process.env.S3_FIXTURE_PORT);
-        Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("fixture") });
+      S3_FIXTURE_PORT_FILE="${port_file}" exec bun --eval '\''
+        import { writeFileSync } from "node:fs";
+        const portFile = process.env.S3_FIXTURE_PORT_FILE;
+        if (typeof portFile !== "string" || portFile.length === 0) process.exit(1);
+        const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("fixture") });
+        writeFileSync(portFile, `${server.port}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
       '\''
     ) &
     child="$!"
     while kill -0 "${child}" 2>/dev/null; do
       if ! wait "${child}"; then :; fi
     done
-  ' s3-term-resistant-payload "${TERM_RESISTANT_STATE_FILE}" "${S3_PORT}" || return 1
+  ' s3-term-resistant-payload "${TERM_RESISTANT_STATE_FILE}" "${SERVER_RESOURCE_PORT_FILE}" || return 1
 
   local members listeners holders status
-  for _wait in {1..60}; do
+  for _wait in {1..200}; do
+    if [[ -z "${SERVER_RESOURCE_PORT}" ]] && ! read_server_resource_port; then
+      sleep 0.05
+      continue
+    fi
     members="$(group_members "${SERVER_PGID}")"; status=$?
     (( status == 0 )) || return 1
-    listeners="$(listener_pids "${S3_PORT}")"; status=$?
+    listeners="$(listener_pids "${SERVER_RESOURCE_PORT}")"; status=$?
     (( status == 0 )) || return 1
     holders="$(fixture_state_holder_pids)"; status=$?
     (( status == 0 )) || return 1
-    if [[ "${members}" == *$'\n'* && -n "${listeners}" && -n "${holders}" ]]; then return 0; fi
+    if [[ "${members}" == *$'\n'* && -n "${listeners}" && -n "${holders}" ]] && \
+      listener_pids_are_in_group "${SERVER_RESOURCE_PORT}" "${SERVER_PGID}"; then
+      SERVER_LISTENER_OWNERSHIP_OBSERVED=1
+      return 0
+    fi
     sleep 0.05
   done
   return 1
@@ -1337,6 +1774,58 @@ run_startup_signal_window_self_test() {
   exit "${start_status}"
 }
 
+run_ordinary_signal_handoff_self_test() {
+  local handoff_status
+  case "${TEST_ORDINARY_SIGNAL_HANDOFF}" in
+    runtime_to_startup)
+      begin_startup_ownership_transition
+      ;;
+    startup_to_runtime)
+      begin_startup_ownership_transition
+      install_runtime_signal_traps
+      ;;
+    *) return 1 ;;
+  esac
+  TEST_ORDINARY_SIGNAL_HANDOFF_COMPLETED=1
+  handoff_status="${STARTUP_SIGNAL_STATUS}"
+  (( handoff_status == 129 )) && [[ "${STARTUP_SIGNAL_NAME}" == "HUP" ]] || return 1
+  return "${handoff_status}"
+}
+
+run_kill_dispatch_signal_window_self_test() {
+  case "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" in
+    server)
+      start_term_resistant_fixture || return 1
+      TEST_KILL_DISPATCH_SIGNAL_PGID="${SERVER_PGID}"
+      stop_worker
+      ;;
+    checker)
+      start_checker_resource_fixture 1 || return 1
+      TEST_KILL_DISPATCH_SIGNAL_PGID="${CHECKER_PGID}"
+      stop_checker
+      ;;
+    provisional)
+      begin_startup_ownership_transition
+      launch_pinned_supervisor "${SERVER_LOG}" bash -c 'while :; do sleep 1; done' \
+        s3-kill-dispatch-signal-provisional-fixture || {
+        install_runtime_signal_traps
+        return 1
+      }
+      TEST_KILL_DISPATCH_SIGNAL_PGID="${SUPERVISOR_PGID}"
+      if (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_STARTUP_RESTORE == 1 )); then
+        reap_provisional_supervisor
+        return $?
+      fi
+      install_runtime_signal_traps
+      reap_provisional_supervisor
+      ;;
+    *) return 1 ;;
+  esac
+  # Runtime plants exit during redelivery before reaching here. The startup
+  # restoration plant returns its retained status to the top-level caller.
+  return 1
+}
+
 read_checker_resource_port() {
   local mode size port extra
   [[ -f "${CHECKER_RESOURCE_PORT_FILE}" && ! -L "${CHECKER_RESOURCE_PORT_FILE}" ]] || return 1
@@ -1356,6 +1845,7 @@ read_checker_resource_port() {
 start_checker_resource_fixture() {
   local resist_signals="$1" members listeners holders status
   [[ "${resist_signals}" =~ ^[01]$ ]] || return 1
+  CHECKER_LISTENER_OWNERSHIP_OBSERVED=0
   [[ ! -e "${CHECKER_RESOURCE_PORT_FILE}" && ! -L "${CHECKER_RESOURCE_PORT_FILE}" ]] || return 1
   # The payload binds port 0 itself and publishes that already-owned port. A
   # parent-side allocate/close followed by a later child bind is inherently
@@ -1402,7 +1892,7 @@ start_checker_resource_fixture() {
         closeSync(portFd);
       }
     ' || return 1
-  for _wait in {1..60}; do
+  for _wait in {1..200}; do
     if [[ -z "${CHECKER_RESOURCE_PORT}" ]] && ! read_checker_resource_port; then
       sleep 0.05
       continue
@@ -1415,6 +1905,7 @@ start_checker_resource_fixture() {
     (( status == 0 )) || return 1
     if [[ "${members}" == *$'\n'* && -n "${listeners}" && -n "${holders}" ]] && \
       listener_pids_are_in_group "${CHECKER_RESOURCE_PORT}" "${CHECKER_PGID}"; then
+      CHECKER_LISTENER_OWNERSHIP_OBSERVED=1
       return 0
     fi
     sleep 0.05
@@ -1431,8 +1922,8 @@ run_checker_timeout_self_test() {
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_uses_exact_bounded_term_kill_and_wait","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_group_empty "${checker_pgid}" || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_has_zero_group_or_descendant_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
-  assert_checker_listener_empty || return 1
-  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_releases_its_test_port","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  assert_owned_checker_listener_retired "${checker_pgid}" || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_retires_its_owned_listener","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_checker_state_holders_empty || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_has_zero_state_fd_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
 }
@@ -1482,9 +1973,43 @@ run_checker_exit_one_self_test() {
 # shellcheck disable=SC2329 # The shell invokes this function through the EXIT trap.
 on_exit() {
   local original_status=$?
+  local kill_dispatch_delivery_proven=0 startup_signal_delivery_proven=0
+  local remembered_startup_signal_name="${STARTUP_SIGNAL_NAME}"
   # Mask every terminal signal before doing any cleanup work. A second HUP,
   # INT, or TERM cannot interrupt the bounded retry or bypass survivor checks.
   trap '' HUP INT TERM
+  SIGNAL_TRAP_PHASE="exit"
+  # A restored runtime signal can enter EXIT while an earlier signal remains
+  # recorded by either transition bridge. Preserve the earliest valid terminal
+  # status, then consume both records so EXIT cleanup cannot replay stale state.
+  if (( KILL_DISPATCH_SIGNAL_STATUS != 0 )); then
+    if kill_dispatch_signal_record_is_valid \
+      "${KILL_DISPATCH_SIGNAL_STATUS}" "${KILL_DISPATCH_SIGNAL_NAME}"; then
+      original_status="${KILL_DISPATCH_SIGNAL_STATUS}"
+      if (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE == 1 )) && \
+        [[ "${KILL_DISPATCH_SIGNAL_STATUS}:${KILL_DISPATCH_SIGNAL_NAME}" == "129:HUP" ]] && \
+        kill_dispatch_state_visible_for_test_owner; then
+        TEST_KILL_DISPATCH_STATE_VISIBLE_BEFORE_REDELIVERY=1
+      fi
+    else
+      original_status=1
+    fi
+  elif (( STARTUP_SIGNAL_STATUS != 0 )); then
+    if kill_dispatch_signal_record_is_valid \
+      "${STARTUP_SIGNAL_STATUS}" "${STARTUP_SIGNAL_NAME}"; then
+      original_status="${STARTUP_SIGNAL_STATUS}"
+      if [[ "${STARTUP_SIGNAL_STATUS}:${STARTUP_SIGNAL_NAME}" == "129:HUP" ]]; then
+        startup_signal_delivery_proven=1
+      fi
+    else
+      original_status=1
+    fi
+  fi
+  KILL_DISPATCH_PREVIOUS_SIGNAL_TRAP_PHASE=""
+  KILL_DISPATCH_SIGNAL_STATUS=0
+  KILL_DISPATCH_SIGNAL_NAME=""
+  STARTUP_SIGNAL_STATUS=0
+  STARTUP_SIGNAL_NAME=""
   trap - EXIT
   if ! cleanup_with_retry; then
     emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"LOCAL_WORKER_CLEANUP_FAILED\",\"original_status\":${original_status},\"reproduce\":\"${REPRODUCE}\"}"
@@ -1521,6 +2046,54 @@ on_exit() {
     exit 1
   fi
 
+  if [[ -n "${TEST_ORDINARY_SIGNAL_HANDOFF}" ]]; then
+    if (( original_status != 129 || startup_signal_delivery_proven != 1 || \
+      TEST_ORDINARY_SIGNAL_FIRST_TRIGGERED != 1 || \
+      TEST_ORDINARY_SIGNAL_SECOND_TRIGGERED != 1 || \
+      TEST_ORDINARY_SIGNAL_HANDOFF_COMPLETED != 1 || S3_PORT != 0 )); then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"ORDINARY_SIGNAL_HANDOFF_UNPROVEN\",\"direction\":\"${TEST_ORDINARY_SIGNAL_HANDOFF}\",\"original_status\":${original_status},\"reproduce\":\"${REPRODUCE}\"}"
+      exit 1
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"ordinary_signal_handoff_${TEST_ORDINARY_SIGNAL_HANDOFF}_preserves_first_hup\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
+  fi
+
+  if [[ -n "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" ]]; then
+    if (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE == 0 && \
+      TEST_KILL_DISPATCH_SIGNAL_REDELIVERED == 1 )); then
+      kill_dispatch_delivery_proven=1
+    elif (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE == 1 && \
+      TEST_KILL_DISPATCH_SECOND_SIGNAL_TRIGGERED == 1 && \
+      TEST_KILL_DISPATCH_SIGNAL_REDELIVERED == 0 )); then
+      kill_dispatch_delivery_proven=1
+    elif (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_STARTUP_RESTORE == 1 && \
+      TEST_KILL_DISPATCH_SECOND_SIGNAL_TRIGGERED == 1 && \
+      TEST_KILL_DISPATCH_SIGNAL_REDELIVERED == 0 )); then
+      kill_dispatch_delivery_proven=1
+    fi
+    if (( original_status != 129 || TEST_KILL_DISPATCH_SIGNAL_TRIGGERED != 1 || \
+      TEST_KILL_DISPATCH_STATE_VISIBLE_BEFORE_REDELIVERY != 1 || \
+      kill_dispatch_delivery_proven != 1 || TEST_POST_KILL_SIGNAL_ATTEMPTS != 0 )) || \
+      (( S3_PORT != 0 )) || \
+      [[ ! "${TEST_KILL_DISPATCH_SIGNAL_PGID}" =~ ^[0-9]+$ ]] || \
+      { [[ "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" == "server" ]] && \
+        { [[ ! "${SERVER_RESOURCE_PORT}" =~ ^[0-9]+$ ]] || \
+          (( SERVER_LISTENER_OWNERSHIP_OBSERVED != 1 )); }; } || \
+      { [[ "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" == "checker" ]] && \
+        { [[ ! "${CHECKER_RESOURCE_PORT}" =~ ^[0-9]+$ ]] || \
+          (( CHECKER_LISTENER_OWNERSHIP_OBSERVED != 1 )); }; } || \
+      ! assert_group_empty "${TEST_KILL_DISPATCH_SIGNAL_PGID}"; then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"KILL_DISPATCH_SIGNAL_WINDOW_UNPROVEN\",\"owner\":\"${TEST_KILL_DISPATCH_SIGNAL_OWNER}\",\"original_status\":${original_status},\"reproduce\":\"${REPRODUCE}\"}"
+      exit 1
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"kill_dispatch_window_${TEST_KILL_DISPATCH_SIGNAL_OWNER}_uses_no_preallocated_worker_port\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
+    emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"kill_dispatch_window_${TEST_KILL_DISPATCH_SIGNAL_OWNER}_publishes_wait_only_state_before_hup\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
+    if (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_RESTORE == 1 )); then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"kill_dispatch_restore_int_preserves_first_deferred_hup\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
+    elif (( TEST_KILL_DISPATCH_SECOND_SIGNAL_DURING_STARTUP_RESTORE == 1 )); then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"kill_dispatch_startup_restore_int_preserves_first_deferred_hup\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
+    fi
+  fi
+
   if (( checker_containment_mode == 1 )); then
     if (( CLEANUP_ATTEMPTS_USED != CLEANUP_RETRY_ATTEMPTS )); then
       emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"CHECKER_CONTAINMENT_EXIT_RETRY_NOT_EXERCISED\",\"original_status\":${original_status},\"reproduce\":\"${REPRODUCE}\"}"
@@ -1539,17 +2112,29 @@ on_exit() {
     emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"second_signals_are_masked_during_bounded_exit_cleanup_retry","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   fi
   if [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]]; then
-    if (( TEST_STARTUP_SIGNAL_TRIGGERED != 1 )) || [[ "${STARTUP_SIGNAL_NAME}" != "HUP" ]]; then
+    if (( TEST_STARTUP_SIGNAL_TRIGGERED != 1 )) || \
+      [[ "${remembered_startup_signal_name}" != "HUP" ]]; then
       emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"STARTUP_SIGNAL_WINDOW_NOT_EXERCISED\",\"window\":\"${TEST_STARTUP_SIGNAL_WINDOW}\",\"reproduce\":\"${REPRODUCE}\"}"
       exit 1
     fi
+    if (( S3_PORT != 0 )); then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"STARTUP_SIGNAL_WINDOW_CLAIMED_UNUSED_PORT\",\"window\":\"${TEST_STARTUP_SIGNAL_WINDOW}\",\"reproduce\":\"${REPRODUCE}\"}"
+      exit 1
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"startup_signal_window_${TEST_STARTUP_SIGNAL_WINDOW}_uses_no_worker_port\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
     emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"startup_signal_window_${TEST_STARTUP_SIGNAL_WINDOW}_retained_exact_ownership\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
   fi
   if [[ -n "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" ]]; then
-    if (( TEST_STARTUP_SIGNAL_TRIGGERED != 1 )) || [[ "${STARTUP_SIGNAL_NAME}" != "HUP" ]]; then
+    if (( TEST_STARTUP_SIGNAL_TRIGGERED != 1 )) || \
+      [[ "${remembered_startup_signal_name}" != "HUP" ]]; then
       emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"DISPATCH_STARTUP_SIGNAL_NOT_EXERCISED\",\"owner\":\"${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}\",\"reproduce\":\"${REPRODUCE}\"}"
       exit 1
     fi
+    if (( S3_PORT != 0 )); then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"DISPATCH_STARTUP_SIGNAL_CLAIMED_UNUSED_PORT\",\"owner\":\"${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}\",\"reproduce\":\"${REPRODUCE}\"}"
+      exit 1
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"dispatch_startup_signal_${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}_uses_no_preallocated_worker_port\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
     emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"dispatch_startup_signal_${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}_preserves_exit_129\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
   fi
   exit "${original_status}"
@@ -1569,8 +2154,8 @@ run_term_resistant_descendant_self_test() {
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_supervisor_reaped_before_group_zero_scan","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_group_empty "${pgid}" || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_group_has_zero_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
-  assert_listener_empty || return 1
-  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_fixture_releases_its_test_port","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  assert_owned_server_listener_retired "${pgid}" || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_fixture_retires_its_owned_listener","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_state_holders_empty || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_state_fd_has_zero_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   CLEANUP_PENDING_PGID=""
@@ -1615,10 +2200,65 @@ run_post_reap_inspection_failure_self_test() {
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_inspects_without_resignalling_remembered_pgid","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_group_empty "${pgid}" || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_has_zero_group_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
-  assert_listener_empty || return 1
-  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_releases_its_test_port","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  assert_owned_server_listener_retired "${pgid}" || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_retires_its_owned_listener","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_state_holders_empty || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_has_zero_state_fd_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+}
+
+run_post_kill_reap_uncertainty_self_test() {
+  local server_pgid checker_pgid provisional_pgid
+
+  start_term_resistant_fixture || return 1
+  server_pgid="${SERVER_PGID}"
+  TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING=1
+  cleanup_with_retry || return 1
+  (( CLEANUP_ATTEMPTS_USED == 2 )) || return 1
+  (( TEST_POST_KILL_REAP_UNCERTAINTY_OBSERVED_COUNT == 1 )) || return 1
+  (( TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT == 1 )) || return 1
+  (( TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING == 0 )) || return 1
+  (( TEST_POST_KILL_SIGNAL_ATTEMPTS == 0 )) || return 1
+  assert_group_empty "${server_pgid}" || return 1
+  assert_owned_server_listener_retired "${server_pgid}" || return 1
+  assert_state_holders_empty || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_uncertainty_server_retries_wait_only","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  start_checker_resource_fixture 1 || return 1
+  checker_pgid="${CHECKER_PGID}"
+  TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING=1
+  cleanup_with_retry || return 1
+  (( CLEANUP_ATTEMPTS_USED == 2 )) || return 1
+  (( TEST_POST_KILL_REAP_UNCERTAINTY_OBSERVED_COUNT == 2 )) || return 1
+  (( TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT == 2 )) || return 1
+  (( TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING == 0 )) || return 1
+  (( TEST_POST_KILL_SIGNAL_ATTEMPTS == 0 )) || return 1
+  assert_group_empty "${checker_pgid}" || return 1
+  assert_owned_checker_listener_retired "${checker_pgid}" || return 1
+  assert_checker_state_holders_empty || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_uncertainty_checker_retries_wait_only","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  begin_startup_ownership_transition
+  launch_pinned_supervisor "${SERVER_LOG}" bash -c 'while :; do sleep 1; done' \
+    s3-post-kill-provisional-fixture || {
+    install_runtime_signal_traps
+    return 1
+  }
+  install_runtime_signal_traps
+  provisional_pgid="${SUPERVISOR_PGID}"
+  TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING=1
+  cleanup_with_retry || return 1
+  (( CLEANUP_ATTEMPTS_USED == 2 )) || return 1
+  (( TEST_POST_KILL_REAP_UNCERTAINTY_OBSERVED_COUNT == 3 )) || return 1
+  (( TEST_POST_KILL_REAP_WAIT_ONLY_RETRY_COUNT == 3 )) || return 1
+  (( TEST_POST_KILL_REAP_UNCERTAINTY_FAILURES_REMAINING == 0 )) || return 1
+  (( TEST_POST_KILL_SIGNAL_ATTEMPTS == 0 )) || return 1
+  assert_group_empty "${provisional_pgid}" || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_uncertainty_provisional_retries_wait_only","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_retries_never_resignal_remembered_identity","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_retry_has_zero_group_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_retry_retires_all_owned_listeners","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_kill_reap_retry_has_zero_state_fd_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
 }
 
 run_state_holder_recheck_self_test() {
@@ -1730,6 +2370,16 @@ if (( term_mode == 1 )); then
   fi
   exit 0
 fi
+if [[ -n "${TEST_KILL_DISPATCH_SIGNAL_OWNER}" ]]; then
+  run_kill_dispatch_signal_window_self_test
+  kill_dispatch_status=$?
+  exit "${kill_dispatch_status}"
+fi
+if [[ -n "${TEST_ORDINARY_SIGNAL_HANDOFF}" ]]; then
+  run_ordinary_signal_handoff_self_test
+  ordinary_signal_handoff_status=$?
+  exit "${ordinary_signal_handoff_status}"
+fi
 if (( identity_mode == 1 )); then
   run_identity_mismatch_self_test || exit 1
 fi
@@ -1738,6 +2388,10 @@ if (( second_signal_mode == 1 )); then
 fi
 if (( post_reap_inspection_mode == 1 )); then
   run_post_reap_inspection_failure_self_test || exit 1
+  exit 0
+fi
+if (( post_kill_reap_mode == 1 )); then
+  run_post_kill_reap_uncertainty_self_test || exit 1
   exit 0
 fi
 if (( state_holder_recheck_mode == 1 )); then
@@ -1771,10 +2425,22 @@ fi
 if [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]]; then
   run_startup_signal_window_self_test || exit 1
 fi
+if [[ "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" == "checker" ]]; then
+  # The planted HUP is synchronous inside the exact production checker
+  # supervisor dispatch, before checker response semantics can run. Exercise
+  # that real argv directly; starting an unrelated Worker first would require
+  # an allocate/release port gap and could divert this ownership proof.
+  run_owned_checker "${CHECKER_DEADLINE_SECONDS}" env \
+    S3_LOCAL_ORIGIN="${ORIGIN}" S3_LOCAL_RUN_TOKEN="${S3_RUN_TOKEN}" \
+    S3_LOCAL_READINESS_NONCE="${S3_READINESS_NONCE}" bun "${CHECKER}"
+  checker_status=$?
+  exit "${checker_status}"
+fi
 
 start_supervised_payload server "${SERVER_LOG}" "${WRANGLER}" dev "${ENTRYPOINT}" \
   --config "${CONFIG}" \
   --local \
+  --ip 127.0.0.1 \
   --persist-to "${STATE_DIR}" \
   --port "${S3_PORT}" \
   --inspector-port 0 \
@@ -1799,11 +2465,9 @@ ready=0
 for _attempt in {1..60}; do
   if ! supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
     "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}"; then break; fi
-  health="$(curl --silent --fail --connect-timeout 1 --max-time 1 "${ORIGIN}/__s3/health" 2>/dev/null || true)"
-  if [[ "${health}" == *"\"readiness_nonce\":\"${S3_READINESS_NONCE}\""* ]] && \
+  if discover_owned_worker_origin "${SERVER_PGID}" && \
     supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
-      "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" && \
-    listener_pids_are_in_group "${S3_PORT}" "${SERVER_PGID}"; then
+      "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}"; then
     ready=1
     break
   fi
@@ -1814,7 +2478,6 @@ if [[ ${ready} -ne 1 ]]; then
   emit "{\"tool\":\"wrangler\",\"tool_version\":${WRANGLER_VERSION_JSON},\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"duration_ms\":$(duration_ms),\"status\":\"fail\",\"code\":\"LOCAL_WORKER_UNAVAILABLE\",\"reproduce\":\"${REPRODUCE}\"}"
   exit 1
 fi
-
 run_owned_checker "${CHECKER_DEADLINE_SECONDS}" env \
   S3_LOCAL_ORIGIN="${ORIGIN}" S3_LOCAL_RUN_TOKEN="${S3_RUN_TOKEN}" \
   S3_LOCAL_READINESS_NONCE="${S3_READINESS_NONCE}" bun "${CHECKER}"
@@ -1852,6 +2515,9 @@ if ! cleanup_with_retry; then
 fi
 
 emit "{\"tool\":\"wrangler+bun\",\"tool_version\":${WRANGLER_VERSION_JSON},\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"duration_ms\":$(duration_ms),\"status\":\"pass\",\"bindings\":{\"d1\":\"DB\",\"r2\":\"ARTIFACTS\"},\"reproduce\":\"${REPRODUCE}\"}"
+if (( S3_PORT_EXPLICIT == 0 )); then
+  emit "{\"tool\":\"wrangler\",\"tool_version\":${WRANGLER_VERSION_JSON},\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"assertion\":\"default_worker_port_is_child_owned_and_nonce_discovered\",\"status\":\"pass\",\"reproduce\":\"${REPRODUCE}\"}"
+fi
 emit "{\"tool\":\"wrangler\",\"tool_version\":${WRANGLER_VERSION_JSON},\"package\":\"@asimposium/wire\",\"suite\":\"s3-staging-paired-principal\",\"duration_ms\":$(duration_ms),\"status\":\"blocked\",\"exit_code\":78,\"code\":\"S3_STAGING_ENVIRONMENT_ABSENT\",\"blocked_on\":\"a deployed staging Worker with Propylon authentication, a configured R2 namespace, and a paired sponsor plus anonymous browser proof\",\"forbidden_substitutes\":\"local-workerd behavior presented as staging proof, test headers as OAuth proof, or in-memory SplitService tests as D1/R2 evidence\",\"reproduce\":\"${REPRODUCE}\"}"
 printf '%s\n' 'BLOCKED s3-staging-paired-principal (exit 78): staging identity and paired-browser proof are not configured' >&2
 exit "${BLOCKED_EXIT}"

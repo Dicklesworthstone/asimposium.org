@@ -7637,6 +7637,7 @@ run_s2_shell_regression_test() {
         writeS2CostMeasurementReceipt([
           {
             event_id: "E-s2-plant-001", seq: 1, idempotent: false, pre_cursor: 0, post_cursor: 1,
+            chain_version: 2,
             payload_sha256: digest("1"), row_digest: digest("2"), build_digest: digest("3"),
             chain_digest: digest("4"), checkpoint_digest: digest("5"), write_phase_ms: 1,
             successful_batch_rows_read: 3, successful_batch_rows_written: 2,

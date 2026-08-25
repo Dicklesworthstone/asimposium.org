@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # Single-quoted programs are expanded by their inner shells.
-# S-6 cross-plane auth, live preview spike (bead asimposiumorg-vw3).
+# S-6 cross-plane auth, live preview spike (historical acceptance-evidence bead
+# asimposiumorg-vw3).
 #
 # Proves the seam against REAL infrastructure: a Vercel preview running Auth.js
 # with Google, and a deployed Worker with real bindings. In one run:
@@ -229,7 +230,7 @@ fail_record() {
 }
 
 blocked_record() {
-  emit "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"$(json_string "$1")\",\"bead\":\"asimposiumorg-vw3\",\"detail\":\"$(json_string "$2")\",\"reproduce\":\"${REPRODUCE}\"}"
+  emit "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"$(json_string "$1")\",\"historical_evidence_bead\":\"asimposiumorg-vw3\",\"detail\":\"$(json_string "$2")\",\"reproduce\":\"${REPRODUCE}\"}"
 }
 
 # Browser refusal is a terminal outcome, so it is DATA until lifecycle cleanup
@@ -1411,11 +1412,14 @@ missing_vars() {
 
 emit_blocked_env_record() {
   local missing_csv="$1"
-  printf '{"suite":"%s","status":"blocked","code":"PREVIEW_NOT_PROVISIONED",' "$SUITE"
-  printf '"bead":"asimposiumorg-vw3","missing_env":[%s],' "$missing_csv"
-  printf '"blocked_on":"a Vercel preview deployment with Auth.js Google credentials and a deployed Worker with real bindings (OPS.3 environments, W3 Propylon)",'
+  printf '{"suite":"%s","status":"blocked","code":"REQUIRED_HARNESS_INPUTS_MISSING",' "$SUITE"
+  printf '"missing_env":[%s],' "$missing_csv"
+  printf '"blocked_on":"external execution prerequisite: supply every required S-6 harness input for the configured paired Agora and Worker target",'
+  printf '"historical_evidence_bead":"asimposiumorg-vw3",'
+  printf '"proof_boundary":"configuration presence is not executed cross-plane proof, and missing caller inputs do not establish provider provisioning state",'
   printf '"forbidden_substitutes":"a mocked Worker or stubbed Auth.js presented as runtime proof; the in-process unit vectors relabelled as a live run; a hand-written transcript; a recorded fixture replayed as a deployment; a storage-state file presented as live cookie evidence",'
-  printf '"unit_coverage":"apps/wire/test/unit/service-envelope.test.ts, apps/wire/test/unit/principal-routing.test.ts, apps/wire/test/security/cross-plane-refusals.test.ts, apps/web/test/unit/service-envelope.test.ts"}\n'
+  printf '"unit_coverage":"apps/wire/test/unit/service-envelope.test.ts, apps/wire/test/unit/principal-routing.test.ts, apps/wire/test/security/cross-plane-refusals.test.ts, apps/web/test/unit/service-envelope.test.ts",'
+  printf '"reproduce":"%s"}\n' "$REPRODUCE"
 }
 
 valid_https_origin() {
@@ -3177,7 +3181,7 @@ self_test() {
       status="$EX_CLEANUP_UNPROVEN"
     fi
     printf '%s\n%s\n' \
-      "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"INTERRUPTED\",\"bead\":\"asimposiumorg-vw3\",\"detail\":\"the run received SIG${signal} and every child process group was reaped\",\"reproduce\":\"${REPRODUCE}\"}" \
+      "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"INTERRUPTED\",\"historical_evidence_bead\":\"asimposiumorg-vw3\",\"detail\":\"the run received SIG${signal} and every child process group was reaped\",\"reproduce\":\"${REPRODUCE}\"}" \
       "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}" >"$expected"
     cmp -s "$capture" "$expected" && exact="exact"
     check "${seam}-${signal}-registration-barrier-armed" "$ready_seen" "ready"
@@ -3884,12 +3888,13 @@ main() {
     local csv="" name
     for name in "${missing[@]}"; do csv+="${csv:+,}\"${name}\""; done
     emit_blocked_env_record "$csv"
-    log "BLOCKED ${SUITE}: the live spike has no infrastructure to run against."
+    log "BLOCKED ${SUITE}: required external harness inputs were not supplied."
     log "  missing environment: ${missing[*]}"
-    log "  blocked on: a Vercel preview with Auth.js Google credentials, and a deployed"
-    log "              Worker with real D1/R2 bindings (OPS.3 environments, W3 Propylon)."
+    log "  blocked on: supply every named input for the configured paired Agora and"
+    log "              Worker target; this run did not determine provider state."
     log "  this script has no offline or fixture mode on purpose: the whole point of S-6"
-    log "  is a claim about running infrastructure, and a mock cannot make that claim."
+    log "  is a claim about running infrastructure, and configuration or a mock cannot"
+    log "  make that claim."
     CLEANED_UP=1
     exit "$EX_CONFIG"
   fi

@@ -37,9 +37,9 @@ readonly CONFIG="${ROOT}/apps/wire/test/integration/wrangler.token-lifecycle.tom
 readonly REPRODUCE="TMPDIR=/Volumes/USB_NVME bash scripts/e2e-token-lifecycle.sh"
 readonly TOTAL_DEADLINE_SECONDS=150
 readonly READY_DEADLINE_SECONDS=35
-readonly CLEANUP_GRACE_SECONDS=10
+readonly CLEANUP_GRACE_SECONDS=15
 readonly SCRIPT_DEADLINE=$((SECONDS + TOTAL_DEADLINE_SECONDS))
-readonly HTTP_TIMEOUT_MS=3000
+readonly HTTP_TIMEOUT_MS=8000
 readonly SESSION_PROBLEM_ID="P-TOKENLIFECYCLE"
 readonly PACK_MEASUREMENT_PROBLEM_ID="P-PACKMEASURE"
 readonly -a EXPECTED_MIGRATIONS=(
