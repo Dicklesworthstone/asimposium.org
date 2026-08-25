@@ -549,7 +549,7 @@ consume_group_terminal_during_grace() {
     return 0
   fi
   if (( GROUP_TERMINAL_SEEN == 1 )); then
-    sleep 0.2
+    sleep "$CHILD_SETTLE_POLL_SECONDS"
     return 0
   fi
   IFS= read -r -t "$grace" record <&5
@@ -3057,7 +3057,11 @@ self_test() {
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"${name}\",\"status\":\"fail\",\"detail\":\"no numeric descendant pid was planted, so the plant proved nothing\"}"
       return 0
     fi
-    [[ -f "$terminated" ]] && acknowledgement="$(cat "$terminated" 2>/dev/null || printf '')"
+    if await_marker_value "$terminated" "term-observed"; then
+      acknowledgement="term-observed"
+    else
+      [[ -f "$terminated" ]] && acknowledgement="$(cat "$terminated" 2>/dev/null || printf '')"
+    fi
     if [[ "$acknowledgement" != "term-observed" ]]; then
       failures=$((failures + 1))
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"${name}\",\"status\":\"fail\",\"detail\":\"the proven-live descendant published no TERM acknowledgement\"}"
