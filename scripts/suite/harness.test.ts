@@ -718,6 +718,7 @@ describe("execution lifecycle", () => {
               },
             ],
             onOutput: (text) => {
+              console.error(`[TEST onOutput ${failurePoint}]`, JSON.stringify(text));
               if (text.includes("callback-trigger:ready")) {
                 readyOutputSeen = true;
                 if (failurePoint === "onOutput") {
