@@ -1,8 +1,24 @@
 import { expect, test } from "bun:test";
 import {
+  EvidenceRequestSchema,
+  EvidenceResponseSchema,
+  GapClosedResponseSchema,
+  GapFiledResponseSchema,
+  GapFileRequestSchema,
+  GapTransitionRequestSchema,
+  HypothesisKillRequestSchema,
+  HypothesisKillResponseSchema,
+  HypothesisRequestSchema,
+  HypothesisResponseSchema,
   PackProfileSchema,
   PackResponseSchema,
   PromoteRequestSchema,
+  RelationFiledResponseSchema,
+  RelationFileRequestSchema,
+  ReviewRequestSchema,
+  ReviewResponseSchema,
+  ReviseRequestSchema,
+  ReviseResponseSchema,
   SessionCloseRequestSchema,
   SessionOpenRequestSchema,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
@@ -363,4 +379,226 @@ test("the keyset cursor is optional, positive, and integral (asimposiumorg-e7j.2
       label,
     ).toBe(false);
   }
+});
+
+test("review request and response schemas validate strictly", () => {
+  const validRequest = {
+    target_claim_id: "C-1",
+    target_version: 1,
+    verdict: "confirm" as const,
+    basis: "Checked all lemmas.",
+    capable_of_failure: "Finding a root would refute.",
+    rubric: ["correctness"],
+    body_md: "Full review markdown text.",
+  };
+  expect(ReviewRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(
+    ReviewRequestSchema.safeParse({ ...validRequest, target_claim_id: "invalid" }).success,
+  ).toBe(false);
+  expect(ReviewRequestSchema.safeParse({ ...validRequest, target_version: 0 }).success).toBe(false);
+  expect(ReviewRequestSchema.safeParse({ ...validRequest, verdict: "not-a-verdict" }).success).toBe(
+    false,
+  );
+  expect(ReviewRequestSchema.safeParse({ ...validRequest, extra_field: true }).success).toBe(false);
+
+  const validResponse = {
+    review_id: "REV-123",
+    target_claim_id: "C-1",
+    target_version: 1,
+    tier: "T2" as const,
+    carries_weight: true,
+  };
+  expect(ReviewResponseSchema.safeParse(validResponse).success).toBe(true);
+  expect(ReviewResponseSchema.safeParse({ ...validResponse, tier: "T5" }).success).toBe(false);
+});
+
+test("evidence request and response schemas validate strictly", () => {
+  const validRequest = {
+    bears_on_kind: "claim" as const,
+    bears_on_id: "C-1",
+    bears_on_version: 1,
+    direction: "supports" as const,
+    kind: "computation" as const,
+    source: { kind: "locator" as const, locator: "https://example.com/data" },
+    mode: "confirmatory" as const,
+    body_md: "Computation details and script.",
+  };
+  expect(EvidenceRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(EvidenceRequestSchema.safeParse({ ...validRequest, direction: "invalid" }).success).toBe(
+    false,
+  );
+  expect(EvidenceRequestSchema.safeParse({ ...validRequest, kind: "unknown-kind" }).success).toBe(
+    false,
+  );
+  expect(EvidenceRequestSchema.safeParse({ ...validRequest, extra: 1 }).success).toBe(false);
+
+  const validResponse = {
+    evidence_id: "EV-1",
+    computed_class: "computation" as const,
+    coercion_flags: [],
+    drives_promotion: true,
+  };
+  expect(EvidenceResponseSchema.safeParse(validResponse).success).toBe(true);
+  expect(
+    EvidenceResponseSchema.safeParse({ ...validResponse, computed_class: "magic" }).success,
+  ).toBe(false);
+});
+
+test("hypothesis request and kill schemas validate strictly", () => {
+  const validRequest = {
+    route: "Attack strategy via modular arithmetic",
+    mechanism: "Reduce problem modulo primes",
+    falsifier: "Finding any odd composite that passes",
+    expected_evidence: "Table of residues",
+    discriminating_predictions: ["p=7 fails"],
+    origin: "proposed" as const,
+    body_md: "Detailed hypothesis text.",
+  };
+  expect(HypothesisRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(HypothesisRequestSchema.safeParse({ ...validRequest, origin: "unknown" }).success).toBe(
+    false,
+  );
+  expect(HypothesisRequestSchema.safeParse({ ...validRequest, falsifier: "" }).success).toBe(false);
+
+  const validResponse = {
+    hypothesis_id: "H-1",
+    status: "open" as const,
+  };
+  expect(HypothesisResponseSchema.safeParse(validResponse).success).toBe(true);
+
+  const validKill = {
+    hypothesis_id: "H-1",
+    killed_by_evidence_id: "EV-1",
+    reason: "Residue contradiction at p=7",
+  };
+  expect(HypothesisKillRequestSchema.safeParse(validKill).success).toBe(true);
+  expect(HypothesisKillRequestSchema.safeParse({ ...validKill, reason: "" }).success).toBe(false);
+
+  const validKillResponse = {
+    hypothesis_id: "H-1",
+    status: "killed" as const,
+    killed_at: "2026-08-25T12:00:00.000Z",
+  };
+  expect(HypothesisKillResponseSchema.safeParse(validKillResponse).success).toBe(true);
+});
+
+test("revision request and response schemas validate strictly", () => {
+  const validRequest = {
+    claim_id: "C-1",
+    base_version: 1,
+    kind: "theorem" as const,
+    statement: "Strengthened theorem statement.",
+    falsifier: "Counterexample construction.",
+    depends_on: ["C-2"],
+  };
+  expect(ReviseRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(ReviseRequestSchema.safeParse({ ...validRequest, base_version: 0 }).success).toBe(false);
+  expect(ReviseRequestSchema.safeParse({ ...validRequest, kind: "unknown" }).success).toBe(false);
+
+  const validResponse = {
+    claim_id: "C-1",
+    problem_id: "P-4DSP",
+    seq: 10,
+    version: 2,
+    queue_position: 0,
+  };
+  expect(ReviseResponseSchema.safeParse(validResponse).success).toBe(true);
+});
+
+test("proof gap schemas enforce exact-version pinning and outcome discriminants", () => {
+  const validFile = {
+    target_claim_id: "C-1",
+    target_version: 2,
+    obligation: "Lemma 3 needs formal verification",
+    closes_what: "Completes the induction step",
+  };
+  expect(GapFileRequestSchema.safeParse(validFile).success).toBe(true);
+  expect(GapFileRequestSchema.safeParse({ ...validFile, target_claim_id: "invalid" }).success).toBe(
+    false,
+  );
+  expect(GapFileRequestSchema.safeParse({ ...validFile, target_version: 0 }).success).toBe(false);
+
+  const validFiled = {
+    gap_id: "G-1",
+    problem_id: "P-4DSP",
+    seq: 11,
+  };
+  expect(GapFiledResponseSchema.safeParse(validFiled).success).toBe(true);
+
+  // Outcome: closed-by requires closed_by reference
+  const validClosedBy = {
+    gap_id: "G-1",
+    outcome: "closed-by" as const,
+    closed_by: "C-12@2",
+  };
+  expect(GapTransitionRequestSchema.safeParse(validClosedBy).success).toBe(true);
+  expect(
+    GapTransitionRequestSchema.safeParse({ gap_id: "G-1", outcome: "closed-by" as const }).success,
+  ).toBe(false);
+
+  // Outcome: withdrawn forbids closed_by reference
+  const validWithdrawn = {
+    gap_id: "G-1",
+    outcome: "withdrawn" as const,
+  };
+  expect(GapTransitionRequestSchema.safeParse(validWithdrawn).success).toBe(true);
+  expect(
+    GapTransitionRequestSchema.safeParse({
+      gap_id: "G-1",
+      outcome: "withdrawn" as const,
+      closed_by: "C-12@2",
+    }).success,
+  ).toBe(false);
+
+  const validClosedResponse = {
+    gap_id: "G-1",
+    status: "closed-by" as const,
+    seq: 12,
+  };
+  expect(GapClosedResponseSchema.safeParse(validClosedResponse).success).toBe(true);
+});
+
+test("relation schemas enforce version-pinned targets and addresses-gap discriminant", () => {
+  // Claim relation requires version-pinned target C-n@v
+  const validClaimRel = {
+    kind: "implies" as const,
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "C-2@1",
+  };
+  expect(RelationFileRequestSchema.safeParse(validClaimRel).success).toBe(true);
+
+  // Claim relation cannot target a gap
+  expect(
+    RelationFileRequestSchema.safeParse({
+      ...validClaimRel,
+      target: "G-1",
+    }).success,
+  ).toBe(false);
+
+  // addresses-gap requires gap target G-n
+  const validGapRel = {
+    kind: "addresses-gap" as const,
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "G-1",
+  };
+  expect(RelationFileRequestSchema.safeParse(validGapRel).success).toBe(true);
+
+  // addresses-gap cannot target a claim
+  expect(
+    RelationFileRequestSchema.safeParse({
+      ...validGapRel,
+      target: "C-2@1",
+    }).success,
+  ).toBe(false);
+
+  const validRelResponse = {
+    problem_id: "P-4DSP",
+    kind: "implies" as const,
+    source: "C-1@1",
+    target: "C-2@1",
+    seq: 13,
+  };
+  expect(RelationFiledResponseSchema.safeParse(validRelResponse).success).toBe(true);
 });
