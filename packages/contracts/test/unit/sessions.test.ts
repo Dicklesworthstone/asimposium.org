@@ -35,10 +35,7 @@ const INVALID_PROMOTE_KIND = new URL(
   "../fixtures/invalid/promote-unknown-kind.json",
   import.meta.url,
 );
-const GENERATED_SESSIONS_SCHEMA = new URL(
-  "../../generated/sessions.schema.json",
-  import.meta.url,
-);
+const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
 
 test("session loop contracts pin the golden fixtures", async () => {
   expect(SessionOpenRequestSchema.safeParse(await fixture(VALID_SESSION_OPEN)).success).toBe(true);

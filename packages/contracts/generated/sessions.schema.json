@@ -10,7 +10,7 @@
       "properties": {
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "intent": {
           "type": "string",
@@ -37,7 +37,7 @@
         },
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "intent": {
           "anyOf": [
@@ -99,7 +99,7 @@
             },
             "problem": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "profile": {
               "type": "string",
@@ -459,7 +459,7 @@
             },
             "problem": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "profile": {
               "type": "string",
@@ -819,7 +819,7 @@
             },
             "problem": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "profile": {
               "type": "string",
@@ -1179,7 +1179,7 @@
             },
             "problem": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "profile": {
               "type": "string",
@@ -1539,7 +1539,7 @@
             },
             "problem": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "profile": {
               "type": "string",
@@ -1951,7 +1951,7 @@
       "properties": {
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "fellow_id": {
           "type": "string",
@@ -1980,7 +1980,7 @@
         },
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "fellow_id": {
           "type": "string",
@@ -2145,7 +2145,7 @@
         },
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "seq": {
           "type": "integer",
@@ -2668,7 +2668,7 @@
         },
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "seq": {
           "type": "integer",
@@ -2735,7 +2735,7 @@
         },
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "seq": {
           "type": "integer",
@@ -2847,7 +2847,7 @@
       "properties": {
         "problem_id": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "kind": {
           "type": "string",
