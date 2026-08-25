@@ -501,13 +501,8 @@ function fixtureScratchRoot(name: string): string {
   return root;
 }
 
-/** Reserve only a run parent; the D1 adapter creates its one state leaf itself. */
-function fixtureD1StateDirectory(name: string, mode: "ok" | "planted-fail"): string {
-  const integration = retainedIntegrationRoot();
-  scratchCounter += 1;
-  const runId = `d1-${name}-${process.pid}-${scratchCounter}`;
-  if (!validateRunId(runId)) throw new Error(`D1 integration run id is not safe: ${runId}`);
-  reserveRetainedIntegrationDirectory(integration, runId, nodeArtifactStorage);
+/** Name the state leaf inside the run ArtifactStore itself will claim. */
+function fixtureD1StateDirectory(runId: string, mode: "ok" | "planted-fail"): string {
   return retainedD1StateDirectory(
     repositoryRoot(),
     DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
@@ -1803,27 +1798,58 @@ realFilesystemTest(
 describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   const ADAPTERS = join(fileURLToPath(new URL("../harness/adapters/", import.meta.url)));
 
+  async function runD1Adapter(
+    mode: "ok" | "planted-fail",
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    requireRealFilesystemIntegration();
+    const root = repositoryRoot();
+    const runId = fixtureRunId(`d1-adapter-${mode}`);
+    const stateDirectory = fixtureD1StateDirectory(runId, mode);
+    let output = "";
+    const result = await runHarness({
+      root,
+      runId,
+      suite: "ops.2a-d1-adapter-proof",
+      reproduction: "self-test",
+      artifactNamespace: DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+      onOutput: (text) => {
+        output += text;
+      },
+      onEvent: () => {},
+      steps: [
+        {
+          id: `d1-${mode}`,
+          scenario: "integration",
+          adapter: "d1",
+          command: [
+            process.execPath,
+            join(ADAPTERS, "d1-rollback.ts"),
+            "--mode",
+            mode,
+            "--state-dir",
+            stateDirectory,
+            "--integration-namespace",
+            DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+          ],
+          replaySafe: false,
+          timeoutMs: 55_000,
+        },
+      ],
+    });
+    return { exitCode: result.exitCode, stdout: output, stderr: "" };
+  }
+
   async function runAdapter(
     file: string,
     mode: "ok" | "planted-fail",
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     requireRealFilesystemIntegration();
-    const d1StateDirectory =
-      file === "d1-rollback.ts" ? fixtureD1StateDirectory(`adapter-${mode}`, mode) : undefined;
     const child = Bun.spawn({
       cmd: [
         process.execPath,
         join(ADAPTERS, file),
         "--mode",
         mode,
-        ...(d1StateDirectory === undefined
-          ? []
-          : [
-              "--state-dir",
-              d1StateDirectory,
-              "--integration-namespace",
-              DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
-            ]),
       ],
       stdout: "pipe",
       stderr: "pipe",
@@ -1851,7 +1877,7 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   }
 
   test("the D1 adapter proves rollback against a real local database", async () => {
-    const ok = await runAdapter("d1-rollback.ts", "ok");
+    const ok = await runD1Adapter("ok");
     expectPositive(ok, "D1_ADAPTER_UNAVAILABLE");
     if (ok.exitCode === 0) {
       const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
@@ -1877,7 +1903,7 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   }, 90000);
 
   test("PLANTED: the D1 rollback assertion fails when nothing rolled back", async () => {
-    const planted = await runAdapter("d1-rollback.ts", "planted-fail");
+    const planted = await runD1Adapter("planted-fail");
     if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
       expect(planted.stdout).toContain("D1_ADAPTER_UNAVAILABLE");
     } else {
@@ -1885,6 +1911,49 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
       expect(planted.stdout).toContain("D1_TRANSACTION_LEAKED");
     }
   }, 90000);
+
+  test("PLANTED: direct D1 execution without the parent capability creates no state", async () => {
+    const root = repositoryRoot();
+    const runId = fixtureRunId("d1-direct-refusal");
+    const stateDirectory = fixtureD1StateDirectory(runId, "ok");
+    let output = "";
+    const result = await runHarness({
+      root,
+      runId,
+      suite: "ops.2a-d1-direct-refusal",
+      reproduction: "self-test",
+      artifactNamespace: DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+      onOutput: (text) => {
+        output += text;
+      },
+      onEvent: () => {},
+      steps: [
+        {
+          id: "direct-d1-without-capability",
+          scenario: "integration",
+          // Deliberately ordinary: only a registered D1 step receives the
+          // parent capability. The same executable copied into a direct process
+          // invocation must fail before creating its state leaf.
+          adapter: "process",
+          command: [
+            process.execPath,
+            join(ADAPTERS, "d1-rollback.ts"),
+            "--mode",
+            "ok",
+            "--state-dir",
+            stateDirectory,
+            "--integration-namespace",
+            DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+          ],
+          replaySafe: false,
+          timeoutMs: 5_000,
+        },
+      ],
+    });
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("D1_ARTIFACT_CAPABILITY_REQUIRED");
+    expect(existsSync(stateDirectory)).toBe(false);
+  }, 30000);
 
   test("the HTTP adapter proves a real loopback fault surface", async () => {
     const ok = await runAdapter("http-fault.ts", "ok");

@@ -52,6 +52,13 @@ e2e_test_acquired_lease_is_closed_for_root() {
     && "$(e2e_physical_directory "$closed_marker")" == "$closed_marker" ]]
 }
 
+make_test_root() {
+  local prefix="$1"
+  local raw
+  raw="$(mktemp -d "${TMPDIR:-/tmp}/$prefix.XXXXXX")" || return 1
+  e2e_physical_directory "$raw"
+}
+
 suite="run-diagnostics-unit"
 started_ms="$(e2e_now_ms)"
 reproduce="bash e2e/tests/run-diagnostics.test.sh"
@@ -64,6 +71,28 @@ fail() {
 if ! e2e_run_harness_self_test "$suite" "$started_ms" "$reproduce"; then
   fail "HARNESS_SELF_TEST_FAILED"
 fi
+
+# JSON string escaping unit tests
+escaped_json="$(e2e_json_escape "quote\"backslash\\newline"$'\n'"tab"$'\t')"
+[[ "$escaped_json" == 'quote\"backslash\\newline\ntab\t' ]] || fail "JSON_ESCAPE_INVALID"
+
+# JSON field injection negative test
+injection_line="$(e2e_format_diagnostic 's"x' 0 pass 'OK","leaked":"FRAGMENT_SECRET' "$reproduce")"
+node -e '
+const line = process.argv[1];
+const parsed = JSON.parse(line);
+const expectedKeys = ["tool", "tool_version", "package", "suite", "version", "duration_ms", "status", "code", "reproduce"].sort();
+const actualKeys = Object.keys(parsed).sort();
+if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+  process.exit(1);
+}
+if ("leaked" in parsed) {
+  process.exit(2);
+}
+if (parsed.suite !== "s\"x" || parsed.code !== "OK\",\"leaked\":\"FRAGMENT_SECRET") {
+  process.exit(3);
+}
+' "$injection_line" || fail "JSON_DIAGNOSTIC_INJECTION_FAILED"
 
 for valid_run_id in "a" "OPS.1-20260813" "run_42"; do
   e2e_validate_run_id "$valid_run_id" || {
@@ -105,7 +134,7 @@ for malformed_origin in \
 done
 unset ASIMPOSIUM_TEST_STAGING_ORIGIN
 
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-artifact.XXXXXX")" || fail "TEMPORARY_FIXTURE_UNAVAILABLE"
+temporary_root="$(make_test_root "asimposium-e2e-artifact")" || fail "TEMPORARY_FIXTURE_UNAVAILABLE"
 mkdir -p "$temporary_root/e2e" "$temporary_root/outside" || fail "TEMPORARY_FIXTURE_LAYOUT_FAILED"
 
 if absent_root_output="$(e2e_write_artifact_diagnostic_at_root "$temporary_root" "absent-run" "$suite" "$started_ms" "fail" "ABSENT_ROOT_TEST" "$reproduce" 2>&1)"; then
@@ -135,7 +164,7 @@ if [[ -n "$second_claim_output" ]]; then
   fail "REUSED_ARTIFACT_RUN_LEAKED"
 fi
 
-namespaced_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced.XXXXXX")" \
+namespaced_root="$(make_test_root "asimposium-e2e-namespaced")" \
   || fail "NAMESPACED_CLAIM_FIXTURE_UNAVAILABLE"
 mkdir -p "$namespaced_root/e2e" || fail "NAMESPACED_CLAIM_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_namespaced_run_at_root "$namespaced_root" s2-krater nested-run \
@@ -173,7 +202,7 @@ if ! e2e_artifact_writer_leases_quiescent_at_root \
   fail "CLOSED_NAMESPACED_CLAIM_REPORTED_OPEN"
 fi
 
-namespaced_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-fence.XXXXXX")" \
+namespaced_fence_root="$(make_test_root "asimposium-e2e-namespaced-fence")" \
   || fail "NAMESPACED_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$namespaced_fence_root/e2e" || fail "NAMESPACED_FENCE_FIXTURE_UNAVAILABLE"
 e2e_test_maintenance_check_count=0
@@ -196,9 +225,8 @@ if [[ "$e2e_test_maintenance_check_count" -ne 3 \
   fail "NAMESPACED_RUN_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 
-namespaced_post_claim_fence_root="$(
-  mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-post-claim-fence.XXXXXX"
-)" || fail "NAMESPACED_POST_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
+namespaced_post_claim_fence_root="$(make_test_root "asimposium-e2e-namespaced-post-claim-fence")" \
+  || fail "NAMESPACED_POST_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$namespaced_post_claim_fence_root/e2e" \
   || fail "NAMESPACED_POST_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
 e2e_test_maintenance_check_count=0
@@ -224,9 +252,8 @@ if [[ "$e2e_test_maintenance_check_count" -ne 5 \
   fail "NAMESPACED_POST_CLAIM_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 
-namespaced_namespace_swap_root="$(
-  mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-namespace-swap.XXXXXX"
-)" || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
+namespaced_namespace_swap_root="$(make_test_root "asimposium-e2e-namespaced-namespace-swap")" \
+  || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
 mkdir -p "$namespaced_namespace_swap_root/e2e" \
   || fail "NAMESPACED_NAMESPACE_SWAP_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_namespaced_run_at_root \
@@ -265,9 +292,8 @@ fi
 e2e_close_artifact_writer_lease "$namespace_swap_lease_path" "$namespace_swap_lease_identity" \
   || fail "NAMESPACED_NAMESPACE_SWAP_CLOSE_FAILED"
 
-namespaced_run_swap_root="$(
-  mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-namespaced-run-swap.XXXXXX"
-)" || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
+namespaced_run_swap_root="$(make_test_root "asimposium-e2e-namespaced-run-swap")" \
+  || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
 mkdir -p "$namespaced_run_swap_root/e2e" \
   || fail "NAMESPACED_RUN_SWAP_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_namespaced_run_at_root "$namespaced_run_swap_root" s2-krater swap-run \
@@ -301,7 +327,7 @@ fi
 e2e_close_artifact_writer_lease "$run_swap_lease_path" "$run_swap_lease_identity" \
   || fail "NAMESPACED_RUN_SWAP_CLOSE_FAILED"
 
-foreign_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-foreign-lease.XXXXXX")" \
+foreign_lease_root="$(make_test_root "asimposium-e2e-foreign-lease")" \
   || fail "FOREIGN_LEASE_FIXTURE_UNAVAILABLE"
 mkdir -p "$foreign_lease_root/e2e" || fail "FOREIGN_LEASE_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_namespaced_run_at_root "$foreign_lease_root" s2-krater foreign-run \
@@ -317,7 +343,7 @@ fi
 e2e_close_artifact_writer_lease "$foreign_lease_path" "$foreign_lease_identity" \
   || fail "FOREIGN_LEASE_CLOSE_FAILED"
 
-inherited_child_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-inherited-child.XXXXXX")" \
+inherited_child_root="$(make_test_root "asimposium-e2e-inherited-child")" \
   || fail "INHERITED_CHILD_FIXTURE_UNAVAILABLE"
 mkdir -p "$inherited_child_root/e2e" || fail "INHERITED_CHILD_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_namespaced_run_at_root "$inherited_child_root" s2-krater parent-run \
@@ -356,7 +382,7 @@ if ! e2e_artifact_writer_leases_quiescent_at_root \
   fail "INHERITED_CHILD_LEASE_REPORTED_OPEN_AFTER_PARENT_CLOSE"
 fi
 
-lease_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-lease-fence.XXXXXX")" \
+lease_fence_root="$(make_test_root "asimposium-e2e-lease-fence")" \
   || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$lease_fence_root/e2e" || fail "LEASE_FENCE_FIXTURE_UNAVAILABLE"
 e2e_test_maintenance_check_count=0
@@ -377,7 +403,7 @@ if [[ "$e2e_test_maintenance_check_count" -ne 2 \
   fail "LEASE_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 
-run_claim_fence_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-run-claim-fence.XXXXXX")" \
+run_claim_fence_root="$(make_test_root "asimposium-e2e-run-claim-fence")" \
   || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$run_claim_fence_root/e2e" || fail "RUN_CLAIM_FENCE_FIXTURE_UNAVAILABLE"
 e2e_test_maintenance_check_count=0
@@ -400,7 +426,7 @@ if [[ "$e2e_test_maintenance_check_count" -ne 3 \
   fail "RUN_CLAIM_FENCE_RACE_MUTATED_OR_LEFT_OPEN"
 fi
 
-fenced_before_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-fenced-before.XXXXXX")" \
+fenced_before_root="$(make_test_root "asimposium-e2e-fenced-before")" \
   || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$fenced_before_root/e2e" || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
 : > "$fenced_before_root/e2e/.artifact-maintenance" \
@@ -412,7 +438,7 @@ if [[ -e "$fenced_before_root/e2e/artifacts" ]]; then
   fail "MAINTENANCE_FENCE_BEFORE_CLAIM_MUTATED"
 fi
 
-fenced_after_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-fenced-after.XXXXXX")" \
+fenced_after_root="$(make_test_root "asimposium-e2e-fenced-after")" \
   || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
 mkdir -p "$fenced_after_root/e2e" || fail "MAINTENANCE_FENCE_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_run_at_root "$fenced_after_root" "fenced-after-run" \
@@ -429,7 +455,7 @@ if [[ -n "$(find "$fenced_after_root/e2e/artifacts/fenced-after-run" -mindepth 1
   fail "MAINTENANCE_FENCE_AFTER_CLAIM_MUTATED"
 fi
 
-root_epoch_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-root-epoch.XXXXXX")" \
+root_epoch_root="$(make_test_root "asimposium-e2e-root-epoch")" \
   || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
 mkdir -p "$root_epoch_root/e2e" || fail "ARTIFACT_ROOT_EPOCH_FIXTURE_UNAVAILABLE"
 e2e_claim_artifact_run_at_root "$root_epoch_root" "root-epoch-run" \
@@ -593,7 +619,7 @@ if e2e_write_artifact_diagnostic_at_root "$temporary_root" "regular-run" "$suite
   fail "CLOSED_ARTIFACT_WRITER_LEASE_PUBLISHED"
 fi
 
-exit_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-exit-lease.XXXXXX")" \
+exit_lease_root="$(make_test_root "asimposium-e2e-exit-lease")" \
   || fail "ARTIFACT_WRITER_EXIT_FIXTURE_UNAVAILABLE"
 mkdir -p "$exit_lease_root/e2e" || fail "ARTIFACT_WRITER_EXIT_FIXTURE_UNAVAILABLE"
 if ! bash -c '
@@ -609,7 +635,7 @@ if ! e2e_artifact_writer_leases_quiescent_at_root "$exit_lease_root" "$exit_leas
   fail "ARTIFACT_WRITER_EXIT_DISPATCHER_LEFT_OPEN_LEASE"
 fi
 
-crash_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-crash-lease.XXXXXX")" \
+crash_lease_root="$(make_test_root "asimposium-e2e-crash-lease")" \
   || fail "ARTIFACT_WRITER_CRASH_FIXTURE_UNAVAILABLE"
 mkdir -p "$crash_lease_root/e2e" || fail "ARTIFACT_WRITER_CRASH_FIXTURE_UNAVAILABLE"
 if bash -c '
@@ -625,7 +651,7 @@ if e2e_artifact_writer_leases_quiescent_at_root "$crash_lease_root" "$crash_leas
   fail "CRASHED_ARTIFACT_WRITER_LEASE_RECLAIMED"
 fi
 
-signal_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-signal-lease.XXXXXX")" \
+signal_lease_root="$(make_test_root "asimposium-e2e-signal-lease")" \
   || fail "ARTIFACT_WRITER_SIGNAL_FIXTURE_UNAVAILABLE"
 mkdir -p "$signal_lease_root/e2e" || fail "ARTIFACT_WRITER_SIGNAL_FIXTURE_UNAVAILABLE"
 set +e
@@ -648,7 +674,7 @@ if e2e_artifact_writer_leases_quiescent_at_root "$signal_lease_root" "$signal_le
   fail "SIGNALED_ARTIFACT_WRITER_LEASE_RECLAIMED"
 fi
 
-malformed_lease_root="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-malformed-lease.XXXXXX")" \
+malformed_lease_root="$(make_test_root "asimposium-e2e-malformed-lease")" \
   || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"
 mkdir -p "$malformed_lease_root/e2e/artifacts" "$malformed_lease_root/e2e/.artifact-writer-leases" \
   || fail "MALFORMED_ARTIFACT_WRITER_LEASE_FIXTURE_UNAVAILABLE"

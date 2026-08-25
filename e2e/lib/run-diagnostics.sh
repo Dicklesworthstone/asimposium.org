@@ -218,6 +218,16 @@ e2e_validate_staging_origin() {
   esac
 }
 
+e2e_json_escape() {
+  local string="$1"
+  string="${string//\\/\\\\}"
+  string="${string//\"/\\\"}"
+  string="${string//$'\n'/\\n}"
+  string="${string//$'\r'/\\r}"
+  string="${string//$'\t'/\\t}"
+  printf '%s' "$string"
+}
+
 e2e_format_diagnostic() {
   local suite="$1"
   local started_ms="$2"
@@ -228,13 +238,13 @@ e2e_format_diagnostic() {
 
   duration_ms="$(e2e_elapsed_ms "$started_ms")"
   printf '{"tool":"bash","tool_version":"%s","package":"e2e","suite":"%s","version":"%s","duration_ms":%s,"status":"%s","code":"%s","reproduce":"%s"}\n' \
-    "${BASH_VERSION%% *}" \
-    "$suite" \
-    "$ASIMPOSIUM_E2E_HARNESS_VERSION" \
+    "$(e2e_json_escape "${BASH_VERSION%% *}")" \
+    "$(e2e_json_escape "$suite")" \
+    "$(e2e_json_escape "$ASIMPOSIUM_E2E_HARNESS_VERSION")" \
     "$duration_ms" \
-    "$status" \
-    "$code" \
-    "$reproduce"
+    "$(e2e_json_escape "$status")" \
+    "$(e2e_json_escape "$code")" \
+    "$(e2e_json_escape "$reproduce")"
 }
 
 e2e_emit_diagnostic() {
