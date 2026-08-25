@@ -17,11 +17,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARTIFACT_BLOB_DIRECTORY,
   ARTIFACT_MAINTENANCE_FENCE_NAME,
+  ARTIFACT_WRITER_LEASE_CLOSED_NAME,
+  ARTIFACT_WRITER_LEASES_NAME,
   ArtifactStore,
   adapterProbePath,
   artifactCapacityReport,
@@ -404,6 +406,22 @@ function fixtureStorage(): ReturnType<typeof createMemoryArtifactStorage> {
   return storage;
 }
 
+function soleArtifactWriterLease(
+  root: string,
+  storage: HarnessArtifactStorage,
+): { readonly directory: string; readonly closed: string } {
+  const registry = join(root, "e2e", ARTIFACT_WRITER_LEASES_NAME);
+  const epochs = storage.readdir(registry);
+  expect(epochs).toHaveLength(1);
+  expect(epochs[0]).toMatch(/^sim-memory-[0-9]+$/);
+  const epoch = join(registry, epochs[0] as string);
+  const leases = storage.readdir(epoch);
+  expect(leases).toHaveLength(1);
+  expect(leases[0]).toMatch(/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/);
+  const directory = join(epoch, leases[0] as string);
+  return { directory, closed: join(directory, ARTIFACT_WRITER_LEASE_CLOSED_NAME) };
+}
+
 /**
  * A retained root for the explicitly enabled real-filesystem tests.
  *
@@ -587,6 +605,128 @@ describe("deterministic, structured diagnostics", () => {
 });
 
 describe("execution lifecycle", () => {
+  test("closes exactly one append-only writer lease after a successful run", async () => {
+    const root = fixtureRoot("writer-lease-success");
+    const storage = fixtureStorage();
+    await runHarness({
+      root,
+      storage,
+      suite: "unit",
+      runId: fixtureRunId("writer-lease-success"),
+      steps: [passStep("ok")],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+
+    const lease = soleArtifactWriterLease(root, storage);
+    expect(storage.isDirectory(lease.directory)).toBe(true);
+    expect(storage.isDirectory(lease.closed)).toBe(true);
+    expect(storage.readdir(lease.closed)).toEqual([]);
+  });
+
+  test("manual store close is idempotent and permanently refuses later writes", () => {
+    const root = fixtureRoot("writer-lease-manual-close");
+    const storage = fixtureStorage();
+    const runId = fixtureRunId("writer-lease-manual-close");
+    const identity = {
+      runId,
+      suite: "unit",
+      seed: 7,
+      stepIds: ["ok"],
+      stepContractDigests: ["a".repeat(64)],
+      reproduction: "unavailable: no registered CLI scenario",
+      artifactNamespace: null,
+      gitRevision: "unavailable",
+      childEnvironmentDigest: "b".repeat(64),
+      bindingVersions: {},
+    } as const;
+    const store = new ArtifactStore(root, runId, false, identity, storage);
+    const lease = soleArtifactWriterLease(root, storage);
+    expect(storage.exists(lease.closed) || storage.isSymlink(lease.closed)).toBe(false);
+
+    store.close();
+    expect(() => store.close()).not.toThrow();
+    expect(storage.isDirectory(lease.closed)).toBe(true);
+    expect(storage.readdir(lease.closed)).toEqual([]);
+    expect(() => store.writeJUnit([])).toThrow(/ARTIFACT_WRITER_LEASE_CLOSED|lease is closed/);
+  });
+
+  for (const failurePoint of ["onOutput", "onEvent", "storage.append"] as const) {
+    test(`reaps the detached process group before ${failurePoint} failure closes its lease`, async () => {
+      const root = fixtureRoot(`writer-lease-${failurePoint}`);
+      const base = fixtureStorage();
+      const ipc = memoryIpc();
+      let failureHookReached = false;
+      let readyOutputSeen = false;
+      const failAtHook = (message: string): never => {
+        const lease = soleArtifactWriterLease(root, base);
+        expect(base.exists(lease.closed) || base.isSymlink(lease.closed)).toBe(false);
+        failureHookReached = true;
+        throw new Error(message);
+      };
+      const storage: HarnessArtifactStorage =
+        failurePoint === "storage.append"
+          ? {
+              ...base,
+              append: () => failAtHook("planted storage append failure"),
+            }
+          : base;
+      const grandchild =
+        'process.on("disconnect", () => { ' +
+        `setTimeout(async () => { await fetch(${JSON.stringify(ipc.endpoint("/escaped-descendant"))}); ` +
+        'process.exit(0); }, 250); setTimeout(() => process.exit(2), 1000); }); ' +
+        'if (process.send) process.send("ready");';
+      const parent =
+        'const cp = require("node:child_process"); ' +
+        `const child = cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], ` +
+        '{ stdio: ["ignore", "ignore", "ignore", "ipc"] }); ' +
+        'child.once("error", () => process.exit(4)); ' +
+        'child.once("message", (message) => { if (message !== "ready") process.exit(3); ' +
+        'process.stdout.write("callback-trigger:ready"); child.disconnect(); child.unref(); ' +
+        "setImmediate(() => process.exit(0)); }); " +
+        "setTimeout(() => process.exit(5), 1000);";
+
+      try {
+        await expect(
+          runHarness({
+            root,
+            storage,
+            suite: "unit",
+            runId: fixtureRunId(`writer-lease-${failurePoint}`),
+            steps: [
+              {
+                id: "spawn",
+                scenario: "unit",
+                command: command(parent),
+                replaySafe: true,
+              },
+            ],
+            onOutput: (text) => {
+              expect(text).toContain("callback-trigger:ready");
+              readyOutputSeen = true;
+              if (failurePoint === "onOutput") {
+                failAtHook("planted output callback failure");
+              }
+            },
+            onEvent:
+              failurePoint === "onEvent"
+                ? () => failAtHook("planted event callback failure")
+                : () => undefined,
+          }),
+        ).rejects.toThrow(/planted/);
+        expect(readyOutputSeen).toBe(true);
+        expect(failureHookReached).toBe(true);
+        const lease = soleArtifactWriterLease(root, storage);
+        expect(storage.isDirectory(lease.closed)).toBe(true);
+        expect(storage.readdir(lease.closed)).toEqual([]);
+        await Bun.sleep(350);
+        expect(ipc.count("/escaped-descendant")).toBe(0);
+      } finally {
+        ipc.close();
+      }
+    });
+  }
+
   test("retries replay-safe work with attempt accounting", async () => {
     const root = fixtureRoot("retry");
     const storage = fixtureStorage();
@@ -3319,6 +3459,40 @@ describe("run options are covered at compile time", () => {
 });
 
 describe("new-run artifact namespace ownership", () => {
+  test("PLANTED: a redirected lease child fails before the run namespace is created", async () => {
+    const root = fixtureRoot("writer-lease-redirect");
+    const runId = "writer-lease-redirect";
+    const base = fixtureStorage();
+    let redirected = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      realpath: (path) => {
+        const physical = base.realpath(path);
+        if (/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/.test(basename(path))) {
+          redirected = true;
+          return `${physical}-redirected`;
+        }
+        return physical;
+      },
+    };
+
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId,
+        steps: [passStep("ok")],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/ARTIFACT_WRITER_LEASE_INVALID|exact registry epoch/);
+    expect(redirected).toBe(true);
+    expect(base.exists(join(root, "e2e", "artifacts", runId))).toBe(false);
+    const lease = soleArtifactWriterLease(root, base);
+    expect(base.exists(lease.closed) || base.isSymlink(lease.closed)).toBe(false);
+  });
+
   test("PLANTED: a maintenance fence blocks before the artifact root is created", async () => {
     const root = fixtureRoot("maintenance-before-claim");
     const storage = fixtureStorage();
@@ -3497,6 +3671,9 @@ describe("new-run artifact namespace ownership", () => {
     expect(won).toBe(true);
     expect(base.readFile(join(target, "foreign.marker"))).toBe("foreign\n");
     expect(base.exists(join(target, "events.jsonl"))).toBe(false);
+    const lease = soleArtifactWriterLease(root, racingStorage);
+    expect(base.isDirectory(lease.closed)).toBe(true);
+    expect(base.readdir(lease.closed)).toEqual([]);
   });
 
   test("PLANTED: a fence raised during retained new-run capacity scan blocks mkdir", () => {

@@ -69,6 +69,10 @@ export const MAX_D1_ADAPTER_STATE_BYTES = 2 * 1024 * 1024;
 export const MAX_ARTIFACT_NAMESPACES = 5_000;
 /** Reserved sibling fence that closes artifact claims and publications. */
 export const ARTIFACT_MAINTENANCE_FENCE_NAME = ".artifact-maintenance";
+/** Append-only sibling registry shared with the shell artifact writers. */
+export const ARTIFACT_WRITER_LEASES_NAME = ".artifact-writer-leases";
+/** A directory marker closes one lease without deleting its history. */
+export const ARTIFACT_WRITER_LEASE_CLOSED_NAME = "closed";
 /** Reserved directory holding content-addressed failure blobs; never a run. */
 export const ARTIFACT_BLOB_DIRECTORY = "blobs";
 /** Per-run manifest naming the blobs a run produced. */
@@ -366,6 +370,16 @@ export class HarnessError extends Error {
   }
 }
 
+/** Internal sentinel: closing the writer lease would overclaim child quiescence. */
+class UnsettledChildProcessError extends HarnessError {
+  constructor() {
+    super(
+      "CHILD_SETTLEMENT_UNPROVEN",
+      "child process settlement could not be proved; the artifact writer lease remains open.",
+    );
+  }
+}
+
 export class ArtifactStore {
   readonly directory: string;
   readonly jsonl: string;
@@ -394,6 +408,7 @@ export class ArtifactStore {
 
   private readonly storage: HarnessArtifactStorage;
   private readonly identityDigest: string;
+  private writerLease: ArtifactWriterLease | undefined;
 
   constructor(
     root: string,
@@ -416,113 +431,124 @@ export class ArtifactStore {
     const topLevelArtifacts = ensureDirectDirectory(e2e, "artifacts", storage);
     this.topLevelArtifactsDirectory = topLevelArtifacts;
     this.artifactRootIdentity = storage.directoryIdentity(topLevelArtifacts);
-    this.assertWritableArtifactRoot();
-    const artifacts =
-      artifactNamespace === undefined
-        ? topLevelArtifacts
-        : reserveArtifactNamespace(
-            this.physicalRoot,
-            topLevelArtifacts,
-            artifactNamespace,
-            MAX_ARTIFACT_NAMESPACES,
-            storage,
-            this.artifactRootIdentity,
-          );
-    this.artifactsDirectory = artifacts;
-    this.retainedIntegrationDirectory = artifactNamespace === undefined ? undefined : artifacts;
-    this.artifactRelativeRoot =
-      artifactNamespace === undefined ? "e2e/artifacts" : `e2e/artifacts/${artifactNamespace}`;
-    /**
-     * A new run refuses a namespace that already exists — at all.
-     *
-     * Testing only for `events.jsonl` meant a directory holding a failure
-     * manifest, a JUnit file, or anything else was silently adopted: the new
-     * run inherited another run's evidence directory and appended to it, and
-     * the resulting artifacts described two runs as one. Existence of the
-     * namespace is the check, because the namespace is the unit of ownership.
-     */
-    // A symlink where the namespace belongs is a containment failure, not an
-    // ownership one, and it is checked first so it keeps its own sharper error
-    // rather than being reported as "this run_id is taken".
-    if (storage.isSymlink(join(artifacts, runId))) {
-      throw new HarnessError(
-        "ARTIFACT_PATH_UNSAFE",
-        "the run namespace is a symlink; artifacts must not be redirected out of the artifact area.",
-      );
-    }
-    const namespaceExisted = storage.exists(join(artifacts, runId));
-    if (!resume && namespaceExisted) {
-      throw new HarnessError(
-        "RUN_ID_EXISTS",
-        "run_id already owns an artifact namespace; choose a new run_id or resume that run.",
-      );
-    }
-    // A resume never creates or adopts a namespace. In particular, do this
-    // before creating events.jsonl: a missing identity is a retained-evidence
-    // defect, not permission to add a blank ledger beside it.
-    const existingIdentityPath = join(artifacts, runId, RUN_IDENTITY_NAME);
-    if (resume && (!namespaceExisted || !storage.exists(existingIdentityPath))) {
-      throw new HarnessError(
-        "RUN_IDENTITY_MISSING",
-        "the retained run has no identity record; refusing to append unverifiable resume evidence.",
-      );
-    }
-    // Counted and created together. Two separate calls left a window in which
-    // another run could create the namespace that took the checkout over the
-    // limit after this one had already counted; narrowing it to a single
-    // reservation cannot make the backstop exact under concurrency, but it does
-    // remove the avoidable part of the gap.
-    this.directory = resume
-      ? realDirectory(join(artifacts, runId), "ARTIFACT_PATH_UNSAFE", storage)
-      : artifactNamespace === undefined
-        ? reserveNewArtifactNamespace(
-            this.physicalRoot,
-            artifacts,
-            runId,
-            MAX_ARTIFACT_NAMESPACES,
-            storage,
-            this.artifactRootIdentity,
-          )
-        : reserveNewRetainedIntegrationDirectory(
-            artifacts,
-            runId,
-            storage,
-            1,
-            this.artifactRootIdentity,
-          );
-    this.assertWritableArtifactRoot();
-    this.jsonl = join(this.directory, "events.jsonl");
-    assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
-    this.identityPath = join(this.directory, RUN_IDENTITY_NAME);
-    assertRegularOrAbsent(this.identityPath, "ARTIFACT_PATH_UNSAFE", storage);
-    // Written once, verified on every resume: a resumed run that changed its
-    // suite, seed, or step set is a different run wearing the same id, and its
-    // appended events would describe work the earlier events never did.
-    if (!storage.exists(this.identityPath)) this.assertRetainedCapacity(MAX_EVENT_BYTES);
-    this.assertWritableArtifactRoot();
-    reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted, storage);
-    if (!storage.exists(this.jsonl)) {
-      this.assertWritableArtifactRoot();
-      storage.writeExclusive(this.jsonl, "");
-    }
-
-    this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
-    assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE", storage);
-    // A resumed run continues the same bounded budget it already spent, counted
-    // per attempt rather than per digest so a crashed attempt stays spent.
-    const reconciled = reconcileFailureManifest(
-      this.manifest,
-      this.artifactsDirectory,
-      runId,
-      storage,
-      this.artifactRelativeRoot,
+    this.writerLease = acquireArtifactWriterLease(
+      this.physicalRoot,
+      this.topLevelArtifactsDirectory,
+      this.artifactRootIdentity,
+      this.storage,
     );
-    this.failureArtifactCount = reconciled.attemptCount;
-    this.danglingFailureDigests = reconciled.dangling;
-    for (const digest of reconciled.stored) {
-      this.failureLogs.push(
-        join(this.artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, "sha256", digest),
+    try {
+      this.assertWritableArtifactRoot();
+      const artifacts =
+        artifactNamespace === undefined
+          ? topLevelArtifacts
+          : reserveArtifactNamespace(
+              this.physicalRoot,
+              topLevelArtifacts,
+              artifactNamespace,
+              MAX_ARTIFACT_NAMESPACES,
+              storage,
+              this.artifactRootIdentity,
+            );
+      this.artifactsDirectory = artifacts;
+      this.retainedIntegrationDirectory = artifactNamespace === undefined ? undefined : artifacts;
+      this.artifactRelativeRoot =
+        artifactNamespace === undefined ? "e2e/artifacts" : `e2e/artifacts/${artifactNamespace}`;
+      /**
+       * A new run refuses a namespace that already exists — at all.
+       *
+       * Testing only for `events.jsonl` meant a directory holding a failure
+       * manifest, a JUnit file, or anything else was silently adopted: the new
+       * run inherited another run's evidence directory and appended to it, and
+       * the resulting artifacts described two runs as one. Existence of the
+       * namespace is the check, because the namespace is the unit of ownership.
+       */
+      // A symlink where the namespace belongs is a containment failure, not an
+      // ownership one, and it is checked first so it keeps its own sharper error
+      // rather than being reported as "this run_id is taken".
+      if (storage.isSymlink(join(artifacts, runId))) {
+        throw new HarnessError(
+          "ARTIFACT_PATH_UNSAFE",
+          "the run namespace is a symlink; artifacts must not be redirected out of the artifact area.",
+        );
+      }
+      const namespaceExisted = storage.exists(join(artifacts, runId));
+      if (!resume && namespaceExisted) {
+        throw new HarnessError(
+          "RUN_ID_EXISTS",
+          "run_id already owns an artifact namespace; choose a new run_id or resume that run.",
+        );
+      }
+      // A resume never creates or adopts a namespace. In particular, do this
+      // before creating events.jsonl: a missing identity is a retained-evidence
+      // defect, not permission to add a blank ledger beside it.
+      const existingIdentityPath = join(artifacts, runId, RUN_IDENTITY_NAME);
+      if (resume && (!namespaceExisted || !storage.exists(existingIdentityPath))) {
+        throw new HarnessError(
+          "RUN_IDENTITY_MISSING",
+          "the retained run has no identity record; refusing to append unverifiable resume evidence.",
+        );
+      }
+      // Counted and created together. Two separate calls left a window in which
+      // another run could create the namespace that took the checkout over the
+      // limit after this one had already counted; narrowing it to a single
+      // reservation cannot make the backstop exact under concurrency, but it does
+      // remove the avoidable part of the gap.
+      this.directory = resume
+        ? realDirectory(join(artifacts, runId), "ARTIFACT_PATH_UNSAFE", storage)
+        : artifactNamespace === undefined
+          ? reserveNewArtifactNamespace(
+              this.physicalRoot,
+              artifacts,
+              runId,
+              MAX_ARTIFACT_NAMESPACES,
+              storage,
+              this.artifactRootIdentity,
+            )
+          : reserveNewRetainedIntegrationDirectory(
+              artifacts,
+              runId,
+              storage,
+              1,
+              this.artifactRootIdentity,
+            );
+      this.assertWritableArtifactRoot();
+      this.jsonl = join(this.directory, "events.jsonl");
+      assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
+      this.identityPath = join(this.directory, RUN_IDENTITY_NAME);
+      assertRegularOrAbsent(this.identityPath, "ARTIFACT_PATH_UNSAFE", storage);
+      // Written once, verified on every resume: a resumed run that changed its
+      // suite, seed, or step set is a different run wearing the same id, and its
+      // appended events would describe work the earlier events never did.
+      if (!storage.exists(this.identityPath)) this.assertRetainedCapacity(MAX_EVENT_BYTES);
+      this.assertWritableArtifactRoot();
+      reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted, storage);
+      if (!storage.exists(this.jsonl)) {
+        this.assertWritableArtifactRoot();
+        storage.writeExclusive(this.jsonl, "");
+      }
+
+      this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
+      assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE", storage);
+      // A resumed run continues the same bounded budget it already spent, counted
+      // per attempt rather than per digest so a crashed attempt stays spent.
+      const reconciled = reconcileFailureManifest(
+        this.manifest,
+        this.artifactsDirectory,
+        runId,
+        storage,
+        this.artifactRelativeRoot,
       );
+      this.failureArtifactCount = reconciled.attemptCount;
+      this.danglingFailureDigests = reconciled.dangling;
+      for (const digest of reconciled.stored) {
+        this.failureLogs.push(
+          join(this.artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, "sha256", digest),
+        );
+      }
+    } catch (error) {
+      this.close();
+      throw error;
     }
   }
 
@@ -655,12 +681,21 @@ export class ArtifactStore {
   }
 
   private assertWritableArtifactRoot(): void {
-    assertArtifactWriterBoundary(
-      this.physicalRoot,
-      this.topLevelArtifactsDirectory,
-      this.artifactRootIdentity,
-      this.storage,
-    );
+    const lease = this.writerLease;
+    if (lease === undefined) {
+      throw new HarnessError(
+        "ARTIFACT_WRITER_LEASE_CLOSED",
+        "artifact writer lease is closed; retained evidence was left untouched.",
+      );
+    }
+    assertArtifactWriterLeaseOpen(lease);
+  }
+
+  close(): void {
+    const lease = this.writerLease;
+    if (lease === undefined) return;
+    closeArtifactWriterLease(lease);
+    this.writerLease = undefined;
   }
 
   /** Resolve and contain the path for one digest. */
@@ -1612,99 +1647,107 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
     storage,
     options.artifactNamespace,
   );
-  const output = options.onOutput ?? ((text: string) => process.stderr.write(text));
-  const eventSink =
-    options.onEvent ??
-    ((event: HarnessEvent) => process.stdout.write(`${JSON.stringify(event)}\n`));
-  const priorStates =
-    options.resume === true ? store.loadResumeStates() : new Map<string, StepStatus>();
-  const events: HarnessEvent[] = [];
+  let closeWriterLease = true;
+  try {
+    const output = options.onOutput ?? ((text: string) => process.stderr.write(text));
+    const eventSink =
+      options.onEvent ??
+      ((event: HarnessEvent) => process.stdout.write(`${JSON.stringify(event)}\n`));
+    const priorStates =
+      options.resume === true ? store.loadResumeStates() : new Map<string, StepStatus>();
+    const events: HarnessEvent[] = [];
 
-  const seenStepIds = new Set<string>();
-  for (const step of orderSteps(options.steps)) {
-    validateHarnessStep(step);
-    if (seenStepIds.has(step.id)) {
-      throw new HarnessError(
-        "STEP_ID_DUPLICATE",
-        "step ids must be unique within one harness run.",
-      );
-    }
-    seenStepIds.add(step.id);
-    // A non-process adapter is only "unavailable" when nothing can drive it.
-    // Once an adapter ships an executable probe, the step runs through the same
-    // bounded process path as everything else and keeps its adapter label, so
-    // one termination, redaction and retention story covers every adapter.
-    if ((step.adapter ?? "process") !== "process" && step.command === undefined) {
-      const event = unavailableAdapterEvent(options, step, seed);
-      recordEvent(store, events, eventSink, event);
-      continue;
-    }
-    const prior = priorStates.get(step.id);
-    if (options.resume === true && prior !== undefined) {
-      if (prior === "pass") {
-        const event = skippedEvent(
-          options,
-          step,
-          seed,
-          "RESUME_ALREADY_COMPLETED",
-          "already completed",
+    const seenStepIds = new Set<string>();
+    for (const step of orderSteps(options.steps)) {
+      validateHarnessStep(step);
+      if (seenStepIds.has(step.id)) {
+        throw new HarnessError(
+          "STEP_ID_DUPLICATE",
+          "step ids must be unique within one harness run.",
         );
+      }
+      seenStepIds.add(step.id);
+      // A non-process adapter is only "unavailable" when nothing can drive it.
+      // Once an adapter ships an executable probe, the step runs through the same
+      // bounded process path as everything else and keeps its adapter label, so
+      // one termination, redaction and retention story covers every adapter.
+      if ((step.adapter ?? "process") !== "process" && step.command === undefined) {
+        const event = unavailableAdapterEvent(options, step, seed);
         recordEvent(store, events, eventSink, event);
         continue;
       }
-      if (!step.replaySafe) {
-        const event = skippedEvent(
-          options,
-          step,
-          seed,
-          "UNSAFE_REPLAY_WITHHELD",
-          "previous incomplete operation is not replay-safe",
-          "blocked",
-        );
-        recordEvent(store, events, eventSink, event);
-        continue;
+      const prior = priorStates.get(step.id);
+      if (options.resume === true && prior !== undefined) {
+        if (prior === "pass") {
+          const event = skippedEvent(
+            options,
+            step,
+            seed,
+            "RESUME_ALREADY_COMPLETED",
+            "already completed",
+          );
+          recordEvent(store, events, eventSink, event);
+          continue;
+        }
+        if (!step.replaySafe) {
+          const event = skippedEvent(
+            options,
+            step,
+            seed,
+            "UNSAFE_REPLAY_WITHHELD",
+            "previous incomplete operation is not replay-safe",
+            "blocked",
+          );
+          recordEvent(store, events, eventSink, event);
+          continue;
+        }
+      }
+
+      const retries = step.replaySafe ? (step.retries ?? 0) : 0;
+      let finalEvent: HarnessEvent | undefined;
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        finalEvent = await runAttempt(options, step, seed, attempt, retries, output);
+        if (finalEvent.status !== "pass" && finalEvent.status !== "blocked") {
+          const mergedOutput = finalEvent.detail ?? "";
+          store.writeFailureLog(step, attempt + 1, mergedOutput);
+        }
+        recordEvent(store, events, eventSink, finalEvent);
+        if (finalEvent.status === "pass" || finalEvent.status === "blocked") break;
       }
     }
 
-    const retries = step.replaySafe ? (step.retries ?? 0) : 0;
-    let finalEvent: HarnessEvent | undefined;
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
-      finalEvent = await runAttempt(options, step, seed, attempt, retries, output);
-      if (finalEvent.status !== "pass" && finalEvent.status !== "blocked") {
-        const mergedOutput = finalEvent.detail ?? "";
-        store.writeFailureLog(step, attempt + 1, mergedOutput);
-      }
-      recordEvent(store, events, eventSink, finalEvent);
-      if (finalEvent.status === "pass" || finalEvent.status === "blocked") break;
-    }
+    const junit = store.writeJUnit(events);
+    const digest = createHash("sha256").update(store.readArtifact(junit), "utf8").digest("hex");
+    const finishedAt = new Date().toISOString();
+    const summary = summaryEvent(options, seed, events, finishedAt, digest);
+    recordEvent(store, events, eventSink, summary);
+
+    const statuses = finalStepEvents(events).map((event) => event.status);
+    const exitCode: HarnessRunResult["exitCode"] = statuses.some(
+      (status) => status === "fail" || status === "timeout" || status === "cancelled",
+    )
+      ? 1
+      : statuses.some((status) => status === "blocked")
+        ? HARNESS_BLOCKED_EXIT_CODE
+        : 0;
+    return {
+      exitCode,
+      events,
+      artifacts: {
+        directory: store.directory,
+        jsonl: store.jsonl,
+        junit,
+        failureLogs: store.failureLogs,
+      },
+      seed,
+      storageAuthority: storageAuthority(storage),
+    };
+  } catch (error) {
+    if (error instanceof UnsettledChildProcessError) closeWriterLease = false;
+    throw error;
+  } finally {
+    if (closeWriterLease) store.close();
   }
-
-  const junit = store.writeJUnit(events);
-  const digest = createHash("sha256").update(store.readArtifact(junit), "utf8").digest("hex");
-  const finishedAt = new Date().toISOString();
-  const summary = summaryEvent(options, seed, events, finishedAt, digest);
-  recordEvent(store, events, eventSink, summary);
-
-  const statuses = finalStepEvents(events).map((event) => event.status);
-  const exitCode: HarnessRunResult["exitCode"] = statuses.some(
-    (status) => status === "fail" || status === "timeout" || status === "cancelled",
-  )
-    ? 1
-    : statuses.some((status) => status === "blocked")
-      ? HARNESS_BLOCKED_EXIT_CODE
-      : 0;
-  return {
-    exitCode,
-    events,
-    artifacts: {
-      directory: store.directory,
-      jsonl: store.jsonl,
-      junit,
-      failureLogs: store.failureLogs,
-    },
-    seed,
-    storageAuthority: storageAuthority(storage),
-  };
 }
 
 async function runAttempt(
@@ -1776,18 +1819,63 @@ async function runAttempt(
   options.signal?.addEventListener("abort", abort, { once: true });
   if (options.signal?.aborted) abort();
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    readBounded(child.stdout, MAX_CAPTURED_OUTPUT_CHARS),
-    readBounded(child.stderr, MAX_CAPTURED_OUTPUT_CHARS),
-    child.exited,
-  ]);
-  clearTimeout(timeout);
+  const stdoutPromise = readBounded(child.stdout, MAX_CAPTURED_OUTPUT_CHARS);
+  const stderrPromise = readBounded(child.stderr, MAX_CAPTURED_OUTPUT_CHARS);
+  const exitPromise = child.exited;
+  const exitAndGroupKillPromise = exitPromise.then(
+    (code) => {
+      signalOwnedProcessGroupOnly(child.pid, "SIGKILL");
+      return code;
+    },
+    (error: unknown) => {
+      signalOwnedProcessGroupOnly(child.pid, "SIGKILL");
+      throw error;
+    },
+  );
+  let stdout: Awaited<typeof stdoutPromise>;
+  let stderr: Awaited<typeof stderrPromise>;
+  let exitCode: number;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      stdoutPromise,
+      stderrPromise,
+      exitAndGroupKillPromise,
+    ]);
+  } catch (error) {
+    // A pipe/read/exit rejection must not let the caller close its artifact
+    // writer lease while this detached process group can still mutate the
+    // checkout. Terminate, bound the leader receipt and group proof, then drain
+    // both read promises before propagating the infrastructure failure.
+    killChildGroup(child, "SIGTERM");
+    if (forceKill === undefined) {
+      forceKill = setTimeout(() => killChildGroup(child, "SIGKILL"), FORCE_KILL_GRACE_MS);
+    }
+    const [leaderSettlementProven, groupQuiescent] = await Promise.all([
+      proveChildLeaderSettlement(exitPromise),
+      killAndProveChildGroupQuiescent(child.pid),
+    ]);
+    clearTimeout(forceKill);
+    forceKill = undefined;
+    if (!groupQuiescent) {
+      throw new UnsettledChildProcessError();
+    }
+    await Promise.allSettled([stdoutPromise, stderrPromise]);
+    if (!leaderSettlementProven) throw new UnsettledChildProcessError();
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
+  }
   if (forceKill !== undefined) {
     clearTimeout(forceKill);
-    // The leader may have exited after SIGTERM while a descendant remains in its process group.
-    killChildGroup(child, "SIGKILL");
+    forceKill = undefined;
   }
-  options.signal?.removeEventListener("abort", abort);
+  // The leader can exit successfully after spawning a background descendant.
+  // A harness step never transfers daemon ownership, so prove the POSIX group
+  // is absent before callbacks run and before an outer artifact lease closes.
+  if (!(await killAndProveChildGroupQuiescent(child.pid))) {
+    throw new UnsettledChildProcessError();
+  }
 
   const visibleOutput = redactNeverLog(`${stdout.text}${stderr.text}`, options.root);
   if (visibleOutput.length > 0) emitOutput(visibleOutput);
@@ -2016,19 +2104,85 @@ function killChildGroup(
   child: { pid: number; kill(signal?: string | number): void },
   signal: string,
 ): void {
-  try {
-    if (process.platform === "win32") {
-      child.kill(signal);
-      return;
-    }
-    // Bun detached=true calls setsid() on POSIX, making the leader PID its process-group ID.
-    process.kill(-child.pid, signal);
-  } catch {
+  if (process.platform === "win32") {
     try {
       child.kill(signal);
     } catch {
       // Exit between a timeout tick and signal delivery is an expected race.
     }
+    return;
+  }
+  // Bun detached=true calls setsid() on POSIX, making the leader PID its
+  // process-group ID. Never fall back to a positive PID: after leader exit it
+  // may already identify an unrelated process.
+  signalOwnedProcessGroupOnly(child.pid, signal);
+}
+
+type ProcessGroupProbe = "absent" | "present" | "unknown";
+
+/** Signal only the detached POSIX group; never fall back to a reused leader PID. */
+function signalOwnedProcessGroupOnly(
+  processGroupId: number,
+  signal: string | number,
+): ProcessGroupProbe {
+  if (process.platform === "win32") return "unknown";
+  try {
+    process.kill(-processGroupId, signal);
+    return "present";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "absent" : "unknown";
+  }
+}
+
+/** Probe only the detached POSIX group; never fall back to a possibly reused leader PID. */
+function probeOwnedProcessGroup(processGroupId: number): ProcessGroupProbe {
+  return signalOwnedProcessGroupOnly(processGroupId, 0);
+}
+
+/**
+ * Kill the owned POSIX process group and prove it reached ESRCH.
+ *
+ * A signal delivery alone proves neither descendant exit nor reaping. Windows
+ * has no equivalent group probe in this adapter, so it returns false and the
+ * caller retains the writer lease rather than making a false quiescence claim.
+ */
+async function killAndProveChildGroupQuiescent(processGroupId: number): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  const initial = probeOwnedProcessGroup(processGroupId);
+  if (initial === "absent") return true;
+  if (initial === "unknown") return false;
+  const signalled = signalOwnedProcessGroupOnly(processGroupId, "SIGKILL");
+  if (signalled === "absent") return true;
+  if (signalled === "unknown") return false;
+  const deadline = performance.now() + HARD_READER_GRACE_MS;
+  while (performance.now() < deadline) {
+    const state = probeOwnedProcessGroup(processGroupId);
+    if (state === "absent") return true;
+    if (state === "unknown") return false;
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  return probeOwnedProcessGroup(processGroupId) === "absent";
+}
+
+/**
+ * Bound the runtime settlement receipt independently of OS process-group proof.
+ * A rejected or late `child.exited` promise cannot justify closing the writer
+ * lease, but it must not prevent the bounded group kill/probe from completing.
+ */
+async function proveChildLeaderSettlement(exitPromise: Promise<number>): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      exitPromise.then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolveTimeout) => {
+        timeout = setTimeout(() => resolveTimeout(false), HARD_READER_GRACE_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -3555,10 +3709,10 @@ function assertArtifactMaintenanceAbsent(
 /**
  * Revalidate the physical artifact-root epoch immediately before a write.
  *
- * This narrows pathname replacement races but is not a lifetime lease: the
- * root can still be replaced after this check and before the filesystem call.
- * Whole-root maintenance therefore remains forbidden until every writer holds
- * a lease that an exclusive operator action can drain.
+ * This predicate alone narrows pathname replacement races but is not a
+ * lifetime lease. `ArtifactStore` pairs it with the append-only lease below;
+ * direct helpers and raw integration writers must do the same before
+ * whole-root maintenance can be allowed.
  */
 function assertArtifactWriterBoundary(
   root: string,
@@ -3585,6 +3739,181 @@ function assertArtifactWriterBoundary(
     );
   }
   assertArtifactMaintenanceAbsent(root, storage);
+}
+
+interface ArtifactWriterLease {
+  readonly root: string;
+  readonly artifactsDirectory: string;
+  readonly artifactRootIdentity: string;
+  readonly directory: string;
+  readonly identity: string;
+  readonly storage: HarnessArtifactStorage;
+}
+
+function artifactWriterLeaseEpochName(rootIdentity: string): string {
+  const real = /^(\d+):(\d+)$/.exec(rootIdentity);
+  if (real !== null) return `dev-${real[1]}-ino-${real[2]}`;
+  const simulated = /^memory:(\d+)$/.exec(rootIdentity);
+  if (simulated !== null) return `sim-memory-${simulated[1]}`;
+  throw new HarnessError(
+    "ARTIFACT_WRITER_LEASE_INVALID",
+    "artifact root identity cannot name an append-only writer lease epoch.",
+  );
+}
+
+function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
+  assertArtifactWriterBoundary(
+    lease.root,
+    lease.artifactsDirectory,
+    lease.artifactRootIdentity,
+    lease.storage,
+  );
+  const actual = realDirectory(
+    lease.directory,
+    "ARTIFACT_WRITER_LEASE_INVALID",
+    lease.storage,
+  );
+  const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
+  if (
+    actual !== lease.directory ||
+    lease.storage.directoryIdentity(actual) !== lease.identity ||
+    lease.storage.exists(closed) ||
+    lease.storage.isSymlink(closed)
+  ) {
+    throw new HarnessError(
+      "ARTIFACT_WRITER_LEASE_CLOSED",
+      "artifact writer lease is absent, replaced, or closed; retained evidence was left untouched.",
+    );
+  }
+  assertArtifactWriterBoundary(
+    lease.root,
+    lease.artifactsDirectory,
+    lease.artifactRootIdentity,
+    lease.storage,
+  );
+}
+
+function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
+  const actual = realDirectory(
+    lease.directory,
+    "ARTIFACT_WRITER_LEASE_INVALID",
+    lease.storage,
+  );
+  if (actual !== lease.directory || lease.storage.directoryIdentity(actual) !== lease.identity) {
+    throw new HarnessError(
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      "artifact writer lease was replaced and cannot be closed safely.",
+    );
+  }
+  const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
+  if (lease.storage.exists(closed) || lease.storage.isSymlink(closed)) {
+    const physicalClosed = realDirectory(
+      closed,
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      lease.storage,
+    );
+    if (physicalClosed !== closed || lease.storage.readdir(physicalClosed).length !== 0) {
+      throw new HarnessError(
+        "ARTIFACT_WRITER_LEASE_INVALID",
+        "artifact writer lease has a malformed closed marker.",
+      );
+    }
+    return;
+  }
+  lease.storage.mkdir(closed);
+  const physicalClosed = realDirectory(
+    closed,
+    "ARTIFACT_WRITER_LEASE_INVALID",
+    lease.storage,
+  );
+  if (physicalClosed !== closed || lease.storage.readdir(physicalClosed).length !== 0) {
+    throw new HarnessError(
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      "artifact writer lease closed marker is not one empty direct directory.",
+    );
+  }
+}
+
+function acquireArtifactWriterLease(
+  root: string,
+  artifactsDirectory: string,
+  artifactRootIdentity: string,
+  storage: HarnessArtifactStorage,
+): ArtifactWriterLease {
+  assertArtifactWriterBoundary(root, artifactsDirectory, artifactRootIdentity, storage);
+  const e2e = realDirectory(join(root, "e2e"), "ARTIFACT_WRITER_LEASE_INVALID", storage);
+  const registry = ensureSharedLeaseDirectory(e2e, ARTIFACT_WRITER_LEASES_NAME, storage);
+  const epoch = ensureSharedLeaseDirectory(
+    registry,
+    artifactWriterLeaseEpochName(artifactRootIdentity),
+    storage,
+  );
+  const openedAt = Math.floor(Date.now() / 1_000);
+  for (let counter = 0; counter < 100; counter += 1) {
+    const random = randomBytes(4).readUInt32BE(0);
+    const directory = join(epoch, `lease-${process.pid}-${openedAt}-${counter}-${random}`);
+    try {
+      storage.mkdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw error;
+    }
+    const physicalDirectory = realDirectory(
+      directory,
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      storage,
+    );
+    if (physicalDirectory !== directory) {
+      throw new HarnessError(
+        "ARTIFACT_WRITER_LEASE_INVALID",
+        "artifact writer lease must remain inside its exact registry epoch.",
+      );
+    }
+    const lease: ArtifactWriterLease = {
+      root,
+      artifactsDirectory,
+      artifactRootIdentity,
+      directory,
+      identity: storage.directoryIdentity(physicalDirectory),
+      storage,
+    };
+    try {
+      assertArtifactWriterLeaseOpen(lease);
+      return lease;
+    } catch (error) {
+      closeArtifactWriterLease(lease);
+      throw error;
+    }
+  }
+  throw new HarnessError(
+    "ARTIFACT_WRITER_LEASE_UNAVAILABLE",
+    "could not claim a unique append-only artifact writer lease.",
+  );
+}
+
+/** Accept only an exact direct directory when another writer wins shared mkdir. */
+function ensureSharedLeaseDirectory(
+  parent: string,
+  child: string,
+  storage: HarnessArtifactStorage,
+): string {
+  const target = join(parent, child);
+  assertContained(parent, target, "ARTIFACT_WRITER_LEASE_INVALID");
+  if (!storage.exists(target) && !storage.isSymlink(target)) {
+    try {
+      storage.mkdir(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  const physical = realDirectory(target, "ARTIFACT_WRITER_LEASE_INVALID", storage);
+  if (physical !== target) {
+    throw new HarnessError(
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      "artifact writer lease registry must be an exact direct directory.",
+    );
+  }
+  return physical;
 }
 
 function realDirectory(
