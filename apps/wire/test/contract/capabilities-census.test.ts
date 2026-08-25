@@ -103,7 +103,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
     "GET /p/<id>/events.json":
-      "the W6.4 event-tail source remains fail-closed until its response contract and nested public route land",
+      "the nested W6.4 route remains fail-closed until its response contract and complete implementation land",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/enrollments/proposals":

@@ -293,7 +293,13 @@ async function cancelPipeline(
     if (!reached) {
       child.kill("SIGKILL");
       await completionPromise;
-      throw new Error("pipeline did not reach the requested cancellation point");
+      const trace = existsSync(${JSON.stringify(paths.tracePath)})
+        ? readFileSync(${JSON.stringify(paths.tracePath)}, "utf8")
+        : null;
+      throw new Error(
+        "pipeline did not reach the requested cancellation point: " +
+          JSON.stringify({ marker: ${JSON.stringify(marker)}, stdout, stderr, trace }),
+      );
     }
     child.kill("SIGTERM");
     const completion = await completionPromise;
