@@ -307,6 +307,7 @@ interface LeaseSettlementPlant {
   readonly leaseDirectory: string;
   readonly leaseIdentity: string;
   readonly lateWrite: string;
+  readonly escapeDone: string;
 }
 
 function runLeaseSettlementPlant(
@@ -318,6 +319,7 @@ function runLeaseSettlementPlant(
   const receipt = join(SCRATCH, `lease-settlement-${runCounter}.txt`);
   const escapeReady = join(SCRATCH, `lease-settlement-${runCounter}.ready`);
   const lateWrite = join(SCRATCH, `lease-settlement-${runCounter}.late`);
+  const escapeDone = join(SCRATCH, `lease-settlement-${runCounter}.done`);
   mkdirSync(join(root, "e2e"), { recursive: true, mode: 0o700 });
 
   const source = readFileSync(PIPELINE, "utf8");
@@ -366,7 +368,7 @@ exit $?
         ? "exec >/dev/null 2>&1 </dev/null; sleep 2"
         : mode === "setsid-escape"
           ? `python3 -c ${JSON.stringify(
-              `import os,pathlib,time; os.setsid(); pathlib.Path(${JSON.stringify(escapeReady)}).write_text("ready\\n", encoding="utf-8"); time.sleep(0.5); closed = pathlib.Path(open(${JSON.stringify(receipt)}, encoding="utf-8").read().splitlines()[0]) / "closed"; closed.is_dir() and pathlib.Path(${JSON.stringify(lateWrite)}).write_text("escaped-after-close\\n", encoding="utf-8")`,
+              `import os,pathlib,time; os.setsid(); pathlib.Path(${JSON.stringify(escapeReady)}).write_text("ready\\n", encoding="utf-8"); time.sleep(0.5); closed = pathlib.Path(${JSON.stringify(receipt)}).read_text(encoding="utf-8").splitlines()[0]; pathlib.Path(closed, "closed").is_dir() and pathlib.Path(${JSON.stringify(lateWrite)}).write_text("escaped-after-close\\n", encoding="utf-8"); pathlib.Path(${JSON.stringify(escapeDone)}).write_text("done\\n", encoding="utf-8")`,
             )} >/dev/null 2>&1 </dev/null & for _attempt in {1..100}; do [[ -f ${JSON.stringify(
               escapeReady,
             )} ]] && exit 0; sleep 0.02; done; exit 98`
@@ -391,6 +393,7 @@ exit $?
     leaseDirectory,
     leaseIdentity,
     lateWrite,
+    escapeDone,
   };
 }
 
@@ -680,7 +683,12 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(existsSync(join(escaped.leaseDirectory, "closed"))).toBe(
       descendantProofAvailable,
     );
-    await Bun.sleep(750);
+    if (!descendantProofAvailable) {
+      for (let attempt = 0; attempt < 100 && !existsSync(escaped.escapeDone); attempt += 1) {
+        await Bun.sleep(25);
+      }
+      expect(existsSync(escaped.escapeDone)).toBe(true);
+    }
     expect(existsSync(escaped.lateWrite)).toBe(false);
   }, 30_000);
 
@@ -731,6 +739,7 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(bounded).toContain(
       "PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0",
     );
+    expect(source.match(/PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1/g)).toHaveLength(1);
 
     const parentClaimIndex = source.lastIndexOf(
       'e2e_claim_artifact_run_at_root "$repository_root" "$RUN_ID"',
