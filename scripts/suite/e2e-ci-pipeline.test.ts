@@ -306,15 +306,18 @@ interface LeaseSettlementPlant {
   readonly signal: NodeJS.Signals | null;
   readonly leaseDirectory: string;
   readonly leaseIdentity: string;
+  readonly lateWrite: string;
 }
 
 function runLeaseSettlementPlant(
-  mode: "settled" | "settled-125" | "forced-unsettled" | "wrapper-crash",
+  mode: "settled" | "settled-125" | "forced-unsettled" | "wrapper-crash" | "setsid-escape",
 ): LeaseSettlementPlant {
   runCounter += 1;
   const root = join(SCRATCH, `lease-settlement-${runCounter}`);
   const runId = `ci-lease-settlement-${process.pid}-${runCounter}`;
   const receipt = join(SCRATCH, `lease-settlement-${runCounter}.txt`);
+  const escapeReady = join(SCRATCH, `lease-settlement-${runCounter}.ready`);
+  const lateWrite = join(SCRATCH, `lease-settlement-${runCounter}.late`);
   mkdirSync(join(root, "e2e"), { recursive: true, mode: 0o700 });
 
   const source = readFileSync(PIPELINE, "utf8");
@@ -333,6 +336,7 @@ set -u -o pipefail
 source "$1"
 PIPELINE_TEST_MODE=1
 PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1
 CURRENT_WRAPPER_PID=""
 ASIMP_CI_PROCESS_FORCE_UNSETTLED="$5"
 ASIMP_CI_PROCESS_KILL_WRAPPER_AFTER_SPAWN="$6"
@@ -360,6 +364,12 @@ exit $?
       mode === "wrapper-crash" ? "1" : "0",
       mode === "wrapper-crash"
         ? "exec >/dev/null 2>&1 </dev/null; sleep 2"
+        : mode === "setsid-escape"
+          ? `python3 -c ${JSON.stringify(
+              `import os,pathlib,time; os.setsid(); pathlib.Path(${JSON.stringify(escapeReady)}).write_text("ready\\n", encoding="utf-8"); time.sleep(0.5); closed = pathlib.Path(open(${JSON.stringify(receipt)}, encoding="utf-8").read().splitlines()[0]) / "closed"; closed.is_dir() and pathlib.Path(${JSON.stringify(lateWrite)}).write_text("escaped-after-close\\n", encoding="utf-8")`,
+            )} >/dev/null 2>&1 </dev/null & for _attempt in {1..100}; do [[ -f ${JSON.stringify(
+              escapeReady,
+            )} ]] && exit 0; sleep 0.02; done; exit 98`
         : mode === "settled-125"
           ? "exit 125"
           : "sleep 30 & exit 0",
@@ -380,6 +390,7 @@ exit $?
     signal: result.signal,
     leaseDirectory,
     leaseIdentity,
+    lateWrite,
   };
 }
 
@@ -630,18 +641,23 @@ describe("OPS.2b review pipeline orchestration", () => {
     }
   });
 
-  test("the parent closes its actual lease only after process-group settlement proof", () => {
+  test("the parent closes its actual lease only after group and descendant settlement proof", async () => {
+    const descendantProofAvailable = process.platform === "linux";
     const settled = runLeaseSettlementPlant("settled");
     expect(settled.signal).toBeNull();
     expect(settled.status).toBe(0);
     expect(directoryIdentity(settled.leaseDirectory)).toBe(settled.leaseIdentity);
-    expect(existsSync(join(settled.leaseDirectory, "closed"))).toBe(true);
+    expect(existsSync(join(settled.leaseDirectory, "closed"))).toBe(
+      descendantProofAvailable,
+    );
 
     const settled125 = runLeaseSettlementPlant("settled-125");
     expect(settled125.signal).toBeNull();
     expect(settled125.status).toBe(125);
     expect(directoryIdentity(settled125.leaseDirectory)).toBe(settled125.leaseIdentity);
-    expect(existsSync(join(settled125.leaseDirectory, "closed"))).toBe(true);
+    expect(existsSync(join(settled125.leaseDirectory, "closed"))).toBe(
+      descendantProofAvailable,
+    );
 
     const unsettled = runLeaseSettlementPlant("forced-unsettled");
     expect(unsettled.signal).toBeNull();
@@ -656,7 +672,17 @@ describe("OPS.2b review pipeline orchestration", () => {
       crashedWrapper.leaseIdentity,
     );
     expect(existsSync(join(crashedWrapper.leaseDirectory, "closed"))).toBe(false);
-  });
+
+    const escaped = runLeaseSettlementPlant("setsid-escape");
+    expect(escaped.signal).toBeNull();
+    expect(escaped.status).toBe(0);
+    expect(directoryIdentity(escaped.leaseDirectory)).toBe(escaped.leaseIdentity);
+    expect(existsSync(join(escaped.leaseDirectory, "closed"))).toBe(
+      descendantProofAvailable,
+    );
+    await Bun.sleep(750);
+    expect(existsSync(escaped.lateWrite)).toBe(false);
+  }, 30_000);
 
   test("recursive deployment children are wired to the parent capability boundary", () => {
     const source = readFileSync(PIPELINE, "utf8");
@@ -689,16 +715,21 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(source).not.toContain("export ASIMP_CI_INTERNAL_");
     expect(source.match(/e2e_close_artifact_writer_leases;/g)).toHaveLength(1);
     expect(source).toContain(
-      'if [[ "$PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED" != "1" ]]; then',
+      '"$PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN" != "1"',
     );
     expect(bounded).toContain("os.killpg(child.pid, signal.SIGKILL)");
     expect(bounded).toContain(
       "return wait_for_group_absence() and not force_unsettled",
     );
     expect(bounded).toContain("os.set_inheritable(3, False)");
-    expect(bounded).toContain('os.write(3, b"settled\\n")');
+    expect(bounded).toContain("pr_set_child_subreaper = 36");
+    expect(bounded).toContain('f"/proc/self/task/{os.getpid()}/children"');
+    expect(bounded).toContain("os.pidfd_open(pid, 0)");
+    expect(bounded).toContain("signal.pidfd_send_signal(pidfd, signum, None, 0)");
+    expect(bounded).toContain('acknowledged_exit(status, b"settled")');
+    expect(bounded).toContain('acknowledged_exit(status, b"unproven")');
     expect(bounded).toContain(
-      'if IFS= read -r settlement_ack <&9 && [[ "$settlement_ack" == "settled" ]]; then',
+      "PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0",
     );
 
     const parentClaimIndex = source.lastIndexOf(

@@ -14,6 +14,7 @@ source "$repository_root/e2e/lib/run-diagnostics.sh"
 # wrapper cannot establish that terminal fact; maintenance must prefer a false
 # refusal to moving the root beneath a surviving descendant.
 PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1
 ci_pipeline_artifact_writer_leases_on_exit() {
   local original_status=$?
 
@@ -21,7 +22,8 @@ ci_pipeline_artifact_writer_leases_on_exit() {
     return "$original_status"
   fi
   trap - EXIT
-  if [[ "$PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED" != "1" ]]; then
+  if [[ "$PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED" != "1" \
+    || "$PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN" != "1" ]]; then
     exit "$original_status"
   fi
   if ! e2e_close_artifact_writer_leases; then
@@ -437,6 +439,7 @@ run_bounded() {
       "$timeout_seconds" "$termination_grace_seconds" \
       "$force_unsettled" "$kill_wrapper_after_spawn" "$@" \
       3>&1 1>&8 <<'PY'
+import ctypes
 import os
 import signal
 import subprocess
@@ -450,15 +453,34 @@ kill_wrapper_after_spawn = sys.argv[4] == "1"
 command = sys.argv[5:]
 unsettled_exit = 125
 
-def settled_exit(status: int) -> None:
+def acknowledged_exit(status: int, acknowledgement: bytes) -> None:
     try:
-        os.write(3, b"settled\n")
+        os.write(3, acknowledgement + b"\n")
     except OSError:
         sys.exit(unsettled_exit)
     sys.exit(status)
 
+def settled_exit(status: int) -> None:
+    acknowledged_exit(status, b"settled")
+
+def unproven_exit(status: int) -> None:
+    acknowledged_exit(status, b"unproven")
+
+def enable_descendant_proof() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise OSError("Linux descendant proof requires pidfd support")
+    libc = ctypes.CDLL(None, use_errno=True)
+    pr_set_child_subreaper = 36
+    if libc.prctl(pr_set_child_subreaper, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return True
+
 try:
     os.set_inheritable(3, False)
+    descendant_proof_supported = enable_descendant_proof()
     child = subprocess.Popen(command, start_new_session=True)
 except BaseException:
     # No stage process exists, so even a launch refusal has a positive empty-set
@@ -468,6 +490,90 @@ if kill_wrapper_after_spawn:
     os.kill(os.getpid(), signal.SIGKILL)
 caught = None
 settlement_proven = True
+
+def reap_exited_children() -> bool:
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        except OSError:
+            return False
+        if pid == 0:
+            return True
+
+def direct_children():
+    try:
+        with open(
+            f"/proc/self/task/{os.getpid()}/children",
+            "r",
+            encoding="ascii",
+        ) as handle:
+            fields = handle.read().split()
+    except (OSError, UnicodeError):
+        return None
+    if any(not field.isdecimal() for field in fields):
+        return None
+    return [int(field) for field in fields]
+
+def signal_exact_children(children, signum: int) -> bool:
+    for pid in children:
+        try:
+            pidfd = os.pidfd_open(pid, 0)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            return False
+        try:
+            signal.pidfd_send_signal(pidfd, signum, None, 0)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return False
+        finally:
+            os.close(pidfd)
+    return True
+
+def retire_adopted_descendants() -> bool:
+    if not descendant_proof_supported:
+        return False
+    if not reap_exited_children():
+        return False
+    term_deadline = time.monotonic() + termination_grace_seconds
+    while time.monotonic() < term_deadline:
+        children = direct_children()
+        if children is None:
+            return False
+        if not children:
+            return reap_exited_children() and direct_children() == []
+        if not signal_exact_children(children, signal.SIGTERM):
+            return False
+        time.sleep(0.02)
+        if not reap_exited_children():
+            return False
+    kill_deadline = time.monotonic() + termination_grace_seconds
+    while time.monotonic() < kill_deadline:
+        children = direct_children()
+        if children is None:
+            return False
+        if not children:
+            return reap_exited_children() and direct_children() == []
+        if not signal_exact_children(children, signal.SIGKILL):
+            return False
+        time.sleep(0.02)
+        if not reap_exited_children():
+            return False
+    return False
+
+def finish_after_group(status: int) -> None:
+    if not descendant_proof_supported:
+        # The original group is absent, but this host has no exact descendant
+        # authority. Preserve the stage result while forcing the Bash owner to
+        # retain its append-only lease.
+        unproven_exit(status)
+    if not retire_adopted_descendants():
+        sys.exit(unsettled_exit)
+    settled_exit(status)
 
 def group_absent() -> bool:
     try:
@@ -526,12 +632,12 @@ while child.poll() is None and caught is None and time.monotonic() < deadline:
 if caught is not None:
     if not wait_for_leader() or not settlement_proven:
         sys.exit(unsettled_exit)
-    settled_exit(128 + caught)
+    finish_after_group(128 + caught)
 if child.poll() is None:
     settlement_proven = terminate_group(signal.SIGTERM)
     if not wait_for_leader() or not settlement_proven:
         sys.exit(unsettled_exit)
-    settled_exit(124)
+    finish_after_group(124)
 
 status = child.returncode
 # A terminal group leader does not prove its stage is quiescent: failed tools
@@ -539,16 +645,29 @@ status = child.returncode
 # members on every outcome before returning the leader's exact status.
 if not terminate_group(signal.SIGTERM):
     sys.exit(unsettled_exit)
-settled_exit(128 - status if status < 0 else status)
+finish_after_group(128 - status if status < 0 else status)
 PY
   )
   CURRENT_WRAPPER_PID=$!
   wait "$CURRENT_WRAPPER_PID"
   status=$?
   CURRENT_WRAPPER_PID=""
-  if IFS= read -r settlement_ack <&9 && [[ "$settlement_ack" == "settled" ]]; then
-    PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+  if IFS= read -r settlement_ack <&9; then
+    case "$settlement_ack" in
+      settled)
+        PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+        ;;
+      unproven)
+        PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=1
+        PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0
+        ;;
+      *)
+        PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0
+        status=125
+        ;;
+    esac
   else
+    PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0
     status=125
   fi
   exec 9<&-
