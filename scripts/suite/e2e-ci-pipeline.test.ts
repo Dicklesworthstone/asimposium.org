@@ -703,6 +703,7 @@ describe("OPS.2b review pipeline orchestration", () => {
     const source = readFileSync(PIPELINE, "utf8");
     const stageCommand = pipelineFunctionSource("stage_command", "run_stage");
     const internalStart = source.indexOf("internal_entrypoint() {");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: exact source match
     const internalEnd = source.indexOf('\nif [[ "${1:-}" == __* ]]', internalStart);
     expect(internalStart).toBeGreaterThanOrEqual(0);
     expect(internalEnd).toBeGreaterThan(internalStart);

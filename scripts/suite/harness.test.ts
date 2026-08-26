@@ -3256,6 +3256,7 @@ describe("artifact retention census aggregation", () => {
     expect(source).toContain('argument === "--retention-census"');
     expect(source).toContain('argument === "--locate-sha256"');
     expect(source).toContain("Number(preflight) + Number(selfTest) + Number(retentionCensus)");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: exact source match
     expect(source).toContain("process.stdout.write(`${JSON.stringify(census)}\\n`)");
   });
 });
