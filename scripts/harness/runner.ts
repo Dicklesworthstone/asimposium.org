@@ -10,12 +10,18 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
+  constants as filesystemConstants,
   existsSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
+  readSync,
   realpathSync,
   statSync,
   writeFileSync,
@@ -69,6 +75,12 @@ export const D1_ARTIFACT_CAPABILITY_ENV = "ASIMPOSIUM_HARNESS_D1_ARTIFACT_CAPABI
  * worse failure.
  */
 export const MAX_ARTIFACT_NAMESPACES = 5_000;
+/** A census is bounded work, never an unbounded walk of an attacker-shaped tree. */
+export const MAX_RETENTION_CENSUS_ENTRIES = 250_000;
+/** Unique regular-file bytes hashed by one census before it returns a lower bound. */
+export const MAX_RETENTION_CENSUS_HASH_BYTES = 256n * 1024n * 1024n * 1024n;
+/** Locator output is bounded even when one digest has many hard-link aliases. */
+export const MAX_RETENTION_LOCATOR_MATCHES = 128;
 /** Reserved sibling fence that closes artifact claims and publications. */
 export const ARTIFACT_MAINTENANCE_FENCE_NAME = ".artifact-maintenance";
 /** Append-only sibling registry shared with the shell artifact writers. */

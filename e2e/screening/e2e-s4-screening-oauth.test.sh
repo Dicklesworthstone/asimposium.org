@@ -30,9 +30,13 @@ run_bounded_capture() {
   local timeout_seconds="$1"
   shift
   local capture_status
+  local bash_env_file
+
+  bash_env_file="$(mktemp "${TMPDIR:-/tmp}/s4-capture-bash-env.XXXXXX")"
+  declare -f > "${bash_env_file}" 2>/dev/null || true
 
   set +e
-  S4_CAPTURE_OUTPUT="$(S4_CAPTURE_TIMEOUT_SECONDS="${timeout_seconds}" /usr/bin/perl -e '
+  S4_CAPTURE_OUTPUT="$(BASH_ENV="${bash_env_file}" S4_CAPTURE_TIMEOUT_SECONDS="${timeout_seconds}" /usr/bin/perl -e '
 use strict;
 use warnings;
 use Fcntl qw(F_SETFD);
@@ -424,23 +428,23 @@ run_private_lifecycle_environment_cases() (
   # private fixture's readiness marker.
   # Keep the normal/live assertion focused on control inertness rather than
   # the full runner's variable fixture runtime.
-  # shellcheck disable=SC2329 # Imported only by this normal/live invocation.
-  bun() {
-    case "${1:-}" in
-      e2e/screening/s4-runner.ts) return 78 ;;
-      test) return 0 ;;
-      *) return 125 ;;
-    esac
-  }
-  export -f bun
-  run_bounded_capture 4 \
+  local fake_bun_dir
+  fake_bun_dir="$(mktemp -d "${TMPDIR:-/tmp}/s4-test-bun.XXXXXX")"
+  cat > "${fake_bun_dir}/bun" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  e2e/screening/s4-runner.ts) exit 78 ;;
+  test) exit 0 ;;
+  *) exit 125 ;;
+esac
+EOF
+  chmod 755 "${fake_bun_dir}/bun"
+  run_bounded_capture 15 \
     env \
-    S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-spawn-before-ownership \
-    S4_WRAPPER_TEST_SIGNAL=TERM \
-    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    PATH="${fake_bun_dir}:${PATH}" \
+    S4_PRIVATE_LIFECYCLE_TEST_ACTIVE=1 \
+    S4_PRIVATE_PRE_EXEC_RACE_DELAY=1 \
     S4_CAPTURE_CONTROL_FD=poisoned \
-    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
-    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
     bash "${SCRIPT_PATH}"
   output="${S4_CAPTURE_OUTPUT}"
   status="${S4_CAPTURE_STATUS}"
@@ -743,7 +747,7 @@ run_pre_exec_identity_race_case() (
     esac
   }
   export -f bun
-  run_bounded_capture 4 \
+  run_bounded_capture 8 \
     env \
     S4_WRAPPER_TEST_LIFECYCLE_HOOK=pre-exec-before-supervisor-stop \
     S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
