@@ -112,7 +112,8 @@ if (( S3_PORT_EXPLICIT == 1 )) && port_is_busy "${S3_PORT}"; then
 fi
 
 
-STATE_DIR="$(mktemp -d -t asimposium-s3-local)"
+# Trailing X's are required by GNU mktemp; BSD mktemp accepts them too.
+STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-s3-local.XXXXXXXX")"
 readonly STATE_DIR
 readonly SERVER_LOG="${STATE_DIR}/wrangler.log"
 readonly CHECK_LOG="${STATE_DIR}/check.log"
