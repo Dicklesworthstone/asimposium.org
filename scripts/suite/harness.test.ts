@@ -3337,6 +3337,15 @@ describe("artifact retention census aggregation", () => {
     expect(() => parseHarnessCli(["--retention-census", "--locate-sha256", "not-a-digest"])).toThrow(
       /lowercase SHA-256/,
     );
+    expect(() =>
+      parseHarnessCli([
+        "--retention-census",
+        "--locate-sha256",
+        digestA,
+        "--locate-sha256",
+        digestA,
+      ]),
+    ).toThrow(/exactly one lowercase SHA-256/);
   });
 });
 

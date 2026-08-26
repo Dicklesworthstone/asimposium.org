@@ -6103,7 +6103,7 @@ export function parseHarnessCli(argv: readonly string[]): HarnessCliOptions {
     }
     if (argument === "--locate-sha256") {
       const value = argv[++index];
-      if (value === undefined || !SHA256_HEX.test(value)) {
+      if (locateSha256 !== undefined || value === undefined || !SHA256_HEX.test(value)) {
         throw new HarnessError(
           "ARTIFACT_CENSUS_DIGEST_INVALID",
           "--locate-sha256 requires exactly one lowercase SHA-256 digest.",
