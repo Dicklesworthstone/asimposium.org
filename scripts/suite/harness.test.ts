@@ -1098,7 +1098,12 @@ describe("secret-safe, bounded artifacts", () => {
         visible += text;
       },
     });
-    if (debug) console.error("[DIAG FINISHED]", { exitCode: result.exitCode, visibleLength: visible.length });
+    if (debug) {
+      console.error("[DIAG FINISHED]", {
+        exitCode: result.exitCode,
+        visibleLength: visible.length,
+      });
+    }
     expect(result.exitCode).toBe(1);
     expect(visible).toContain("<redacted>");
     expect(visible).not.toContain(secret);
@@ -1220,6 +1225,15 @@ describe("secret-safe, bounded artifacts", () => {
     ]) {
       expect(source).not.toContain(duplicateFamily);
     }
+  });
+
+  test("static guard: opt-in harness diagnostics expose metadata, never argv or output bytes", () => {
+    const source = readFileSync(RUNNER_SOURCE, "utf8");
+    expect(source).toContain('console.error("[DEBUG SPAWN]", { stepId: step.id, argvCount:');
+    expect(source).toContain('console.error("[DEBUG readBounded]", { capturedLength:');
+    expect(source).not.toContain('console.error("[DEBUG SPAWN]", { commandLine');
+    expect(source).not.toContain("visibleLen: visibleOutput.length, visibleOutput");
+    expect(source).not.toContain("raw: JSON.stringify(raw)");
   });
 
   test("caps failure artifacts and does not retain child output for successful steps", async () => {
