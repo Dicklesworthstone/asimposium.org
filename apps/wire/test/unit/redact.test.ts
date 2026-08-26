@@ -22,6 +22,20 @@ describe("redactPathname", () => {
     expect(redactPathname("/asimp_")).toBe("/<redacted>");
   });
 
+  test("redacts percent-encoded credential prefixes before they can be echoed", () => {
+    expect(redactPathname("/%61simp_ag_x")).toBe("/<redacted>");
+    expect(redactPathname("/ASIMP%5fAG_short")).toBe("/<redacted>");
+    expect(redactPathname("/join/v1%2E9f2c")).toBe("/join/<redacted>");
+    expect(redactPathname("/poll/%66low_v1.aabb")).toBe("/poll/<redacted>");
+  });
+
+  test("redacts nested encoding and prefixes behind encoded path boundaries", () => {
+    expect(redactPathname("/%2561simp_ag_x")).toBe("/<redacted>");
+    expect(redactPathname("/%252561simp_ag_x")).toBe("/<redacted>");
+    expect(redactPathname("/safe%2Fasimp_ag_x")).toBe("/<redacted>");
+    expect(redactPathname("/safe%252Fv1.9f2c")).toBe("/<redacted>");
+  });
+
   test("redacts an enrollment fragment secret that leaked into the path", () => {
     expect(redactPathname("/join/v1.9f2c")).toBe("/join/<redacted>");
   });
@@ -37,6 +51,7 @@ describe("redactPathname", () => {
 
   test("keeps versioned workflow references that merely contain the prefix", () => {
     expect(redactPathname("/runs/workflow_v1.config")).toBe("/runs/workflow_v1.config");
+    expect(redactPathname("/runs/work%66low_v1.config")).toBe("/runs/work%66low_v1.config");
   });
 
   test("redacts any segment longer than a legitimate route segment", () => {

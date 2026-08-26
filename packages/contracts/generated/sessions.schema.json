@@ -2615,7 +2615,7 @@
         "base_version": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 9007199254740991
+          "maximum": 9007199254740990
         },
         "kind": {
           "type": "string",

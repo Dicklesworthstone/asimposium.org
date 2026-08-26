@@ -43,13 +43,25 @@ describe("P9 claim version minting", () => {
   });
 
   test("an invalid current version is refused", async () => {
-    await expect(
-      mintClaimVersion({
-        currentVersion: -1,
-        newContent: CONTENT,
-        editorFellowId: "F-1",
-        sha256Hex: sha,
-      }),
-    ).rejects.toThrow("CLAIM_VERSION_INVALID");
+    for (const currentVersion of [-1, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(
+        mintClaimVersion({
+          currentVersion,
+          newContent: CONTENT,
+          editorFellowId: "F-1",
+          sha256Hex: sha,
+        }),
+      ).rejects.toThrow("CLAIM_VERSION_INVALID");
+    }
+  });
+
+  test("the largest mintable current version stays inside the safe range", async () => {
+    const mint = await mintClaimVersion({
+      currentVersion: Number.MAX_SAFE_INTEGER - 1,
+      newContent: CONTENT,
+      editorFellowId: "F-1",
+      sha256Hex: sha,
+    });
+    expect(mint.version).toBe(Number.MAX_SAFE_INTEGER);
   });
 });

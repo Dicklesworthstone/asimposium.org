@@ -51,6 +51,11 @@ const ACK_DELIVERED_CAS_SQL = normalizeSql(`UPDATE outbox SET state = 'delivered
   AND event_id = ? AND problem_id = ? AND kind = ?
   AND dedupe_key = ? AND payload_sha256 = ?`);
 
+const QUARANTINE_CAS_SQL = normalizeSql(`UPDATE outbox SET quarantined_at = ?,
+  quarantine_code = ? WHERE id = ? AND state = 'pending' AND quarantined_at IS NULL
+  AND event_id = ? AND problem_id = ? AND kind = ?
+  AND dedupe_key = ? AND payload_sha256 = ?`);
+
 /**
  * The immutable identity columns the delivered CAS must bind, in bind order
  * after `delivered_at` and `id`. Each one gets its own mutation plant below.
@@ -136,6 +141,7 @@ interface OutboxHarnessOptions {
   ) => void;
   readonly afterStatusSnapshot?: () => void;
   readonly afterPendingPage?: (page: number, rows: FakeOutboxRow[]) => void | Promise<void>;
+  readonly beforeQuarantine?: (rows: FakeOutboxRow[]) => void;
   readonly failAttemptSnapshotOnce?: boolean;
   readonly failStorageOnce?: (operation: FakeStorageOperation) => boolean;
   readonly failStorageAlways?: (operation: FakeStorageOperation) => boolean;
@@ -462,12 +468,33 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
         },
         run: async () => {
           if (sql.includes("SET quarantined_at = ?")) {
-            const [quarantinedAt, quarantineCode, id] = bindings;
+            if (normalizeSql(sql) !== QUARANTINE_CAS_SQL) {
+              throw new Error("PLANTED_QUARANTINE_CAS_SQL_DRIFT");
+            }
+            if (bindings.length !== 8) {
+              throw new Error("PLANTED_QUARANTINE_CAS_BINDING_DRIFT");
+            }
+            options.beforeQuarantine?.(rows);
+            const [
+              quarantinedAt,
+              quarantineCode,
+              id,
+              eventId,
+              problemId,
+              kind,
+              dedupeKey,
+              payloadSha256,
+            ] = bindings;
             const row = rows.find(
               (candidate) =>
                 candidate.id === id &&
                 candidate.state === "pending" &&
-                candidate.quarantined_at === null,
+                candidate.quarantined_at === null &&
+                candidate.event_id === eventId &&
+                candidate.problem_id === problemId &&
+                candidate.kind === kind &&
+                candidate.dedupe_key === dedupeKey &&
+                candidate.payload_sha256 === payloadSha256,
             );
             if (
               row !== undefined &&
@@ -862,6 +889,59 @@ describe("Krater outbox Durable Object contracts", () => {
     // The drain harness models the crash window cooperatively (`hold-before-ack`
     // returns before the acknowledgement), so nothing here claims proof against
     // abrupt process death between the effect and the acknowledgement.
+    sqlite.close();
+  });
+
+  test("quarantine CAS refuses a row whose selected identity changed under it", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.exec(readFileSync(KRATER_MIGRATION, "utf8"));
+    const digest = "d".repeat(64);
+    sqlite
+      .prepare("INSERT INTO problems (id, created_at, updated_at) VALUES (?, ?, ?)")
+      .run("P-quarantine", "2026-08-17T00:00:00Z", "2026-08-17T00:00:00Z");
+    sqlite
+      .prepare(
+        `INSERT INTO events (
+             id, problem_id, seq, type, object_kind, object_id,
+             object_version, payload_sha256, created_at
+           ) VALUES (?, 'P-quarantine', 1, 'claim.created', 'claim', 'C-q', 1, ?, ?)`,
+      )
+      .run("E-quarantine", digest, "2026-08-17T00:00:00Z");
+    sqlite
+      .prepare(
+        `INSERT INTO outbox (
+             id, event_id, problem_id, kind, dedupe_key, payload_sha256, state, created_at
+           ) VALUES (1, 'E-quarantine', 'P-quarantine', 'malformed', ?, ?, 'pending', ?)`,
+      )
+      .run("malformed:E-quarantine", digest, "2026-08-17T00:00:00Z");
+    sqlite.exec(readFileSync(QUARANTINE_MIGRATION, "utf8"));
+
+    const cas = sqlite.prepare(QUARANTINE_CAS_SQL);
+    const selectedBindings = [
+      "2026-08-17T00:05:00Z",
+      "OUTBOX_KIND_INVALID",
+      1,
+      "E-quarantine",
+      "P-quarantine",
+      "malformed",
+      "malformed:E-quarantine",
+      digest,
+    ] as const;
+    sqlite.prepare("UPDATE outbox SET dedupe_key = ? WHERE id = 1").run("replacement:handoff");
+    expect(cas.run(...selectedBindings).changes).toBe(0);
+    expect(
+      sqlite
+        .prepare("SELECT quarantined_at, quarantine_code FROM outbox WHERE id = 1")
+        .get(),
+    ).toEqual({ quarantined_at: null, quarantine_code: null });
+
+    // Non-vacuity: the old primary-key-only predicate quarantines the replaced
+    // row even though these are not the bytes the drain validated.
+    const legacyCas = sqlite.prepare(
+      `UPDATE outbox SET quarantined_at = ?, quarantine_code = ?
+       WHERE id = ? AND state = 'pending' AND quarantined_at IS NULL`,
+    );
+    expect(legacyCas.run("2026-08-17T00:06:00Z", "OUTBOX_KIND_INVALID", 1).changes).toBe(1);
     sqlite.close();
   });
 

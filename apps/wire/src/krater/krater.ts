@@ -1912,7 +1912,11 @@ function validateRevisionInput(input: KraterRevisionInput, serverNowMs: number):
   if (!Number.isSafeInteger(input.baseVersion) || input.baseVersion < 1) {
     inputError("baseVersion must be a positive safe integer.");
   }
-  if (input.newVersion !== input.baseVersion + 1) {
+  if (
+    input.baseVersion >= Number.MAX_SAFE_INTEGER ||
+    !Number.isSafeInteger(input.newVersion) ||
+    input.newVersion !== input.baseVersion + 1
+  ) {
     inputError("newVersion must be exactly baseVersion + 1 (P9 mints @n+1).");
   }
   if (

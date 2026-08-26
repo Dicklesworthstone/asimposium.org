@@ -785,7 +785,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row?.role;
   }
 
-  // ebts: one exact-path response policy for the four mounted Fellow POST
+  // ebts: one exact-path response policy for every mounted Fellow POST
   // routes. Every response class they can emit — fresh success, exact replay,
   // auth refusal, contract refusal, policy refusal, idempotency conflict,
   // typed exceptional refusal — carries session/workshop identifiers or error
@@ -797,6 +797,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions",
     "/v1/sessions/:id/workshop",
     "/v1/sessions/:id/promote",
+    "/v1/sessions/:id/revise",
+    "/v1/sessions/:id/gaps",
+    "/v1/sessions/:id/gaps/close",
+    "/v1/sessions/:id/relations",
+    "/v1/sessions/:id/review",
+    "/v1/sessions/:id/hypotheses",
+    "/v1/sessions/:id/hypotheses/:hid/kill",
+    "/v1/sessions/:id/evidence",
     "/v1/sessions/:id/close",
   ] as const;
   for (const path of FELLOW_WRITE_RECEIPT_PATHS) {

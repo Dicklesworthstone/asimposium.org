@@ -847,10 +847,17 @@ export class KraterOutboxDrainer {
       this.env.DB,
       `UPDATE outbox
           SET quarantined_at = ?, quarantine_code = ?
-        WHERE id = ? AND state = 'pending' AND quarantined_at IS NULL`,
+        WHERE id = ? AND state = 'pending' AND quarantined_at IS NULL
+          AND event_id = ? AND problem_id = ? AND kind = ?
+          AND dedupe_key = ? AND payload_sha256 = ?`,
       new Date().toISOString(),
       code,
       row.id,
+      row.event_id,
+      row.problem_id,
+      row.kind,
+      row.dedupe_key,
+      row.payload_sha256,
     ).run();
     if (result.meta.changes !== 1) return false;
     // No per-event forensic key is written here. D1 is the authority and the

@@ -277,6 +277,33 @@ describe("the error handler does not leak thrown detail", () => {
     ]);
     expect(JSON.stringify(logged)).not.toContain(CANARY_TOKEN);
   });
+
+  test("an encoded credential prefix in a throwing path is redacted from diagnostics", async () => {
+    const app = createApp();
+    app.get("/test-only/:value/boom", () => {
+      throw new Error("ordinary message");
+    });
+    const originalConsoleError = console.error;
+    const logged: unknown[][] = [];
+    console.error = (...values: unknown[]) => {
+      logged.push(values);
+    };
+    try {
+      const response = await app.fetch(
+        new Request("https://a.asimposium.org/test-only/%2561simp_ag_x/boom"),
+        boundEnv() as Env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(response.status).toBe(500);
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(logged).toEqual([
+      ["[wire] unhandled error", { path: "/test-only/<redacted>/boom", error: "unhandled" }],
+    ]);
+    expect(JSON.stringify(logged)).not.toContain("simp_ag_x");
+  });
 });
 
 describe("the 404 face teaches without inventing surface", () => {
@@ -299,5 +326,24 @@ describe("the 404 face teaches without inventing surface", () => {
       "/protocol.md",
       "/v1",
     ]);
+  });
+
+  test("it never reflects a percent-encoded credential prefix", async () => {
+    for (const path of [
+      "/%61simp_ag_x",
+      "/ASIMP%5fAG_short",
+      "/unknown/v1%2E9f2c",
+      "/poll/%66low_v1.aabb",
+      "/safe%252Fasimp_ag_x",
+    ]) {
+      const res = await callWorker(path);
+      const bytes = JSON.stringify(res.body);
+      expect(res.status, path).toBe(404);
+      expect(bytes, path).toContain("<redacted>");
+      expect(bytes, path).not.toContain("simp_ag_x");
+      expect(bytes, path).not.toContain("AG_short");
+      expect(bytes, path).not.toContain("9f2c");
+      expect(bytes, path).not.toContain("aabb");
+    }
   });
 });

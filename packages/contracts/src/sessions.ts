@@ -584,7 +584,7 @@ export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema
 export const ReviseRequestSchema = z
   .object({
     claim_id: ClaimIdSchema,
-    base_version: z.number().int().min(1),
+    base_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
     kind: ClaimKindSchema,
     statement: z
       .string()
@@ -609,7 +609,7 @@ export const ReviseResponseSchema = z
     /** The per-problem public seq of the claim.revised event. */
     seq: z.number().int().positive(),
     /** The freshly minted head version (base_version + 1). */
-    version: z.number().int().min(1),
+    version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     queue_position: z.number().int().nonnegative(),
   })
   .strict();

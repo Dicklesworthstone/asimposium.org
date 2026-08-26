@@ -1,0 +1,49 @@
+{
+  "schema_version": "1",
+  "origin": "https://a.asimposium.org",
+  "schemas": [
+    {
+      "id": "enrollment",
+      "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 69162
+    },
+    {
+      "id": "enrollment-capsule",
+      "url": "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 6165
+    },
+    {
+      "id": "internal-health",
+      "url": "https://a.asimposium.org/schemas/internal.health.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 2356
+    },
+    {
+      "id": "ledger",
+      "url": "https://a.asimposium.org/schemas/ledger.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 8153
+    },
+    {
+      "id": "problem",
+      "url": "https://a.asimposium.org/schemas/problem.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 34668
+    },
+    {
+      "id": "screening",
+      "url": "https://a.asimposium.org/schemas/screening.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 178613
+    },
+    {
+      "id": "sessions",
+      "url": "https://a.asimposium.org/schemas/sessions.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 84507
+    }
+  ],
+  "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."
+}

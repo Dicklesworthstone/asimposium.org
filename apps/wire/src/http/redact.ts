@@ -23,6 +23,10 @@
 
 const MAX_SEGMENT_LENGTH = 24;
 const MAX_SEGMENTS = 8;
+// A still-printable segment can contain at most eleven nested `%25` wrappers
+// around one encoded byte. Decode one pass beyond that bound for inspection so
+// a short multiply-encoded credential prefix cannot evade the prefix rule.
+const MAX_PERCENT_DECODE_PASSES = 12;
 
 /** Known credential shapes, redacted regardless of length. */
 const CREDENTIAL_PREFIXES = [
@@ -43,12 +47,40 @@ const CREDENTIAL_PREFIXES = [
 const REDACTED = "<redacted>";
 const TRUNCATED = "...";
 
+function decodeAsciiPercentEscapes(value: string): string {
+  return value.replace(/%([0-9a-f]{2})/giu, (escape, hex: string) => {
+    const byte = Number.parseInt(hex, 16);
+    return byte <= 0x7f ? String.fromCharCode(byte) : escape;
+  });
+}
+
+function carriesCredentialPrefix(segment: string): boolean {
+  let inspected = segment;
+  for (let pass = 0; pass < MAX_PERCENT_DECODE_PASSES; pass += 1) {
+    // Encoded slashes create path-component boundaries after decoding. Check
+    // each resulting component rather than searching arbitrary substrings, so
+    // safe text such as `workflow_v1.config` remains printable.
+    if (
+      inspected
+        .split("/")
+        .some((part) =>
+          CREDENTIAL_PREFIXES.some((prefix) => part.toLowerCase().startsWith(prefix)),
+        )
+    ) {
+      return true;
+    }
+    const decoded = decodeAsciiPercentEscapes(inspected);
+    if (decoded === inspected) break;
+    inspected = decoded;
+  }
+  return false;
+}
+
 function redactSegment(segment: string): string {
   if (segment.length === 0) {
     return segment;
   }
-  const lowered = segment.toLowerCase();
-  if (CREDENTIAL_PREFIXES.some((prefix) => lowered.startsWith(prefix))) {
+  if (carriesCredentialPrefix(segment)) {
     return REDACTED;
   }
   if (segment.length > MAX_SEGMENT_LENGTH) {

@@ -6822,13 +6822,43 @@ describe("committed promotion outbox nudge", () => {
   });
 
   test("PLANTED: every Fellow write receipt class carries private, no-store (ebts)", async () => {
-    // One exact-path response policy over the four mounted Fellow POST
+    // One exact-path response policy over every mounted Fellow POST
     // routes: fresh success, exact replay, auth refusal, contract refusal,
     // and idempotency conflict receipts all carry Cache-Control:
     // private, no-store. Statuses, bytes, and content-types stay pinned by
     // the existing suites; this table pins only the retention prohibition.
     const { call, token } = await fixture();
     const NO_STORE = "private, no-store";
+
+    // Authentication is the earliest refusal in every handler, so this table
+    // causally proves the retention policy is mounted on every exact dynamic
+    // route without creating scientific objects merely to reach each handler.
+    for (const path of [
+      "/v1/sessions",
+      "/v1/sessions/S-no-store/workshop",
+      "/v1/sessions/S-no-store/promote",
+      "/v1/sessions/S-no-store/revise",
+      "/v1/sessions/S-no-store/gaps",
+      "/v1/sessions/S-no-store/gaps/close",
+      "/v1/sessions/S-no-store/relations",
+      "/v1/sessions/S-no-store/review",
+      "/v1/sessions/S-no-store/hypotheses",
+      "/v1/sessions/S-no-store/hypotheses/H-no-store/kill",
+      "/v1/sessions/S-no-store/evidence",
+      "/v1/sessions/S-no-store/close",
+    ]) {
+      const refused = await call(path, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer not-a-real-token",
+          "content-type": "application/json",
+          "idempotency-key": "ebts-route-census",
+        },
+        body: "{}",
+      });
+      expect(refused.status, path).toBe(401);
+      expect(refused.headers.get("cache-control"), path).toBe(NO_STORE);
+    }
 
     const sessionOpen = async (
       key: string,

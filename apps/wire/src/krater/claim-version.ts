@@ -49,9 +49,13 @@ export async function mintClaimVersion(input: {
   readonly editorFellowId: string;
   readonly sha256Hex: (text: string) => Promise<string>;
 }): Promise<ClaimVersionMint> {
-  if (!Number.isSafeInteger(input.currentVersion) || input.currentVersion < 0) {
+  if (
+    !Number.isSafeInteger(input.currentVersion) ||
+    input.currentVersion < 0 ||
+    input.currentVersion >= Number.MAX_SAFE_INTEGER
+  ) {
     throw new Error(
-      "CLAIM_VERSION_INVALID: the current version must be a non-negative safe integer",
+      "CLAIM_VERSION_INVALID: the current version must be a non-negative safe integer with room for @n+1",
     );
   }
   return {
