@@ -147,13 +147,25 @@ nor a hosted deployment has executed at this revision under the required
 low-load RCH gate. The direct
 failure-blob helper now requires the caller's matching open root-epoch lease
 before its first real-filesystem mutation, while preserving lease-free
-read-only deduplication and pre-mutation validation refusals. The opt-in
+read-only deduplication and pre-mutation validation refusals. Exported run
+identity reconciliation likewise keeps existing-record verification read-only,
+but first creation now requires the exact `run-identity.json` leaf, an open
+root-epoch lease, and the owning directory's physical identity; it re-proves
+that authority and the exact written bytes after exclusive creation. Both the
+reusable top-level namespace reservation and retained child reservation now
+require the same exact owner-directory capability on real storage, and the
+exclusive new-run variants inside `ArtifactStore` re-prove it before and after
+their claims. The opt-in
 real-filesystem fixture suite owns one such lease from before its retained
 namespace/case claims until its synchronous `afterAll` boundary; a crash leaves
-the append-only lease open. This fixture wiring is source-level only and has
-not executed at this revision under the required low-load RCH gate. Other
-exported/raw artifact writers and standalone entry points do not yet share the
-full descendant-settlement contract. There is also no archive locator or
+the append-only lease open. Its remaining raw directory and file plants now
+route through one exact owner-directory capability immediately before and after
+the mutation; fixture files use exclusive creation and never overwrite retained
+bytes. This fixture wiring is source-level only and has
+not executed at this revision under the required low-load RCH gate. This
+exhausts the currently known synchronous raw fixture primitives, but does not
+grant full descendant-settlement semantics to arbitrary future standalone
+entry points. There is also no archive locator or
 operator maintenance acquisition path. Moving or rotating `e2e/artifacts`
 therefore remains unsafe.
 S-6 has a separate fixed contract:

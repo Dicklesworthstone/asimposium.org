@@ -463,6 +463,10 @@ export class ArtifactStore {
     );
     try {
       this.assertWritableArtifactRoot();
+      const artifactRootWriterCapability = this.directoryWriterCapability(
+        this.topLevelArtifactsDirectory,
+        this.artifactRootIdentity,
+      );
       const artifacts =
         artifactNamespace === undefined
           ? topLevelArtifacts
@@ -473,11 +477,17 @@ export class ArtifactStore {
               MAX_ARTIFACT_NAMESPACES,
               storage,
               this.artifactRootIdentity,
+              artifactRootWriterCapability,
             );
+      const artifactsIdentity = storage.directoryIdentity(artifacts);
+      const artifactsWriterCapability = this.directoryWriterCapability(
+        artifacts,
+        artifactsIdentity,
+      );
       this.artifactsDirectory = artifacts;
       this.retainedIntegrationDirectory = artifactNamespace === undefined ? undefined : artifacts;
       this.retainedIntegrationIdentity =
-        artifactNamespace === undefined ? undefined : storage.directoryIdentity(artifacts);
+        artifactNamespace === undefined ? undefined : artifactsIdentity;
       this.artifactRelativeRoot =
         artifactNamespace === undefined ? "e2e/artifacts" : `e2e/artifacts/${artifactNamespace}`;
       /**
@@ -530,6 +540,7 @@ export class ArtifactStore {
               MAX_ARTIFACT_NAMESPACES,
               storage,
               this.artifactRootIdentity,
+              artifactsWriterCapability,
             )
           : reserveNewRetainedIntegrationDirectory(
               artifacts,
@@ -537,6 +548,7 @@ export class ArtifactStore {
               storage,
               1,
               this.artifactRootIdentity,
+              artifactsWriterCapability,
             );
       this.runDirectoryIdentity = storage.directoryIdentity(this.directory);
       this.assertWritableArtifactRoot();
@@ -549,7 +561,13 @@ export class ArtifactStore {
       // appended events would describe work the earlier events never did.
       if (!storage.exists(this.identityPath)) this.assertRetainedCapacity(MAX_EVENT_BYTES);
       this.assertWritableArtifactRoot();
-      reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted, storage);
+      reconcileRunIdentity(
+        this.identityPath,
+        identity,
+        resume && namespaceExisted,
+        storage,
+        this.directoryWriterCapability(this.directory, this.runDirectoryIdentity),
+      );
       if (!storage.exists(this.jsonl)) {
         this.assertWritableArtifactRoot();
         storage.writeExclusive(this.jsonl, "");
@@ -724,6 +742,24 @@ export class ArtifactStore {
       );
     }
     assertArtifactWriterLeaseOpen(lease);
+  }
+
+  private directoryWriterCapability(
+    directory: string,
+    directoryIdentity: string,
+  ): ArtifactDirectoryWriterCapability {
+    const writerLease = this.writerLease;
+    if (writerLease === undefined) {
+      throw new HarnessError(
+        "ARTIFACT_WRITER_LEASE_CLOSED",
+        "artifact writer lease is closed; retained evidence was left untouched.",
+      );
+    }
+    return {
+      writerLease,
+      directory,
+      directoryIdentity,
+    };
   }
 
   d1ArtifactWriterCapability(): D1ArtifactWriterCapability {
@@ -3016,6 +3052,7 @@ export function reconcileRunIdentity(
   identity: RunIdentity,
   resuming: boolean,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
+  writerCapability?: ArtifactDirectoryWriterCapability,
 ): void {
   const digest = runIdentityDigest(identity);
   const body = `${JSON.stringify({
@@ -3041,7 +3078,34 @@ export function reconcileRunIdentity(
         "the retained run has no identity record; refusing to append unverifiable resume evidence.",
       );
     }
-    storage.writeExclusive(path, body);
+    const target = resolve(path);
+    const owner = dirname(target);
+    if (storage === nodeArtifactStorage || writerCapability !== undefined) {
+      if (path !== target || target !== join(owner, RUN_IDENTITY_NAME)) {
+        throw new HarnessError(
+          "ARTIFACT_DIRECTORY_CAPABILITY_INVALID",
+          "run identity creation requires the exact run-identity leaf beneath its owning directory.",
+        );
+      }
+      assertArtifactDirectoryWriterCapability(writerCapability, owner, storage);
+      assertRegularOrAbsent(target, "ARTIFACT_DIRECTORY_CAPABILITY_INVALID", storage);
+      assertArtifactDirectoryWriterCapability(writerCapability, owner, storage);
+    }
+    storage.writeExclusive(target, body);
+    if (storage === nodeArtifactStorage || writerCapability !== undefined) {
+      assertArtifactDirectoryWriterCapability(writerCapability, owner, storage);
+      assertRegularOrAbsent(target, "ARTIFACT_DIRECTORY_CAPABILITY_INVALID", storage);
+      if (
+        !storage.exists(target) ||
+        !storage.isFile(target) ||
+        storage.readFile(target) !== body
+      ) {
+        throw new HarnessError(
+          "ARTIFACT_DIRECTORY_CAPABILITY_INVALID",
+          "run identity creation did not leave its exact bytes in one direct regular file.",
+        );
+      }
+    }
     return;
   }
   let recorded: Record<string, unknown>;
@@ -3492,16 +3556,29 @@ export function reserveArtifactNamespace(
   limit = MAX_ARTIFACT_NAMESPACES,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
   expectedArtifactRootIdentity?: string,
+  writerCapability?: ArtifactDirectoryWriterCapability,
 ): string {
+  if (!validateRunId(namespace)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "artifact namespace names must be safe bounded path components.",
+    );
+  }
   assertExactArtifactsDirectory(root, artifactsDirectory, storage);
   const rootDirectory = realDirectory(resolve(root), "ARTIFACT_PATH_UNSAFE", storage);
   const artifactRoot = realDirectory(resolve(artifactsDirectory), "ARTIFACT_PATH_UNSAFE", storage);
   const expectedIdentity = expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
-  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  const assertWriterAuthority = (): void => {
+    assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+    if (storage === nodeArtifactStorage || writerCapability !== undefined) {
+      assertArtifactDirectoryWriterCapability(writerCapability, artifactRoot, storage);
+    }
+  };
+  assertWriterAuthority();
   assertArtifactNamespaceBudget(root, namespace, limit, storage);
-  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  assertWriterAuthority();
   const reserved = ensureDirectDirectory(artifactsDirectory, namespace, storage);
-  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  assertWriterAuthority();
   return reserved;
 }
 
@@ -3521,12 +3598,19 @@ function reserveNewArtifactNamespace(
   limit = MAX_ARTIFACT_NAMESPACES,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
   expectedArtifactRootIdentity?: string,
+  writerCapability?: ArtifactDirectoryWriterCapability,
 ): string {
   assertExactArtifactsDirectory(root, artifactsDirectory, storage);
   const rootDirectory = realDirectory(resolve(root), "ARTIFACT_PATH_UNSAFE", storage);
   const artifactRoot = realDirectory(resolve(artifactsDirectory), "ARTIFACT_PATH_UNSAFE", storage);
   const expectedIdentity = expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
-  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  const assertWriterAuthority = (): void => {
+    assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+    if (storage === nodeArtifactStorage || writerCapability !== undefined) {
+      assertArtifactDirectoryWriterCapability(writerCapability, artifactRoot, storage);
+    }
+  };
+  assertWriterAuthority();
   if (!validateRunId(namespace)) {
     throw new HarnessError(
       "ARTIFACT_NAMESPACE_INVALID",
@@ -3534,9 +3618,9 @@ function reserveNewArtifactNamespace(
     );
   }
   assertArtifactNamespaceBudget(root, namespace, limit, storage);
-  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  assertWriterAuthority();
   const reserved = createNewRunDirectory(artifactsDirectory, namespace, storage);
-  assertArtifactWriterBoundary(rootDirectory, artifactRoot, expectedIdentity, storage);
+  assertWriterAuthority();
   return reserved;
 }
 
@@ -3706,6 +3790,7 @@ export function reserveRetainedIntegrationDirectory(
   name: string,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
   projectedDirectories = 1,
+  writerCapability?: ArtifactDirectoryWriterCapability,
 ): string {
   if (!validateRunId(name)) {
     throw new HarnessError(
@@ -3721,7 +3806,18 @@ export function reserveRetainedIntegrationDirectory(
     storage,
   );
   const expectedArtifactRootIdentity = storage.directoryIdentity(artifactRoot);
-  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
+  const assertWriterAuthority = (): void => {
+    assertArtifactWriterBoundary(
+      writerRoot,
+      artifactRoot,
+      expectedArtifactRootIdentity,
+      storage,
+    );
+    if (storage === nodeArtifactStorage || writerCapability !== undefined) {
+      assertArtifactDirectoryWriterCapability(writerCapability, root, storage);
+    }
+  };
+  assertWriterAuthority();
   const target = join(root, name);
   if (!storage.exists(target)) {
     assertRetainedIntegrationCapacity(
@@ -3730,9 +3826,9 @@ export function reserveRetainedIntegrationDirectory(
       storage,
     );
   }
-  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
+  assertWriterAuthority();
   const reserved = ensureDirectDirectory(root, name, storage);
-  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
+  assertWriterAuthority();
   return reserved;
 }
 
@@ -3743,6 +3839,7 @@ function reserveNewRetainedIntegrationDirectory(
   storage: HarnessArtifactStorage = nodeArtifactStorage,
   projectedDirectories = 1,
   expectedArtifactRootIdentity?: string,
+  writerCapability?: ArtifactDirectoryWriterCapability,
 ): string {
   if (!validateRunId(name)) {
     throw new HarnessError(
@@ -3758,11 +3855,17 @@ function reserveNewRetainedIntegrationDirectory(
     storage,
   );
   const expectedIdentity = expectedArtifactRootIdentity ?? storage.directoryIdentity(artifactRoot);
-  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
+  const assertWriterAuthority = (): void => {
+    assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
+    if (storage === nodeArtifactStorage || writerCapability !== undefined) {
+      assertArtifactDirectoryWriterCapability(writerCapability, root, storage);
+    }
+  };
+  assertWriterAuthority();
   assertRetainedIntegrationCapacity(root, { additionalDirectories: projectedDirectories }, storage);
-  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
+  assertWriterAuthority();
   const reserved = createNewRunDirectory(root, name, storage);
-  assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedIdentity, storage);
+  assertWriterAuthority();
   return reserved;
 }
 
@@ -3884,6 +3987,62 @@ export interface ArtifactWriterLease {
   readonly directory: string;
   readonly identity: string;
   readonly storage: HarnessArtifactStorage;
+}
+
+/** Exact owner-directory authority paired with one open artifact-root lease. */
+export interface ArtifactDirectoryWriterCapability {
+  readonly writerLease: ArtifactWriterLease;
+  readonly directory: string;
+  readonly directoryIdentity: string;
+}
+
+/**
+ * Re-prove one direct artifact directory immediately around a synchronous
+ * mutation. The root-epoch lease prevents whole-root maintenance while the
+ * directory identity prevents a caller from redirecting a generic writer into
+ * another retained namespace.
+ */
+export function assertArtifactDirectoryWriterCapability(
+  capability: ArtifactDirectoryWriterCapability | undefined,
+  expectedDirectory: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): ArtifactDirectoryWriterCapability {
+  if (capability === undefined) {
+    throw new HarnessError(
+      "ARTIFACT_DIRECTORY_CAPABILITY_REQUIRED",
+      "real artifact creation requires an open lease bound to its exact owning directory.",
+    );
+  }
+  const expected = resolve(expectedDirectory);
+  const lease = capability.writerLease;
+  if (lease.storage !== storage || capability.directory !== expected) {
+    throw new HarnessError(
+      "ARTIFACT_DIRECTORY_CAPABILITY_INVALID",
+      "artifact directory capability does not belong to this storage and exact owner path.",
+    );
+  }
+  assertArtifactWriterLeaseOpen(lease);
+  let actual: string;
+  try {
+    actual = realDirectory(expected, "ARTIFACT_DIRECTORY_CAPABILITY_INVALID", storage);
+  } catch {
+    throw new HarnessError(
+      "ARTIFACT_DIRECTORY_CAPABILITY_INVALID",
+      "artifact directory capability owner is absent, replaced, or redirected.",
+    );
+  }
+  if (
+    actual !== expected ||
+    isOutside(lease.artifactsDirectory, actual) ||
+    storage.directoryIdentity(actual) !== capability.directoryIdentity
+  ) {
+    throw new HarnessError(
+      "ARTIFACT_DIRECTORY_CAPABILITY_INVALID",
+      "artifact directory capability owner is outside its leased root or changed identity.",
+    );
+  }
+  assertArtifactWriterLeaseOpen(lease);
+  return capability;
 }
 
 const D1_ARTIFACT_CAPABILITY_KEYS: readonly (keyof D1ArtifactWriterCapability)[] = [

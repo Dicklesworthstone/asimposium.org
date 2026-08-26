@@ -17,17 +17,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARTIFACT_BLOB_DIRECTORY,
   ARTIFACT_MAINTENANCE_FENCE_NAME,
   ARTIFACT_WRITER_LEASE_CLOSED_NAME,
   ARTIFACT_WRITER_LEASES_NAME,
+  type ArtifactDirectoryWriterCapability,
   ArtifactStore,
   acquireArtifactWriterLeaseAtRoot,
   adapterProbePath,
   artifactCapacityReport,
+  assertArtifactDirectoryWriterCapability,
   assertArtifactNamespaceBudget,
   assertArtifactWriterLeaseOpen,
   assertContainedRoot,
@@ -136,6 +138,7 @@ function sampleEvent(overrides: Partial<HarnessEvent> = {}): HarnessEvent {
 
 const SHELL_HARNESS = fileURLToPath(new URL("../e2e-test-harness.sh", import.meta.url));
 const RUNNER_SOURCE = fileURLToPath(new URL("../harness/runner.ts", import.meta.url));
+const HARNESS_TEST_SOURCE = fileURLToPath(import.meta.url);
 const SECRET_EMITTER = fileURLToPath(
   new URL("../harness/self-test-secret-emitter.ts", import.meta.url),
 );
@@ -389,6 +392,82 @@ function fixtureWriterLease(): ArtifactWriterLease {
   return realFilesystemFixtureWriterLease;
 }
 
+function fixtureDirectoryWriterCapability(
+  directory: string,
+): ArtifactDirectoryWriterCapability {
+  const writerLease = fixtureWriterLease();
+  const physicalDirectory = realpathSync(directory);
+  return {
+    writerLease,
+    directory: physicalDirectory,
+    directoryIdentity: nodeArtifactStorage.directoryIdentity(physicalDirectory),
+  };
+}
+
+function fixtureCreateDirectory(owner: string, target: string): void {
+  const physicalOwner = realpathSync(owner);
+  if (
+    physicalOwner !== owner ||
+    target === physicalOwner ||
+    !isContainedPath(physicalOwner, target)
+  ) {
+    throw new Error("fixture directory creation escaped its exact physical owner");
+  }
+
+  let physicalParent = physicalOwner;
+  for (const component of relative(physicalOwner, target).split(sep)) {
+    if (component === "" || component === "." || component === "..") {
+      throw new Error("fixture directory creation received an unsafe path component");
+    }
+    const directChild = join(physicalParent, component);
+    const capability = fixtureDirectoryWriterCapability(physicalParent);
+    assertArtifactDirectoryWriterCapability(capability, physicalParent, nodeArtifactStorage);
+    if (!existsSync(directChild)) mkdirSync(directChild, { mode: 0o700 });
+    const targetStat = lstatSync(directChild);
+    if (
+      targetStat.isSymbolicLink() ||
+      !targetStat.isDirectory() ||
+      realpathSync(directChild) !== directChild
+    ) {
+      throw new Error("fixture directory creation was redirected or replaced");
+    }
+    assertArtifactDirectoryWriterCapability(capability, physicalParent, nodeArtifactStorage);
+    physicalParent = directChild;
+  }
+}
+
+function fixtureWriteFile(owner: string, target: string, data: string): void {
+  const physicalOwner = realpathSync(owner);
+  if (physicalOwner !== owner || dirname(target) !== physicalOwner) {
+    throw new Error("fixture file creation escaped its exact physical owner");
+  }
+  const capability = fixtureDirectoryWriterCapability(physicalOwner);
+  assertArtifactDirectoryWriterCapability(capability, physicalOwner, nodeArtifactStorage);
+  writeFileSync(target, data, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  const targetStat = lstatSync(target);
+  if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
+    throw new Error("fixture file creation was redirected or replaced");
+  }
+  assertArtifactDirectoryWriterCapability(capability, physicalOwner, nodeArtifactStorage);
+}
+
+function reserveFixtureArtifactNamespace(
+  root: string,
+  namespace: string,
+  limit = MAX_ARTIFACT_NAMESPACES,
+): string {
+  const artifacts = realpathSync(join(root, "e2e", "artifacts"));
+  return reserveArtifactNamespace(
+    root,
+    artifacts,
+    namespace,
+    limit,
+    nodeArtifactStorage,
+    nodeArtifactStorage.directoryIdentity(artifacts),
+    fixtureDirectoryWriterCapability(artifacts),
+  );
+}
+
 if (realFilesystemIntegrationEnabled) {
   afterAll(() => {
     const lease = realFilesystemFixtureWriterLease;
@@ -487,14 +566,10 @@ function simulatedD1ArtifactCapability(
 function retainedIntegrationRoot(): string {
   const lease = fixtureWriterLease();
   const checkout = lease.root;
-  const artifacts = lease.artifactsDirectory;
   assertArtifactWriterLeaseOpen(lease);
-  return reserveArtifactNamespace(
+  return reserveFixtureArtifactNamespace(
     checkout,
-    artifacts,
     DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
-    MAX_ARTIFACT_NAMESPACES,
-    nodeArtifactStorage,
   );
 }
 
@@ -519,11 +594,11 @@ function fixtureScratchRoot(name: string): string {
     caseNamespace,
     nodeArtifactStorage,
     1,
+    fixtureDirectoryWriterCapability(integration),
   );
   assertArtifactWriterLeaseOpen(fixtureWriterLease());
-  nodeArtifactStorage.mkdir(join(root, "e2e"));
-  assertArtifactWriterLeaseOpen(fixtureWriterLease());
-  nodeArtifactStorage.mkdir(join(root, "e2e", "artifacts"));
+  fixtureCreateDirectory(root, join(root, "e2e"));
+  fixtureCreateDirectory(join(root, "e2e"), join(root, "e2e", "artifacts"));
   return root;
 }
 
@@ -3307,9 +3382,9 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
     const root = fixtureScratchRoot("mismatch");
     const payload = `mismatch payload ${process.pid}\n`;
     // Occupy the digest with bytes that disagree, as on-disk corruption would.
-    mkdirSync(blobStore(root), { recursive: true });
+    fixtureCreateDirectory(join(root, "e2e", "artifacts"), blobStore(root));
     const corrupted = "not the bytes this digest names\n";
-    writeFileSync(join(blobStore(root), digestOf(payload)), corrupted);
+    fixtureWriteFile(blobStore(root), join(blobStore(root), digestOf(payload)), corrupted);
 
     expect(() => publish(root, payload)).toThrow(/does not match its digest/);
     // Refused, not repaired: the divergent file is still exactly as it was.
@@ -3320,8 +3395,8 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
     const root = fixtureScratchRoot("lost-race");
     const payload = `contended payload ${process.pid}\n`;
     // Stand in for a winner publishing between the existence check and the link.
-    mkdirSync(blobStore(root), { recursive: true });
-    writeFileSync(join(blobStore(root), digestOf(payload)), payload);
+    fixtureCreateDirectory(join(root, "e2e", "artifacts"), blobStore(root));
+    fixtureWriteFile(blobStore(root), join(blobStore(root), digestOf(payload)), payload);
 
     expect(() => publish(root, payload)).not.toThrow();
     expect(readFileSync(join(blobStore(root), digestOf(payload)), "utf8")).toBe(payload);
@@ -3381,8 +3456,8 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
     // A staging entry left by a process that died mid-write. It was never
     // linked into the store, so no reader can reach it by digest.
     const staging = join(blobStore(root), "incoming");
-    mkdirSync(staging, { recursive: true });
-    writeFileSync(join(staging, `${digestOf(body)}.99999.1`), "half");
+    fixtureCreateDirectory(join(root, "e2e", "artifacts"), staging);
+    fixtureWriteFile(staging, join(staging, `${digestOf(body)}.99999.1`), "half");
     expect(existsSync(join(blobStore(root), digestOf(body)))).toBe(false);
 
     // A real publication still stores the whole bytes, and the torn entry stays.
@@ -3452,7 +3527,7 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
     const artifactsDirectory = join(root, "e2e", "artifacts");
     const beforeLink = (path: string): void => {
       // A different payload occupies the digest first — corruption, not a race.
-      if (!existsSync(path)) writeFileSync(path, "impostor bytes\n");
+      if (!existsSync(path)) fixtureWriteFile(dirname(path), path, "impostor bytes\n");
     };
     expect(() =>
       publishFailureBlob({
@@ -3511,10 +3586,15 @@ describeRealFilesystemIntegration("real filesystem manifest fixtures", () => {
   }
 
   function writeManifest(root: string, lines: readonly object[], runId = RUN): string {
+    const artifacts = join(root, "e2e", "artifacts");
     const directory = join(root, "e2e", "artifacts", runId);
-    mkdirSync(directory, { recursive: true });
+    fixtureCreateDirectory(artifacts, directory);
     const manifest = join(directory, FAILURE_MANIFEST_NAME);
-    writeFileSync(manifest, `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    fixtureWriteFile(
+      directory,
+      manifest,
+      `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    );
     return manifest;
   }
 
@@ -3522,8 +3602,8 @@ describeRealFilesystemIntegration("real filesystem manifest fixtures", () => {
 
   function plantBlob(root: string, body: string): void {
     const store = join(artifactsOf(root), ARTIFACT_BLOB_DIRECTORY, "sha256");
-    mkdirSync(store, { recursive: true });
-    writeFileSync(join(store, digestOf(body)), body);
+    fixtureCreateDirectory(artifactsOf(root), store);
+    fixtureWriteFile(store, join(store, digestOf(body)), body);
   }
 
   test("PLANTED: an intent whose blob never arrived still spends its slot", () => {
@@ -3634,9 +3714,9 @@ describeRealFilesystemIntegration("real filesystem manifest fixtures", () => {
         let manifest: string;
         if (typeof built === "string") {
           const directory = join(artifactsOf(root), RUN);
-          mkdirSync(directory, { recursive: true });
+          fixtureCreateDirectory(artifactsOf(root), directory);
           manifest = join(directory, FAILURE_MANIFEST_NAME);
-          writeFileSync(manifest, built);
+          fixtureWriteFile(directory, manifest, built);
         } else {
           manifest = writeManifest(root, built);
         }
@@ -3650,8 +3730,8 @@ describeRealFilesystemIntegration("real filesystem manifest fixtures", () => {
   });
 });
 
-describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
-  const base = {
+function runIdentityTestValue() {
+  return {
     runId: "identity-run",
     suite: "unit",
     seed: 7,
@@ -3663,12 +3743,300 @@ describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
     childEnvironmentDigest: "c".repeat(64),
     bindingVersions: {},
   };
+}
+
+interface SimulatedDirectoryCapabilityFixture {
+  readonly root: string;
+  readonly artifactRoot: string;
+  readonly owner: string;
+  readonly path: string;
+  readonly storage: ReturnType<typeof createMemoryArtifactStorage>;
+  readonly capability: ArtifactDirectoryWriterCapability;
+}
+
+function simulatedDirectoryCapabilityFixture(
+  label: string,
+): SimulatedDirectoryCapabilityFixture {
+  const root = fixtureRoot(`directory-capability-${label}`);
+  const storage = fixtureStorage();
+  const artifactRoot = join(root, "e2e", "artifacts");
+  const owner = join(artifactRoot, `owner-${label}`);
+  storage.seedDirectory(owner);
+  const writerLease = acquireArtifactWriterLeaseAtRoot(root, storage);
+  const capability: ArtifactDirectoryWriterCapability = {
+    writerLease,
+    directory: owner,
+    directoryIdentity: storage.directoryIdentity(owner),
+  };
+  return {
+    root,
+    artifactRoot,
+    owner,
+    path: join(owner, RUN_IDENTITY_NAME),
+    storage,
+    capability,
+  };
+}
+
+describe("run identity directory capability", () => {
+  test("an exact open capability permits one simulated direct identity creation", () => {
+    const value = simulatedDirectoryCapabilityFixture("valid");
+    reconcileRunIdentity(
+      value.path,
+      runIdentityTestValue(),
+      false,
+      value.storage,
+      value.capability,
+    );
+    expect(value.storage.files.has(value.path)).toBe(true);
+  });
+
+  test("PLANTED: another leaf, owner, or outside path is refused before creation", () => {
+    const value = simulatedDirectoryCapabilityFixture("wrong-target");
+    for (const path of [
+      join(value.owner, "not-run-identity.json"),
+      join(value.artifactRoot, RUN_IDENTITY_NAME),
+      join(value.root, "outside-artifacts", RUN_IDENTITY_NAME),
+    ]) {
+      expect(() =>
+        reconcileRunIdentity(
+          path,
+          runIdentityTestValue(),
+          false,
+          value.storage,
+          value.capability,
+        ),
+      ).toThrow(/exact run-identity leaf|exact owner path/);
+      expect(value.storage.files.has(path)).toBe(false);
+    }
+  });
+
+  test("PLANTED: a closed or foreign lease is refused before creation", () => {
+    const closed = simulatedDirectoryCapabilityFixture("closed");
+    closeArtifactWriterLease(closed.capability.writerLease);
+    expect(() =>
+      reconcileRunIdentity(
+        closed.path,
+        runIdentityTestValue(),
+        false,
+        closed.storage,
+        closed.capability,
+      ),
+    ).toThrow(/ARTIFACT_WRITER_LEASE_CLOSED|lease.*closed/);
+    expect(closed.storage.files.has(closed.path)).toBe(false);
+
+    const foreign = simulatedDirectoryCapabilityFixture("foreign");
+    const forgedCapability: ArtifactDirectoryWriterCapability = {
+      ...foreign.capability,
+      writerLease: {
+        ...foreign.capability.writerLease,
+        directory: foreign.owner,
+        identity: foreign.storage.directoryIdentity(foreign.owner),
+      },
+    };
+    expect(() =>
+      reconcileRunIdentity(
+        foreign.path,
+        runIdentityTestValue(),
+        false,
+        foreign.storage,
+        forgedCapability,
+      ),
+    ).toThrow(/ARTIFACT_WRITER_LEASE_INVALID|lease.*epoch/);
+    expect(foreign.storage.files.has(foreign.path)).toBe(false);
+  });
+
+  test("PLANTED: a maintenance fence or replaced root is refused before creation", () => {
+    const fenced = simulatedDirectoryCapabilityFixture("fenced");
+    fenced.storage.seedDirectory(
+      join(fenced.root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
+    );
+    expect(() =>
+      reconcileRunIdentity(
+        fenced.path,
+        runIdentityTestValue(),
+        false,
+        fenced.storage,
+        fenced.capability,
+      ),
+    ).toThrow(/ARTIFACT_MAINTENANCE_ACTIVE|maintenance is active/);
+    expect(fenced.storage.files.has(fenced.path)).toBe(false);
+
+    const replaced = simulatedDirectoryCapabilityFixture("root-replaced");
+    replaced.storage.directories.delete(replaced.artifactRoot);
+    replaced.storage.mkdir(replaced.artifactRoot);
+    expect(() =>
+      reconcileRunIdentity(
+        replaced.path,
+        runIdentityTestValue(),
+        false,
+        replaced.storage,
+        replaced.capability,
+      ),
+    ).toThrow(/ARTIFACT_ROOT_CHANGED|physical artifact root changed/);
+    expect(replaced.storage.files.has(replaced.path)).toBe(false);
+  });
+
+  test("PLANTED: a replaced owner is refused before creation", () => {
+    const value = simulatedDirectoryCapabilityFixture("owner-replaced");
+    value.storage.directories.delete(value.owner);
+    value.storage.mkdir(value.owner);
+    expect(() =>
+      reconcileRunIdentity(
+        value.path,
+        runIdentityTestValue(),
+        false,
+        value.storage,
+        value.capability,
+      ),
+    ).toThrow(/ARTIFACT_DIRECTORY_CAPABILITY_INVALID|changed identity/);
+    expect(value.storage.files.has(value.path)).toBe(false);
+  });
+
+  test("PLANTED: an owner swap during the exclusive write is detected afterward", () => {
+    const root = fixtureRoot("directory-capability-post-write");
+    const base = fixtureStorage();
+    const artifactRoot = join(root, "e2e", "artifacts");
+    const owner = join(artifactRoot, "owner-post-write");
+    const path = join(owner, RUN_IDENTITY_NAME);
+    base.seedDirectory(owner);
+    let swapped = false;
+    const storage: HarnessArtifactStorage = {
+      ...base,
+      writeExclusive: (target, data) => {
+        base.writeExclusive(target, data);
+        base.directories.delete(owner);
+        base.mkdir(owner);
+        swapped = true;
+      },
+    };
+    const writerLease = acquireArtifactWriterLeaseAtRoot(root, storage);
+    const capability: ArtifactDirectoryWriterCapability = {
+      writerLease,
+      directory: owner,
+      directoryIdentity: storage.directoryIdentity(owner),
+    };
+    expect(() =>
+      reconcileRunIdentity(
+        path,
+        runIdentityTestValue(),
+        false,
+        storage,
+        capability,
+      ),
+    ).toThrow(/ARTIFACT_DIRECTORY_CAPABILITY_INVALID|changed identity/);
+    expect(swapped).toBe(true);
+    expect(base.files.has(path)).toBe(true);
+  });
+});
+
+describe("artifact reservation directory capability", () => {
+  test("exact owner capabilities permit simulated top-level and retained claims", () => {
+    const value = simulatedDirectoryCapabilityFixture("reservation-valid");
+    const artifactRootCapability: ArtifactDirectoryWriterCapability = {
+      ...value.capability,
+      directory: value.artifactRoot,
+      directoryIdentity: value.storage.directoryIdentity(value.artifactRoot),
+    };
+    expect(
+      reserveArtifactNamespace(
+        value.root,
+        value.artifactRoot,
+        "top-level-child",
+        MAX_ARTIFACT_NAMESPACES,
+        value.storage,
+        value.storage.directoryIdentity(value.artifactRoot),
+        artifactRootCapability,
+      ),
+    ).toBe(join(value.artifactRoot, "top-level-child"));
+    expect(
+      reserveRetainedIntegrationDirectory(
+        value.owner,
+        "retained-child",
+        value.storage,
+        1,
+        value.capability,
+      ),
+    ).toBe(join(value.owner, "retained-child"));
+  });
+
+  test("PLANTED: a replaced retained owner refuses before its child exists", () => {
+    const value = simulatedDirectoryCapabilityFixture("reservation-owner-replaced");
+    const target = join(value.owner, "retained-child");
+    value.storage.directories.delete(value.owner);
+    value.storage.mkdir(value.owner);
+    expect(() =>
+      reserveRetainedIntegrationDirectory(
+        value.owner,
+        "retained-child",
+        value.storage,
+        1,
+        value.capability,
+      ),
+    ).toThrow(/changed identity|outside its leased root/);
+    expect(value.storage.exists(target)).toBe(false);
+  });
+
+  test("PLANTED: a nested top-level name is refused as more than one component", () => {
+    const value = simulatedDirectoryCapabilityFixture("reservation-nested-name");
+    const artifactRootCapability: ArtifactDirectoryWriterCapability = {
+      ...value.capability,
+      directory: value.artifactRoot,
+      directoryIdentity: value.storage.directoryIdentity(value.artifactRoot),
+    };
+    expect(() =>
+      reserveArtifactNamespace(
+        value.root,
+        value.artifactRoot,
+        "nested/child",
+        MAX_ARTIFACT_NAMESPACES,
+        value.storage,
+        value.storage.directoryIdentity(value.artifactRoot),
+        artifactRootCapability,
+      ),
+    ).toThrow(/safe bounded path components/);
+    expect(value.storage.exists(join(value.artifactRoot, "nested"))).toBe(false);
+  });
+});
+
+test("real fixture raw mutations stay inside the exact owner capability wrappers", () => {
+  const source = readFileSync(HARNESS_TEST_SOURCE, "utf8");
+  const directoryStart = source.indexOf("function fixtureCreateDirectory(");
+  const fileStart = source.indexOf("function fixtureWriteFile(", directoryStart);
+  const nextStart = source.indexOf("function reserveFixtureArtifactNamespace(", fileStart);
+  expect(directoryStart).toBeGreaterThanOrEqual(0);
+  expect(fileStart).toBeGreaterThan(directoryStart);
+  expect(nextStart).toBeGreaterThan(fileStart);
+  const directoryWrapper = source.slice(directoryStart, fileStart);
+  const fileWrapper = source.slice(fileStart, nextStart);
+  expect(source.match(/\bmkdirSync\(/g)).toHaveLength(1);
+  expect(source.match(/\bwriteFileSync\(/g)).toHaveLength(1);
+  expect(directoryWrapper.match(/assertArtifactDirectoryWriterCapability\(/g)).toHaveLength(2);
+  expect(fileWrapper.match(/assertArtifactDirectoryWriterCapability\(/g)).toHaveLength(2);
+  expect(directoryWrapper).not.toContain("recursive: true");
+  expect(directoryWrapper).toContain("for (const component of");
+  expect(fileWrapper).toContain('flag: "wx"');
+});
+
+describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
+  const base = runIdentityTestValue();
 
   test("the identity is recorded once and re-verified unchanged", () => {
     const root = fixtureScratchRoot("identity-stable");
     const path = join(root, RUN_IDENTITY_NAME);
-    reconcileRunIdentity(path, base, false);
+    expect(() => reconcileRunIdentity(path, base, false)).toThrow(
+      /ARTIFACT_DIRECTORY_CAPABILITY_REQUIRED|open lease/,
+    );
+    expect(existsSync(path)).toBe(false);
+    reconcileRunIdentity(
+      path,
+      base,
+      false,
+      nodeArtifactStorage,
+      fixtureDirectoryWriterCapability(root),
+    );
     expect(existsSync(path)).toBe(true);
+    // Existing-record verification is read-only and therefore lease-free.
     expect(() => reconcileRunIdentity(path, base, true)).not.toThrow();
   });
 
@@ -3681,7 +4049,13 @@ describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
     test(`PLANTED: a resume that changes the ${what} is refused`, () => {
       const root = fixtureScratchRoot("identity-change");
       const path = join(root, RUN_IDENTITY_NAME);
-      reconcileRunIdentity(path, base, false);
+      reconcileRunIdentity(
+        path,
+        base,
+        false,
+        nodeArtifactStorage,
+        fixtureDirectoryWriterCapability(root),
+      );
       // The events already on disk describe work this invocation is not doing.
       expect(() => reconcileRunIdentity(path, changed, true)).toThrow(
         /RUN_IDENTITY_MISMATCH|different run/,
@@ -3694,7 +4068,7 @@ describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
   test("PLANTED: an unreadable identity record refuses the resume", () => {
     const root = fixtureScratchRoot("identity-corrupt");
     const path = join(root, RUN_IDENTITY_NAME);
-    writeFileSync(path, "{ this is not json\n");
+    fixtureWriteFile(root, path, "{ this is not json\n");
     expect(() => reconcileRunIdentity(path, base, true)).toThrow(
       /RUN_IDENTITY_UNREADABLE|cannot be matched/,
     );
@@ -3704,17 +4078,17 @@ describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
     const root = fixtureScratchRoot("namespace-occupied");
     const artifacts = join(root, "e2e", "artifacts");
     const occupied = join(artifacts, "taken");
-    mkdirSync(occupied, { recursive: true });
+    fixtureCreateDirectory(artifacts, occupied);
     // No events.jsonl — only other evidence. Testing for the ledger alone let a
     // new run adopt this directory and append to another run's artifacts.
-    writeFileSync(join(occupied, FAILURE_MANIFEST_NAME), "");
+    fixtureWriteFile(occupied, join(occupied, FAILURE_MANIFEST_NAME), "");
 
     // The namespace is the unit of ownership, so existence is the whole check.
     expect(existsSync(join(artifacts, "taken"))).toBe(true);
     expect(existsSync(join(occupied, "events.jsonl"))).toBe(false);
     // Reservation still permits reuse; it is the new-run branch that refuses,
     // which is why the guard sits in the store rather than in reservation.
-    expect(() => reserveArtifactNamespace(root, artifacts, "taken", 5)).not.toThrow();
+    expect(() => reserveFixtureArtifactNamespace(root, "taken", 5)).not.toThrow();
   });
 });
 
@@ -4072,13 +4446,32 @@ describe("new-run artifact namespace ownership", () => {
 });
 
 describeRealFilesystemIntegration("real filesystem reservation semantics", () => {
+  test("a retained child reservation without the suite lease creates nothing", () => {
+    const integration = retainedIntegrationRoot();
+    const name = `missing-capability-${process.pid}-${scratchCounter}`;
+    expect(() =>
+      reserveRetainedIntegrationDirectory(
+        integration,
+        name,
+        nodeArtifactStorage,
+        1,
+      ),
+    ).toThrow(/ARTIFACT_DIRECTORY_CAPABILITY_REQUIRED|open lease/);
+    expect(existsSync(join(integration, name))).toBe(false);
+  });
+
   test("reserving at the limit creates nothing and keeps existing evidence", () => {
     const root = fixtureScratchRoot("reserve-limit");
     const artifacts = join(root, "e2e", "artifacts");
-    mkdirSync(join(artifacts, "occupied"), { recursive: true });
-    writeFileSync(join(artifacts, "occupied", "evidence.log"), "retained\n");
+    const occupied = join(artifacts, "occupied");
+    fixtureCreateDirectory(artifacts, occupied);
+    fixtureWriteFile(occupied, join(occupied, "evidence.log"), "retained\n");
 
     expect(() => reserveArtifactNamespace(root, artifacts, "brand-new", 1)).toThrow(
+      /ARTIFACT_DIRECTORY_CAPABILITY_REQUIRED|open lease/,
+    );
+    expect(existsSync(join(artifacts, "brand-new"))).toBe(false);
+    expect(() => reserveFixtureArtifactNamespace(root, "brand-new", 1)).toThrow(
       /ARTIFACT_RETENTION_EXCEEDED|backstop/,
     );
     expect(existsSync(join(artifacts, "brand-new"))).toBe(false);
@@ -4088,9 +4481,9 @@ describeRealFilesystemIntegration("real filesystem reservation semantics", () =>
   test("reserving an existing namespace returns it without spending budget", () => {
     const root = fixtureScratchRoot("reserve-reuse");
     const artifacts = join(root, "e2e", "artifacts");
-    mkdirSync(join(artifacts, "already"), { recursive: true });
+    fixtureCreateDirectory(artifacts, join(artifacts, "already"));
     // A resume must not be refused by a ceiling on *new* namespaces.
-    expect(reserveArtifactNamespace(root, artifacts, "already", 1)).toBe(
+    expect(reserveFixtureArtifactNamespace(root, "already", 1)).toBe(
       realpathSync(join(artifacts, "already")),
     );
     expect(countArtifactNamespaces(root)).toBe(1);
@@ -4103,12 +4496,12 @@ describeRealFilesystemIntegration("real filesystem reservation semantics", () =>
     // backstop, not a quota; the honest claim is that it overshoots by at most
     // the number of writers racing at the boundary, and a test that asserted
     // exactness under concurrency would be asserting something untrue.
-    reserveArtifactNamespace(root, artifacts, "racer-a", 2);
-    reserveArtifactNamespace(root, artifacts, "racer-b", 2);
+    reserveFixtureArtifactNamespace(root, "racer-a", 2);
+    reserveFixtureArtifactNamespace(root, "racer-b", 2);
     expect(countArtifactNamespaces(root)).toBe(2);
     // Serially, the very next one is refused: the bound holds once the count is
     // observed after the race rather than during it.
-    expect(() => reserveArtifactNamespace(root, artifacts, "racer-c", 2)).toThrow(
+    expect(() => reserveFixtureArtifactNamespace(root, "racer-c", 2)).toThrow(
       /ARTIFACT_RETENTION_EXCEEDED|backstop/,
     );
   });
