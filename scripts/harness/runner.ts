@@ -3797,6 +3797,12 @@ export function summarizeArtifactCensusObservations(
   observations: readonly ArtifactCensusObservation[],
   context: ArtifactCensusContext,
 ): ArtifactRetentionCensusReport {
+  const leaseCounts = [
+    context.writerLeases.open,
+    context.writerLeases.closed,
+    context.writerLeases.malformed,
+    context.writerLeases.foreignEpochs,
+  ];
   if (
     !Number.isSafeInteger(context.observedAtMilliseconds) ||
     context.observedAtMilliseconds < 0 ||
@@ -3806,6 +3812,7 @@ export function summarizeArtifactCensusObservations(
     context.hashedBytes < 0n ||
     context.hashedBytes > context.hashByteLimit ||
     observations.length > context.entryLimit ||
+    !leaseCounts.every((value) => Number.isSafeInteger(value) && value >= 0) ||
     !SHA256_HEX.test(context.maintenance.snapshotSha256) ||
     !SHA256_HEX.test(context.writerLeases.snapshotSha256) ||
     (context.locateSha256 !== undefined && !SHA256_HEX.test(context.locateSha256)) ||

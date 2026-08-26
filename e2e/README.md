@@ -186,7 +186,7 @@ JSON fields, and reproduction text are never emitted. A caller that retains the
 record must redirect stdout to an explicitly chosen location outside
 `e2e/artifacts`; the tool itself creates no census file. Entry or byte limits,
 filesystem drift, unreadable nodes, an open current-epoch lease, or a malformed
-lease suppress the canonical tree/content digests and returns the blocked exit
+lease suppress the canonical tree/content digests and return the blocked exit
 code. Even `archive_candidate: true` is only an observed precondition summary,
 never permission to move or delete evidence. This census and locator are
 source-wired only and have not executed at this revision under the required
