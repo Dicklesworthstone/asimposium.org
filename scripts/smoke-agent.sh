@@ -185,6 +185,78 @@ smoke_agent_fetch_cursor() {
   printf '%s\n' "$cursor"
 }
 
+# Bounded Retry-After honoring for public preflight GETs. A 429 whose
+# Retry-After header is absent, non-numeric, non-positive, or above the bound
+# refuses immediately: the smoke gate never sleeps on an unbounded or forged
+# value, and it retries exactly once before reporting the surface as
+# rate-limited.
+smoke_agent_retry_after_bound_seconds() {
+  local bound="${ASIMPOSIUM_SMOKE_MAX_RETRY_AFTER_SECONDS:-10}"
+  [[ "$bound" =~ ^[1-9][0-9]{0,3}$ ]] || return 1
+  printf '%s' "$bound"
+}
+
+smoke_agent_sleep_retry_after() { # $1 = response headers file; rc 0 = slept
+  local raw bound
+  raw="$(LC_ALL=C grep -i '^retry-after:' "$1" 2>/dev/null | tail -n 1 | cut -d: -f2- | tr -d ' \t\r')" || return 1
+  [[ -n "$raw" && "$raw" =~ ^[0-9]+$ ]] || return 1
+  (( 10#$raw > 0 )) || return 1
+  bound="$(smoke_agent_retry_after_bound_seconds)" || return 1
+  (( 10#$raw <= 10#$bound )) || return 1
+  sleep "$raw"
+}
+
+# Runs one GET and prints curl's body+write-out blob unchanged. On a 429 with
+# an honorable Retry-After it sleeps once and retries once. Returns 29 when
+# the surface stays rate-limited or the header is not honorably bounded;
+# returns the transport failure code otherwise. Headers never outlive this
+# function and are written only to a private file under TMPDIR.
+smoke_agent_fetch_with_rate_limit() { # $1 = write-out, $2 = url, rest = extra args
+  local write_out="$1" url="$2" attempt headers response status status_line curl_status
+  shift 2
+  for attempt in 1 2; do
+    headers="$(mktemp "${TMPDIR:-/tmp}/smoke-agent-headers.XXXXXX")" || return 99
+    curl_status=0
+    response="$(e2e_curl --silent --max-time 15 --connect-timeout 5 \
+      --dump-header "$headers" --write-out "$write_out" "$@" "$url" 2>/dev/null)" || curl_status=$?
+    if (( curl_status != 0 )); then
+      rm -f "$headers"
+      return "$curl_status"
+    fi
+    status_line="${response##*$'\n'}"
+    status="${status_line%%$'\t'*}"
+    if [[ "$status" == "429" ]]; then
+      if [[ "$attempt" -eq 1 ]] && smoke_agent_sleep_retry_after "$headers"; then
+        rm -f "$headers"
+        continue
+      fi
+      rm -f "$headers"
+      return 29
+    fi
+    rm -f "$headers"
+    printf '%s' "$response"
+    return 0
+  done
+}
+
+# e2e_probe_public_path semantics (2xx without redirect) plus rate-limiting.
+smoke_agent_probe_with_rate_limit() { # $1 = origin, $2 = path; rc 29 = rate-limited
+  local origin="$1" path="$2" probe_result http_status redirect_url fetch_status
+  fetch_status=0
+  probe_result="$(smoke_agent_fetch_with_rate_limit $'%{http_code}\t%{redirect_url}' "$origin$path" --output /dev/null)" || fetch_status=$?
+  if (( fetch_status != 0 )); then
+    if (( fetch_status == 29 )); then
+      return 29
+    fi
+    return 1
+  fi
+  [[ "$probe_result" == *$'\t'* && "$probe_result" != *$'\n'* ]] || return 1
+  http_status="${probe_result%%$'\t'*}"
+  redirect_url="${probe_result#*$'\t'}"
+  [[ "$redirect_url" != *$'\t'* ]] || return 1
+  [[ "$http_status" =~ ^2[0-9][0-9]$ && -z "$redirect_url" ]]
+}
+
 smoke_agent_run_fixture_self_test() {
   # Exercises the response check functions against fixtures: acceptance must
   # pass, every violation class must refuse. No network; no real handles.
@@ -383,13 +455,25 @@ if [[ -n "$smoke_fellow_token" ]] && ! e2e_validate_fellow_token "$smoke_fellow_
   exit 90
 fi
 
-if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_UNAVAILABLE" "$reproduce"
+handbook_status=0
+smoke_agent_probe_with_rate_limit "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/" || handbook_status=$?
+if (( handbook_status != 0 )); then
+  if (( handbook_status == 29 )); then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_RATE_LIMITED" "$reproduce"
+  else
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_UNAVAILABLE" "$reproduce"
+  fi
   exit 69
 fi
 
-if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/capabilities"; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CAPABILITIES_UNAVAILABLE" "$reproduce"
+capabilities_status=0
+smoke_agent_probe_with_rate_limit "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/capabilities" || capabilities_status=$?
+if (( capabilities_status != 0 )); then
+  if (( capabilities_status == 29 )); then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CAPABILITIES_RATE_LIMITED" "$reproduce"
+  else
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CAPABILITIES_UNAVAILABLE" "$reproduce"
+  fi
   exit 69
 fi
 
@@ -398,7 +482,12 @@ fi
 # check cannot prove absence of private bytes without a seeded canary; that
 # stronger deployed pair remains an S-3 evidence boundary. The sponsor route
 # must also return its exact anonymous authorization face before body parsing.
-if ! split_index_response="$(e2e_curl --silent --max-time 15 --write-out $'\n%{http_code}\t%{content_type}' "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/problems.json" 2>/dev/null)"; then
+split_index_fetch_status=0
+split_index_response="$(smoke_agent_fetch_with_rate_limit $'\n%{http_code}\t%{content_type}' "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/problems.json")" || split_index_fetch_status=$?
+if (( split_index_fetch_status == 29 )); then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PROBLEM_INDEX_RATE_LIMITED" "$reproduce"
+  exit 87
+elif (( split_index_fetch_status != 0 )); then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PROBLEM_INDEX_UNAVAILABLE" "$reproduce"
   exit 87
 fi
