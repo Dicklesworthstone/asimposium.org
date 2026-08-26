@@ -131,14 +131,20 @@ before starting provider tools, and re-proves the capability before provider
 operations and retained receipt writes. Only the top-level pipeline closes the
 lease. Its bounded stage wrapper polls the owned process group after SIGKILL and
 acknowledges proven absence over a private descriptor that stage descendants do
-not inherit. A missing acknowledgement becomes exit 125 and leaves the parent
-lease open regardless of the wrapper's own exit status. The focused tests
+not inherit. On Linux it also becomes a child subreaper before spawn, then uses
+`/proc` direct-child census plus pidfds to TERM/KILL and reap descendants that
+escaped into another session; only an empty original group and empty adopted
+child census can acknowledge full settlement. A missing or malformed
+acknowledgement becomes exit 125. A host without that exact descendant authority
+may preserve the stage result, but emits an explicit unproven acknowledgement
+that leaves the parent lease open for the entire pipeline. The focused tests
 include one live-capability positive control, reject root/run/lease identity
 mismatches, a foreign lease, a closed lease, and an artifact-maintenance fence,
 and exercise an actual claimed lease on the settled-close,
-deliberately-unprovable-open, and abnormal-wrapper-open paths. This CI wiring is
-also source-level only; neither its process controls nor a hosted deployment has
-executed at this revision under the required low-load RCH gate. The direct
+re-daemonized-session, deliberately-unprovable-open, and abnormal-wrapper-open
+paths. This CI wiring is also source-level only; neither its process controls
+nor a hosted deployment has executed at this revision under the required
+low-load RCH gate. The direct
 failure-blob helper now requires the caller's matching open root-epoch lease
 before its first real-filesystem mutation, while preserving lease-free
 read-only deduplication and pre-mutation validation refusals. The opt-in
@@ -146,10 +152,10 @@ real-filesystem fixture suite owns one such lease from before its retained
 namespace/case claims until its synchronous `afterAll` boundary; a crash leaves
 the append-only lease open. This fixture wiring is source-level only and has
 not executed at this revision under the required low-load RCH gate. Other
-exported/raw artifact writers do not yet share the full lifetime contract, and
-a deliberately re-daemonized child can escape the owned process group. There
-is also no archive locator or operator maintenance acquisition path. Moving or
-rotating `e2e/artifacts` therefore remains unsafe.
+exported/raw artifact writers and standalone entry points do not yet share the
+full descendant-settlement contract. There is also no archive locator or
+operator maintenance acquisition path. Moving or rotating `e2e/artifacts`
+therefore remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.
