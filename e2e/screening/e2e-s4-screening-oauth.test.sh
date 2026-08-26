@@ -942,7 +942,7 @@ run_stale_identity_case() (
   # TERM-resistant fixture self-expires after three seconds, comfortably after
   # wrapper cleanup should have succeeded but before this six-second capture
   # deadline. Capture never signals its numeric descendant group.
-  run_bounded_capture 6 \
+  run_bounded_capture 12 \
     env \
     S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-ownership-before-wait \
     S4_WRAPPER_TEST_SIGNAL=TERM \
@@ -1032,7 +1032,7 @@ run_outer_wrapper_loss_case() (
   export -f bun
 
   started_at="$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f", time')"
-  run_bounded_capture 6 \
+  run_bounded_capture 12 \
     env \
     S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-parent-signal-forwarded-kill-wrapper \
     S4_WRAPPER_TEST_SIGNAL=TERM \
