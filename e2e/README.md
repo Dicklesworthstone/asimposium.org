@@ -184,7 +184,7 @@ locator matches. Unsafe or credential-shaped path components are represented by
 their path digest rather than printed; file bodies, symlink targets, arbitrary
 JSON fields, and reproduction text are never emitted. A caller that retains the
 record must redirect stdout to an explicitly chosen location outside
-`e2e/artifacts`; the tool itself creates no census file. Entry or byte limits,
+`e2e/artifacts`; the tool itself creates no census file. Depth, entry, or byte limits,
 filesystem drift, unreadable nodes, an open current-epoch lease, or a malformed
 lease suppress the canonical tree/content digests and return the blocked exit
 code. Even `archive_candidate: true` is only an observed precondition summary,

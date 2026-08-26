@@ -3231,7 +3231,7 @@ describe("artifact retention census aggregation", () => {
         [{ ...observation, contentSha256: null }],
         censusContext(),
       ),
-    ).toThrow(/ARTIFACT_CENSUS_INVALID|digest/);
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
   });
 
   test("static guard keeps the operator census write-free and CLI-exclusive", () => {

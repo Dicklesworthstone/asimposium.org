@@ -4437,6 +4437,13 @@ export function artifactRetentionCensus(
     }
     for (const name of names) {
       if (observations.length >= MAX_RETENTION_CENSUS_ENTRIES) return stop("entry-limit");
+      try {
+        if (!sameCensusStat(directoryBefore, lstatSync(directory, { bigint: true }))) {
+          return stop("filesystem-drift");
+        }
+      } catch {
+        return stop("filesystem-drift");
+      }
       const path = censusPathChild(directory, name);
       const pathComponents = [...components, name];
       let stat: BigIntStats;
