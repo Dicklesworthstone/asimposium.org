@@ -19,6 +19,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -84,6 +85,8 @@ export const MAX_RETENTION_CENSUS_DEPTH = 256;
 export const MAX_RETENTION_CENSUS_HASH_BYTES = 256n * 1024n * 1024n * 1024n;
 /** Locator output is bounded even when one digest has many hard-link aliases. */
 export const MAX_RETENTION_LOCATOR_MATCHES = 128;
+/** Lease metadata is separately bounded so malformed registries cannot exhaust memory. */
+const MAX_RETENTION_LEASE_CENSUS_ENTRIES = 100_000;
 /** Reserved sibling fence that closes artifact claims and publications. */
 export const ARTIFACT_MAINTENANCE_FENCE_NAME = ".artifact-maintenance";
 /** Append-only sibling registry shared with the shell artifact writers. */
@@ -3614,7 +3617,6 @@ export type ArtifactCensusIncompleteReason =
   | "unreadable-node";
 
 export interface ArtifactCensusContext {
-  readonly storageAuthority: HarnessStorageAuthority;
   readonly artifactRoot: string;
   readonly artifactRootIdentity: string;
   readonly observedAtMilliseconds: number;
@@ -3623,7 +3625,6 @@ export interface ArtifactCensusContext {
   readonly incompleteReason: ArtifactCensusIncompleteReason | null;
   readonly entryLimit: number;
   readonly hashByteLimit: bigint;
-  readonly hashedBytes: bigint;
   readonly maintenance: ArtifactMaintenanceCensus;
   readonly writerLeases: ArtifactWriterLeaseCensus;
   readonly locateSha256?: string;
@@ -3707,8 +3708,48 @@ interface ArtifactCensusInodeAggregate {
   contentSha256: string;
 }
 
+interface ArtifactCensusEnumerationBudget {
+  remaining: number;
+}
+
+interface ArtifactCensusDirectoryListing {
+  readonly names: readonly Buffer[];
+  readonly truncated: boolean;
+}
+
 const CENSUS_DAY_MILLISECONDS = 24n * 60n * 60n * 1_000n;
 const CENSUS_READ_CHUNK_BYTES = 64 * 1_024;
+
+const ARTIFACT_CENSUS_NODE_TYPES: ReadonlySet<string> = new Set<ArtifactCensusNodeType>([
+  "directory",
+  "regular",
+  "symlink",
+  "fifo",
+  "socket",
+  "block",
+  "character",
+  "unknown",
+]);
+
+function censusBoundedDirectoryNames(
+  directory: string | Buffer,
+  budget: ArtifactCensusEnumerationBudget,
+): ArtifactCensusDirectoryListing {
+  const handle = opendirSync(directory, { encoding: "buffer", bufferSize: 32 });
+  const names: Buffer[] = [];
+  try {
+    for (;;) {
+      const entry = handle.readSync();
+      if (entry === null) return { names, truncated: false };
+      if (budget.remaining <= 0) return { names, truncated: true };
+      const raw = Buffer.isBuffer(entry.name) ? entry.name : Buffer.from(entry.name, "utf8");
+      names.push(Buffer.from(raw));
+      budget.remaining -= 1;
+    }
+  } finally {
+    handle.closeSync();
+  }
+}
 
 function censusBuffer(value: Uint8Array): Buffer {
   return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
@@ -3809,8 +3850,6 @@ export function summarizeArtifactCensusObservations(
     !Number.isSafeInteger(context.entryLimit) ||
     context.entryLimit <= 0 ||
     context.hashByteLimit < 0n ||
-    context.hashedBytes < 0n ||
-    context.hashedBytes > context.hashByteLimit ||
     observations.length > context.entryLimit ||
     !leaseCounts.every((value) => Number.isSafeInteger(value) && value >= 0) ||
     !SHA256_HEX.test(context.maintenance.snapshotSha256) ||
@@ -3909,6 +3948,7 @@ export function summarizeArtifactCensusObservations(
       relativePath.length > 4_096 ||
       !expectedRelativePath.equals(relativePath) ||
       observedPaths.has(pathKey) ||
+      !ARTIFACT_CENSUS_NODE_TYPES.has(observation.type) ||
       !validNumbers ||
       BigInt(observation.links) <= 0n ||
       !/^[0-7]+$/.test(observation.mode) ||
@@ -4042,14 +4082,13 @@ export function summarizeArtifactCensusObservations(
   const authoritative =
     context.complete &&
     context.stable &&
+    context.maintenance.valid &&
     context.writerLeases.open === 0 &&
     context.writerLeases.malformed === 0;
-  const hasSpecialNodes =
-    counts.fifo + counts.socket + counts.block + counts.character + counts.unknown > 0;
   return {
     schema_version: 1,
     record: "artifact_retention_census",
-    storage_authority: context.storageAuthority,
+    storage_authority: "simulation",
     observed_at: new Date(context.observedAtMilliseconds).toISOString(),
     artifact_root: context.artifactRoot,
     artifact_root_identity: context.artifactRootIdentity,
@@ -4057,13 +4096,7 @@ export function summarizeArtifactCensusObservations(
     stable: context.stable,
     archive_candidate:
       authoritative &&
-      context.storageAuthority === "real-filesystem" &&
-      context.maintenance.present &&
-      context.maintenance.valid &&
-      context.writerLeases.open === 0 &&
-      context.writerLeases.malformed === 0 &&
-      !hasSpecialNodes &&
-      externalLinkGroups === 0,
+      false,
     incomplete_reason: context.incompleteReason,
     limits: {
       entries: context.entryLimit,
@@ -4082,7 +4115,7 @@ export function summarizeArtifactCensusObservations(
       unique: uniqueBytes.toString(),
       logical_allocated: logicalAllocated.toString(),
       unique_allocated: uniqueAllocated.toString(),
-      hashed_unique: context.hashedBytes.toString(),
+      hashed_unique: uniqueBytes.toString(),
     },
     age_buckets: Object.fromEntries(
       Object.entries(ageBuckets).map(([key, value]) => [
@@ -4171,8 +4204,41 @@ function censusPathChild(parent: Buffer, child: Buffer): Buffer {
   return Buffer.concat([parent, Buffer.from(sep), child]);
 }
 
+/** Hash opaque census chunks without retaining or returning their bytes. */
+export function opaqueCensusSha256(chunks: Iterable<Uint8Array>): string {
+  const digest = createHash("sha256");
+  for (const chunk of chunks) digest.update(censusBuffer(chunk));
+  return digest.digest("hex");
+}
+
+function* censusRegularFileChunks(
+  descriptor: number,
+  expectedBytes: bigint,
+): Generator<Uint8Array, void, undefined> {
+  const buffer = Buffer.allocUnsafe(CENSUS_READ_CHUNK_BYTES);
+  let remaining = expectedBytes;
+  while (remaining > 0n) {
+    const wanted = Number(remaining > BigInt(buffer.length) ? BigInt(buffer.length) : remaining);
+    const bytes = readSync(descriptor, buffer, 0, wanted, null);
+    if (bytes <= 0) {
+      throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file shortened while hashing.");
+    }
+    yield buffer.subarray(0, bytes);
+    remaining -= BigInt(bytes);
+  }
+  if (readSync(descriptor, buffer, 0, 1, null) !== 0) {
+    throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file grew while hashing.");
+  }
+}
+
 function hashCensusRegularFile(path: Buffer, expected: BigIntStats): string {
-  const noFollow = filesystemConstants.O_NOFOLLOW ?? 0;
+  const noFollow = filesystemConstants.O_NOFOLLOW;
+  if (typeof noFollow !== "number" || noFollow === 0) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_NOFOLLOW_UNAVAILABLE",
+      "this host cannot prove no-follow regular-file hashing.",
+    );
+  }
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, filesystemConstants.O_RDONLY | noFollow);
@@ -4180,27 +4246,13 @@ function hashCensusRegularFile(path: Buffer, expected: BigIntStats): string {
     if (!before.isFile() || !sameCensusStat(expected, before)) {
       throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file changed before hashing.");
     }
-    const digest = createHash("sha256");
-    const buffer = Buffer.allocUnsafe(CENSUS_READ_CHUNK_BYTES);
-    let remaining = before.size;
-    while (remaining > 0n) {
-      const wanted = Number(remaining > BigInt(buffer.length) ? BigInt(buffer.length) : remaining);
-      const bytes = readSync(descriptor, buffer, 0, wanted, null);
-      if (bytes <= 0) {
-        throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file shortened while hashing.");
-      }
-      digest.update(buffer.subarray(0, bytes));
-      remaining -= BigInt(bytes);
-    }
-    if (readSync(descriptor, buffer, 0, 1, null) !== 0) {
-      throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file grew while hashing.");
-    }
+    const digest = opaqueCensusSha256(censusRegularFileChunks(descriptor, before.size));
     const after = fstatSync(descriptor, { bigint: true });
     const finalPath = lstatSync(path, { bigint: true });
     if (!sameCensusStat(before, after) || !sameCensusStat(before, finalPath)) {
       throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file changed while hashing.");
     }
-    return digest.digest("hex");
+    return digest;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -4226,11 +4278,12 @@ function censusMaintenanceState(root: string): ArtifactMaintenanceCensus {
     };
   }
   try {
-    const exactDirectory =
-      !stat.isSymbolicLink() &&
-      stat.isDirectory() &&
-      realpathSync(fence) === fence &&
-      readdirSync(fence).length === 0;
+    let exactDirectory =
+      !stat.isSymbolicLink() && stat.isDirectory() && realpathSync(fence) === fence;
+    if (exactDirectory) {
+      const listing = censusBoundedDirectoryNames(fence, { remaining: 1 });
+      exactDirectory = !listing.truncated && listing.names.length === 0;
+    }
     const snapshot = [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs]
       .map(String)
       .join(":");
@@ -4246,6 +4299,13 @@ function censusMaintenanceState(root: string): ArtifactMaintenanceCensus {
       snapshotSha256: createHash("sha256").update("unreadable").digest("hex"),
     };
   }
+}
+
+function censusRegistryName(raw: Buffer): string | null {
+  const decoded = raw.toString("utf8");
+  return Buffer.from(decoded, "utf8").equals(raw) && isSafeRetainedEvidenceName(decoded)
+    ? decoded
+    : null;
 }
 
 function censusWriterLeases(root: string, artifactRootIdentity: string): ArtifactWriterLeaseCensus {
@@ -4288,7 +4348,23 @@ function censusWriterLeases(root: string, artifactRootIdentity: string): Artifac
     } else {
       witness.push(`registry:${registryStat.dev}:${registryStat.ino}:${registryStat.mtimeNs}`);
       const currentEpoch = artifactWriterLeaseEpochName(artifactRootIdentity);
-      for (const epochName of readdirSync(registry).sort(asciiCompare)) {
+      const budget: ArtifactCensusEnumerationBudget = {
+        remaining: MAX_RETENTION_LEASE_CENSUS_ENTRIES,
+      };
+      const epochs = censusBoundedDirectoryNames(registry, budget);
+      if (epochs.truncated) {
+        malformed += 1;
+        witness.push("epoch-registry-limit");
+      }
+      for (const rawEpochName of [...epochs.names].sort(Buffer.compare)) {
+        const epochName = censusRegistryName(rawEpochName);
+        if (epochName === null) {
+          malformed += 1;
+          witness.push(
+            `malformed-epoch:${createHash("sha256").update(rawEpochName).digest("hex")}`,
+          );
+          continue;
+        }
         const epoch = join(registry, epochName);
         const epochStat = lstatSync(epoch, { bigint: true });
         if (
@@ -4305,7 +4381,20 @@ function censusWriterLeases(root: string, artifactRootIdentity: string): Artifac
           foreignEpochs += 1;
           continue;
         }
-        for (const leaseName of readdirSync(epoch).sort(asciiCompare)) {
+        const leases = censusBoundedDirectoryNames(epoch, budget);
+        if (leases.truncated) {
+          malformed += 1;
+          witness.push("lease-registry-limit");
+        }
+        for (const rawLeaseName of [...leases.names].sort(Buffer.compare)) {
+          const leaseName = censusRegistryName(rawLeaseName);
+          if (leaseName === null) {
+            malformed += 1;
+            witness.push(
+              `malformed-lease:${createHash("sha256").update(rawLeaseName).digest("hex")}`,
+            );
+            continue;
+          }
           const lease = join(epoch, leaseName);
           const leaseStat = lstatSync(lease, { bigint: true });
           if (
@@ -4320,27 +4409,54 @@ function censusWriterLeases(root: string, artifactRootIdentity: string): Artifac
           }
           const marker = join(lease, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
           witness.push(`lease:${leaseStat.dev}:${leaseStat.ino}:${leaseStat.mtimeNs}`);
+          const leaseChildren = censusBoundedDirectoryNames(lease, budget);
+          if (leaseChildren.truncated) {
+            malformed += 1;
+            witness.push("lease-child-limit");
+            continue;
+          }
+          if (leaseChildren.names.length === 0) {
+            open += 1;
+            continue;
+          }
+          if (
+            leaseChildren.names.length !== 1 ||
+            censusRegistryName(leaseChildren.names[0] as Buffer) !==
+              ARTIFACT_WRITER_LEASE_CLOSED_NAME
+          ) {
+            malformed += 1;
+            witness.push(
+              `malformed-lease-children:${createHash("sha256")
+                .update(Buffer.concat(leaseChildren.names.map((name) => Buffer.from(name))))
+                .digest("hex")}`,
+            );
+            continue;
+          }
           let markerStat: BigIntStats;
           try {
             markerStat = lstatSync(marker, { bigint: true });
           } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-              malformed += 1;
-              witness.push("unreadable-marker");
-              continue;
-            }
-            open += 1;
+            malformed += 1;
+            witness.push(
+              (error as NodeJS.ErrnoException).code === "ENOENT"
+                ? "missing-marker"
+                : "unreadable-marker",
+            );
             continue;
           }
           if (
             markerStat.isSymbolicLink() ||
             !markerStat.isDirectory() ||
-            realpathSync(marker) !== marker ||
-            readdirSync(marker).length !== 0
+            realpathSync(marker) !== marker
           ) {
             malformed += 1;
           } else {
-            closed += 1;
+            const markerChildren = censusBoundedDirectoryNames(marker, budget);
+            if (markerChildren.truncated || markerChildren.names.length !== 0) {
+              malformed += 1;
+            } else {
+              closed += 1;
+            }
           }
           witness.push(`marker:${markerStat.dev}:${markerStat.ino}:${markerStat.mtimeNs}`);
         }
@@ -4409,6 +4525,9 @@ export function artifactRetentionCensus(
   let complete = true;
   let stable = true;
   let incompleteReason: ArtifactCensusIncompleteReason | null = null;
+  const entryBudget: ArtifactCensusEnumerationBudget = {
+    remaining: MAX_RETENTION_CENSUS_ENTRIES,
+  };
 
   const stop = (reason: ArtifactCensusIncompleteReason): false => {
     complete = false;
@@ -4427,8 +4546,9 @@ export function artifactRetentionCensus(
       }
       const physical = realpathSync(directory, { encoding: "buffer" }) as Buffer;
       if (!physical.equals(directory)) return stop("filesystem-drift");
-      names = readdirSync(directory, { encoding: "buffer" }) as Buffer[];
-      names.sort(Buffer.compare);
+      const listing = censusBoundedDirectoryNames(directory, entryBudget);
+      if (listing.truncated) return stop("entry-limit");
+      names = [...listing.names].sort(Buffer.compare);
     } catch {
       return stop("unreadable-node");
     }
@@ -4553,8 +4673,7 @@ export function artifactRetentionCensus(
   ) {
     stable = false;
   }
-  return summarizeArtifactCensusObservations(observations, {
-    storageAuthority: "real-filesystem",
+  const summarized = summarizeArtifactCensusObservations(observations, {
     artifactRoot,
     artifactRootIdentity,
     observedAtMilliseconds,
@@ -4563,11 +4682,30 @@ export function artifactRetentionCensus(
     incompleteReason,
     entryLimit: MAX_RETENTION_CENSUS_ENTRIES,
     hashByteLimit: MAX_RETENTION_CENSUS_HASH_BYTES,
-    hashedBytes,
     maintenance: endMaintenance,
     writerLeases: endLeases,
     locateSha256,
   });
+  const disqualifyingNodes =
+    summarized.counts.symlink +
+    summarized.counts.fifo +
+    summarized.counts.socket +
+    summarized.counts.block +
+    summarized.counts.character +
+    summarized.counts.unknown;
+  return {
+    ...summarized,
+    storage_authority: "real-filesystem",
+    archive_candidate:
+      summarized.complete &&
+      summarized.stable &&
+      endMaintenance.present &&
+      endMaintenance.valid &&
+      endLeases.open === 0 &&
+      endLeases.malformed === 0 &&
+      disqualifyingNodes === 0 &&
+      summarized.hard_links.external_link_groups === 0,
+  };
 }
 
 export function reserveArtifactNamespace(

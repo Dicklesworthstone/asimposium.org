@@ -3031,7 +3031,6 @@ describe("artifact retention census aggregation", () => {
 
   function censusContext(overrides: Partial<ArtifactCensusContext> = {}): ArtifactCensusContext {
     return {
-      storageAuthority: "simulation",
       artifactRoot: "/checkout/e2e/artifacts",
       artifactRootIdentity: "1:2",
       observedAtMilliseconds: observedAt,
@@ -3040,7 +3039,6 @@ describe("artifact retention census aggregation", () => {
       incompleteReason: null,
       entryLimit: MAX_RETENTION_CENSUS_ENTRIES,
       hashByteLimit: MAX_RETENTION_CENSUS_HASH_BYTES,
-      hashedBytes: 16n,
       maintenance: {
         present: false,
         valid: true,
@@ -3184,13 +3182,11 @@ describe("artifact retention census aggregation", () => {
       censusContext({
         complete: false,
         incompleteReason: "entry-limit",
-        hashedBytes: 8n,
       }),
       censusContext({
         complete: false,
         stable: false,
         incompleteReason: "filesystem-drift",
-        hashedBytes: 8n,
       }),
       censusContext({
         stable: false,
@@ -3201,7 +3197,6 @@ describe("artifact retention census aggregation", () => {
           foreignEpochs: 0,
           snapshotSha256: "d".repeat(64),
         },
-        hashedBytes: 8n,
       }),
     ]) {
       const report = summarizeArtifactCensusObservations([observation], context);
@@ -3232,6 +3227,19 @@ describe("artifact retention census aggregation", () => {
         censusContext(),
       ),
     ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [{ ...observation, type: "forged" as ArtifactCensusObservation["type"] }],
+        censusContext(),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
+
+    const forgedAuthority = summarizeArtifactCensusObservations(
+      [observation],
+      { ...censusContext(), storageAuthority: "real-filesystem" } as ArtifactCensusContext,
+    );
+    expect(forgedAuthority.storage_authority).toBe("simulation");
+    expect(forgedAuthority.archive_candidate).toBe(false);
   });
 
   test("static guard keeps the operator census write-free and CLI-exclusive", () => {
