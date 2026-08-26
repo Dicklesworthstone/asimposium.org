@@ -3247,6 +3247,18 @@ describe("artifact retention census aggregation", () => {
     ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
     expect(() =>
       summarizeArtifactCensusObservations(
+        [null] as unknown as readonly ArtifactCensusObservation[],
+        censusContext(),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [observation],
+        { ...censusContext(), incompleteReason: "forged" } as ArtifactCensusContext,
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|context fields/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
         [observation],
         censusContext({ hashByteLimit: BigInt(observation.size) - 1n }),
       ),

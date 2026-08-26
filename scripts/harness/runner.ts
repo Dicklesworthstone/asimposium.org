@@ -3705,6 +3705,10 @@ interface ArtifactCensusInodeAggregate {
   links: bigint;
   size: bigint;
   allocated: bigint;
+  uid: string;
+  gid: string;
+  mode: string;
+  modifiedMilliseconds: string;
   contentSha256: string;
 }
 
@@ -3721,6 +3725,8 @@ const CENSUS_DAY_MILLISECONDS = 24n * 60n * 60n * 1_000n;
 const CENSUS_READ_CHUNK_BYTES = 64 * 1_024;
 const CENSUS_MAX_DATE_MILLISECONDS = 8_640_000_000_000_000;
 const CENSUS_MAX_METADATA_DIGITS = 40;
+const CENSUS_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+const CENSUS_SIGNED_DECIMAL = /^(?:0|-?[1-9][0-9]*)$/;
 
 const ARTIFACT_CENSUS_NODE_TYPES: ReadonlySet<string> = new Set<ArtifactCensusNodeType>([
   "directory",
@@ -3732,12 +3738,51 @@ const ARTIFACT_CENSUS_NODE_TYPES: ReadonlySet<string> = new Set<ArtifactCensusNo
   "character",
   "unknown",
 ]);
+const ARTIFACT_CENSUS_INCOMPLETE_REASONS: ReadonlySet<string> = new Set<
+  ArtifactCensusIncompleteReason
+>([
+  "entry-limit",
+  "depth-limit",
+  "hash-byte-limit",
+  "filesystem-drift",
+  "unreadable-node",
+]);
+
+function isArtifactCensusObservationRecord(
+  observation: unknown,
+): observation is ArtifactCensusObservation {
+  if (typeof observation !== "object" || observation === null) return false;
+  const candidate = observation as Partial<ArtifactCensusObservation>;
+  return (
+    candidate.relativePath instanceof Uint8Array &&
+    Array.isArray(candidate.components) &&
+    candidate.components.every((component) => component instanceof Uint8Array) &&
+    typeof candidate.type === "string" &&
+    typeof candidate.device === "string" &&
+    typeof candidate.inode === "string" &&
+    typeof candidate.links === "string" &&
+    typeof candidate.uid === "string" &&
+    typeof candidate.gid === "string" &&
+    typeof candidate.mode === "string" &&
+    typeof candidate.size === "string" &&
+    typeof candidate.blocks === "string" &&
+    typeof candidate.modifiedMilliseconds === "string" &&
+    (candidate.contentSha256 === null || typeof candidate.contentSha256 === "string") &&
+    (candidate.symlinkTargetSha256 === null ||
+      typeof candidate.symlinkTargetSha256 === "string")
+  );
+}
 
 function censusBoundedDirectoryNames(
   directory: string | Buffer,
   budget: ArtifactCensusEnumerationBudget,
 ): ArtifactCensusDirectoryListing {
-  const handle = opendirSync(directory, { encoding: "buffer", bufferSize: 32 });
+  const handle = opendirSync(directory, {
+    // Node accepts the sentinel `buffer` encoding and returns raw Dirent names,
+    // but the ambient BufferEncoding declaration omits that runtime sentinel.
+    encoding: "buffer" as unknown as BufferEncoding,
+    bufferSize: 32,
+  });
   const names: Buffer[] = [];
   try {
     for (;;) {
@@ -3840,6 +3885,20 @@ export function summarizeArtifactCensusObservations(
   observations: readonly ArtifactCensusObservation[],
   context: ArtifactCensusContext,
 ): ArtifactRetentionCensusReport {
+  if (
+    !Array.isArray(observations) ||
+    typeof context !== "object" ||
+    context === null ||
+    typeof context.maintenance !== "object" ||
+    context.maintenance === null ||
+    typeof context.writerLeases !== "object" ||
+    context.writerLeases === null
+  ) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_INVALID",
+      "artifact census inputs must be bounded observation and context records.",
+    );
+  }
   const leaseCounts = [
     context.writerLeases.open,
     context.writerLeases.closed,
@@ -3857,7 +3916,9 @@ export function summarizeArtifactCensusObservations(
     context.artifactRoot.length > 4_096 ||
     typeof context.artifactRootIdentity !== "string" ||
     context.artifactRootIdentity.length > 128 ||
-    !/^(?:[0-9]+:[0-9]+|memory:[0-9]+)$/.test(context.artifactRootIdentity) ||
+    !/^(?:(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)|memory:(?:0|[1-9][0-9]*))$/.test(
+      context.artifactRootIdentity,
+    ) ||
     !Number.isSafeInteger(context.observedAtMilliseconds) ||
     context.observedAtMilliseconds < 0 ||
     context.observedAtMilliseconds > CENSUS_MAX_DATE_MILLISECONDS ||
@@ -3869,15 +3930,27 @@ export function summarizeArtifactCensusObservations(
     context.hashByteLimit > MAX_RETENTION_CENSUS_HASH_BYTES ||
     observations.length > context.entryLimit ||
     !leaseCounts.every((value) => Number.isSafeInteger(value) && value >= 0) ||
+    typeof context.maintenance.snapshotSha256 !== "string" ||
     !SHA256_HEX.test(context.maintenance.snapshotSha256) ||
+    typeof context.writerLeases.snapshotSha256 !== "string" ||
     !SHA256_HEX.test(context.writerLeases.snapshotSha256) ||
-    (context.locateSha256 !== undefined && !SHA256_HEX.test(context.locateSha256)) ||
+    (context.locateSha256 !== undefined &&
+      (typeof context.locateSha256 !== "string" || !SHA256_HEX.test(context.locateSha256))) ||
+    (context.incompleteReason !== null &&
+      (typeof context.incompleteReason !== "string" ||
+        !ARTIFACT_CENSUS_INCOMPLETE_REASONS.has(context.incompleteReason))) ||
     (context.complete && context.incompleteReason !== null) ||
     (!context.complete && context.incompleteReason === null)
   ) {
     throw new HarnessError(
       "ARTIFACT_CENSUS_INVALID",
       "artifact census context fields are inconsistent or outside their bounds.",
+    );
+  }
+  if (!observations.every(isArtifactCensusObservationRecord)) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_INVALID",
+      "artifact census observations must be bounded metadata records.",
     );
   }
   const counts: Record<ArtifactCensusNodeType, number> = {
@@ -3929,7 +4002,6 @@ export function summarizeArtifactCensusObservations(
     const expectedRelativePath = censusRelativePath(components);
     const relativePath = censusBuffer(observation.relativePath);
     const pathKey = relativePath.toString("hex");
-    const unsignedDecimal = /^[0-9]+$/;
     const validComponents =
       components.length > 0 &&
       components.length <= MAX_RETENTION_CENSUS_DEPTH &&
@@ -3951,7 +4023,8 @@ export function summarizeArtifactCensusObservations(
       observation.blocks,
     ];
     const validNumbers = numericMetadata.every(
-      (value) => value.length <= CENSUS_MAX_METADATA_DIGITS && unsignedDecimal.test(value),
+      (value) =>
+        value.length <= CENSUS_MAX_METADATA_DIGITS && CENSUS_UNSIGNED_DECIMAL.test(value),
     );
     const validDigests =
       observation.type === "regular"
@@ -3972,9 +4045,9 @@ export function summarizeArtifactCensusObservations(
       !validNumbers ||
       BigInt(observation.links) <= 0n ||
       observation.mode.length > 8 ||
-      !/^[0-7]+$/.test(observation.mode) ||
+      !/^(?:0|[1-7][0-7]*)$/.test(observation.mode) ||
       observation.modifiedMilliseconds.length > CENSUS_MAX_METADATA_DIGITS ||
-      !/^-?[0-9]+$/.test(observation.modifiedMilliseconds) ||
+      !CENSUS_SIGNED_DECIMAL.test(observation.modifiedMilliseconds) ||
       !validDigests
     ) {
       throw new HarnessError(
@@ -4013,12 +4086,21 @@ export function summarizeArtifactCensusObservations(
           links: BigInt(observation.links),
           size,
           allocated,
+          uid: observation.uid,
+          gid: observation.gid,
+          mode: observation.mode,
+          modifiedMilliseconds: observation.modifiedMilliseconds,
           contentSha256: observation.contentSha256,
         });
       } else {
         if (
           existing.size !== size ||
           existing.allocated !== allocated ||
+          existing.links !== BigInt(observation.links) ||
+          existing.uid !== observation.uid ||
+          existing.gid !== observation.gid ||
+          existing.mode !== observation.mode ||
+          existing.modifiedMilliseconds !== observation.modifiedMilliseconds ||
           existing.contentSha256 !== observation.contentSha256
         ) {
           throw new HarnessError(
@@ -4027,7 +4109,6 @@ export function summarizeArtifactCensusObservations(
           );
         }
         existing.aliases += 1;
-        if (BigInt(observation.links) > existing.links) existing.links = BigInt(observation.links);
       }
       if (context.locateSha256 === observation.contentSha256) {
         if (locatorMatches.length < MAX_RETENTION_LOCATOR_MATCHES) {
