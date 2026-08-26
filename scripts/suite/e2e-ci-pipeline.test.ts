@@ -16,6 +16,7 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -306,6 +307,8 @@ interface LeaseSettlementPlant {
   readonly signal: NodeJS.Signals | null;
   readonly leaseDirectory: string;
   readonly leaseIdentity: string;
+  readonly escapePid: number | null;
+  readonly escapeStop: string;
   readonly lateWrite: string;
   readonly escapeDone: string;
 }
@@ -323,7 +326,14 @@ function runLeaseSettlementPlant(
   const runId = `ci-lease-settlement-${process.pid}-${runCounter}`;
   const receipt = join(SCRATCH, `lease-settlement-${runCounter}.txt`);
   const escapeReady = join(SCRATCH, `lease-settlement-${runCounter}.ready`);
-  const lateWrite = join(SCRATCH, `lease-settlement-${runCounter}.late`);
+  const escapeStop = join(SCRATCH, `lease-settlement-${runCounter}.stop`);
+  const lateWrite = join(
+    root,
+    "e2e",
+    "artifacts",
+    runId,
+    "escaped-write-after-close",
+  );
   const escapeDone = join(SCRATCH, `lease-settlement-${runCounter}.done`);
   mkdirSync(join(root, "e2e"), { recursive: true, mode: 0o700 });
 
@@ -373,7 +383,7 @@ exit $?
         ? "exec >/dev/null 2>&1 </dev/null; sleep 2"
         : mode === "setsid-escape"
           ? `python3 -c ${JSON.stringify(
-              `import os,pathlib,time; os.setsid(); pathlib.Path(${JSON.stringify(escapeReady)}).write_text("ready\\n", encoding="utf-8"); time.sleep(0.5); closed = pathlib.Path(${JSON.stringify(receipt)}).read_text(encoding="utf-8").splitlines()[0]; pathlib.Path(closed, "closed").is_dir() and pathlib.Path(${JSON.stringify(lateWrite)}).write_text("escaped-after-close\\n", encoding="utf-8"); pathlib.Path(${JSON.stringify(escapeDone)}).write_text("done\\n", encoding="utf-8")`,
+              `import os,pathlib,time; os.setsid(); ready = pathlib.Path(${JSON.stringify(escapeReady)}); stop = pathlib.Path(${JSON.stringify(escapeStop)}); late = pathlib.Path(${JSON.stringify(lateWrite)}); done = pathlib.Path(${JSON.stringify(escapeDone)}); closed = pathlib.Path(pathlib.Path(${JSON.stringify(receipt)}).read_text(encoding="utf-8").splitlines()[0], "closed"); ready.write_text(str(os.getpid()) + "\\n", encoding="utf-8"); next((True for _attempt in range(1000) if closed.is_dir() or stop.is_file() or (time.sleep(0.02) is not None)), False); observed_close = closed.is_dir(); observed_close and late.write_text("escaped-after-close\\n", encoding="utf-8"); done.write_text("done\\n", encoding="utf-8")`,
             )} >/dev/null 2>&1 </dev/null & for _attempt in {1..100}; do [[ -f ${JSON.stringify(
               escapeReady,
             )} ]] && exit 0; sleep 0.02; done; exit 98`
@@ -392,11 +402,19 @@ exit $?
   if (!leaseDirectory || !leaseIdentity) {
     throw new Error("pipeline lease settlement plant omitted its lease receipt");
   }
+  const escapePid = existsSync(escapeReady)
+    ? Number.parseInt(readFileSync(escapeReady, "utf8").trim(), 10)
+    : null;
+  if (escapePid !== null && (!Number.isSafeInteger(escapePid) || escapePid <= 0)) {
+    throw new Error("pipeline lease settlement plant emitted an invalid escaped PID");
+  }
   return {
     status: result.status,
     signal: result.signal,
     leaseDirectory,
     leaseIdentity,
+    escapePid,
+    escapeStop,
     lateWrite,
     escapeDone,
   };
@@ -686,13 +704,19 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(existsSync(join(crashedWrapper.leaseDirectory, "closed"))).toBe(false);
 
     const escaped = runLeaseSettlementPlant("setsid-escape");
+    expect(escaped.escapePid).not.toBeNull();
+    const escapedProcessWasAliveAfterReturn =
+      descendantProofAvailable && escaped.escapePid !== null
+        ? existsSync(`/proc/${escaped.escapePid}`)
+        : false;
+    writeFileSync(escaped.escapeStop, "stop\n", { mode: 0o600 });
     expect(escaped.signal).toBeNull();
     expect(escaped.status).toBe(0);
     expect(directoryIdentity(escaped.leaseDirectory)).toBe(escaped.leaseIdentity);
     expect(existsSync(join(escaped.leaseDirectory, "closed"))).toBe(
       descendantProofAvailable,
     );
-    if (!descendantProofAvailable) {
+    if (!descendantProofAvailable || escapedProcessWasAliveAfterReturn) {
       for (
         let attempt = 0;
         attempt < 100 && !existsSync(escaped.escapeDone);
@@ -702,6 +726,7 @@ describe("OPS.2b review pipeline orchestration", () => {
       }
       expect(existsSync(escaped.escapeDone)).toBe(true);
     }
+    expect(escapedProcessWasAliveAfterReturn).toBe(false);
     expect(existsSync(escaped.lateWrite)).toBe(false);
   }, 30_000);
 
