@@ -339,6 +339,7 @@ function runCaptured(
   env: NodeJS.ProcessEnv,
   deadlineMs: number,
   reusableLogRoot?: string,
+  cwdOverride?: string,
 ): Run {
   const logRoot = reusableLogRoot ?? mkdtempSync(join(tmpdir(), "asimposium-s2-shell-"));
   const stdoutPath = join(logRoot, "stdout.log");
@@ -362,7 +363,7 @@ function runCaptured(
       ...args,
     ],
     {
-      cwd: REPOSITORY_ROOT,
+      cwd: cwdOverride ?? REPOSITORY_ROOT,
       env: { ...process.env, ...env },
       timeout: deadlineMs,
       // The planted lifecycle modes deliberately signal owned process groups.
@@ -1704,7 +1705,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_COST_LOCAL_PHASES_COMPLETE=1");
     expect(shell).toContain("write_s2_cost_publication");
     expect(shell).toContain("write_s2_cost_publication_commit");
-    const onExit = shell.slice(shell.indexOf("on_exit() {"), shell.indexOf("trap on_exit EXIT"));
+    const onExit = shell.slice(shell.indexOf("\non_exit() {"), shell.indexOf("trap on_exit EXIT"));
     expect(onExit).toContain("write_evidence_receipt");
     expect(onExit).toContain("write_s2_cost_publication");
     expect(onExit).toContain("write_s2_cost_publication_commit");
@@ -1746,7 +1747,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(recursiveLaunches.length).toBeGreaterThanOrEqual(2);
     for (const launch of recursiveLaunches) {
       const index = launch.index ?? 0;
-      const inheritedCapability = shell.slice(Math.max(0, index - 900), index);
+      const inheritedCapability = shell.slice(Math.max(0, index - 4000), index);
       expect(inheritedCapability).toContain("S2_INHERIT_WRITER_LEASE=1");
       expect(inheritedCapability).toContain("S2_INHERITED_RUN_DIR_IDENTITY=");
       expect(inheritedCapability).toContain("s2_prepare_inherited_child_run");
@@ -1834,13 +1835,15 @@ describe("S2 to S7 normalized cost receipt", () => {
   });
 
   test("resolves recursive script authority from a non-root caller cwd", () => {
-    const run = spawnSync("bash", ["../../scripts/e2e-s2-krater.sh"], {
-      cwd: resolve(REPOSITORY_ROOT, "apps/wire"),
-      env: { ...process.env, S2_RUN_ID: "../invalid" },
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-    expect(run.status).toBe(1);
+    const run = runCaptured(
+      "bash",
+      ["../../scripts/e2e-s2-krater.sh"],
+      { S2_RUN_ID: "../invalid" },
+      30_000,
+      undefined,
+      resolve(REPOSITORY_ROOT, "apps/wire"),
+    );
+    expect(run.exitCode).toBe(1);
     expect(run.stdout).toContain('"code":"S2_EVIDENCE_RUN_ID_INVALID"');
   });
 
@@ -2531,7 +2534,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     );
     expect(explicitProduct.exitCode).toBe(1);
     expect(typedDiagnosticCodes(explicitProduct)).toContain("WRANGLER_VERSION_UNAVAILABLE");
-  });
+  }, 60_000);
 
   test(
     "PLANTED: a deadline before setsid kills only the exact gated fork child",

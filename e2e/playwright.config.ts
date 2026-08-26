@@ -1,5 +1,5 @@
 import { defineConfig } from "@playwright/test";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -45,10 +45,10 @@ const anyNodeExists = (path: string): boolean => {
 const physicalDirectory = (path: string | undefined): string | undefined => {
   if (path === undefined) return undefined;
   try {
-    const resolved = resolve(path);
-    const stat = lstatSync(resolved);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
-    return realpathSync(resolved);
+    const canonical = realpathSync(resolve(path));
+    const stat = statSync(canonical);
+    if (!stat.isDirectory()) return undefined;
+    return canonical;
   } catch {
     return undefined;
   }

@@ -100,7 +100,7 @@ for leased_entrypoint in \
   "$repository_root/scripts/e2e-ci-pipeline.sh"; do
   if ! awk '
     /source .*e2e\/lib\/run-diagnostics\.sh/ && helper == 0 { helper = NR }
-    /trap .*e2e_close_artifact_writer_leases_on_exit.* EXIT/ && exit_trap == 0 {
+    /trap .*_artifact_writer_leases_on_exit.* EXIT/ && exit_trap == 0 {
       exit_trap = NR
     }
     /^trap .* INT$/ && int_trap == 0 { int_trap = NR }

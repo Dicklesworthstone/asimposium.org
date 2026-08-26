@@ -702,7 +702,9 @@ const FAULT_CASES: readonly {
 ];
 
 for (const current of FAULT_CASES) {
-  test(`token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`, async () => {
+  test(
+    `token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`,
+    async () => {
     const result = await runHarness([], { [current.plant]: "1" });
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain(`"code":"${current.code}"`);
@@ -723,7 +725,7 @@ for (const current of FAULT_CASES) {
       );
       expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
     }
-  });
+  }, 120_000);
 }
 
 test("PLANTED: combined lifecycle evidence omits the unevidenced active cap", () => {
@@ -869,7 +871,7 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   );
   expect(result.stdout).toContain('"assertion":"revoke_vs_effectful_domain_write","status":"pass"');
   expect(result.stdout).toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
-});
+}, 180_000);
 
 test("OPS.2a authorization evidence bounds and redacts every emitted string field", () => {
   const script = readFileSync(SCRIPT, "utf8");

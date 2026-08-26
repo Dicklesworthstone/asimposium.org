@@ -58,13 +58,13 @@ expect_exit "SPONSOR_PRINCIPAL_LEAK" 2 "${signin/continue/continue usr_sponsor01
 # the response source, so each identifier class must still fire when ordinary
 # HTML escaping hides its punctuation from a raw-text regex.
 expect_exit "HTML_ESCAPED_WORKSHOP_ID_LEAK" 2 \
-  "${signin/continue/continue W&#45;9ZXWVTSRQPNMKJHG0123456789}"
+  "${signin/continue/continue W\&#45;9ZXWVTSRQPNMKJHG0123456789}"
 expect_exit "HTML_ESCAPED_FELLOW_ID_LEAK" 2 \
-  "${signin/continue/continue F&#45;0123456789ABCDEFGHJKMNPQRS}"
+  "${signin/continue/continue F\&#45;0123456789ABCDEFGHJKMNPQRS}"
 expect_exit "HTML_ESCAPED_ENROLLMENT_ID_LEAK" 2 \
-  "${signin/continue/continue ASIMP&#45;EN&#45;0123ABCD}"
+  "${signin/continue/continue ASIMP\&#45;EN\&#45;0123ABCD}"
 expect_exit "HTML_ESCAPED_SPONSOR_PRINCIPAL_LEAK" 2 \
-  "${signin/continue/continue usr&#95;sponsor01}"
+  "${signin/continue/continue usr\&#95;sponsor01}"
 
 # Non-vacuity: describing the workshop in prose (no id token) stays safe, so the
 # gate is not merely matching the word "workshop".

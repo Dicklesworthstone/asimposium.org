@@ -2,6 +2,7 @@
   "name": "@asimposium/e2e",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "test": "bun run test:unit && bun run test:contract && bun run test:integration",
     "typecheck": "tsc --noEmit -p tsconfig.json",
