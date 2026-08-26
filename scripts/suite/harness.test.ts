@@ -3192,6 +3192,17 @@ describe("artifact retention census aggregation", () => {
         incompleteReason: "filesystem-drift",
         hashedBytes: 8n,
       }),
+      censusContext({
+        stable: false,
+        writerLeases: {
+          open: 1,
+          closed: 1,
+          malformed: 0,
+          foreignEpochs: 0,
+          snapshotSha256: "d".repeat(64),
+        },
+        hashedBytes: 8n,
+      }),
     ]) {
       const report = summarizeArtifactCensusObservations([observation], context);
       expect(report.tree_sha256).toBeNull();
@@ -3199,6 +3210,28 @@ describe("artifact retention census aggregation", () => {
       expect(report.locator.complete).toBe(false);
       expect(report.archive_candidate).toBe(false);
     }
+  });
+
+  test("PLANTED: the exported aggregation seam rejects non-canonical or secret-bearing metadata", () => {
+    const observation = censusObservation(["run", "evidence.bin"]);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [{ ...observation, relativePath: Buffer.from("another/path") }],
+        censusContext(),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|canonical/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [{ ...observation, uid: "asimp_ag_not_metadata" }],
+        censusContext(),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [{ ...observation, contentSha256: null }],
+        censusContext(),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|digest/);
   });
 
   test("static guard keeps the operator census write-free and CLI-exclusive", () => {
