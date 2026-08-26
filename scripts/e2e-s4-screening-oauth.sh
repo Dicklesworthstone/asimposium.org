@@ -407,10 +407,6 @@ s4_controlled_command_supervisor() {
     # target a recycled numeric PGID. KILL also terminates this supervisor; the
     # outer wrapper then positively verifies zero group members before it emits
     # the typed runner failure.
-    group_has_live_member_other_than "${pgid}" "${BASHPID}" || {
-      kill -KILL -- "-${pgid}" 2>/dev/null || return 125
-      return 125
-    }
     kill -KILL -- "-${pgid}" 2>/dev/null || exit 137
     exit 137
   fi

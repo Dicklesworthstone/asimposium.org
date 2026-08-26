@@ -4284,7 +4284,7 @@ export function artifactRetentionCensus(
   }
   const physicalRoot = assertContainedRoot(resolve(root));
   const artifactRoot = join(physicalRoot, "e2e", "artifacts");
-  let artifactRootStat;
+  let artifactRootStat: BigIntStats;
   try {
     artifactRootStat = lstatSync(artifactRoot, { bigint: true });
   } catch {
@@ -4323,14 +4323,14 @@ export function artifactRetentionCensus(
   };
 
   const walk = (directory: Buffer, components: readonly Buffer[]): boolean => {
-    let directoryBefore;
+    let directoryBefore: BigIntStats;
     let names: Buffer[];
     try {
       directoryBefore = lstatSync(directory, { bigint: true });
       if (directoryBefore.isSymbolicLink() || !directoryBefore.isDirectory()) {
         return stop("filesystem-drift");
       }
-      const physical = realpathSync(directory, { encoding: "buffer" });
+      const physical = realpathSync(directory, { encoding: "buffer" }) as Buffer;
       if (!physical.equals(directory)) return stop("filesystem-drift");
       names = readdirSync(directory, { encoding: "buffer" }) as Buffer[];
       names.sort(Buffer.compare);
@@ -4341,7 +4341,7 @@ export function artifactRetentionCensus(
       if (observations.length >= MAX_RETENTION_CENSUS_ENTRIES) return stop("entry-limit");
       const path = censusPathChild(directory, name);
       const pathComponents = [...components, name];
-      let stat;
+      let stat: BigIntStats;
       try {
         stat = lstatSync(path, { bigint: true });
       } catch {
@@ -4375,7 +4375,7 @@ export function artifactRetentionCensus(
         }
       } else if (type === "symlink") {
         try {
-          const target = readlinkSync(path, { encoding: "buffer" });
+          const target = readlinkSync(path, { encoding: "buffer" }) as Buffer;
           symlinkTargetSha256 = createHash("sha256").update(target).digest("hex");
           if (!sameCensusStat(stat, lstatSync(path, { bigint: true }))) {
             return stop("filesystem-drift");
@@ -5743,15 +5743,20 @@ export function harnessIntegrationReproduction(
 interface HarnessCliOptions {
   readonly preflight: boolean;
   readonly selfTest: boolean;
+  readonly retentionCensus: boolean;
   readonly root: string;
   readonly artifactNamespace: string;
+  readonly locateSha256?: string;
 }
 
 function parseCli(argv: readonly string[]): HarnessCliOptions {
   let preflight = false;
   let selfTest = false;
+  let retentionCensus = false;
   let root = resolve(import.meta.dir, "..", "..");
   let artifactNamespace = DEFAULT_RETAINED_INTEGRATION_NAMESPACE;
+  let integrationNamespaceSpecified = false;
+  let locateSha256: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--self-test") {
@@ -5760,6 +5765,10 @@ function parseCli(argv: readonly string[]): HarnessCliOptions {
     }
     if (argument === "--preflight") {
       preflight = true;
+      continue;
+    }
+    if (argument === "--retention-census") {
+      retentionCensus = true;
       continue;
     }
     if (argument === "--root") {
@@ -5784,77 +5793,116 @@ function parseCli(argv: readonly string[]): HarnessCliOptions {
         );
       }
       artifactNamespace = value;
+      integrationNamespaceSpecified = true;
+      continue;
+    }
+    if (argument === "--locate-sha256") {
+      const value = argv[++index];
+      if (value === undefined || !SHA256_HEX.test(value)) {
+        throw new HarnessError(
+          "ARTIFACT_CENSUS_DIGEST_INVALID",
+          "--locate-sha256 requires exactly one lowercase SHA-256 digest.",
+        );
+      }
+      locateSha256 = value;
       continue;
     }
     throw new HarnessError(
       "UNKNOWN_ARGUMENT",
-      "usage: scripts/e2e-test-harness.sh (--preflight | --self-test) [--root <dir>] [--integration-namespace <safe-component>]",
+      "usage: scripts/e2e-test-harness.sh (--preflight | --self-test | --retention-census) [--root <dir>] [--integration-namespace <safe-component>] [--locate-sha256 <lowercase-sha256>]",
     );
   }
-  if (preflight === selfTest) {
-    throw new HarnessError("MODE_REQUIRED", "choose exactly one of --preflight or --self-test.");
+  if (Number(preflight) + Number(selfTest) + Number(retentionCensus) !== 1) {
+    throw new HarnessError(
+      "MODE_REQUIRED",
+      "choose exactly one of --preflight, --self-test, or --retention-census.",
+    );
   }
-  return { preflight, selfTest, root, artifactNamespace };
+  if (retentionCensus && integrationNamespaceSpecified) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_ARGUMENT_CONFLICT",
+      "--integration-namespace does not narrow the whole-root retention census.",
+    );
+  }
+  if (!retentionCensus && locateSha256 !== undefined) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_ARGUMENT_CONFLICT",
+      "--locate-sha256 is valid only with --retention-census.",
+    );
+  }
+  return { preflight, selfTest, retentionCensus, root, artifactNamespace, locateSha256 };
 }
 
 if (import.meta.main) {
-  let failureReproduction = SELF_TEST_REPRODUCTION;
+  let failureReproduction = process.argv.includes("--retention-census")
+    ? "bash scripts/e2e-test-harness.sh --retention-census"
+    : SELF_TEST_REPRODUCTION;
+  let failureSuite = process.argv.includes("--retention-census")
+    ? "ops.2a-artifact-retention-census"
+    : "ops.2a-harness-self-test";
   try {
     const options = parseCli(process.argv.slice(2));
-    failureReproduction = selfTestReproduction(options.artifactNamespace);
-    const report = realFilesystemRetentionPreflight(
-      options.root,
-      nodeArtifactStorage,
-      options.artifactNamespace,
-    );
-    const reproduce = harnessIntegrationReproduction(options.root, options.artifactNamespace);
-    if (report.exceeded) {
-      process.stdout.write(
-        `${JSON.stringify({
-          tool: "bun",
-          suite: "ops.2a-harness",
-          record: "retention_preflight",
-          storage_authority: report.storageAuthority,
-          status: "blocked",
-          code: "ARTIFACT_RETENTION_EXCEEDED",
-          used: report.used,
-          limit: report.limit,
-          detail:
-            "No shell step or artifact publication was attempted because the real filesystem retention backstop is already reached.",
-          reproduce,
-          remedy: report.remedy,
-        })}\n`,
-      );
-      process.exitCode = HARNESS_BLOCKED_EXIT_CODE;
-    } else if (options.preflight) {
-      process.stdout.write(
-        `${JSON.stringify({
-          tool: "bun",
-          suite: "ops.2a-harness",
-          record: "retention_preflight",
-          storage_authority: report.storageAuthority,
-          status: "pass",
-          code: "ARTIFACT_CAPACITY_AVAILABLE",
-          used: report.used,
-          limit: report.limit,
-          detail:
-            "Real filesystem authority is available and the retention backstop permits a separately requested shell self-test.",
-          reproduce,
-        })}\n`,
-      );
-      process.exitCode = 0;
+    if (options.retentionCensus) {
+      failureSuite = "ops.2a-artifact-retention-census";
+      const census = artifactRetentionCensus(options.root, options.locateSha256);
+      process.stdout.write(`${JSON.stringify(census)}\n`);
+      process.exitCode = census.complete && census.stable ? 0 : HARNESS_BLOCKED_EXIT_CODE;
     } else {
-      process.exitCode = await runHarnessSelfTest(
+      failureReproduction = selfTestReproduction(options.artifactNamespace);
+      const report = realFilesystemRetentionPreflight(
         options.root,
-        undefined,
         nodeArtifactStorage,
         options.artifactNamespace,
       );
+      const reproduce = harnessIntegrationReproduction(options.root, options.artifactNamespace);
+      if (report.exceeded) {
+        process.stdout.write(
+          `${JSON.stringify({
+            tool: "bun",
+            suite: "ops.2a-harness",
+            record: "retention_preflight",
+            storage_authority: report.storageAuthority,
+            status: "blocked",
+            code: "ARTIFACT_RETENTION_EXCEEDED",
+            used: report.used,
+            limit: report.limit,
+            detail:
+              "No shell step or artifact publication was attempted because the real filesystem retention backstop is already reached.",
+            reproduce,
+            remedy: report.remedy,
+          })}\n`,
+        );
+        process.exitCode = HARNESS_BLOCKED_EXIT_CODE;
+      } else if (options.preflight) {
+        process.stdout.write(
+          `${JSON.stringify({
+            tool: "bun",
+            suite: "ops.2a-harness",
+            record: "retention_preflight",
+            storage_authority: report.storageAuthority,
+            status: "pass",
+            code: "ARTIFACT_CAPACITY_AVAILABLE",
+            used: report.used,
+            limit: report.limit,
+            detail:
+              "Real filesystem authority is available and the retention backstop permits a separately requested shell self-test.",
+            reproduce,
+          })}\n`,
+        );
+        process.exitCode = 0;
+      } else {
+        process.exitCode = await runHarnessSelfTest(
+          options.root,
+          undefined,
+          nodeArtifactStorage,
+          options.artifactNamespace,
+        );
+      }
     }
   } catch (error) {
     const code = error instanceof HarnessError ? error.code : "HARNESS_UNEXPECTED";
     process.stderr.write(
-      `${JSON.stringify({ tool: "bun", suite: "ops.2a-harness-self-test", status: "fail", code, reproduce: failureReproduction })}\n`,
+      `${JSON.stringify({ tool: "bun", suite: failureSuite, status: "fail", code, reproduce: failureReproduction })}\n`,
     );
     process.exitCode = 1;
   }
