@@ -621,7 +621,7 @@ describe("OPS.2b review pipeline orchestration", () => {
 
     expect(result.signal).toBeNull();
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe(capability.runDirectory);
+    expect(String(result.stdout).trim()).toBe(capability.runDirectory);
     expect(result.stderr).toBe("");
   });
 

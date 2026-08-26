@@ -10,6 +10,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   appendFileSync,
+  type BigIntStats,
   closeSync,
   constants as filesystemConstants,
   existsSync,
@@ -2290,7 +2291,7 @@ function signalOwnedProcessGroupOnly(
           if (match) {
             const pid = Number(match[1]);
             const state = match[2];
-            if (!state.startsWith("Z")) {
+            if (state !== undefined && !state.startsWith("Z")) {
               alivePids.push(pid);
             }
           }
@@ -3559,6 +3560,893 @@ function emptyRetainedIntegrationCapacityReport(
     truncated: false,
     exceeded: false,
   };
+}
+
+export type ArtifactCensusNodeType =
+  | "directory"
+  | "regular"
+  | "symlink"
+  | "fifo"
+  | "socket"
+  | "block"
+  | "character"
+  | "unknown";
+
+export interface ArtifactCensusObservation {
+  /** Raw bytes relative to e2e/artifacts; never emitted directly. */
+  readonly relativePath: Uint8Array;
+  /** Raw path components used only for safe-display and provenance classification. */
+  readonly components: readonly Uint8Array[];
+  readonly type: ArtifactCensusNodeType;
+  readonly device: string;
+  readonly inode: string;
+  readonly links: string;
+  readonly uid: string;
+  readonly gid: string;
+  readonly mode: string;
+  readonly size: string;
+  readonly blocks: string;
+  readonly modifiedMilliseconds: string;
+  /** Present only for regular files whose opaque bytes were hashed completely. */
+  readonly contentSha256: string | null;
+  /** Present only for symlinks; the target itself is never emitted. */
+  readonly symlinkTargetSha256: string | null;
+}
+
+export interface ArtifactWriterLeaseCensus {
+  readonly open: number;
+  readonly closed: number;
+  readonly malformed: number;
+  readonly foreignEpochs: number;
+  /** Stable metadata-only witness used to detect a changing registry. */
+  readonly snapshotSha256: string;
+}
+
+export interface ArtifactMaintenanceCensus {
+  readonly present: boolean;
+  readonly valid: boolean;
+  /** Stable metadata-only witness used to detect a changing fence. */
+  readonly snapshotSha256: string;
+}
+
+export type ArtifactCensusIncompleteReason =
+  | "entry-limit"
+  | "hash-byte-limit"
+  | "filesystem-drift"
+  | "unreadable-node";
+
+export interface ArtifactCensusContext {
+  readonly storageAuthority: HarnessStorageAuthority;
+  readonly artifactRoot: string;
+  readonly artifactRootIdentity: string;
+  readonly observedAtMilliseconds: number;
+  readonly complete: boolean;
+  readonly stable: boolean;
+  readonly incompleteReason: ArtifactCensusIncompleteReason | null;
+  readonly entryLimit: number;
+  readonly hashByteLimit: bigint;
+  readonly hashedBytes: bigint;
+  readonly maintenance: ArtifactMaintenanceCensus;
+  readonly writerLeases: ArtifactWriterLeaseCensus;
+  readonly locateSha256?: string;
+}
+
+export interface ArtifactRetentionCensusReport {
+  readonly schema_version: 1;
+  readonly record: "artifact_retention_census";
+  readonly storage_authority: "real-filesystem" | "simulation";
+  readonly observed_at: string;
+  readonly artifact_root: string;
+  readonly artifact_root_identity: string;
+  readonly complete: boolean;
+  readonly stable: boolean;
+  /** Advisory only; a true value is never authority to move or delete evidence. */
+  readonly archive_candidate: boolean;
+  readonly incomplete_reason: ArtifactCensusIncompleteReason | null;
+  readonly limits: {
+    readonly entries: number;
+    readonly unique_regular_bytes: string;
+  };
+  readonly counts: Readonly<Record<ArtifactCensusNodeType, number>> & {
+    readonly entries: number;
+    readonly top_level_directories: number;
+    readonly top_level_namespaces: number;
+    readonly unique_regular_inodes: number;
+  };
+  readonly bytes: {
+    readonly logical: string;
+    readonly unique: string;
+    readonly logical_allocated: string;
+    readonly unique_allocated: string;
+    readonly hashed_unique: string;
+  };
+  readonly age_buckets: Readonly<
+    Record<
+      "future" | "lt_24h" | "d1_to_lt8" | "d8_to_lt31" | "d31_to_lt91" | "gte_91d",
+      { readonly entries: number; readonly logical_bytes: string }
+    >
+  >;
+  readonly uid_histogram: readonly { readonly value: string; readonly entries: number }[];
+  readonly gid_histogram: readonly { readonly value: string; readonly entries: number }[];
+  readonly mode_histogram: readonly { readonly value: string; readonly entries: number }[];
+  readonly provenance: readonly {
+    readonly role: string;
+    readonly entries: number;
+    readonly logical_bytes: string;
+  }[];
+  readonly hard_links: {
+    readonly groups: number;
+    readonly observed_aliases: number;
+    readonly external_link_groups: number;
+    readonly max_observed_aliases: number;
+  };
+  readonly maintenance: ArtifactMaintenanceCensus;
+  readonly writer_leases: ArtifactWriterLeaseCensus;
+  /** Canonical metadata-plus-content witness; absent for partial or unstable scans. */
+  readonly tree_sha256: string | null;
+  /** Canonical unique-inode content witness; absent for partial or unstable scans. */
+  readonly unique_content_sha256: string | null;
+  readonly locator: {
+    readonly requested_sha256: string | null;
+    readonly complete: boolean;
+    readonly matches: readonly {
+      readonly path: string | null;
+      readonly path_sha256: string;
+      readonly size: string;
+      readonly device: string;
+      readonly inode: string;
+    }[];
+  };
+  readonly warning: string;
+}
+
+interface ArtifactCensusInodeAggregate {
+  aliases: number;
+  links: bigint;
+  size: bigint;
+  allocated: bigint;
+  contentSha256: string;
+}
+
+const CENSUS_DAY_MILLISECONDS = 24n * 60n * 60n * 1_000n;
+const CENSUS_READ_CHUNK_BYTES = 64 * 1_024;
+
+function censusBuffer(value: Uint8Array): Buffer {
+  return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function censusRelativePath(components: readonly Buffer[]): Buffer {
+  const separator = Buffer.from("/");
+  return Buffer.concat(
+    components.flatMap((component, index) => (index === 0 ? [component] : [separator, component])),
+  );
+}
+
+function censusPathSha256(relativePath: Uint8Array): string {
+  return createHash("sha256").update(censusBuffer(relativePath)).digest("hex");
+}
+
+function censusSafeDisplayPath(components: readonly Uint8Array[]): string | null {
+  const display: string[] = [];
+  for (const raw of components) {
+    const bytes = censusBuffer(raw);
+    const decoded = bytes.toString("utf8");
+    if (!Buffer.from(decoded, "utf8").equals(bytes) || !isSafeRetainedEvidenceName(decoded)) {
+      return null;
+    }
+    const opaqueToken = /[A-Za-z0-9]{32,}/.test(decoded) && !SHA256_HEX.test(decoded);
+    if (containsCredentialShape(decoded) || opaqueToken) return null;
+    display.push(decoded);
+  }
+  return display.join("/");
+}
+
+function censusProvenanceRole(component: Uint8Array | undefined): string {
+  if (component === undefined) return "artifact-root";
+  const bytes = censusBuffer(component);
+  const decoded = bytes.toString("utf8");
+  if (!Buffer.from(decoded, "utf8").equals(bytes)) return "unclassified";
+  if (decoded === ARTIFACT_BLOB_DIRECTORY) return "shared-cas";
+  if (decoded === DEFAULT_RETAINED_INTEGRATION_NAMESPACE) return "ops2a-retained-harness";
+  if (decoded === "s2-krater") return "s2-krater";
+  if (decoded === "s6-cross-plane-auth") return "s6-cross-plane-auth";
+  if (decoded.startsWith("ci-")) return "ci-pipeline";
+  if (decoded.startsWith("smoke-agent-")) return "smoke-agent";
+  if (decoded.startsWith("smoke-gallery-")) return "smoke-gallery";
+  if (decoded.startsWith("gauntlet-")) return "cold-agent-gauntlet";
+  if (decoded.startsWith("playwright-")) return "playwright";
+  return "unclassified";
+}
+
+function censusAgeBucket(
+  modifiedMilliseconds: bigint,
+  observedAtMilliseconds: bigint,
+): keyof ArtifactRetentionCensusReport["age_buckets"] {
+  if (modifiedMilliseconds > observedAtMilliseconds) return "future";
+  const age = observedAtMilliseconds - modifiedMilliseconds;
+  if (age < CENSUS_DAY_MILLISECONDS) return "lt_24h";
+  if (age < 8n * CENSUS_DAY_MILLISECONDS) return "d1_to_lt8";
+  if (age < 31n * CENSUS_DAY_MILLISECONDS) return "d8_to_lt31";
+  if (age < 91n * CENSUS_DAY_MILLISECONDS) return "d31_to_lt91";
+  return "gte_91d";
+}
+
+function censusHistogram(
+  values: ReadonlyMap<string, number>,
+): readonly { readonly value: string; readonly entries: number }[] {
+  return [...values.entries()]
+    .sort(([left], [right]) => asciiCompare(left, right))
+    .map(([value, entries]) => ({ value, entries }));
+}
+
+function updateCensusHashField(
+  hash: ReturnType<typeof createHash>,
+  value: Uint8Array | string,
+): void {
+  const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : censusBuffer(value);
+  const length = Buffer.allocUnsafe(8);
+  length.writeBigUInt64BE(BigInt(bytes.byteLength));
+  hash.update(length);
+  hash.update(bytes);
+}
+
+/**
+ * Aggregate already-observed metadata without consulting the filesystem.
+ * Exported so deterministic accounting and redaction can be proven in memory.
+ */
+export function summarizeArtifactCensusObservations(
+  observations: readonly ArtifactCensusObservation[],
+  context: ArtifactCensusContext,
+): ArtifactRetentionCensusReport {
+  const counts: Record<ArtifactCensusNodeType, number> = {
+    directory: 0,
+    regular: 0,
+    symlink: 0,
+    fifo: 0,
+    socket: 0,
+    block: 0,
+    character: 0,
+    unknown: 0,
+  };
+  const uid = new Map<string, number>();
+  const gid = new Map<string, number>();
+  const mode = new Map<string, number>();
+  const provenance = new Map<string, { entries: number; logicalBytes: bigint }>();
+  const namespaces = new Set<string>();
+  const inodes = new Map<string, ArtifactCensusInodeAggregate>();
+  let logicalBytes = 0n;
+  let logicalAllocated = 0n;
+  const ageBuckets: Record<
+    keyof ArtifactRetentionCensusReport["age_buckets"],
+    { entries: number; logicalBytes: bigint }
+  > = {
+    future: { entries: 0, logicalBytes: 0n },
+    lt_24h: { entries: 0, logicalBytes: 0n },
+    d1_to_lt8: { entries: 0, logicalBytes: 0n },
+    d8_to_lt31: { entries: 0, logicalBytes: 0n },
+    d31_to_lt91: { entries: 0, logicalBytes: 0n },
+    gte_91d: { entries: 0, logicalBytes: 0n },
+  };
+  const ordered = [...observations].sort((left, right) =>
+    Buffer.compare(censusBuffer(left.relativePath), censusBuffer(right.relativePath)),
+  );
+  const tree = createHash("sha256");
+  let topLevelDirectories = 0;
+  const locatorMatches: {
+    path: string | null;
+    path_sha256: string;
+    size: string;
+    device: string;
+    inode: string;
+  }[] = [];
+  let locatorOverflow = false;
+
+  for (const observation of ordered) {
+    counts[observation.type] += 1;
+    uid.set(observation.uid, (uid.get(observation.uid) ?? 0) + 1);
+    gid.set(observation.gid, (gid.get(observation.gid) ?? 0) + 1);
+    mode.set(observation.mode, (mode.get(observation.mode) ?? 0) + 1);
+    const role = censusProvenanceRole(observation.components[0]);
+    const roleValue = provenance.get(role) ?? { entries: 0, logicalBytes: 0n };
+    roleValue.entries += 1;
+    provenance.set(role, roleValue);
+
+    const size = BigInt(observation.size);
+    const allocated = BigInt(observation.blocks) * 512n;
+    const regularBytes = observation.type === "regular" ? size : 0n;
+    if (observation.type === "regular") {
+      logicalBytes += size;
+      logicalAllocated += allocated;
+      roleValue.logicalBytes += size;
+      const inodeKey = `${observation.device}:${observation.inode}`;
+      const existing = inodes.get(inodeKey);
+      if (observation.contentSha256 === null || !SHA256_HEX.test(observation.contentSha256)) {
+        throw new HarnessError(
+          "ARTIFACT_CENSUS_INVALID",
+          "a regular-file census observation lacks its opaque-byte digest.",
+        );
+      }
+      if (existing === undefined) {
+        inodes.set(inodeKey, {
+          aliases: 1,
+          links: BigInt(observation.links),
+          size,
+          allocated,
+          contentSha256: observation.contentSha256,
+        });
+      } else {
+        if (
+          existing.size !== size ||
+          existing.allocated !== allocated ||
+          existing.contentSha256 !== observation.contentSha256
+        ) {
+          throw new HarnessError(
+            "ARTIFACT_CENSUS_DRIFT",
+            "one regular-file inode changed while the census was being aggregated.",
+          );
+        }
+        existing.aliases += 1;
+        if (BigInt(observation.links) > existing.links) existing.links = BigInt(observation.links);
+      }
+      if (context.locateSha256 === observation.contentSha256) {
+        if (locatorMatches.length < MAX_RETENTION_LOCATOR_MATCHES) {
+          locatorMatches.push({
+            path: censusSafeDisplayPath(observation.components),
+            path_sha256: censusPathSha256(observation.relativePath),
+            size: observation.size,
+            device: observation.device,
+            inode: observation.inode,
+          });
+        } else {
+          locatorOverflow = true;
+        }
+      }
+    }
+
+    const bucket = censusAgeBucket(
+      BigInt(observation.modifiedMilliseconds),
+      BigInt(context.observedAtMilliseconds),
+    );
+    ageBuckets[bucket].entries += 1;
+    ageBuckets[bucket].logicalBytes += regularBytes;
+
+    if (observation.components.length === 1 && observation.type === "directory") {
+      topLevelDirectories += 1;
+      const component = censusBuffer(observation.components[0] as Uint8Array);
+      if (!component.equals(Buffer.from(ARTIFACT_BLOB_DIRECTORY))) {
+        namespaces.add(component.toString("hex"));
+      }
+    }
+
+    updateCensusHashField(tree, observation.relativePath);
+    for (const value of [
+      observation.type,
+      observation.device,
+      observation.inode,
+      observation.links,
+      observation.uid,
+      observation.gid,
+      observation.mode,
+      observation.size,
+      observation.blocks,
+      observation.modifiedMilliseconds,
+      observation.contentSha256 ?? "",
+      observation.symlinkTargetSha256 ?? "",
+    ]) {
+      updateCensusHashField(tree, value);
+    }
+  }
+
+  let uniqueBytes = 0n;
+  let uniqueAllocated = 0n;
+  let hardLinkGroups = 0;
+  let observedAliases = 0;
+  let externalLinkGroups = 0;
+  let maxObservedAliases = 0;
+  const content = createHash("sha256");
+  for (const [key, inode] of [...inodes.entries()].sort(([left], [right]) =>
+    asciiCompare(left, right),
+  )) {
+    uniqueBytes += inode.size;
+    uniqueAllocated += inode.allocated;
+    updateCensusHashField(content, key);
+    updateCensusHashField(content, inode.size.toString());
+    updateCensusHashField(content, inode.contentSha256);
+    if (inode.aliases > 1 || inode.links > 1n) {
+      hardLinkGroups += 1;
+      observedAliases += inode.aliases;
+      if (inode.links > BigInt(inode.aliases)) externalLinkGroups += 1;
+      if (inode.aliases > maxObservedAliases) maxObservedAliases = inode.aliases;
+    }
+  }
+
+  const authoritative = context.complete && context.stable;
+  const hasSpecialNodes =
+    counts.fifo + counts.socket + counts.block + counts.character + counts.unknown > 0;
+  return {
+    schema_version: 1,
+    record: "artifact_retention_census",
+    storage_authority: context.storageAuthority,
+    observed_at: new Date(context.observedAtMilliseconds).toISOString(),
+    artifact_root: context.artifactRoot,
+    artifact_root_identity: context.artifactRootIdentity,
+    complete: context.complete,
+    stable: context.stable,
+    archive_candidate:
+      authoritative &&
+      context.storageAuthority === "real-filesystem" &&
+      context.maintenance.present &&
+      context.maintenance.valid &&
+      context.writerLeases.open === 0 &&
+      context.writerLeases.malformed === 0 &&
+      !hasSpecialNodes &&
+      externalLinkGroups === 0,
+    incomplete_reason: context.incompleteReason,
+    limits: {
+      entries: context.entryLimit,
+      unique_regular_bytes: context.hashByteLimit.toString(),
+    },
+    counts: {
+      ...counts,
+      entries: observations.length,
+      top_level_directories: topLevelDirectories,
+      top_level_namespaces: namespaces.size,
+      unique_regular_inodes: inodes.size,
+    },
+    bytes: {
+      logical: logicalBytes.toString(),
+      unique: uniqueBytes.toString(),
+      logical_allocated: logicalAllocated.toString(),
+      unique_allocated: uniqueAllocated.toString(),
+      hashed_unique: context.hashedBytes.toString(),
+    },
+    age_buckets: Object.fromEntries(
+      Object.entries(ageBuckets).map(([key, value]) => [
+        key,
+        { entries: value.entries, logical_bytes: value.logicalBytes.toString() },
+      ]),
+    ) as ArtifactRetentionCensusReport["age_buckets"],
+    uid_histogram: censusHistogram(uid),
+    gid_histogram: censusHistogram(gid),
+    mode_histogram: censusHistogram(mode),
+    provenance: [...provenance.entries()]
+      .sort(([left], [right]) => asciiCompare(left, right))
+      .map(([role, value]) => ({
+        role,
+        entries: value.entries,
+        logical_bytes: value.logicalBytes.toString(),
+      })),
+    hard_links: {
+      groups: hardLinkGroups,
+      observed_aliases: observedAliases,
+      external_link_groups: externalLinkGroups,
+      max_observed_aliases: maxObservedAliases,
+    },
+    maintenance: context.maintenance,
+    writer_leases: context.writerLeases,
+    tree_sha256: authoritative ? tree.digest("hex") : null,
+    unique_content_sha256: authoritative ? content.digest("hex") : null,
+    locator: {
+      requested_sha256: context.locateSha256 ?? null,
+      complete: authoritative && !locatorOverflow,
+      matches: locatorMatches,
+    },
+    warning:
+      "This is a bounded read-only observation, not authority to move or delete evidence. A maintenance fence, zero open writers, exact operator approval, and a separately verified move plan remain mandatory.",
+  };
+}
+
+function censusNodeType(stat: {
+  isDirectory(): boolean;
+  isFile(): boolean;
+  isSymbolicLink(): boolean;
+  isFIFO(): boolean;
+  isSocket(): boolean;
+  isBlockDevice(): boolean;
+  isCharacterDevice(): boolean;
+}): ArtifactCensusNodeType {
+  if (stat.isSymbolicLink()) return "symlink";
+  if (stat.isDirectory()) return "directory";
+  if (stat.isFile()) return "regular";
+  if (stat.isFIFO()) return "fifo";
+  if (stat.isSocket()) return "socket";
+  if (stat.isBlockDevice()) return "block";
+  if (stat.isCharacterDevice()) return "character";
+  return "unknown";
+}
+
+function sameCensusStat(
+  left: { readonly dev: bigint; readonly ino: bigint; readonly mode: bigint; readonly size: bigint; readonly mtimeNs: bigint; readonly ctimeNs: bigint },
+  right: { readonly dev: bigint; readonly ino: bigint; readonly mode: bigint; readonly size: bigint; readonly mtimeNs: bigint; readonly ctimeNs: bigint },
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function censusPathChild(parent: Buffer, child: Buffer): Buffer {
+  return Buffer.concat([parent, Buffer.from(sep), child]);
+}
+
+function hashCensusRegularFile(
+  path: Buffer,
+  expected: BigIntStats,
+): string {
+  const noFollow = filesystemConstants.O_NOFOLLOW ?? 0;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, filesystemConstants.O_RDONLY | noFollow);
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || !sameCensusStat(expected, before)) {
+      throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file changed before hashing.");
+    }
+    const digest = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(CENSUS_READ_CHUNK_BYTES);
+    let remaining = before.size;
+    while (remaining > 0n) {
+      const wanted = Number(remaining > BigInt(buffer.length) ? BigInt(buffer.length) : remaining);
+      const bytes = readSync(descriptor, buffer, 0, wanted, null);
+      if (bytes <= 0) {
+        throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file shortened while hashing.");
+      }
+      digest.update(buffer.subarray(0, bytes));
+      remaining -= BigInt(bytes);
+    }
+    if (readSync(descriptor, buffer, 0, 1, null) !== 0) {
+      throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file grew while hashing.");
+    }
+    const after = fstatSync(descriptor, { bigint: true });
+    const finalPath = lstatSync(path, { bigint: true });
+    if (!sameCensusStat(before, after) || !sameCensusStat(before, finalPath)) {
+      throw new HarnessError("ARTIFACT_CENSUS_DRIFT", "a regular file changed while hashing.");
+    }
+    return digest.digest("hex");
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function censusMaintenanceState(root: string): ArtifactMaintenanceCensus {
+  const fence = join(root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME);
+  let stat: BigIntStats;
+  try {
+    stat = lstatSync(fence, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return {
+        present: true,
+        valid: false,
+        snapshotSha256: createHash("sha256").update("unreadable").digest("hex"),
+      };
+    }
+    return {
+      present: false,
+      valid: true,
+      snapshotSha256: createHash("sha256").update("absent").digest("hex"),
+    };
+  }
+  try {
+    const exactDirectory =
+      !stat.isSymbolicLink() &&
+      stat.isDirectory() &&
+      realpathSync(fence) === fence &&
+      readdirSync(fence).length === 0;
+    const snapshot = [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs]
+      .map(String)
+      .join(":");
+    return {
+      present: true,
+      valid: exactDirectory,
+      snapshotSha256: createHash("sha256").update(snapshot).digest("hex"),
+    };
+  } catch {
+    return {
+      present: true,
+      valid: false,
+      snapshotSha256: createHash("sha256").update("unreadable").digest("hex"),
+    };
+  }
+}
+
+function censusWriterLeases(root: string, artifactRootIdentity: string): ArtifactWriterLeaseCensus {
+  let open = 0;
+  let closed = 0;
+  let malformed = 0;
+  let foreignEpochs = 0;
+  const witness: string[] = [];
+  const registry = join(root, "e2e", ARTIFACT_WRITER_LEASES_NAME);
+  let registryStat: BigIntStats;
+  try {
+    registryStat = lstatSync(registry, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      malformed = 1;
+      witness.push("unreadable-registry");
+      return {
+        open,
+        closed,
+        malformed,
+        foreignEpochs,
+        snapshotSha256: createHash("sha256").update(witness.join("\n")).digest("hex"),
+      };
+    }
+    return {
+      open,
+      closed,
+      malformed,
+      foreignEpochs,
+      snapshotSha256: createHash("sha256").update("absent").digest("hex"),
+    };
+  }
+  try {
+    if (
+      registryStat.isSymbolicLink() ||
+      !registryStat.isDirectory() ||
+      realpathSync(registry) !== registry
+    ) {
+      malformed += 1;
+    } else {
+      witness.push(`registry:${registryStat.dev}:${registryStat.ino}:${registryStat.mtimeNs}`);
+      const currentEpoch = artifactWriterLeaseEpochName(artifactRootIdentity);
+      for (const epochName of readdirSync(registry).sort(asciiCompare)) {
+        const epoch = join(registry, epochName);
+        const epochStat = lstatSync(epoch, { bigint: true });
+        if (
+          epochStat.isSymbolicLink() ||
+          !epochStat.isDirectory() ||
+          realpathSync(epoch) !== epoch
+        ) {
+          malformed += 1;
+          witness.push(`malformed-epoch:${createHash("sha256").update(epochName).digest("hex")}`);
+          continue;
+        }
+        witness.push(`epoch:${epochStat.dev}:${epochStat.ino}:${epochStat.mtimeNs}`);
+        if (epochName !== currentEpoch) {
+          foreignEpochs += 1;
+          continue;
+        }
+        for (const leaseName of readdirSync(epoch).sort(asciiCompare)) {
+          const lease = join(epoch, leaseName);
+          const leaseStat = lstatSync(lease, { bigint: true });
+          if (
+            !/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/.test(leaseName) ||
+            leaseStat.isSymbolicLink() ||
+            !leaseStat.isDirectory() ||
+            realpathSync(lease) !== lease
+          ) {
+            malformed += 1;
+            witness.push(`malformed-lease:${createHash("sha256").update(leaseName).digest("hex")}`);
+            continue;
+          }
+          const marker = join(lease, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
+          witness.push(`lease:${leaseStat.dev}:${leaseStat.ino}:${leaseStat.mtimeNs}`);
+          let markerStat: BigIntStats;
+          try {
+            markerStat = lstatSync(marker, { bigint: true });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              malformed += 1;
+              witness.push("unreadable-marker");
+              continue;
+            }
+            open += 1;
+            continue;
+          }
+          if (
+            markerStat.isSymbolicLink() ||
+            !markerStat.isDirectory() ||
+            realpathSync(marker) !== marker ||
+            readdirSync(marker).length !== 0
+          ) {
+            malformed += 1;
+          } else {
+            closed += 1;
+          }
+          witness.push(`marker:${markerStat.dev}:${markerStat.ino}:${markerStat.mtimeNs}`);
+        }
+      }
+    }
+  } catch {
+    malformed += 1;
+    witness.push("unreadable");
+  }
+  return {
+    open,
+    closed,
+    malformed,
+    foreignEpochs,
+    snapshotSha256: createHash("sha256").update(witness.join("\n")).digest("hex"),
+  };
+}
+
+/**
+ * Full, bounded, write-free artifact-root census for an operator.
+ *
+ * Bodies are read only in fixed-size chunks to compute opaque SHA-256 values;
+ * neither body bytes, arbitrary JSON fields, nor unsafe path components enter
+ * the report. Path-based Node APIs cannot prove a race-free snapshot, so any
+ * observed drift suppresses authoritative digests and archive candidacy.
+ */
+export function artifactRetentionCensus(
+  root: string,
+  locateSha256?: string,
+): ArtifactRetentionCensusReport {
+  if (locateSha256 !== undefined && !SHA256_HEX.test(locateSha256)) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_DIGEST_INVALID",
+      "--locate-sha256 requires exactly one lowercase SHA-256 digest.",
+    );
+  }
+  const physicalRoot = assertContainedRoot(resolve(root));
+  const artifactRoot = join(physicalRoot, "e2e", "artifacts");
+  let artifactRootStat;
+  try {
+    artifactRootStat = lstatSync(artifactRoot, { bigint: true });
+  } catch {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_ROOT_MISSING",
+      "the exact e2e/artifacts directory is required for a retention census.",
+    );
+  }
+  if (
+    artifactRootStat.isSymbolicLink() ||
+    !artifactRootStat.isDirectory() ||
+    realpathSync(artifactRoot) !== artifactRoot
+  ) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_ROOT_UNSAFE",
+      "the retention census requires one unredirected e2e/artifacts directory.",
+    );
+  }
+  const artifactRootIdentity = `${artifactRootStat.dev}:${artifactRootStat.ino}`;
+  const observedAtMilliseconds = Date.now();
+  const startMaintenance = censusMaintenanceState(physicalRoot);
+  const startLeases = censusWriterLeases(physicalRoot, artifactRootIdentity);
+  const observations: ArtifactCensusObservation[] = [];
+  const inodeDigests = new Map<string, { digest: string; signature: string }>();
+  const artifactRootBuffer = Buffer.from(artifactRoot);
+  let hashedBytes = 0n;
+  let complete = true;
+  let stable = true;
+  let incompleteReason: ArtifactCensusIncompleteReason | null = null;
+
+  const stop = (reason: ArtifactCensusIncompleteReason): false => {
+    complete = false;
+    incompleteReason ??= reason;
+    if (reason === "filesystem-drift" || reason === "unreadable-node") stable = false;
+    return false;
+  };
+
+  const walk = (directory: Buffer, components: readonly Buffer[]): boolean => {
+    let directoryBefore;
+    let names: Buffer[];
+    try {
+      directoryBefore = lstatSync(directory, { bigint: true });
+      if (directoryBefore.isSymbolicLink() || !directoryBefore.isDirectory()) {
+        return stop("filesystem-drift");
+      }
+      const physical = realpathSync(directory, { encoding: "buffer" });
+      if (!physical.equals(directory)) return stop("filesystem-drift");
+      names = readdirSync(directory, { encoding: "buffer" }) as Buffer[];
+      names.sort(Buffer.compare);
+    } catch {
+      return stop("unreadable-node");
+    }
+    for (const name of names) {
+      if (observations.length >= MAX_RETENTION_CENSUS_ENTRIES) return stop("entry-limit");
+      const path = censusPathChild(directory, name);
+      const pathComponents = [...components, name];
+      let stat;
+      try {
+        stat = lstatSync(path, { bigint: true });
+      } catch {
+        return stop("filesystem-drift");
+      }
+      const type = censusNodeType(stat);
+      let contentSha256: string | null = null;
+      let symlinkTargetSha256: string | null = null;
+      if (type === "regular") {
+        const inodeKey = `${stat.dev}:${stat.ino}`;
+        const signature = [stat.size, stat.mode, stat.mtimeNs, stat.ctimeNs].map(String).join(":");
+        const known = inodeDigests.get(inodeKey);
+        if (known === undefined) {
+          if (hashedBytes + stat.size > MAX_RETENTION_CENSUS_HASH_BYTES) {
+            return stop("hash-byte-limit");
+          }
+          try {
+            contentSha256 = hashCensusRegularFile(path, stat);
+          } catch (error) {
+            return stop(
+              error instanceof HarnessError && error.code === "ARTIFACT_CENSUS_DRIFT"
+                ? "filesystem-drift"
+                : "unreadable-node",
+            );
+          }
+          inodeDigests.set(inodeKey, { digest: contentSha256, signature });
+          hashedBytes += stat.size;
+        } else {
+          if (known.signature !== signature) return stop("filesystem-drift");
+          contentSha256 = known.digest;
+        }
+      } else if (type === "symlink") {
+        try {
+          const target = readlinkSync(path, { encoding: "buffer" });
+          symlinkTargetSha256 = createHash("sha256").update(target).digest("hex");
+          if (!sameCensusStat(stat, lstatSync(path, { bigint: true }))) {
+            return stop("filesystem-drift");
+          }
+        } catch {
+          return stop("filesystem-drift");
+        }
+      }
+      observations.push({
+        relativePath: censusRelativePath(pathComponents),
+        components: pathComponents,
+        type,
+        device: stat.dev.toString(),
+        inode: stat.ino.toString(),
+        links: stat.nlink.toString(),
+        uid: stat.uid.toString(),
+        gid: stat.gid.toString(),
+        mode: (stat.mode & 0o177777n).toString(8),
+        size: stat.size.toString(),
+        blocks: stat.blocks.toString(),
+        modifiedMilliseconds: (stat.mtimeNs / 1_000_000n).toString(),
+        contentSha256,
+        symlinkTargetSha256,
+      });
+      if (type === "directory" && !walk(path, pathComponents)) return false;
+    }
+    try {
+      const directoryAfter = lstatSync(directory, { bigint: true });
+      if (!sameCensusStat(directoryBefore, directoryAfter)) return stop("filesystem-drift");
+    } catch {
+      return stop("filesystem-drift");
+    }
+    return true;
+  };
+
+  walk(artifactRootBuffer, []);
+  const endMaintenance = censusMaintenanceState(physicalRoot);
+  const endLeases = censusWriterLeases(physicalRoot, artifactRootIdentity);
+  try {
+    const artifactRootAfter = lstatSync(artifactRoot, { bigint: true });
+    if (!sameCensusStat(artifactRootStat, artifactRootAfter)) stable = false;
+  } catch {
+    stable = false;
+  }
+  if (
+    JSON.stringify(startMaintenance) !== JSON.stringify(endMaintenance) ||
+    JSON.stringify(startLeases) !== JSON.stringify(endLeases) ||
+    startLeases.open > 0 ||
+    startLeases.malformed > 0
+  ) {
+    stable = false;
+  }
+  if (!stable) {
+    complete = false;
+    incompleteReason ??= "filesystem-drift";
+  }
+  return summarizeArtifactCensusObservations(observations, {
+    storageAuthority: "real-filesystem",
+    artifactRoot,
+    artifactRootIdentity,
+    observedAtMilliseconds,
+    complete,
+    stable,
+    incompleteReason,
+    entryLimit: MAX_RETENTION_CENSUS_ENTRIES,
+    hashByteLimit: MAX_RETENTION_CENSUS_HASH_BYTES,
+    hashedBytes,
+    maintenance: endMaintenance,
+    writerLeases: endLeases,
+    locateSha256,
+  });
 }
 
 export function reserveArtifactNamespace(

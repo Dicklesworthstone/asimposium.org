@@ -184,11 +184,12 @@ group_liveness_state() {
   table="$(ps -A -o pid=,pgid=,stat= 2>/dev/null)" || return 2
   [[ -n "${table}" ]] || return 2
   if ! awk '
+    NF == 0 { next }
     NF != 3 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[[:alpha:]?][^[:space:]]*$/ { exit 1 }
   ' <<<"${table}"; then
     return 2
   fi
-  if awk -v wanted="${pgid}" '$2 == wanted && $3 !~ /Z/ { found = 1 } END { exit(found ? 0 : 1) }' <<<"${table}"; then
+  if awk -v wanted="${pgid}" 'NF == 0 { next } $2 == wanted && $3 !~ /Z/ { found = 1 } END { exit(found ? 0 : 1) }' <<<"${table}"; then
     return 0
   fi
   return 1
@@ -198,13 +199,13 @@ wait_for_group_absence() {
   local pgid="$1"
   local attempts state
 
-  for ((attempts = 0; attempts < 10; attempts += 1)); do
+  for ((attempts = 0; attempts < 30; attempts += 1)); do
     state=0
     group_liveness_state "${pgid}" || state=$?
     if [[ "${state}" -eq 1 ]]; then
       return 0
     fi
-    sleep 0.01
+    sleep 0.02
   done
   return 1
 }
@@ -319,9 +320,11 @@ group_has_live_member_other_than() {
     my ($wanted, $excluded) = @ARGV;
     exit 2 unless defined($wanted) && defined($excluded) &&
       $wanted =~ /\A[1-9][0-9]*\z/ && $excluded =~ /\A[1-9][0-9]*\z/;
-    setsid() == -1 and exit 2;
+    POSIX::setsid();
     open(my $ps, q{-|}, q{ps}, q{-A}, q{-o}, q{pid=,pgid=,stat=}) or exit 2;
     while (my $row = <$ps>) {
+      chomp($row);
+      next if $row =~ /^\s*$/;
       my ($pid, $member_pgid, $state) =
         $row =~ /^\s*([0-9]+)\s+([0-9]+)\s+([^\s]+)\s*\z/;
       exit 2 unless defined($pid) && defined($member_pgid) && defined($state);
@@ -329,7 +332,7 @@ group_has_live_member_other_than() {
       close($ps);
       exit 0;
     }
-    close($ps) or exit 2;
+    close($ps);
     exit 1;
   ' "${pgid}" "${excluded_pid}"
 }
@@ -408,7 +411,8 @@ s4_controlled_command_supervisor() {
       kill -KILL -- "-${pgid}" 2>/dev/null || return 125
       return 125
     }
-    kill -KILL -- "-${pgid}" 2>/dev/null || return 1
+    kill -KILL -- "-${pgid}" 2>/dev/null || exit 137
+    exit 137
   fi
   # TERM removed every payload member. This still makes the command fail: its
   # payload leader returned while a descendant remained. Use the generic
