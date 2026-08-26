@@ -102,6 +102,7 @@ run_smoke() { # $1 = defect name, $2 = optional extra env (NAME=VAL)
     ASIMPOSIUM_STAGING_AGENT_BASE_URL="$base_url" \
     ASIMPOSIUM_SMOKE_FELLOW_TOKEN="$fellow_token" \
     ${env_extra[@]+"${env_extra[@]}"} \
+    SMOKE_AGENT_LANE_LABEL="fixture-seeded-origin" \
     timeout 60 bash "$smoke_script" >"$scratch/out" 2>"$scratch/err"
   run_status=$?
   set -e
@@ -141,8 +142,10 @@ expect_run() { # $1 label, $2 expected exit, $3 expected code, $4 defect, $5 ext
 }
 
 # --- Happy path: the conforming fixture drives the full journey to completion.
-expect_run HAPPY 0 "AGENT_LOOP_COMPLETE" ""
-expect_run HAPPY_REPEAT 0 "AGENT_LOOP_COMPLETE" ""
+# Codes arrive lane-prefixed (see smoke_agent_lane_code in smoke-agent.sh) so a
+# fixture green can never be quoted as a staging or product green.
+expect_run HAPPY 0 "fixture-seeded-origin:AGENT_LOOP_COMPLETE" ""
+expect_run HAPPY_REPEAT 0 "fixture-seeded-origin:AGENT_LOOP_COMPLETE" ""
 
 # --- Stage refusal matrix: each planted defect fires its named assertion.
 expect_run DEF_HANDBOOK 69 "AGENT_HANDBOOK_UNAVAILABLE" "handbook-unavailable"

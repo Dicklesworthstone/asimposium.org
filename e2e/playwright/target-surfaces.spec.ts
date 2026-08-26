@@ -1,5 +1,12 @@
 import { type APIRequestContext, expect, test } from "@playwright/test";
 
+/**
+ * Tamper-evidence rule: a green run must prove the REAL ASImposium staging
+ * planes, not an arbitrary look-alike server someone pointed the env at.
+ * Mock-free requests are not identity; the origin itself is constrained to
+ * operator-owned *.asimposium.org subdomains, minus the production family,
+ * so only a machine this project actually controls can produce a pass.
+ */
 function requiredStagingOrigin(variableName: string): string {
   const supplied = process.env[variableName];
   if (!supplied) {
@@ -11,10 +18,11 @@ function requiredStagingOrigin(variableName: string): string {
     parsed = new URL(supplied);
   } catch {
     throw new Error(
-      `${variableName} must be an HTTPS origin without credentials, a path, query, or fragment.`,
+      `${variableName} must be an HTTPS origin without credentials, a path, query, or fragment, on an operator-owned *.asimposium.org subdomain.`,
     );
   }
 
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/u, "");
   if (
     parsed.protocol !== "https:" ||
     parsed.username ||
@@ -27,10 +35,11 @@ function requiredStagingOrigin(variableName: string): string {
       "artifacts.asimposium.org",
       "asimposium.org",
       "www.asimposium.org",
-    ]).has(parsed.hostname.toLowerCase().replace(/\.$/u, ""))
+    ]).has(hostname) ||
+    !hostname.endsWith(".asimposium.org")
   ) {
     throw new Error(
-      `${variableName} must be an HTTPS origin without credentials, a path, query, or fragment.`,
+      `${variableName} must be an HTTPS origin without credentials, a path, query, or fragment, and must be an operator-owned *.asimposium.org subdomain other than the production family.`,
     );
   }
 

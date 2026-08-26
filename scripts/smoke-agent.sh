@@ -25,7 +25,9 @@ unset ASIMPOSIUM_SMOKE_FELLOW_TOKEN
 #      Fellow credential (ASIMPOSIUM_SMOKE_FELLOW_TOKEN) the loop is
 #      unprovable and the run blocks with
 #      exit 75 AGENT_LOOP_CREDENTIAL_ABSENT; with it, a passing run ends
-#      exit 0 AGENT_LOOP_COMPLETE.
+#      exit 0 AGENT_LOOP_COMPLETE (prefixed "<lane>:" when the caller sets
+#      SMOKE_AGENT_LANE_LABEL, so a fixture-table green can never be quoted
+#      as a staging or product green).
 #
 # Other exits: 64 usage/run-id, 78 staging origin missing/invalid,
 # 90 AGENT_LOOP_CREDENTIAL_INVALID.
@@ -183,6 +185,14 @@ smoke_agent_fetch_cursor() {
   [[ "$http_status" == "200" ]] || return 2
   [[ "$cursor" =~ ^[0-9]+$ ]] || return 3
   printf '%s\n' "$cursor"
+}
+smoke_agent_lane_code() { # $1 = base code; stdout = lane-prefixed code
+  local label="${SMOKE_AGENT_LANE_LABEL:-}"
+  case "$label" in
+    "") printf '%s' "$1" ;;
+    *[!a-z0-9-]* | [A-Z]*) printf '%s' "$1" ;; # malformed label: refuse to decorate
+    *) printf '%s:%s' "$label" "$1" ;;
+  esac
 }
 
 # Bounded Retry-After honoring for public preflight GETs. A 429 whose
@@ -789,5 +799,5 @@ if [[ "${loop_close##*$'\n'}" != "201" && "${loop_close##*$'\n'}" != "200" ]]; t
   exit 83
 fi
 
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "AGENT_LOOP_COMPLETE" "$reproduce"
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "$(smoke_agent_lane_code AGENT_LOOP_COMPLETE)" "$reproduce"
 exit 0
