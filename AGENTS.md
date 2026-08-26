@@ -307,7 +307,7 @@ Scripts that write under `e2e/artifacts` or similar must treat caller-provided r
 
 ## Beads
 
-Use `br` for roadmap and implementation tracking. **`br` never runs git.** After `br sync --flush-only`, manually `git add .beads/`.
+Use `br` for roadmap and implementation tracking. **`br` never runs git.** After issue changes, run `scripts/beads-flush.sh`; it flushes, leaves Beads' certified working JSONL intact, and stages a public projection without the local `source_repo_path` plus the two certificate files. An expected `MM .beads/issues.jsonl` means the working file retains local routing metadata while the staged blob is sanitized; rerun the helper instead of staging the working copy. **Never stage the `.beads/` directory wholesale**: that can publish databases, recovery artifacts, and machine-local state.
 
 ```bash
 br ready
@@ -318,8 +318,7 @@ br update <id> --status=in_progress
 br close <id> [--reason "..."]
 br dep add <issue> <depends-on>
 br dep cycles
-br sync --flush-only
-git add .beads/
+scripts/beads-flush.sh
 ```
 
 Use the bead ID as the Agent-Mail `thread_id`. Do not run bare `bv`; use only `bv --robot-*`.
@@ -378,7 +377,7 @@ Before finishing a work session you MUST:
 1. File beads for remaining work.
 2. Run quality gates if code changed (typecheck, lint, tests, `ubs --diff`).
 3. Update issue status; close finished work.
-4. `br sync --flush-only` and `git add .beads/`.
+4. Run `scripts/beads-flush.sh` to flush and exactly stage the sanitized public Beads projection plus certificates.
 5. Hand off: what changed, gates run + results, remaining risks, concrete next steps.
 
 Do not claim a surface is done unless the relevant Fable gate is actually green.
