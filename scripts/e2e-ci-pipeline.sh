@@ -482,9 +482,11 @@ try:
     os.set_inheritable(3, False)
     descendant_proof_supported = enable_descendant_proof()
     child = subprocess.Popen(command, start_new_session=True)
-except BaseException:
+except (OSError, ValueError, subprocess.SubprocessError):
     # No stage process exists, so even a launch refusal has a positive empty-set
     # proof. Preserve a distinct wrapper failure without stranding the lease.
+    # Do not catch BaseException: an asynchronous KeyboardInterrupt may arrive
+    # after fork but before Popen returns, and must fail closed with no token.
     settled_exit(126)
 if kill_wrapper_after_spawn:
     os.kill(os.getpid(), signal.SIGKILL)

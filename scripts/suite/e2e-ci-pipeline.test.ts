@@ -743,6 +743,10 @@ describe("OPS.2b review pipeline orchestration", () => {
       "return wait_for_group_absence() and not force_unsettled",
     );
     expect(bounded).toContain("os.set_inheritable(3, False)");
+    expect(bounded).toContain(
+      "except (OSError, ValueError, subprocess.SubprocessError):",
+    );
+    expect(bounded).not.toContain("except BaseException:");
     expect(bounded).toContain("pr_set_child_subreaper = 36");
     expect(bounded).toContain('f"/proc/self/task/{os.getpid()}/children"');
     expect(bounded).toContain("os.pidfd_open(pid, 0)");
