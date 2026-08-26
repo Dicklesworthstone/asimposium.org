@@ -138,12 +138,18 @@ mismatches, a foreign lease, a closed lease, and an artifact-maintenance fence,
 and exercise an actual claimed lease on the settled-close,
 deliberately-unprovable-open, and abnormal-wrapper-open paths. This CI wiring is
 also source-level only; neither its process controls nor a hosted deployment has
-executed at this revision under the required low-load RCH gate. Direct exported
-artifact helpers, standalone real-filesystem test fixtures, and remaining raw
-artifact writers do not yet share the full lifetime contract, and a deliberately
-re-daemonized child can escape the owned process group. There is also no archive
-locator or operator maintenance acquisition path. Moving or rotating
-`e2e/artifacts` therefore remains unsafe.
+executed at this revision under the required low-load RCH gate. The direct
+failure-blob helper now requires the caller's matching open root-epoch lease
+before its first real-filesystem mutation, while preserving lease-free
+read-only deduplication and pre-mutation validation refusals. The opt-in
+real-filesystem fixture suite owns one such lease from before its retained
+namespace/case claims until its synchronous `afterAll` boundary; a crash leaves
+the append-only lease open. This fixture wiring is source-level only and has
+not executed at this revision under the required low-load RCH gate. Other
+exported/raw artifact writers do not yet share the full lifetime contract, and
+a deliberately re-daemonized child can escape the owned process group. There
+is also no archive locator or operator maintenance acquisition path. Moving or
+rotating `e2e/artifacts` therefore remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.

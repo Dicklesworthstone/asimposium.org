@@ -25,15 +25,18 @@ import {
   ARTIFACT_WRITER_LEASE_CLOSED_NAME,
   ARTIFACT_WRITER_LEASES_NAME,
   ArtifactStore,
+  acquireArtifactWriterLeaseAtRoot,
   adapterProbePath,
   artifactCapacityReport,
   assertArtifactNamespaceBudget,
+  assertArtifactWriterLeaseOpen,
   assertContainedRoot,
   assertD1ArtifactWriterCapability,
   assertRealStorageAuthority,
   assertRetainedD1StateDirectory,
   assertRetainedIntegrationCapacity,
   boundedDiff,
+  closeArtifactWriterLease,
   countArtifactNamespaces,
   countBlobStagingArtifacts,
   createMemoryArtifactStorage,
@@ -51,6 +54,7 @@ import {
   HARNESS_RUN_OPTION_KEYS,
   HARNESS_SCHEMA_VERSION,
   type HarnessArtifactStorage,
+  type ArtifactWriterLease,
   type HarnessError,
   type HarnessEvent,
   type HarnessRootFilesystem,
@@ -137,6 +141,7 @@ const SECRET_EMITTER = fileURLToPath(
 );
 
 let scratchCounter = 0;
+let realFilesystemFixtureWriterLease: ArtifactWriterLease | undefined;
 const REAL_FILESYSTEM_INTEGRATION_ENV = "ASIMPOSIUM_RUN_REAL_FS_INTEGRATION";
 const realFilesystemIntegrationEnabled = process.env[REAL_FILESYSTEM_INTEGRATION_ENV] === "1";
 const VIRTUAL_CHECKOUT = "/memory/asimposium";
@@ -372,6 +377,27 @@ function describeRealFilesystemIntegration(name: string, define: () => void): vo
   (realFilesystemIntegrationEnabled ? describe : describe.skip)(name, define);
 }
 
+function fixtureWriterLease(): ArtifactWriterLease {
+  requireRealFilesystemIntegration();
+  if (realFilesystemFixtureWriterLease === undefined) {
+    realFilesystemFixtureWriterLease = acquireArtifactWriterLeaseAtRoot(
+      repositoryRoot(),
+      nodeArtifactStorage,
+    );
+  }
+  assertArtifactWriterLeaseOpen(realFilesystemFixtureWriterLease);
+  return realFilesystemFixtureWriterLease;
+}
+
+if (realFilesystemIntegrationEnabled) {
+  afterAll(() => {
+    const lease = realFilesystemFixtureWriterLease;
+    if (lease === undefined) return;
+    closeArtifactWriterLease(lease);
+    realFilesystemFixtureWriterLease = undefined;
+  });
+}
+
 /**
  * The only root the harness accepts: this checkout.
  *
@@ -459,12 +485,10 @@ function simulatedD1ArtifactCapability(
  * cleanup, move, or temp-root escape is involved.
  */
 function retainedIntegrationRoot(): string {
-  requireRealFilesystemIntegration();
-  const checkout = repositoryRoot();
-  const e2e = join(checkout, "e2e");
-  const artifacts = join(e2e, "artifacts");
-  if (!nodeArtifactStorage.exists(e2e)) nodeArtifactStorage.mkdir(e2e);
-  if (!nodeArtifactStorage.exists(artifacts)) nodeArtifactStorage.mkdir(artifacts);
+  const lease = fixtureWriterLease();
+  const checkout = lease.root;
+  const artifacts = lease.artifactsDirectory;
+  assertArtifactWriterLeaseOpen(lease);
   return reserveArtifactNamespace(
     checkout,
     artifacts,
@@ -496,7 +520,9 @@ function fixtureScratchRoot(name: string): string {
     nodeArtifactStorage,
     1,
   );
+  assertArtifactWriterLeaseOpen(fixtureWriterLease());
   nodeArtifactStorage.mkdir(join(root, "e2e"));
+  assertArtifactWriterLeaseOpen(fixtureWriterLease());
   nodeArtifactStorage.mkdir(join(root, "e2e", "artifacts"));
   return root;
 }
@@ -2233,6 +2259,26 @@ describe("timeout grace", () => {
 });
 
 describe("content-addressed failure artifacts", () => {
+  test("static guard: a direct real publisher proves its lease before creating blob paths", () => {
+    const source = readFileSync(RUNNER_SOURCE, "utf8");
+    const start = source.indexOf("export function publishFailureBlob(");
+    const end = source.indexOf("\nfunction existingFailureBlobPath(", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const publish = source.slice(start, end);
+    const dedupeReturn = publish.indexOf("return existing;");
+    const authority = publish.indexOf("assertWriterAuthority();", dedupeReturn);
+    const createBlobStore = publish.indexOf(
+      "const store = blobStoreDirectory(artifactsDirectory, storage);",
+    );
+
+    expect(publish).toContain('if (storage !== nodeArtifactStorage) return;');
+    expect(publish).toContain('"ARTIFACT_WRITER_LEASE_REQUIRED"');
+    expect(dedupeReturn).toBeGreaterThanOrEqual(0);
+    expect(authority).toBeGreaterThan(dedupeReturn);
+    expect(createBlobStore).toBeGreaterThan(authority);
+  });
+
   /**
    * Failure payloads are stored once, by the digest of the bytes actually
    * written. Before this, every run wrote its own copy: 577 failure logs on
@@ -3111,6 +3157,7 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
       stored: body,
       attempt,
       retainedIntegrationDirectory: retainedIntegrationDirectory(),
+      writerLease: fixtureWriterLease(),
     });
   }
 
@@ -3130,6 +3177,31 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
 
   const blobStore = (root: string): string =>
     join(root, "e2e", "artifacts", ARTIFACT_BLOB_DIRECTORY, "sha256");
+
+  test("PLANTED: a direct real publisher requires its caller's open root-epoch lease", () => {
+    const root = fixtureScratchRoot("writer-lease-required");
+    const body = `leased publication ${process.pid}\n`;
+    const input = {
+      containmentRoot: root,
+      artifactsDirectory: join(root, "e2e", "artifacts"),
+      digest: digestOf(body),
+      stored: body,
+      attempt: 1,
+      retainedIntegrationDirectory: retainedIntegrationDirectory(),
+    } as const;
+
+    expect(() => publishFailureBlob(input)).toThrow(
+      /ARTIFACT_WRITER_LEASE_REQUIRED|open root-epoch/,
+    );
+    expect(existsSync(blobStore(root))).toBe(false);
+
+    const closedLease = acquireArtifactWriterLeaseAtRoot(repositoryRoot(), nodeArtifactStorage);
+    closeArtifactWriterLease(closedLease);
+    expect(() => publishFailureBlob({ ...input, writerLease: closedLease })).toThrow(
+      /ARTIFACT_WRITER_LEASE_CLOSED|lease is absent, replaced, or closed/,
+    );
+    expect(existsSync(blobStore(root))).toBe(false);
+  });
 
   test("a published blob is complete, and its staging entry is the same inode", () => {
     const root = fixtureScratchRoot("atomic-publish");
@@ -3310,6 +3382,7 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
         stored: body,
         attempt: 99,
         retainedIntegrationDirectory: retainedIntegrationDirectory(),
+        writerLease: fixtureWriterLease(),
       });
       expect(existsSync(path)).toBe(true);
     };
@@ -3323,6 +3396,7 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
       storage: nodeArtifactStorage,
       beforeLink,
       retainedIntegrationDirectory: retainedIntegrationDirectory(),
+      writerLease: fixtureWriterLease(),
     });
 
     expect(intruded).toBe(true);
@@ -3352,6 +3426,7 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
         storage: nodeArtifactStorage,
         beforeLink,
         retainedIntegrationDirectory: retainedIntegrationDirectory(),
+        writerLease: fixtureWriterLease(),
       }),
     ).toThrow(/does not match its digest/);
     expect(readFileSync(join(blobStore(root), digestOf(body)), "utf8")).toBe("impostor bytes\n");
