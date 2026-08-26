@@ -429,7 +429,7 @@ run_bounded() {
     *) return 64 ;;
   esac
   PIPELINE_ARTIFACT_PROCESS_GROUP_SETTLED=0
-  # fd 9 is a private positive acknowledgement pipe. fd 3 is made
+  # fd 9 is a private settlement acknowledgement pipe. fd 3 is made
   # non-inheritable before the stage starts, while ordinary stage output stays
   # on the caller's stdout through fd 8. A wrapper crash therefore closes the
   # pipe without a token; no descendant can forge settlement.

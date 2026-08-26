@@ -311,7 +311,12 @@ interface LeaseSettlementPlant {
 }
 
 function runLeaseSettlementPlant(
-  mode: "settled" | "settled-125" | "forced-unsettled" | "wrapper-crash" | "setsid-escape",
+  mode:
+    | "settled"
+    | "settled-125"
+    | "forced-unsettled"
+    | "wrapper-crash"
+    | "setsid-escape",
 ): LeaseSettlementPlant {
   runCounter += 1;
   const root = join(SCRATCH, `lease-settlement-${runCounter}`);
@@ -657,7 +662,9 @@ describe("OPS.2b review pipeline orchestration", () => {
     const settled125 = runLeaseSettlementPlant("settled-125");
     expect(settled125.signal).toBeNull();
     expect(settled125.status).toBe(125);
-    expect(directoryIdentity(settled125.leaseDirectory)).toBe(settled125.leaseIdentity);
+    expect(directoryIdentity(settled125.leaseDirectory)).toBe(
+      settled125.leaseIdentity,
+    );
     expect(existsSync(join(settled125.leaseDirectory, "closed"))).toBe(
       descendantProofAvailable,
     );
@@ -665,7 +672,9 @@ describe("OPS.2b review pipeline orchestration", () => {
     const unsettled = runLeaseSettlementPlant("forced-unsettled");
     expect(unsettled.signal).toBeNull();
     expect(unsettled.status).toBe(125);
-    expect(directoryIdentity(unsettled.leaseDirectory)).toBe(unsettled.leaseIdentity);
+    expect(directoryIdentity(unsettled.leaseDirectory)).toBe(
+      unsettled.leaseIdentity,
+    );
     expect(existsSync(join(unsettled.leaseDirectory, "closed"))).toBe(false);
 
     const crashedWrapper = runLeaseSettlementPlant("wrapper-crash");
@@ -684,7 +693,11 @@ describe("OPS.2b review pipeline orchestration", () => {
       descendantProofAvailable,
     );
     if (!descendantProofAvailable) {
-      for (let attempt = 0; attempt < 100 && !existsSync(escaped.escapeDone); attempt += 1) {
+      for (
+        let attempt = 0;
+        attempt < 100 && !existsSync(escaped.escapeDone);
+        attempt += 1
+      ) {
         await Bun.sleep(25);
       }
       expect(existsSync(escaped.escapeDone)).toBe(true);
@@ -739,7 +752,9 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(bounded).toContain(
       "PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0",
     );
-    expect(source.match(/PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1/g)).toHaveLength(1);
+    expect(
+      source.match(/PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1/g),
+    ).toHaveLength(1);
 
     const parentClaimIndex = source.lastIndexOf(
       'e2e_claim_artifact_run_at_root "$repository_root" "$RUN_ID"',
