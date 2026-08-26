@@ -4673,6 +4673,7 @@ export function artifactRetentionCensus(
   ) {
     stable = false;
   }
+  if (!startMaintenance.valid || !endMaintenance.valid) stable = false;
   const summarized = summarizeArtifactCensusObservations(observations, {
     artifactRoot,
     artifactRootIdentity,
@@ -5991,7 +5992,7 @@ export function harnessIntegrationReproduction(
   };
 }
 
-interface HarnessCliOptions {
+export interface HarnessCliOptions {
   readonly preflight: boolean;
   readonly selfTest: boolean;
   readonly retentionCensus: boolean;
@@ -6000,7 +6001,7 @@ interface HarnessCliOptions {
   readonly locateSha256?: string;
 }
 
-function parseCli(argv: readonly string[]): HarnessCliOptions {
+export function parseHarnessCli(argv: readonly string[]): HarnessCliOptions {
   let preflight = false;
   let selfTest = false;
   let retentionCensus = false;
@@ -6092,7 +6093,7 @@ if (import.meta.main) {
     ? "ops.2a-artifact-retention-census"
     : "ops.2a-harness-self-test";
   try {
-    const options = parseCli(process.argv.slice(2));
+    const options = parseHarnessCli(process.argv.slice(2));
     if (options.retentionCensus) {
       failureSuite = "ops.2a-artifact-retention-census";
       const census = artifactRetentionCensus(options.root, options.locateSha256);

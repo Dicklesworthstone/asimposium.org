@@ -79,7 +79,9 @@ import {
   MAX_STEPS_PER_RUN,
   MAX_TIMEOUT_MS,
   nodeArtifactStorage,
+  opaqueCensusSha256,
   orderSteps,
+  parseHarnessCli,
   publishFailureBlob,
   RUN_IDENTITY_NAME,
   realFilesystemRetentionPreflight,
@@ -2995,7 +2997,7 @@ describe("artifact namespace backstop", () => {
 
 describe("artifact retention census aggregation", () => {
   const observedAt = Date.UTC(2026, 7, 25, 12, 0, 0);
-  const digestA = createHash("sha256").update("opaque-a").digest("hex");
+  const digestA = opaqueCensusSha256([Buffer.from("opaque-"), Buffer.from("a")]);
   const digestB = createHash("sha256").update("opaque-b").digest("hex");
 
   function censusObservation(
@@ -3198,6 +3200,13 @@ describe("artifact retention census aggregation", () => {
           snapshotSha256: "d".repeat(64),
         },
       }),
+      censusContext({
+        maintenance: {
+          present: true,
+          valid: false,
+          snapshotSha256: "e".repeat(64),
+        },
+      }),
     ]) {
       const report = summarizeArtifactCensusObservations([observation], context);
       expect(report.tree_sha256).toBeNull();
@@ -3244,7 +3253,7 @@ describe("artifact retention census aggregation", () => {
 
   test("static guard keeps the operator census write-free and CLI-exclusive", () => {
     const source = readFileSync(RUNNER_SOURCE, "utf8");
-    const censusStart = source.indexOf("function censusNodeType(");
+    const censusStart = source.indexOf("function censusBoundedDirectoryNames(");
     const reservationStart = source.indexOf("export function reserveArtifactNamespace(");
     expect(censusStart).toBeGreaterThanOrEqual(0);
     expect(reservationStart).toBeGreaterThan(censusStart);
@@ -3254,6 +3263,7 @@ describe("artifact retention census aggregation", () => {
       ["writeFile", "Sync("],
       ["appendFile", "Sync("],
       ["link", "Sync("],
+      ["readdir", "Sync("],
       [".mk", "dir("],
       [".write", "Exclusive("],
       [".app", "end("],
@@ -3266,6 +3276,31 @@ describe("artifact retention census aggregation", () => {
     expect(source).toContain("Number(preflight) + Number(selfTest) + Number(retentionCensus)");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: exact source match
     expect(source).toContain("process.stdout.write(`${JSON.stringify(census)}\\n`)");
+  });
+
+  test("the census CLI parser causally enforces one mode and locator scope", () => {
+    expect(parseHarnessCli(["--retention-census"])).toMatchObject({
+      retentionCensus: true,
+      preflight: false,
+      selfTest: false,
+      locateSha256: undefined,
+    });
+    expect(parseHarnessCli(["--retention-census", "--locate-sha256", digestA])).toMatchObject({
+      retentionCensus: true,
+      locateSha256: digestA,
+    });
+    expect(() => parseHarnessCli(["--retention-census", "--preflight"])).toThrow(
+      /choose exactly one/,
+    );
+    expect(() => parseHarnessCli(["--preflight", "--locate-sha256", digestA])).toThrow(
+      /valid only with --retention-census/,
+    );
+    expect(() =>
+      parseHarnessCli(["--retention-census", "--integration-namespace", "one"]),
+    ).toThrow(/does not narrow/);
+    expect(() => parseHarnessCli(["--retention-census", "--locate-sha256", "not-a-digest"])).toThrow(
+      /lowercase SHA-256/,
+    );
   });
 });
 
