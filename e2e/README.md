@@ -165,9 +165,34 @@ bytes. This fixture wiring is source-level only and has
 not executed at this revision under the required low-load RCH gate. This
 exhausts the currently known synchronous raw fixture primitives, but does not
 grant full descendant-settlement semantics to arbitrary future standalone
-entry points. There is also no archive locator or
-operator maintenance acquisition path. Moving or rotating `e2e/artifacts`
-therefore remains unsafe.
+entry points.
+
+The existing harness entry point now also exposes a bounded, write-free
+operator census:
+
+```bash
+bash scripts/e2e-test-harness.sh --retention-census
+bash scripts/e2e-test-harness.sh --retention-census --locate-sha256 <lowercase-sha256>
+```
+
+It walks raw pathname bytes without following symlinks, hashes regular files in
+fixed-size chunks, and emits one JSON document to stdout. The document contains
+only aggregate metadata, opaque digests, safe path displays, root/lease/fence
+epochs, direct and recursive counts, logical and unique-inode bytes, allocation
+totals, age/UID/GID/mode/provenance buckets, hard-link warnings, and bounded
+locator matches. Unsafe or credential-shaped path components are represented by
+their path digest rather than printed; file bodies, symlink targets, arbitrary
+JSON fields, and reproduction text are never emitted. A caller that retains the
+record must redirect stdout to an explicitly chosen location outside
+`e2e/artifacts`; the tool itself creates no census file. Entry or byte limits,
+filesystem drift, unreadable nodes, an open current-epoch lease, or a malformed
+lease suppress the canonical tree/content digests and returns the blocked exit
+code. Even `archive_candidate: true` is only an observed precondition summary,
+never permission to move or delete evidence. This census and locator are
+source-wired only and have not executed at this revision under the required
+low-load RCH gate. There is still no operator maintenance-acquisition or move
+path, and Node's path APIs do not provide a race-free `openat` snapshot. Moving
+or rotating `e2e/artifacts` therefore remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.
