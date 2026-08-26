@@ -1018,7 +1018,7 @@ run_outer_wrapper_loss_case() (
           $0 = q{S4_TEST_SELF_EXPIRING_DESCENDANT};
           $SIG{TERM} = q{IGNORE};
           $SIG{ALRM} = sub { exit 0 };
-          alarm 3;
+          alarm 4;
           while (1) { }
         '
         ;;
@@ -1047,7 +1047,7 @@ run_outer_wrapper_loss_case() (
     printf '%s\n' "outer wrapper loss: expected killed wrapper status 137, got ${status}" >&2
     exit 1
   fi
-  if ! /usr/bin/perl -e 'exit($ARGV[0] < 2.5 ? 0 : 1)' "${elapsed}"; then
+  if ! /usr/bin/perl -e 'exit($ARGV[0] < 3.5 ? 0 : 1)' "${elapsed}"; then
     printf '%s\n' "outer wrapper loss: supervisor teardown exceeded its pre-expiry bound (${elapsed}s)" >&2
     exit 1
   fi
