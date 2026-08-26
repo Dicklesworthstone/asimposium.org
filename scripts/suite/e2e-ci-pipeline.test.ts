@@ -314,12 +314,7 @@ interface LeaseSettlementPlant {
 }
 
 function runLeaseSettlementPlant(
-  mode:
-    | "settled"
-    | "settled-125"
-    | "forced-unsettled"
-    | "wrapper-crash"
-    | "setsid-escape",
+  mode: "settled" | "settled-125" | "forced-unsettled" | "wrapper-crash" | "setsid-escape",
 ): LeaseSettlementPlant {
   runCounter += 1;
   const root = join(SCRATCH, `lease-settlement-${runCounter}`);
@@ -327,13 +322,7 @@ function runLeaseSettlementPlant(
   const receipt = join(SCRATCH, `lease-settlement-${runCounter}.txt`);
   const escapeReady = join(SCRATCH, `lease-settlement-${runCounter}.ready`);
   const escapeStop = join(SCRATCH, `lease-settlement-${runCounter}.stop`);
-  const lateWrite = join(
-    root,
-    "e2e",
-    "artifacts",
-    runId,
-    "escaped-write-after-close",
-  );
+  const lateWrite = join(root, "e2e", "artifacts", runId, "escaped-write-after-close");
   const escapeDone = join(SCRATCH, `lease-settlement-${runCounter}.done`);
   mkdirSync(join(root, "e2e"), { recursive: true, mode: 0o700 });
 
@@ -387,9 +376,9 @@ exit $?
             )} >/dev/null 2>&1 </dev/null & for _attempt in {1..100}; do [[ -f ${JSON.stringify(
               escapeReady,
             )} ]] && exit 0; sleep 0.02; done; exit 98`
-        : mode === "settled-125"
-          ? "exit 125"
-          : "sleep 30 & exit 0",
+          : mode === "settled-125"
+            ? "exit 125"
+            : "sleep 30 & exit 0",
     ],
     { env: HELPER_ENV, encoding: "utf8", timeout: 10_000 },
   );
@@ -420,11 +409,7 @@ exit $?
   };
 }
 
-function expectCapabilityGuardBefore(
-  body: string,
-  marker: string,
-  maxLineDistance = 6,
-): void {
+function expectCapabilityGuardBefore(body: string, marker: string, maxLineDistance = 6): void {
   const guard = "ci_artifact_capability_is_current || return 64";
   let markerIndex = body.indexOf(marker);
   expect(markerIndex).toBeGreaterThanOrEqual(0);
@@ -673,34 +658,24 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(settled.signal).toBeNull();
     expect(settled.status).toBe(0);
     expect(directoryIdentity(settled.leaseDirectory)).toBe(settled.leaseIdentity);
-    expect(existsSync(join(settled.leaseDirectory, "closed"))).toBe(
-      descendantProofAvailable,
-    );
+    expect(existsSync(join(settled.leaseDirectory, "closed"))).toBe(descendantProofAvailable);
 
     const settled125 = runLeaseSettlementPlant("settled-125");
     expect(settled125.signal).toBeNull();
     expect(settled125.status).toBe(125);
-    expect(directoryIdentity(settled125.leaseDirectory)).toBe(
-      settled125.leaseIdentity,
-    );
-    expect(existsSync(join(settled125.leaseDirectory, "closed"))).toBe(
-      descendantProofAvailable,
-    );
+    expect(directoryIdentity(settled125.leaseDirectory)).toBe(settled125.leaseIdentity);
+    expect(existsSync(join(settled125.leaseDirectory, "closed"))).toBe(descendantProofAvailable);
 
     const unsettled = runLeaseSettlementPlant("forced-unsettled");
     expect(unsettled.signal).toBeNull();
     expect(unsettled.status).toBe(125);
-    expect(directoryIdentity(unsettled.leaseDirectory)).toBe(
-      unsettled.leaseIdentity,
-    );
+    expect(directoryIdentity(unsettled.leaseDirectory)).toBe(unsettled.leaseIdentity);
     expect(existsSync(join(unsettled.leaseDirectory, "closed"))).toBe(false);
 
     const crashedWrapper = runLeaseSettlementPlant("wrapper-crash");
     expect(crashedWrapper.signal).toBeNull();
     expect(crashedWrapper.status).toBe(125);
-    expect(directoryIdentity(crashedWrapper.leaseDirectory)).toBe(
-      crashedWrapper.leaseIdentity,
-    );
+    expect(directoryIdentity(crashedWrapper.leaseDirectory)).toBe(crashedWrapper.leaseIdentity);
     expect(existsSync(join(crashedWrapper.leaseDirectory, "closed"))).toBe(false);
 
     const escaped = runLeaseSettlementPlant("setsid-escape");
@@ -713,15 +688,9 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(escaped.signal).toBeNull();
     expect(escaped.status).toBe(0);
     expect(directoryIdentity(escaped.leaseDirectory)).toBe(escaped.leaseIdentity);
-    expect(existsSync(join(escaped.leaseDirectory, "closed"))).toBe(
-      descendantProofAvailable,
-    );
+    expect(existsSync(join(escaped.leaseDirectory, "closed"))).toBe(descendantProofAvailable);
     if (!descendantProofAvailable || escapedProcessWasAliveAfterReturn) {
-      for (
-        let attempt = 0;
-        attempt < 100 && !existsSync(escaped.escapeDone);
-        attempt += 1
-      ) {
+      for (let attempt = 0; attempt < 100 && !existsSync(escaped.escapeDone); attempt += 1) {
         await Bun.sleep(25);
       }
       expect(existsSync(escaped.escapeDone)).toBe(true);
@@ -748,29 +717,22 @@ describe("OPS.2b review pipeline orchestration", () => {
     const bounded = pipelineFunctionSource("run_bounded", "plant_stage");
 
     const inheritedCapability = {
-      ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY:
-        "ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY",
+      ASIMP_CI_INTERNAL_ARTIFACT_ROOT_IDENTITY: "ASIMPOSIUM_E2E_SELECTED_ARTIFACT_ROOT_IDENTITY",
       ASIMP_CI_INTERNAL_RUN_IDENTITY: "ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY",
       ASIMP_CI_INTERNAL_LEASE_DIRECTORY: "ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY",
       ASIMP_CI_INTERNAL_LEASE_IDENTITY: "ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY",
     } as const;
     for (const [name, selectedName] of Object.entries(inheritedCapability)) {
-      expect(stageCommand.split(`${name}=\"$${name}\"`)).toHaveLength(4);
-      expect(source).toContain(`${name}=\"$${selectedName}\"`);
+      expect(stageCommand.split(`${name}="$${name}"`)).toHaveLength(4);
+      expect(source).toContain(`${name}="$${selectedName}"`);
     }
     expect(source).not.toContain("export ASIMP_CI_INTERNAL_");
     expect(source.match(/e2e_close_artifact_writer_leases;/g)).toHaveLength(1);
-    expect(source).toContain(
-      '"$PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN" != "1"',
-    );
+    expect(source).toContain('"$PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN" != "1"');
     expect(bounded).toContain("os.killpg(child.pid, signal.SIGKILL)");
-    expect(bounded).toContain(
-      "return wait_for_group_absence() and not force_unsettled",
-    );
+    expect(bounded).toContain("return wait_for_group_absence() and not force_unsettled");
     expect(bounded).toContain("os.set_inheritable(3, False)");
-    expect(bounded).toContain(
-      "except (OSError, ValueError, subprocess.SubprocessError):",
-    );
+    expect(bounded).toContain("except (OSError, ValueError, subprocess.SubprocessError):");
     expect(bounded).not.toContain("except BaseException:");
     expect(bounded).toContain("pr_set_child_subreaper = 36");
     expect(bounded).toContain('f"/proc/self/task/{os.getpid()}/children"');
@@ -778,12 +740,8 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(bounded).toContain("signal.pidfd_send_signal(pidfd, signum, None, 0)");
     expect(bounded).toContain('acknowledged_exit(status, b"settled")');
     expect(bounded).toContain('acknowledged_exit(status, b"unproven")');
-    expect(bounded).toContain(
-      "PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0",
-    );
-    expect(
-      source.match(/PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1/g),
-    ).toHaveLength(1);
+    expect(bounded).toContain("PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=0");
+    expect(source.match(/PIPELINE_ARTIFACT_DESCENDANT_SETTLEMENT_PROVEN=1/g)).toHaveLength(1);
 
     const parentClaimIndex = source.lastIndexOf(
       'e2e_claim_artifact_run_at_root "$repository_root" "$RUN_ID"',
@@ -798,18 +756,12 @@ describe("OPS.2b review pipeline orchestration", () => {
       "ci_artifact_capability_is_current || exit 64",
       parentCaptureIndex,
     );
-    const curlHomeIndex = source.indexOf(
-      'mkdir "$ARTIFACT_DIRECTORY/curl-home"',
-      parentProofIndex,
-    );
+    const curlHomeIndex = source.indexOf('mkdir "$ARTIFACT_DIRECTORY/curl-home"', parentProofIndex);
     const preWriteProofIndex = source.indexOf(
       "ci_artifact_capability_is_current || exit 64",
       curlHomeIndex,
     );
-    const curlConfigIndex = source.indexOf(
-      "printf 'user-agent =",
-      preWriteProofIndex,
-    );
+    const curlConfigIndex = source.indexOf("printf 'user-agent =", preWriteProofIndex);
     expect(parentClaimIndex).toBeGreaterThanOrEqual(0);
     expect(parentSelectIndex).toBeGreaterThan(parentClaimIndex);
     expect(parentCaptureIndex).toBeGreaterThan(parentSelectIndex);
@@ -831,10 +783,7 @@ describe("OPS.2b review pipeline orchestration", () => {
     expect(revisionIndex).toBeGreaterThan(proofIndex);
     expect(prefixIndex).toBeGreaterThan(revisionIndex);
 
-    expectCapabilityGuardBefore(
-      observeWorker,
-      'curl_with_bearer "$CLOUDFLARE_API_TOKEN"',
-    );
+    expectCapabilityGuardBefore(observeWorker, 'curl_with_bearer "$CLOUDFLARE_API_TOKEN"');
     expectCapabilityGuardBefore(workerDeploy, 'WRANGLER_OUTPUT_FILE_PATH="$raw_receipt"');
     expectCapabilityGuardBefore(workerDeploy, 'python3 - "$raw_receipt"');
     expectCapabilityGuardBefore(
@@ -850,9 +799,9 @@ describe("OPS.2b review pipeline orchestration", () => {
     expectCapabilityGuardBefore(webDeploy, "https://api.vercel.com/v9/projects/");
     expectCapabilityGuardBefore(webDeploy, "https://api.vercel.com/v7/deployments?");
     expectCapabilityGuardBefore(webDeploy, 'vercel@$VERCEL_CLI_VERSION" deploy');
-    expectCapabilityGuardBefore(webDeploy, 'printf \'%s\' "$deployment_output"');
+    expectCapabilityGuardBefore(webDeploy, "printf '%s' \"$deployment_output\"");
     expectCapabilityGuardBefore(webDeploy, 'vercel@$VERCEL_CLI_VERSION" inspect');
-    expectCapabilityGuardBefore(webDeploy, 'printf \'%s\' "$inspect_output"');
+    expectCapabilityGuardBefore(webDeploy, "printf '%s' \"$inspect_output\"");
     expectCapabilityGuardBefore(webDeploy, "https://api.vercel.com/v13/deployments/");
     expectCapabilityGuardBefore(webDeploy, 'python3 - "$inspect_receipt"');
   });

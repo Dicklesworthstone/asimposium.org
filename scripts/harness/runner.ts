@@ -12,8 +12,8 @@ import {
   appendFileSync,
   type BigIntStats,
   closeSync,
-  constants as filesystemConstants,
   existsSync,
+  constants as filesystemConstants,
   fstatSync,
   linkSync,
   lstatSync,
@@ -1957,11 +1957,7 @@ async function runAttempt(
   let stderr: Awaited<typeof stderrPromise>;
   let exitCode: number;
   try {
-    [stdout, stderr, exitCode] = await Promise.all([
-      stdoutPromise,
-      stderrPromise,
-      exitPromise,
-    ]);
+    [stdout, stderr, exitCode] = await Promise.all([stdoutPromise, stderrPromise, exitPromise]);
   } catch (error) {
     // A pipe/read/exit rejection must not let the caller close its artifact
     // writer lease while this detached process group can still mutate the
@@ -2284,7 +2280,10 @@ function signalOwnedProcessGroupOnly(
         if (ps.exitCode !== 0 || out.length === 0) {
           return "absent";
         }
-        const lines = out.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+        const lines = out
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
         const alivePids: number[] = [];
         for (const line of lines) {
           const match = /^([0-9]+)\s+([A-Za-z+]+)/.exec(line);
@@ -3108,11 +3107,7 @@ export function reconcileRunIdentity(
     if (storage === nodeArtifactStorage || writerCapability !== undefined) {
       assertArtifactDirectoryWriterCapability(writerCapability, owner, storage);
       assertRegularOrAbsent(target, "ARTIFACT_DIRECTORY_CAPABILITY_INVALID", storage);
-      if (
-        !storage.exists(target) ||
-        !storage.isFile(target) ||
-        storage.readFile(target) !== body
-      ) {
+      if (!storage.exists(target) || !storage.isFile(target) || storage.readFile(target) !== body) {
         throw new HarnessError(
           "ARTIFACT_DIRECTORY_CAPABILITY_INVALID",
           "run identity creation did not leave its exact bytes in one direct regular file.",
@@ -4056,8 +4051,22 @@ function censusNodeType(stat: {
 }
 
 function sameCensusStat(
-  left: { readonly dev: bigint; readonly ino: bigint; readonly mode: bigint; readonly size: bigint; readonly mtimeNs: bigint; readonly ctimeNs: bigint },
-  right: { readonly dev: bigint; readonly ino: bigint; readonly mode: bigint; readonly size: bigint; readonly mtimeNs: bigint; readonly ctimeNs: bigint },
+  left: {
+    readonly dev: bigint;
+    readonly ino: bigint;
+    readonly mode: bigint;
+    readonly size: bigint;
+    readonly mtimeNs: bigint;
+    readonly ctimeNs: bigint;
+  },
+  right: {
+    readonly dev: bigint;
+    readonly ino: bigint;
+    readonly mode: bigint;
+    readonly size: bigint;
+    readonly mtimeNs: bigint;
+    readonly ctimeNs: bigint;
+  },
 ): boolean {
   return (
     left.dev === right.dev &&
@@ -4073,10 +4082,7 @@ function censusPathChild(parent: Buffer, child: Buffer): Buffer {
   return Buffer.concat([parent, Buffer.from(sep), child]);
 }
 
-function hashCensusRegularFile(
-  path: Buffer,
-  expected: BigIntStats,
-): string {
+function hashCensusRegularFile(path: Buffer, expected: BigIntStats): string {
   const noFollow = filesystemConstants.O_NOFOLLOW ?? 0;
   let descriptor: number | undefined;
   try {
@@ -4707,12 +4713,7 @@ export function reserveRetainedIntegrationDirectory(
   );
   const expectedArtifactRootIdentity = storage.directoryIdentity(artifactRoot);
   const assertWriterAuthority = (): void => {
-    assertArtifactWriterBoundary(
-      writerRoot,
-      artifactRoot,
-      expectedArtifactRootIdentity,
-      storage,
-    );
+    assertArtifactWriterBoundary(writerRoot, artifactRoot, expectedArtifactRootIdentity, storage);
     if (storage === nodeArtifactStorage || writerCapability !== undefined) {
       assertArtifactDirectoryWriterCapability(writerCapability, root, storage);
     }
@@ -5139,10 +5140,7 @@ export function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void 
   );
   const actual = artifactWriterLeaseDirectory(lease);
   const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
-  if (
-    lease.storage.exists(closed) ||
-    lease.storage.isSymlink(closed)
-  ) {
+  if (lease.storage.exists(closed) || lease.storage.isSymlink(closed)) {
     throw new HarnessError(
       "ARTIFACT_WRITER_LEASE_CLOSED",
       "artifact writer lease is absent, replaced, or closed; retained evidence was left untouched.",

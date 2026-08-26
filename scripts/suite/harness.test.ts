@@ -28,6 +28,7 @@ import {
   type ArtifactCensusObservation,
   type ArtifactDirectoryWriterCapability,
   ArtifactStore,
+  type ArtifactWriterLease,
   acquireArtifactWriterLeaseAtRoot,
   adapterProbePath,
   artifactCapacityReport,
@@ -58,7 +59,6 @@ import {
   HARNESS_RUN_OPTION_KEYS,
   HARNESS_SCHEMA_VERSION,
   type HarnessArtifactStorage,
-  type ArtifactWriterLease,
   type HarnessError,
   type HarnessEvent,
   type HarnessRootFilesystem,
@@ -92,11 +92,11 @@ import {
   restoreProtectedSha256Marker,
   retainedD1StateDirectory,
   retainedIntegrationCapacityReport,
-  summarizeArtifactCensusObservations,
   runHarness,
   SELF_TEST_REPRODUCTION,
   safeReproductionCommand,
   selfTestReproduction,
+  summarizeArtifactCensusObservations,
   validateHarnessEvent,
   validateHarnessRunOptions,
   validateHarnessStep,
@@ -397,9 +397,7 @@ function fixtureWriterLease(): ArtifactWriterLease {
   return realFilesystemFixtureWriterLease;
 }
 
-function fixtureDirectoryWriterCapability(
-  directory: string,
-): ArtifactDirectoryWriterCapability {
+function fixtureDirectoryWriterCapability(directory: string): ArtifactDirectoryWriterCapability {
   const writerLease = fixtureWriterLease();
   const physicalDirectory = realpathSync(directory);
   return {
@@ -572,10 +570,7 @@ function retainedIntegrationRoot(): string {
   const lease = fixtureWriterLease();
   const checkout = lease.root;
   assertArtifactWriterLeaseOpen(lease);
-  return reserveFixtureArtifactNamespace(
-    checkout,
-    DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
-  );
+  return reserveFixtureArtifactNamespace(checkout, DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
 }
 
 function fixtureScratchRoot(name: string): string {
@@ -799,9 +794,7 @@ describe("execution lifecycle", () => {
     expect(() => closeArtifactWriterLease(forged)).toThrow(
       /ARTIFACT_WRITER_LEASE_INVALID|outside its exact artifact-root epoch/,
     );
-    expect(
-      storage.exists(join(foreignDirectory, ARTIFACT_WRITER_LEASE_CLOSED_NAME)),
-    ).toBe(false);
+    expect(storage.exists(join(foreignDirectory, ARTIFACT_WRITER_LEASE_CLOSED_NAME))).toBe(false);
     closeArtifactWriterLease(lease);
   });
 
@@ -2376,7 +2369,7 @@ describe("content-addressed failure artifacts", () => {
       "const store = blobStoreDirectory(artifactsDirectory, storage);",
     );
 
-    expect(publish).toContain('if (storage !== nodeArtifactStorage) return;');
+    expect(publish).toContain("if (storage !== nodeArtifactStorage) return;");
     expect(publish).toContain('"ARTIFACT_WRITER_LEASE_REQUIRED"');
     expect(dedupeReturn).toBeGreaterThanOrEqual(0);
     expect(authority).toBeGreaterThan(dedupeReturn);
@@ -2997,6 +2990,240 @@ describe("artifact namespace backstop", () => {
       expect(message).toMatch(/directories/i);
       expect(message).not.toMatch(/delet(e|ing) the|prune|purge/i);
     }
+  });
+});
+
+describe("artifact retention census aggregation", () => {
+  const observedAt = Date.UTC(2026, 7, 25, 12, 0, 0);
+  const digestA = createHash("sha256").update("opaque-a").digest("hex");
+  const digestB = createHash("sha256").update("opaque-b").digest("hex");
+
+  function censusObservation(
+    path: readonly (string | Buffer)[],
+    overrides: Partial<ArtifactCensusObservation> = {},
+  ): ArtifactCensusObservation {
+    const components = path.map((component) =>
+      typeof component === "string" ? Buffer.from(component) : component,
+    );
+    const separator = Buffer.from("/");
+    return {
+      relativePath: Buffer.concat(
+        components.flatMap((component, index) =>
+          index === 0 ? [component] : [separator, component],
+        ),
+      ),
+      components,
+      type: "regular",
+      device: "1",
+      inode: String(100 + path.length),
+      links: "1",
+      uid: "501",
+      gid: "20",
+      mode: "100600",
+      size: "8",
+      blocks: "1",
+      modifiedMilliseconds: String(observedAt - 60 * 60 * 1_000),
+      contentSha256: digestA,
+      symlinkTargetSha256: null,
+      ...overrides,
+    };
+  }
+
+  function censusContext(overrides: Partial<ArtifactCensusContext> = {}): ArtifactCensusContext {
+    return {
+      storageAuthority: "simulation",
+      artifactRoot: "/checkout/e2e/artifacts",
+      artifactRootIdentity: "1:2",
+      observedAtMilliseconds: observedAt,
+      complete: true,
+      stable: true,
+      incompleteReason: null,
+      entryLimit: MAX_RETENTION_CENSUS_ENTRIES,
+      hashByteLimit: MAX_RETENTION_CENSUS_HASH_BYTES,
+      hashedBytes: 16n,
+      maintenance: {
+        present: false,
+        valid: true,
+        snapshotSha256: "a".repeat(64),
+      },
+      writerLeases: {
+        open: 0,
+        closed: 2,
+        malformed: 0,
+        foreignEpochs: 1,
+        snapshotSha256: "b".repeat(64),
+      },
+      ...overrides,
+    };
+  }
+
+  test("is deterministic across enumeration order and separates logical from unique bytes", () => {
+    const observations = [
+      censusObservation(["run-a"], {
+        type: "directory",
+        inode: "10",
+        mode: "40700",
+        size: "0",
+        blocks: "0",
+        contentSha256: null,
+      }),
+      censusObservation(["run-a", "first.bin"], {
+        inode: "20",
+        links: "3",
+        size: "8",
+        blocks: "1",
+      }),
+      censusObservation(["run-a", "second.bin"], {
+        inode: "20",
+        links: "3",
+        size: "8",
+        blocks: "1",
+      }),
+      censusObservation(["run-a", "other.bin"], {
+        inode: "21",
+        size: "8",
+        blocks: "2",
+        contentSha256: digestB,
+      }),
+    ];
+    const forward = summarizeArtifactCensusObservations(observations, censusContext());
+    const reversed = summarizeArtifactCensusObservations(
+      [...observations].reverse(),
+      censusContext(),
+    );
+
+    expect(reversed.tree_sha256).toBe(forward.tree_sha256);
+    expect(reversed.unique_content_sha256).toBe(forward.unique_content_sha256);
+    expect(forward.counts.top_level_namespaces).toBe(1);
+    expect(forward.counts.regular).toBe(3);
+    expect(forward.counts.unique_regular_inodes).toBe(2);
+    expect(forward.bytes.logical).toBe("24");
+    expect(forward.bytes.unique).toBe("16");
+    expect(forward.bytes.logical_allocated).toBe(String(4 * 512));
+    expect(forward.bytes.unique_allocated).toBe(String(3 * 512));
+    expect(forward.hard_links).toEqual({
+      groups: 1,
+      observed_aliases: 2,
+      external_link_groups: 1,
+      max_observed_aliases: 2,
+    });
+    // Simulation can prove accounting, never archival readiness.
+    expect(forward.archive_candidate).toBe(false);
+  });
+
+  test("buckets exact ages and inventories every non-regular node without traversing it", () => {
+    const day = 24 * 60 * 60 * 1_000;
+    const observations: ArtifactCensusObservation[] = [
+      censusObservation(["future"], { modifiedMilliseconds: String(observedAt + 1) }),
+      censusObservation(["new"], {
+        inode: "2",
+        modifiedMilliseconds: String(observedAt - day + 1),
+      }),
+      censusObservation(["day"], { inode: "3", modifiedMilliseconds: String(observedAt - day) }),
+      censusObservation(["eight"], {
+        inode: "4",
+        modifiedMilliseconds: String(observedAt - 8 * day),
+      }),
+      censusObservation(["thirty-one"], {
+        inode: "5",
+        modifiedMilliseconds: String(observedAt - 31 * day),
+      }),
+      censusObservation(["ninety-one"], {
+        inode: "6",
+        modifiedMilliseconds: String(observedAt - 91 * day),
+      }),
+      ...(["symlink", "fifo", "socket", "block", "character", "unknown"] as const).map(
+        (type, index) =>
+          censusObservation([type], {
+            type,
+            inode: String(30 + index),
+            size: "0",
+            blocks: "0",
+            contentSha256: null,
+            symlinkTargetSha256: type === "symlink" ? "c".repeat(64) : null,
+          }),
+      ),
+    ];
+    const report = summarizeArtifactCensusObservations(observations, censusContext());
+    expect(report.age_buckets.future.entries).toBe(1);
+    expect(report.age_buckets.lt_24h.entries).toBe(7);
+    expect(report.age_buckets.d1_to_lt8.entries).toBe(1);
+    expect(report.age_buckets.d8_to_lt31.entries).toBe(1);
+    expect(report.age_buckets.d31_to_lt91.entries).toBe(1);
+    expect(report.age_buckets.gte_91d.entries).toBe(1);
+    expect(report.counts.symlink).toBe(1);
+    expect(report.counts.fifo).toBe(1);
+    expect(report.counts.socket).toBe(1);
+    expect(report.counts.block).toBe(1);
+    expect(report.counts.character).toBe(1);
+    expect(report.counts.unknown).toBe(1);
+  });
+
+  test("locator output hides credential-shaped paths and never accepts body bytes", () => {
+    const secretName = "asimp_ag_abcdefghijklmnopqrstuvwxyz123456";
+    const observations = [
+      censusObservation(["safe-run", "evidence.bin"], { inode: "81" }),
+      censusObservation([secretName, "evidence.bin"], { inode: "82" }),
+    ];
+    const report = summarizeArtifactCensusObservations(
+      observations,
+      censusContext({ locateSha256: digestA }),
+    );
+    const serialized = JSON.stringify(report);
+    expect(report.locator.matches).toHaveLength(2);
+    expect(report.locator.matches[0]?.path).toBeNull();
+    expect(report.locator.matches[1]?.path).toBe("safe-run/evidence.bin");
+    expect(serialized).not.toContain(secretName);
+    expect(serialized).not.toContain("opaque-a");
+    expect(serialized).toContain(digestA);
+  });
+
+  test("partial or unstable scans suppress authority and canonical digests", () => {
+    const observation = censusObservation(["run", "evidence.bin"]);
+    for (const context of [
+      censusContext({
+        complete: false,
+        incompleteReason: "entry-limit",
+        hashedBytes: 8n,
+      }),
+      censusContext({
+        complete: false,
+        stable: false,
+        incompleteReason: "filesystem-drift",
+        hashedBytes: 8n,
+      }),
+    ]) {
+      const report = summarizeArtifactCensusObservations([observation], context);
+      expect(report.tree_sha256).toBeNull();
+      expect(report.unique_content_sha256).toBeNull();
+      expect(report.locator.complete).toBe(false);
+      expect(report.archive_candidate).toBe(false);
+    }
+  });
+
+  test("static guard keeps the operator census write-free and CLI-exclusive", () => {
+    const source = readFileSync(RUNNER_SOURCE, "utf8");
+    const censusStart = source.indexOf("function censusNodeType(");
+    const reservationStart = source.indexOf("export function reserveArtifactNamespace(");
+    expect(censusStart).toBeGreaterThanOrEqual(0);
+    expect(reservationStart).toBeGreaterThan(censusStart);
+    const censusSource = source.slice(censusStart, reservationStart);
+    for (const mutation of [
+      ["mkdir", "Sync("],
+      ["writeFile", "Sync("],
+      ["appendFile", "Sync("],
+      ["link", "Sync("],
+      [".mk", "dir("],
+      [".write", "Exclusive("],
+      [".app", "end("],
+      [".li", "nk("],
+    ].map((parts) => parts.join(""))) {
+      expect(censusSource).not.toContain(mutation);
+    }
+    expect(source).toContain('argument === "--retention-census"');
+    expect(source).toContain('argument === "--locate-sha256"');
+    expect(source).toContain("Number(preflight) + Number(selfTest) + Number(retentionCensus)");
+    expect(source).toContain("process.stdout.write(`${JSON.stringify(census)}\\n`)");
   });
 });
 
@@ -3759,9 +3986,7 @@ interface SimulatedDirectoryCapabilityFixture {
   readonly capability: ArtifactDirectoryWriterCapability;
 }
 
-function simulatedDirectoryCapabilityFixture(
-  label: string,
-): SimulatedDirectoryCapabilityFixture {
+function simulatedDirectoryCapabilityFixture(label: string): SimulatedDirectoryCapabilityFixture {
   const root = fixtureRoot(`directory-capability-${label}`);
   const storage = fixtureStorage();
   const artifactRoot = join(root, "e2e", "artifacts");
@@ -3804,13 +4029,7 @@ describe("run identity directory capability", () => {
       join(value.root, "outside-artifacts", RUN_IDENTITY_NAME),
     ]) {
       expect(() =>
-        reconcileRunIdentity(
-          path,
-          runIdentityTestValue(),
-          false,
-          value.storage,
-          value.capability,
-        ),
+        reconcileRunIdentity(path, runIdentityTestValue(), false, value.storage, value.capability),
       ).toThrow(/exact run-identity leaf|exact owner path/);
       expect(value.storage.files.has(path)).toBe(false);
     }
@@ -3853,9 +4072,7 @@ describe("run identity directory capability", () => {
 
   test("PLANTED: a maintenance fence or replaced root is refused before creation", () => {
     const fenced = simulatedDirectoryCapabilityFixture("fenced");
-    fenced.storage.seedDirectory(
-      join(fenced.root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME),
-    );
+    fenced.storage.seedDirectory(join(fenced.root, "e2e", ARTIFACT_MAINTENANCE_FENCE_NAME));
     expect(() =>
       reconcileRunIdentity(
         fenced.path,
@@ -3922,13 +4139,7 @@ describe("run identity directory capability", () => {
       directoryIdentity: storage.directoryIdentity(owner),
     };
     expect(() =>
-      reconcileRunIdentity(
-        path,
-        runIdentityTestValue(),
-        false,
-        storage,
-        capability,
-      ),
+      reconcileRunIdentity(path, runIdentityTestValue(), false, storage, capability),
     ).toThrow(/ARTIFACT_DIRECTORY_CAPABILITY_INVALID|changed identity/);
     expect(swapped).toBe(true);
     expect(base.files.has(path)).toBe(true);
@@ -4455,12 +4666,7 @@ describeRealFilesystemIntegration("real filesystem reservation semantics", () =>
     const integration = retainedIntegrationRoot();
     const name = `missing-capability-${process.pid}-${scratchCounter}`;
     expect(() =>
-      reserveRetainedIntegrationDirectory(
-        integration,
-        name,
-        nodeArtifactStorage,
-        1,
-      ),
+      reserveRetainedIntegrationDirectory(integration, name, nodeArtifactStorage, 1),
     ).toThrow(/ARTIFACT_DIRECTORY_CAPABILITY_REQUIRED|open lease/);
     expect(existsSync(join(integration, name))).toBe(false);
   });
@@ -4496,7 +4702,6 @@ describeRealFilesystemIntegration("real filesystem reservation semantics", () =>
 
   test("the concurrent overshoot bound is what the backstop actually promises", () => {
     const root = fixtureScratchRoot("reserve-race");
-    const artifacts = join(root, "e2e", "artifacts");
     // Two reservations that both observed `limit - 1` both succeed. This is a
     // backstop, not a quota; the honest claim is that it overshoots by at most
     // the number of writers racing at the boundary, and a test that asserted

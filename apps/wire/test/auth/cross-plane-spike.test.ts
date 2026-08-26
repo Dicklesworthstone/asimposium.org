@@ -2668,10 +2668,8 @@ describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
     ]) {
       expect(claim).toContain(identity);
     }
-    expect(claim).toContain('S6_ARTIFACT_WRITER_LEASE_OWNED=1');
-    expect(claim).toContain(
-      '[[ "$S6_RUN_DIRECTORY" == "${ROOT}/${S6_RUN_RELATIVE_DIRECTORY}" ]]',
-    );
+    expect(claim).toContain("S6_ARTIFACT_WRITER_LEASE_OWNED=1");
+    expect(claim).toContain('[[ "$S6_RUN_DIRECTORY" == "${ROOT}/${S6_RUN_RELATIVE_DIRECTORY}" ]]');
     expect(claim.trimEnd().endsWith("s6_artifact_writer_boundary_is_open")).toBe(true);
 
     const writer = shellFunction(source, "write_evidence_bundle");
@@ -4773,9 +4771,7 @@ while :; do sleep 1; done
     expect(controller).toContain("readBounded(stdoutFd, stdoutPath, stdoutCaptureIdentity)");
     expect(reader).toContain("while (offset < size)");
     expect(reader).toContain("after.size !== before.size");
-    expect(reader).toContain(
-      "buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf",
-    );
+    expect(reader).toContain("buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf");
     expect(reader).toContain('new TextDecoder("utf-8", { fatal: true })');
     expect(reader).not.toContain("statSync(path)");
     expect(controller.indexOf("readBounded(stdoutFd")).toBeLessThan(

@@ -1773,7 +1773,7 @@ describe("S2 to S7 normalized cost receipt", () => {
       expect(inheritedCapability).toContain("s2_begin_raw_inherited_child_owner");
       expect(inheritedCapability).toContain("perl -MPOSIX=setsid");
       expect(adjacentRegistration).toMatch(
-        /&\n    (?:parent_loss_child|interrupt_child|raw_child_pid)=\$!\n    s2_register_raw_inherited_child "\$\{(?:parent_loss_child|interrupt_child|raw_child_pid)\}"/u,
+        /&\n {4}(?:parent_loss_child|interrupt_child|raw_child_pid)=\$!\n {4}s2_register_raw_inherited_child "\$\{(?:parent_loss_child|interrupt_child|raw_child_pid)\}"/u,
       );
     }
     const cleanupWorkers = shell.slice(
