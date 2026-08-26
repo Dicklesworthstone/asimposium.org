@@ -252,6 +252,7 @@ publish_buffered_browser_blocked() {
 # ---------------------------------------------------------------------------
 
 CLEANED_UP=0
+SELF_TEST_BOUNDED_OUT=""
 CLEANUP_IN_PROGRESS=0
 CLEANUP_SECOND_SIGNAL=0
 SIGNAL_CLEANUP_MARKER=""
@@ -262,6 +263,10 @@ SPAWN_REGISTRATION_READY_MARKER=""
 SPAWN_REGISTRATION_RELEASE_MARKER=""
 SPAWN_HANDOFF_READY_MARKER=""
 SPAWN_HANDOFF_RELEASE_MARKER=""
+# Set by an outer self-test before it spawns any descendant. Descendants inherit it
+# and must never re-enter self_test: without this a child that reaches the self-test
+# gate re-runs the whole suite and forks another generation of victims (exponential).
+SELF_TEST_NESTED="${S6_SELF_TEST_NESTED:-0}"
 
 # Playwright launches Chromium as a grandchild and the minter can fork, so each
 # payload runs beneath a same-group supervisor. The parent never signals a
@@ -714,6 +719,9 @@ publish_lifecycle_settled() {
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 on_exit() {
   local status=$?
+  # The per-run bounded-supervisor stdout capture leaks on every early
+  # self_test exit, so retire it here where all exit paths converge.
+  [[ -z "${SELF_TEST_BOUNDED_OUT:-}" ]] || rm -f "$SELF_TEST_BOUNDED_OUT" 2>/dev/null || true
   if (( CLEANED_UP == 1 )); then
     publish_lifecycle_settled || {
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"no-child-survivors\",\"status\":\"fail\",\"detail\":\"owned process-group settlement was not proven\",\"reproduce\":\"${REPRODUCE}\"}"
@@ -2508,6 +2516,7 @@ self_test() {
   clear_child_records
   local bounded_status=0 bounded_start bounded_elapsed
   local bounded_out="${TMPDIR:-/tmp}/s6-bounded.$$"
+  SELF_TEST_BOUNDED_OUT="$bounded_out"
   bounded_start="$(date +%s)"
   run_bounded 1 "$bounded_out" - sleep 30 || bounded_status=$?
   bounded_elapsed=$(( $(date +%s) - bounded_start ))
@@ -2565,7 +2574,7 @@ self_test() {
   if [[ -n "$resistant_dir" ]]; then
     resistant_ready="${resistant_dir}/ready"
     run_bounded 1 "$bounded_out" - \
-      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
       _ "$resistant_ready" || resistant_status=$?
   fi
   [[ -f "${resistant_ready:-}" ]] && resistant_ready_value="$(cat "$resistant_ready" 2>/dev/null || printf '')"
@@ -2677,7 +2686,7 @@ self_test() {
   SIGNAL_TERM_FAILURE_PLANT=1
   SIGNAL_KILL_FAILURE_PLANT=1
   run_bounded 10 "$bounded_out" - \
-    bash -c 'trap "exit 0" TERM; while :; do IFS= read -r -t 30 _ || true; done' \
+    bash -c 'trap "exit 0" TERM; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
     || reaper_child_before_ack_status=$?
   reaper_child_before_ack_records="${#CHILD_PIDS[@]}"
   SIGNAL_TERM_FAILURE_PLANT=0
@@ -3838,7 +3847,7 @@ main() {
     # child terminal to await during the causal plant's retirement grace.
     REAP_GRACE_SECONDS=0
     run_bounded 45 /dev/null - \
-      bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
       _ "$prereg_payload_marker" || true
     exit 0
   fi
@@ -3855,7 +3864,7 @@ main() {
     SIGNAL_TERM_FAILURE_PLANT=1
     SIGNAL_KILL_FAILURE_PLANT=1
     run_bounded 10 /dev/null - \
-      bash -c 'trap "" TERM; while :; do IFS= read -r -t 30 _ || true; done' || true
+      bash -c 'trap "" TERM; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' || true
     exit 0
   fi
 
@@ -3868,12 +3877,19 @@ main() {
     local multi_ready="${3:?ready marker required}"
     REAP_GRACE_SECONDS=2
     run_bounded 45 /dev/null - \
-      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _; __rc=$?; (( __rc == 0 || __rc > 128 )) || break; done' \
       _ "$multi_ready" || true
     exit 0
   fi
 
   if [[ "${1:-}" == "--self-test" || "${S6_SELF_TEST:-}" == "1" ]]; then
+    # Only the outermost self-test runs the suite. Every process this suite
+    # spawns inherits S6_SELF_TEST=1, so without this gate a descendant that
+    # reaches here starts a whole new suite -- the 2026-08-25 fork bomb.
+    if [[ "$SELF_TEST_NESTED" != "0" ]]; then
+      exit 0
+    fi
+    export S6_SELF_TEST_NESTED=1
     self_test
   fi
 
