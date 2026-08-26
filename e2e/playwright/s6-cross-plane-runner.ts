@@ -73,7 +73,7 @@ export const MAX_SUPERVISOR_BOOTSTRAP_TRANSCRIPT_BYTES = 512;
  * accepting an equivalent object would re-open framing and duplicate-key drift.
  */
 export const SUPERVISOR_BOOTSTRAP_CANONICAL_TRANSCRIPT = `{"suite":"s6-cross-plane-auth","assertion":"supervisor-bootstrap-only","status":"pass","run_status":0,"outcome":"child","stage":"input-ready"}
-{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled"}
+{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled","artifact_writer_lease":"closed-or-not-acquired"}
 `;
 
 /** Refuse every bootstrap stdout stream except the one bounded canonical transcript. */
