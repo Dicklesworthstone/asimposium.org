@@ -682,6 +682,13 @@ export class ArtifactStore {
    * observable instead of a matter of trust.
    */
   private publishBlob(digest: string, stored: string): void {
+    const writerLease = this.writerLease;
+    if (writerLease === undefined) {
+      throw new HarnessError(
+        "ARTIFACT_WRITER_LEASE_CLOSED",
+        "artifact writer lease is closed; retained evidence was left untouched.",
+      );
+    }
     this.stagingCounter += 1;
     publishFailureBlob({
       containmentRoot: this.physicalRoot,
@@ -693,6 +700,7 @@ export class ArtifactStore {
       retainedIntegrationDirectory: this.retainedIntegrationDirectory,
       artifactRootDirectory: this.topLevelArtifactsDirectory,
       expectedArtifactRootIdentity: this.artifactRootIdentity,
+      writerLease,
     });
   }
 
@@ -2616,6 +2624,8 @@ export interface PublishFailureBlobInput {
    * cap as run ids and fixture cases.
    */
   readonly retainedIntegrationDirectory?: string;
+  /** Open root-epoch lease required before any real-filesystem mutation. */
+  readonly writerLease?: ArtifactWriterLease;
   /** Deterministic test seam for the exact EEXIST window; never an authority capability. */
   readonly beforeLink?: (path: string) => void;
 }
@@ -2732,6 +2742,24 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
       expectedArtifactRootIdentity,
       storage,
     );
+  const assertWriterAuthority = (): void => {
+    assertWriterBoundary();
+    if (storage !== nodeArtifactStorage) return;
+    const lease = input.writerLease;
+    if (
+      lease === undefined ||
+      lease.storage !== storage ||
+      lease.root !== writerRoot ||
+      lease.artifactsDirectory !== artifactRootDirectory ||
+      lease.artifactRootIdentity !== expectedArtifactRootIdentity
+    ) {
+      throw new HarnessError(
+        "ARTIFACT_WRITER_LEASE_REQUIRED",
+        "real artifact publication requires the caller's open root-epoch writer lease.",
+      );
+    }
+    assertArtifactWriterLeaseOpen(lease);
+  };
   assertWriterBoundary();
 
   // Deduplication is a read-only operation and remains valid at the retention
@@ -2762,7 +2790,7 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     );
   }
 
-  assertWriterBoundary();
+  assertWriterAuthority();
   const store = blobStoreDirectory(artifactsDirectory, storage);
   const path = join(store, input.digest);
   assertContained(containmentRoot, path, "ARTIFACT_PATH_UNSAFE");
@@ -2777,12 +2805,12 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
   );
   assertContained(containmentRoot, staging, "ARTIFACT_PATH_UNSAFE");
   assertRegularOrAbsent(staging, "ARTIFACT_PATH_UNSAFE", storage);
-  assertWriterBoundary();
+  assertWriterAuthority();
   storage.writeExclusive(staging, input.stored);
   // The contended window: this publisher has seen no blob and is about to claim
   // the name. A test hooks here to let another publisher win first.
   input.beforeLink?.(path);
-  assertWriterBoundary();
+  assertWriterAuthority();
   try {
     storage.link(staging, path);
   } catch (error) {
@@ -3849,7 +3877,7 @@ function assertArtifactWriterBoundary(
   assertArtifactMaintenanceAbsent(root, storage);
 }
 
-interface ArtifactWriterLease {
+export interface ArtifactWriterLease {
   readonly root: string;
   readonly artifactsDirectory: string;
   readonly artifactRootIdentity: string;
@@ -4017,7 +4045,7 @@ function artifactWriterLeaseEpochName(rootIdentity: string): string {
   );
 }
 
-function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
+export function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
   assertArtifactWriterBoundary(
     lease.root,
     lease.artifactsDirectory,
@@ -4045,7 +4073,7 @@ function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
   );
 }
 
-function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
+export function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
   const actual = realDirectory(lease.directory, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
   if (actual !== lease.directory || lease.storage.directoryIdentity(actual) !== lease.identity) {
     throw new HarnessError(
@@ -4124,6 +4152,31 @@ function acquireArtifactWriterLease(
   throw new HarnessError(
     "ARTIFACT_WRITER_LEASE_UNAVAILABLE",
     "could not claim a unique append-only artifact writer lease.",
+  );
+}
+
+/**
+ * Claim one append-only lease for direct in-process artifact writers.
+ *
+ * ArtifactStore owns this lifecycle internally. This entry point exists for
+ * the explicitly enabled real-filesystem fixtures and other direct helpers
+ * that write below the same root without constructing a run store.
+ */
+export function acquireArtifactWriterLeaseAtRoot(
+  root: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): ArtifactWriterLease {
+  if (storage === nodeArtifactStorage) assertContainedRoot(root);
+  const physicalRoot = realDirectory(resolve(root), "ARTIFACT_WRITER_LEASE_INVALID", storage);
+  assertArtifactMaintenanceAbsent(physicalRoot, storage);
+  const e2e = ensureDirectDirectory(physicalRoot, "e2e", storage);
+  const artifactsDirectory = ensureDirectDirectory(e2e, "artifacts", storage);
+  const artifactRootIdentity = storage.directoryIdentity(artifactsDirectory);
+  return acquireArtifactWriterLease(
+    physicalRoot,
+    artifactsDirectory,
+    artifactRootIdentity,
+    storage,
   );
 }
 
