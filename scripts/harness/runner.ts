@@ -6087,7 +6087,7 @@ export function parseHarnessCli(argv: readonly string[]): HarnessCliOptions {
 
 if (import.meta.main) {
   let failureReproduction = process.argv.includes("--retention-census")
-    ? "bash scripts/e2e-test-harness.sh --retention-census"
+    ? "unavailable: census arguments and local paths are not echoed after a failure"
     : SELF_TEST_REPRODUCTION;
   let failureSuite = process.argv.includes("--retention-census")
     ? "ops.2a-artifact-retention-census"
