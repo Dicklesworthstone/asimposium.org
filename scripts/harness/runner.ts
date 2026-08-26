@@ -78,6 +78,8 @@ export const D1_ARTIFACT_CAPABILITY_ENV = "ASIMPOSIUM_HARNESS_D1_ARTIFACT_CAPABI
 export const MAX_ARTIFACT_NAMESPACES = 5_000;
 /** A census is bounded work, never an unbounded walk of an attacker-shaped tree. */
 export const MAX_RETENTION_CENSUS_ENTRIES = 250_000;
+/** Prevent recursive path depth from becoming a call-stack denial of service. */
+export const MAX_RETENTION_CENSUS_DEPTH = 256;
 /** Unique regular-file bytes hashed by one census before it returns a lower bound. */
 export const MAX_RETENTION_CENSUS_HASH_BYTES = 256n * 1024n * 1024n * 1024n;
 /** Locator output is bounded even when one digest has many hard-link aliases. */
@@ -3606,6 +3608,7 @@ export interface ArtifactMaintenanceCensus {
 
 export type ArtifactCensusIncompleteReason =
   | "entry-limit"
+  | "depth-limit"
   | "hash-byte-limit"
   | "filesystem-drift"
   | "unreadable-node";
@@ -3640,6 +3643,7 @@ export interface ArtifactRetentionCensusReport {
   readonly incomplete_reason: ArtifactCensusIncompleteReason | null;
   readonly limits: {
     readonly entries: number;
+    readonly depth: number;
     readonly unique_regular_bytes: string;
   };
   readonly counts: Readonly<Record<ArtifactCensusNodeType, number>> & {
@@ -3793,6 +3797,26 @@ export function summarizeArtifactCensusObservations(
   observations: readonly ArtifactCensusObservation[],
   context: ArtifactCensusContext,
 ): ArtifactRetentionCensusReport {
+  if (
+    !Number.isSafeInteger(context.observedAtMilliseconds) ||
+    context.observedAtMilliseconds < 0 ||
+    !Number.isSafeInteger(context.entryLimit) ||
+    context.entryLimit <= 0 ||
+    context.hashByteLimit < 0n ||
+    context.hashedBytes < 0n ||
+    context.hashedBytes > context.hashByteLimit ||
+    observations.length > context.entryLimit ||
+    !SHA256_HEX.test(context.maintenance.snapshotSha256) ||
+    !SHA256_HEX.test(context.writerLeases.snapshotSha256) ||
+    (context.locateSha256 !== undefined && !SHA256_HEX.test(context.locateSha256)) ||
+    (context.complete && context.incompleteReason !== null) ||
+    (!context.complete && context.incompleteReason === null)
+  ) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_INVALID",
+      "artifact census context fields are inconsistent or outside their bounds.",
+    );
+  }
   const counts: Record<ArtifactCensusNodeType, number> = {
     directory: 0,
     regular: 0,
@@ -3835,8 +3859,61 @@ export function summarizeArtifactCensusObservations(
     inode: string;
   }[] = [];
   let locatorOverflow = false;
+  const observedPaths = new Set<string>();
 
   for (const observation of ordered) {
+    const components = observation.components.map(censusBuffer);
+    const expectedRelativePath = censusRelativePath(components);
+    const relativePath = censusBuffer(observation.relativePath);
+    const pathKey = relativePath.toString("hex");
+    const unsignedDecimal = /^[0-9]+$/;
+    const validComponents =
+      components.length > 0 &&
+      components.length <= MAX_RETENTION_CENSUS_DEPTH &&
+      components.every(
+        (component) =>
+          component.length > 0 &&
+          component.length <= 255 &&
+          !component.includes(0) &&
+          !component.includes("/".charCodeAt(0)) &&
+          (sep !== "\\" || !component.includes("\\".charCodeAt(0))),
+      );
+    const validNumbers = [
+      observation.device,
+      observation.inode,
+      observation.links,
+      observation.uid,
+      observation.gid,
+      observation.size,
+      observation.blocks,
+    ].every((value) => unsignedDecimal.test(value));
+    const validDigests =
+      observation.type === "regular"
+        ? observation.contentSha256 !== null &&
+          SHA256_HEX.test(observation.contentSha256) &&
+          observation.symlinkTargetSha256 === null
+        : observation.type === "symlink"
+          ? observation.contentSha256 === null &&
+            observation.symlinkTargetSha256 !== null &&
+            SHA256_HEX.test(observation.symlinkTargetSha256)
+          : observation.contentSha256 === null && observation.symlinkTargetSha256 === null;
+    if (
+      !validComponents ||
+      relativePath.length > 4_096 ||
+      !expectedRelativePath.equals(relativePath) ||
+      observedPaths.has(pathKey) ||
+      !validNumbers ||
+      BigInt(observation.links) <= 0n ||
+      !/^[0-7]+$/.test(observation.mode) ||
+      !/^-?[0-9]+$/.test(observation.modifiedMilliseconds) ||
+      !validDigests
+    ) {
+      throw new HarnessError(
+        "ARTIFACT_CENSUS_INVALID",
+        "artifact census observations must be unique, canonical, bounded metadata records.",
+      );
+    }
+    observedPaths.add(pathKey);
     counts[observation.type] += 1;
     uid.set(observation.uid, (uid.get(observation.uid) ?? 0) + 1);
     gid.set(observation.gid, (gid.get(observation.gid) ?? 0) + 1);
@@ -3955,7 +4032,11 @@ export function summarizeArtifactCensusObservations(
     }
   }
 
-  const authoritative = context.complete && context.stable;
+  const authoritative =
+    context.complete &&
+    context.stable &&
+    context.writerLeases.open === 0 &&
+    context.writerLeases.malformed === 0;
   const hasSpecialNodes =
     counts.fifo + counts.socket + counts.block + counts.character + counts.unknown > 0;
   return {
@@ -3979,6 +4060,7 @@ export function summarizeArtifactCensusObservations(
     incomplete_reason: context.incompleteReason,
     limits: {
       entries: context.entryLimit,
+      depth: MAX_RETENTION_CENSUS_DEPTH,
       unique_regular_bytes: context.hashByteLimit.toString(),
     },
     counts: {
@@ -4343,6 +4425,9 @@ export function artifactRetentionCensus(
     } catch {
       return stop("unreadable-node");
     }
+    if (components.length >= MAX_RETENTION_CENSUS_DEPTH && names.length > 0) {
+      return stop("depth-limit");
+    }
     for (const name of names) {
       if (observations.length >= MAX_RETENTION_CENSUS_ENTRIES) return stop("entry-limit");
       const path = censusPathChild(directory, name);
@@ -4389,6 +4474,14 @@ export function artifactRetentionCensus(
         } catch {
           return stop("filesystem-drift");
         }
+      } else if (type !== "directory") {
+        try {
+          if (!sameCensusStat(stat, lstatSync(path, { bigint: true }))) {
+            return stop("filesystem-drift");
+          }
+        } catch {
+          return stop("filesystem-drift");
+        }
       }
       observations.push({
         relativePath: censusRelativePath(pathComponents),
@@ -4420,23 +4513,31 @@ export function artifactRetentionCensus(
   walk(artifactRootBuffer, []);
   const endMaintenance = censusMaintenanceState(physicalRoot);
   const endLeases = censusWriterLeases(physicalRoot, artifactRootIdentity);
+  let boundaryDrift = false;
   try {
     const artifactRootAfter = lstatSync(artifactRoot, { bigint: true });
-    if (!sameCensusStat(artifactRootStat, artifactRootAfter)) stable = false;
+    if (!sameCensusStat(artifactRootStat, artifactRootAfter)) boundaryDrift = true;
   } catch {
-    stable = false;
+    boundaryDrift = true;
   }
   if (
     JSON.stringify(startMaintenance) !== JSON.stringify(endMaintenance) ||
-    JSON.stringify(startLeases) !== JSON.stringify(endLeases) ||
-    startLeases.open > 0 ||
-    startLeases.malformed > 0
+    JSON.stringify(startLeases) !== JSON.stringify(endLeases)
   ) {
-    stable = false;
+    boundaryDrift = true;
   }
-  if (!stable) {
+  if (boundaryDrift) {
+    stable = false;
     complete = false;
     incompleteReason ??= "filesystem-drift";
+  }
+  if (
+    startLeases.open > 0 ||
+    endLeases.open > 0 ||
+    startLeases.malformed > 0 ||
+    endLeases.malformed > 0
+  ) {
+    stable = false;
   }
   return summarizeArtifactCensusObservations(observations, {
     storageAuthority: "real-filesystem",
