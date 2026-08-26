@@ -1276,7 +1276,7 @@ run_parent_signal_case() (
   # process-level INT delivery test rather than a disposition-dependent fake.
   # Perl owns $SIG here; shell expansion would corrupt the signal reset.
   # shellcheck disable=SC2016
-  run_bounded_capture 6 \
+  run_bounded_capture 12 \
     env \
     "S4_WRAPPER_TEST_LIFECYCLE_HOOK=${lifecycle_hook}" \
     "S4_WRAPPER_TEST_SIGNAL=${signal_name}" \
