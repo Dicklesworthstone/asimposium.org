@@ -179,8 +179,8 @@ expect_run DEF_P11 85 "AGENT_VALIDATOR_P11_MISSING" "p11-missing"
 expect_run DEF_CLOSE 83 "AGENT_CLOSE_FAILED" "close-failed"
 
 # --- Retry-After honoring and bounds (all firing on the first GET).
-expect_run RETRY_ONCE 0 "AGENT_LOOP_COMPLETE" "retry-after-once"
-expect_run RETRY_THREE_HONORED 0 "AGENT_LOOP_COMPLETE" "retry-after-three"
+expect_run RETRY_ONCE 0 "fixture-seeded-origin:AGENT_LOOP_COMPLETE" "retry-after-once"
+expect_run RETRY_THREE_HONORED 0 "fixture-seeded-origin:AGENT_LOOP_COMPLETE" "retry-after-three"
 expect_run RETRY_INVALID 69 "AGENT_HANDBOOK_RATE_LIMITED" "retry-after-invalid"
 expect_run RETRY_ZERO 69 "AGENT_HANDBOOK_RATE_LIMITED" "retry-after-zero"
 expect_run RETRY_NEGATIVE 69 "AGENT_HANDBOOK_RATE_LIMITED" "retry-after-negative"

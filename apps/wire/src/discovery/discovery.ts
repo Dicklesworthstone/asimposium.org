@@ -37,11 +37,7 @@
  */
 
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
-import {
-  PROTOCOL_RULES_WORD_CAP,
-  getProtocolRules,
-  listDocuments,
-} from "@asimposium/protocol";
+import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.1.0-draft";
@@ -52,17 +48,17 @@ export const DISCOVERY_ORIGINS = Object.freeze({
   agora: "https://asimposium.org",
   artifacts: "https://artifacts.asimposium.org",
 });
+
 /**
  * Routes that are mounted but deliberately withheld from agent-facing
  * discovery until their public face contract lands. Precedent: the
  * capabilities census itself keeps GET /v1/fellows out of the published
  * roster (apps/wire/test/contract/faces.test.ts). Keyed "METHOD <raw path>".
  */
-export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> =
-  Object.freeze({
-    "GET /v1/fellows": true,
-    "POST /v1/sponsors/workshop": true,
-  });
+export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Object.freeze({
+  "GET /v1/fellows": true,
+  "POST /v1/sponsors/workshop": true,
+});
 
 /** One honest line per disclosed surface; omission here would be the lie. */
 const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
@@ -77,22 +73,16 @@ const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
   "GET /cursor": "One-integer public ledger cursor.",
-  "GET /join/:enrollmentId":
-    "Enrollment capsule; the fragment secret is never part of any GET.",
+  "GET /join/:enrollmentId": "Enrollment capsule; the fragment secret is never part of any GET.",
   "POST /v1/device-code": "Start a device authorization flow.",
   "POST /v1/device-token": "Poll a device flow for an issued bearer token.",
-  "POST /v1/fellows":
-    "Register a Fellow from a join capsule secret (pre-credential plane).",
-  "POST /v1/fellows/flow":
-    "Register a Fellow through an approved device flow.",
+  "POST /v1/fellows": "Register a Fellow from a join capsule secret (pre-credential plane).",
+  "POST /v1/fellows/flow": "Register a Fellow through an approved device flow.",
   "GET /v1/hello": "Authenticated hello; follow next_actions.",
   "POST /v1/sessions": "Open a working session for a problem.",
-  "GET /v1/sessions/:id/pack":
-    "Read the token-budgeted pack for the session profile.",
-  "POST /v1/sessions/:id/workshop":
-    "Push workshop work; sponsor-visible, not public.",
-  "POST /v1/sessions/:id/promote":
-    "Promote validated objects onto the public ledger.",
+  "GET /v1/sessions/:id/pack": "Read the token-budgeted pack for the session profile.",
+  "POST /v1/sessions/:id/workshop": "Push workshop work; sponsor-visible, not public.",
+  "POST /v1/sessions/:id/promote": "Promote validated objects onto the public ledger.",
   "POST /v1/sessions/:id/close": "Close the session with a handback.",
 });
 
@@ -112,47 +102,39 @@ export interface DisclosedOperation {
   readonly requiresBearer: boolean;
 }
 
+/** Normalize a Hono route pattern (`/:id{.+\.md$}` etc.) to OpenAPI `{param}`. */
+export function normalizeOpenApiPath(honoPath: string): string {
+  const qualified = honoPath.replace(/\/:([A-Za-z0-9_]+)\{[^}]*\}/gu, "/{$1}");
+  return qualified.replace(/\/:([A-Za-z0-9_]+)/gu, "/{$1}") || "/";
+}
+
 function tagFor(method: string, openApiPath: string): string {
   if (openApiPath.startsWith("/schemas/")) return "schema-documents";
   return method === "GET" ? "public-reads" : "agent-writes";
-}
-
-/** Normalize a Hono route pattern (`/:id{.+\.md$}` etc.) to OpenAPI `{param}`. */
-export function normalizeOpenApiPath(honoPath: string): string {
-  const qualified = honoPath.replace(
-    /\/:([A-Za-z0-9_]+)\{[^}]*\}/gu,
-    "/{$1}",
-  );
-  return qualified.replace(/\/:([A-Za-z0-9_]+)/gu, "/{$1}") || "/";
 }
 
 /**
  * The disclosure manifest: every entry in ROUTE_SUMMARIES except those on
  * the undisclosed roster. Sorted at module load for byte-stable output.
  */
-export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] =
-  Object.entries(ROUTE_SUMMARIES)
-    .filter(([, summary]) => summary.length > 0)
-    .map(([key, summary]) => {
-      const spaceAt = key.indexOf(" ");
-      const method = key.slice(0, spaceAt);
-      const honoPath = key.slice(spaceAt + 1);
-      return {
-        method,
-        honoPath,
-        openApiPath: normalizeOpenApiPath(honoPath),
-        summary,
-        tag: tagFor(method, normalizeOpenApiPath(honoPath)),
-        requiresBearer:
-          BEARER_REQUIRED[key] === true ||
-          (method === "POST" && honoPath.startsWith("/v1/")),
-      };
-    })
-    .sort(
-      (a, b) =>
-        a.openApiPath.localeCompare(b.openApiPath) ||
-        a.method.localeCompare(b.method),
-    );
+export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = Object.entries(ROUTE_SUMMARIES)
+  .map(([key, summary]) => {
+    const spaceAt = key.indexOf(" ");
+    const method = key.slice(0, spaceAt);
+    const honoPath = key.slice(spaceAt + 1);
+    const openApiPath = normalizeOpenApiPath(honoPath);
+    return {
+      method,
+      honoPath,
+      openApiPath,
+      summary,
+      tag: tagFor(method, openApiPath),
+      requiresBearer:
+        BEARER_REQUIRED[key] === true || (method === "POST" && honoPath.startsWith("/v1/")),
+    };
+  })
+  .filter((op) => DISCOVERY_UNDISCLOSED_ROUTES[`${op.method} ${op.honoPath}`] !== true)
+  .sort((a, b) => a.openApiPath.localeCompare(b.openApiPath) || a.method.localeCompare(b.method));
 
 /* ------------------------------------------------------------------ */
 /* 1. Schema index                                                     */
@@ -203,16 +185,14 @@ export function generateWellKnownDocument(): string {
     formats: ["md", "json"],
     protocol: {
       rules_word_cap: PROTOCOL_RULES_WORD_CAP,
-      rules_word_count: rules.rulesWords,
+      rules_word_count: rules.words,
       severable_texts_sha256: texts,
     },
     auth: {
-      human_sponsors:
-        "Google SSO; host-only session cookie on asimposium.org",
+      human_sponsors: "Google SSO; host-only session cookie on asimposium.org",
       agents:
         "long-lived revocable bearer tokens (asimp_*); join-URL fragment secret for enrollment",
-      cross_plane_writes:
-        "Ed25519 signed service envelope minted in the Agora console",
+      cross_plane_writes: "Ed25519 signed service envelope minted in the Agora console",
     },
     discovery: {
       capabilities: "/capabilities",
@@ -231,14 +211,12 @@ export function generateWellKnownDocument(): string {
 interface OpenApiOperation {
   readonly summary: string;
   readonly tags: readonly string[];
-  readonly security?: readonly Record<string, readonly string[]>[];
   readonly responses: Readonly<Record<string, unknown>>;
+  readonly security?: readonly Record<string, readonly string[]>[];
 }
 
 function responseFor(openApiPath: string): Readonly<Record<string, unknown>> {
-  const media = openApiPath.endsWith(".md")
-    ? "text/markdown; charset=utf-8"
-    : "application/json";
+  const media = openApiPath.endsWith(".md") ? "text/markdown; charset=utf-8" : "application/json";
   return {
     "200": {
       description: "Success.",
@@ -257,15 +235,13 @@ function responseFor(openApiPath: string): Readonly<Record<string, unknown>> {
 }
 
 function operationFor(operation: DisclosedOperation): OpenApiOperation {
-  const op: OpenApiOperation = {
+  const base = {
     summary: operation.summary,
     tags: [operation.tag],
     responses: responseFor(operation.openApiPath),
   };
-  if (operation.requiresBearer) {
-    op.security = [{ bearerAuth: [] }];
-  }
-  return op;
+  if (!operation.requiresBearer) return base;
+  return { ...base, security: [{ bearerAuth: [] }] };
 }
 
 export function generateOpenApiDocument(): string {
@@ -305,10 +281,6 @@ export function generateOpenApiDocument(): string {
     },
   });
 }
-
-/* ------------------------------------------------------------------ */
-/* Manifest sanitizer                                                  */
-/* ------------------------------------------------------------------ */
 
 /** Stable pretty-printing contract: 2-space indent + trailing newline. */
 function pretty(value: unknown): string {

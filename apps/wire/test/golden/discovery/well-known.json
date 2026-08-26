@@ -12,6 +12,7 @@
   ],
   "protocol": {
     "rules_word_cap": 1000,
+    "rules_word_count": 534,
     "severable_texts_sha256": [
       {
         "id": "capsule",

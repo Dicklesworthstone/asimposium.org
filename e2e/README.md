@@ -244,3 +244,14 @@ short user code. `--write-artifacts` records those validated safe steps plus the
 final diagnostic beneath the validated run-id directory; raw browser output,
 response bodies, screenshots, traces, and terminal transcripts are never
 artifacts.
+
+## Runtime hazard: directory-glob `bun test` breaks child spawning
+
+On Bun 1.4.0 (darwin/arm64), running a test DIRECTORY (`bun test e2e/gauntlet/`)
+deterministically breaks every child-process spawn from the test workers with
+`EBADF: bad file descriptor, posix_spawn` — even spawning `/bin/bash`. The
+wired package scripts avoid it by listing files explicitly after a `/dev/null`
+filter, e.g. `bun test /dev/null --timeout=120000 *.test.ts`. If you see that
+EBADF from a suite, suspect the invocation form first; reproduce with any
+one-line `spawnSync(process.execPath)` probe before blaming the surface under
+test.

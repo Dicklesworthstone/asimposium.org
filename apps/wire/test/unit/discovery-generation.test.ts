@@ -3,23 +3,19 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
-import {
-  PROTOCOL_RULES_WORD_CAP,
-  listDocuments,
-  sha256Hex,
-} from "@asimposium/protocol";
+import { listDocuments, PROTOCOL_RULES_WORD_CAP, sha256Hex } from "@asimposium/protocol";
 
 import { createApp } from "../../src/app";
-import { boundEnv } from "../support/bindings";
 import {
   DISCLOSED_OPERATIONS,
   DISCOVERY_UNDISCLOSED_ROUTES,
   DISCOVERY_VERSION,
-  generateOpenApiDocument,
   generateSchemaIndexDocument,
   generateWellKnownDocument,
+  generateOpenApiDocument,
   normalizeOpenApiPath,
 } from "../../src/discovery/discovery";
+import { boundEnv } from "../support/bindings";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const GOLDEN_DIR = resolve(ROOT, "apps/wire/test/golden/discovery");
@@ -58,15 +54,10 @@ describe("discovery generators (W1.6)", () => {
     );
     registry.forEach((registered, index_) => {
       const entry = doc.schemas[index_];
-      expect(
-        entry,
-        `registry index ${index_} (${registered.id}) must be listed`,
-      ).toBeDefined();
+      expect(entry, `registry index ${index_} (${registered.id}) must be listed`).toBeDefined();
       if (entry === undefined) return;
       expect(entry.url).toBe(`https://a.asimposium.org${registered.served_at}`);
-      expect(entry.body_bytes).toBe(
-        new TextEncoder().encode(registered.body).length,
-      );
+      expect(entry.body_bytes).toBe(new TextEncoder().encode(registered.body).length);
     });
   });
 
@@ -84,14 +75,10 @@ describe("discovery generators (W1.6)", () => {
     expect(doc.protocol.rules_word_cap).toBe(PROTOCOL_RULES_WORD_CAP);
 
     // Independence check: recompute one digest straight from document bytes.
-    const protocolDoc = listDocuments().find(
-      (candidate) => candidate.id === "protocol",
-    );
+    const protocolDoc = listDocuments().find((candidate) => candidate.id === "protocol");
     expect(protocolDoc).toBeDefined();
     if (protocolDoc === undefined) return;
-    const recorded = doc.protocol.severable_texts_sha256.find(
-      (entry) => entry.id === "protocol",
-    );
+    const recorded = doc.protocol.severable_texts_sha256.find((entry) => entry.id === "protocol");
     expect(recorded).toBeDefined();
     if (recorded === undefined) return;
     expect(recorded.sha256).toBe(protocolDoc.digest);
@@ -102,22 +89,16 @@ describe("discovery generators (W1.6)", () => {
   test("every disclosed operation answers as a mounted route", async () => {
     // A real constructed app; the manifest may never advertise a path that
     // resolves to the canonical ROUTE_NOT_FOUND problem. Status codes vary
-    // by design (401s, 404s on absent data); only the router-miss marker
-    // proves non-existence.
-    const app = createApp(boundEnv());
+    const app = createApp();
     for (const operation of DISCLOSED_OPERATIONS) {
       const url = `https://a.asimposium.org${sampleFor(operation.honoPath)}`;
       const response = await app.request(url, {
         method: operation.method,
-        headers:
-          operation.method === "POST"
-            ? { "content-type": "application/json" }
-            : undefined,
+        headers: operation.method === "POST" ? { "content-type": "application/json" } : undefined,
         body: operation.method === "POST" ? "{}" : undefined,
       });
       const missMarked =
-        response.headers.get(MISS_HEADER) === "1" ||
-        response.headers.get(MISS_HEADER) === "true";
+        response.headers.get(MISS_HEADER) === "1" || response.headers.get(MISS_HEADER) === "true";
       const body = await response.text();
       let code = "";
       try {
@@ -148,18 +129,14 @@ describe("discovery generators (W1.6)", () => {
 
     // The sponsor roster READ is the withheld surface; the pre-credential
     // registration POST on the same path is deliberately disclosed.
-    const fellows = doc.paths["/v1/fellows"] as
-      | { get?: unknown; post: unknown }
-      | undefined;
+    const fellows = doc.paths["/v1/fellows"] as { get?: unknown; post: unknown } | undefined;
     expect(fellows?.get).toBeUndefined();
     expect(fellows?.post).toBeDefined();
   });
 
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {
     expect(normalizeOpenApiPath("/p/:id{.+\\.json$}")).toBe("/p/{id}");
-    expect(normalizeOpenApiPath("/v1/sessions/:id/promote")).toBe(
-      "/v1/sessions/{id}/promote",
-    );
+    expect(normalizeOpenApiPath("/v1/sessions/:id/promote")).toBe("/v1/sessions/{id}/promote");
     expect(normalizeOpenApiPath("/")).toBe("/");
   });
 
@@ -177,10 +154,7 @@ describe("discovery generators (W1.6)", () => {
     };
     for (const [name, produced] of Object.entries(goldens)) {
       const committed = readFileSync(resolve(GOLDEN_DIR, name), "utf8");
-      expect(
-        committed,
-        `${name} drifted; regenerate deliberately, never silently`,
-      ).toBe(produced);
+      expect(committed, `${name} drifted; regenerate deliberately, never silently`).toBe(produced);
     }
   });
 });
