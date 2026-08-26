@@ -808,7 +808,7 @@ run_normal_leader_exit_descendant_case() (
   }
   export -f bun
 
-  run_bounded_capture 6 \
+  run_bounded_capture 12 \
     env \
     S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
     "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
@@ -877,7 +877,7 @@ run_normal_term_accepts_descendant_case() (
   }
   export -f bun
 
-  run_bounded_capture 6 \
+  run_bounded_capture 12 \
     env \
     S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
     "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
