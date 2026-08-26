@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "CONFIG_ERROR",
+    "message": "Configuration error: runtime schema remains incompatible after repair",
+    "hint": null,
+    "retryable": false,
+    "context": null
+  }
+}
