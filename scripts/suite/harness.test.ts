@@ -41,6 +41,7 @@ import {
   assertRetainedD1StateDirectory,
   assertRetainedIntegrationCapacity,
   boundedDiff,
+  classifyArtifactWriterLeaseChildren,
   closeArtifactWriterLease,
   countArtifactNamespaces,
   countBlobStagingArtifacts,
@@ -2997,7 +2998,8 @@ describe("artifact namespace backstop", () => {
 
 describe("artifact retention census aggregation", () => {
   const observedAt = Date.UTC(2026, 7, 25, 12, 0, 0);
-  const digestA = opaqueCensusSha256([Buffer.from("opaque-"), Buffer.from("a")]);
+  const bodyCanary = Buffer.from("opaque-a");
+  const digestA = opaqueCensusSha256([bodyCanary.subarray(0, 7), bodyCanary.subarray(7)]);
   const digestB = createHash("sha256").update("opaque-b").digest("hex");
 
   function censusObservation(
@@ -3159,7 +3161,7 @@ describe("artifact retention census aggregation", () => {
     expect(report.counts.unknown).toBe(1);
   });
 
-  test("locator output hides credential-shaped paths and never accepts body bytes", () => {
+  test("opaque chunk hashing causally feeds the locator without emitting body bytes", () => {
     const secretName = "asimp_ag_abcdefghijklmnopqrstuvwxyz123456";
     const observations = [
       censusObservation(["safe-run", "evidence.bin"], { inode: "81" }),
@@ -3170,6 +3172,7 @@ describe("artifact retention census aggregation", () => {
       censusContext({ locateSha256: digestA }),
     );
     const serialized = JSON.stringify(report);
+    expect(digestA).toBe(createHash("sha256").update(bodyCanary).digest("hex"));
     expect(report.locator.matches).toHaveLength(2);
     expect(report.locator.matches[0]?.path).toBeNull();
     expect(report.locator.matches[1]?.path).toBe("safe-run/evidence.bin");
@@ -3242,6 +3245,24 @@ describe("artifact retention census aggregation", () => {
         censusContext(),
       ),
     ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [observation],
+        censusContext({ hashByteLimit: BigInt(observation.size) - 1n }),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_INVALID|hashing bound/);
+    expect(() =>
+      summarizeArtifactCensusObservations(
+        [
+          observation,
+          censusObservation(["run", "alias.bin"], {
+            inode: observation.inode,
+            links: "1",
+          }),
+        ],
+        censusContext(),
+      ),
+    ).toThrow(/ARTIFACT_CENSUS_DRIFT|fewer links/);
 
     const forgedAuthority = summarizeArtifactCensusObservations(
       [observation],
@@ -3249,6 +3270,16 @@ describe("artifact retention census aggregation", () => {
     );
     expect(forgedAuthority.storage_authority).toBe("simulation");
     expect(forgedAuthority.archive_candidate).toBe(false);
+  });
+
+  test("PLANTED: writer leases are open or exactly closed, never loosely inferred", () => {
+    expect(classifyArtifactWriterLeaseChildren([])).toBe("open");
+    expect(classifyArtifactWriterLeaseChildren([Buffer.from("closed")])).toBe("closed");
+    expect(
+      classifyArtifactWriterLeaseChildren([Buffer.from("closed"), Buffer.from("unexpected")]),
+    ).toBe("malformed");
+    expect(classifyArtifactWriterLeaseChildren([Buffer.from("unexpected")])).toBe("malformed");
+    expect(classifyArtifactWriterLeaseChildren([Buffer.from([0xff])])).toBe("malformed");
   });
 
   test("static guard keeps the operator census write-free and CLI-exclusive", () => {
@@ -3274,6 +3305,11 @@ describe("artifact retention census aggregation", () => {
     expect(source).toContain('argument === "--retention-census"');
     expect(source).toContain('argument === "--locate-sha256"');
     expect(source).toContain("Number(preflight) + Number(selfTest) + Number(retentionCensus)");
+    expect(censusSource).toContain("summarized.counts.symlink +");
+    expect(censusSource).toContain('storage_authority: "real-filesystem"');
+    expect(source).toContain(
+      '"unavailable: census arguments and local paths are not echoed after a failure"',
+    );
     // biome-ignore lint/suspicious/noTemplateCurlyInString: exact source match
     expect(source).toContain("process.stdout.write(`${JSON.stringify(census)}\\n`)");
   });

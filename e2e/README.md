@@ -175,24 +175,31 @@ bash scripts/e2e-test-harness.sh --retention-census
 bash scripts/e2e-test-harness.sh --retention-census --locate-sha256 <lowercase-sha256>
 ```
 
-It walks raw pathname bytes without following symlinks, hashes regular files in
-fixed-size chunks, and emits one JSON document to stdout. The document contains
-only aggregate metadata, opaque digests, safe path displays, root/lease/fence
-epochs, direct and recursive counts, logical and unique-inode bytes, allocation
-totals, age/UID/GID/mode/provenance buckets, hard-link warnings, and bounded
-locator matches. Unsafe or credential-shaped path components are represented by
-their path digest rather than printed; file bodies, symlink targets, arbitrary
-JSON fields, and reproduction text are never emitted. A caller that retains the
-record must redirect stdout to an explicitly chosen location outside
-`e2e/artifacts`; the tool itself creates no census file. Depth, entry, or byte limits,
-filesystem drift, unreadable nodes, an open current-epoch lease, or a malformed
-lease suppress the canonical tree/content digests and return the blocked exit
-code. Even `archive_candidate: true` is only an observed precondition summary,
-never permission to move or delete evidence. This census and locator are
-source-wired only and have not executed at this revision under the required
-low-load RCH gate. There is still no operator maintenance-acquisition or move
-path, and Node's path APIs do not provide a race-free `openat` snapshot. Moving
-or rotating `e2e/artifacts` therefore remains unsafe.
+It streams bounded raw pathname-byte directory entries, refuses observed
+symlinks as traversal nodes, opens regular-file leaves with `O_NOFOLLOW`, hashes
+them in fixed-size chunks, and emits one JSON document to stdout. The successful
+document contains aggregate metadata, opaque digests, safe relative path
+displays, the absolute artifact-root path, root/lease/fence epochs, direct and
+recursive counts, logical and unique-inode bytes, allocation totals,
+age/UID/GID/mode/provenance buckets, hard-link warnings, and bounded locator
+matches. Unsafe or credential-shaped descendant components are represented by
+their path digest rather than printed; file bodies, symlink targets, and
+arbitrary JSON fields are never emitted. Census failure stderr carries only a
+fixed unavailable-reproduction message and does not echo census arguments or
+local paths. A caller that retains the successful record must redirect stdout to
+an explicitly chosen location outside `e2e/artifacts`; the tool itself creates
+no census file. Depth, entry, lease-entry, or byte limits, filesystem drift,
+unreadable nodes, an invalid maintenance fence, an open current-epoch lease, or
+a malformed lease suppress the canonical tree/content digests and return the
+blocked exit code. Symlinks, special nodes, and externally linked regular files
+also disqualify `archive_candidate`. Even `archive_candidate: true` is only an
+observed precondition summary, never permission to move or delete evidence.
+This census and locator are source-wired only and have not executed at this
+revision under the required low-load RCH gate. There is still no operator
+maintenance-acquisition or move path, and Node's path APIs do not provide a
+race-free `openat` snapshot: an ancestor or in-place pathname ABA can evade a
+path-based before/after comparison. Moving or rotating `e2e/artifacts` therefore
+remains unsafe.
 S-6 has a separate fixed contract:
 it requires `ASIMP_S6_EVIDENCE_DIR=e2e/artifacts/s6-cross-plane-auth` and
 accepts neither of those command-line flags.

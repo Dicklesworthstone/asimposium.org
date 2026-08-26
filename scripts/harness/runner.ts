@@ -3719,6 +3719,8 @@ interface ArtifactCensusDirectoryListing {
 
 const CENSUS_DAY_MILLISECONDS = 24n * 60n * 60n * 1_000n;
 const CENSUS_READ_CHUNK_BYTES = 64 * 1_024;
+const CENSUS_MAX_DATE_MILLISECONDS = 8_640_000_000_000_000;
+const CENSUS_MAX_METADATA_DIGITS = 40;
 
 const ARTIFACT_CENSUS_NODE_TYPES: ReadonlySet<string> = new Set<ArtifactCensusNodeType>([
   "directory",
@@ -3845,11 +3847,26 @@ export function summarizeArtifactCensusObservations(
     context.writerLeases.foreignEpochs,
   ];
   if (
+    typeof context.complete !== "boolean" ||
+    typeof context.stable !== "boolean" ||
+    typeof context.maintenance.present !== "boolean" ||
+    typeof context.maintenance.valid !== "boolean" ||
+    (!context.maintenance.present && !context.maintenance.valid) ||
+    typeof context.artifactRoot !== "string" ||
+    !isAbsolute(context.artifactRoot) ||
+    context.artifactRoot.length > 4_096 ||
+    typeof context.artifactRootIdentity !== "string" ||
+    context.artifactRootIdentity.length > 128 ||
+    !/^(?:[0-9]+:[0-9]+|memory:[0-9]+)$/.test(context.artifactRootIdentity) ||
     !Number.isSafeInteger(context.observedAtMilliseconds) ||
     context.observedAtMilliseconds < 0 ||
+    context.observedAtMilliseconds > CENSUS_MAX_DATE_MILLISECONDS ||
     !Number.isSafeInteger(context.entryLimit) ||
     context.entryLimit <= 0 ||
+    context.entryLimit > MAX_RETENTION_CENSUS_ENTRIES ||
+    typeof context.hashByteLimit !== "bigint" ||
     context.hashByteLimit < 0n ||
+    context.hashByteLimit > MAX_RETENTION_CENSUS_HASH_BYTES ||
     observations.length > context.entryLimit ||
     !leaseCounts.every((value) => Number.isSafeInteger(value) && value >= 0) ||
     !SHA256_HEX.test(context.maintenance.snapshotSha256) ||
@@ -3924,7 +3941,7 @@ export function summarizeArtifactCensusObservations(
           !component.includes("/".charCodeAt(0)) &&
           (sep !== "\\" || !component.includes("\\".charCodeAt(0))),
       );
-    const validNumbers = [
+    const numericMetadata = [
       observation.device,
       observation.inode,
       observation.links,
@@ -3932,7 +3949,10 @@ export function summarizeArtifactCensusObservations(
       observation.gid,
       observation.size,
       observation.blocks,
-    ].every((value) => unsignedDecimal.test(value));
+    ];
+    const validNumbers = numericMetadata.every(
+      (value) => value.length <= CENSUS_MAX_METADATA_DIGITS && unsignedDecimal.test(value),
+    );
     const validDigests =
       observation.type === "regular"
         ? observation.contentSha256 !== null &&
@@ -3951,7 +3971,9 @@ export function summarizeArtifactCensusObservations(
       !ARTIFACT_CENSUS_NODE_TYPES.has(observation.type) ||
       !validNumbers ||
       BigInt(observation.links) <= 0n ||
+      observation.mode.length > 8 ||
       !/^[0-7]+$/.test(observation.mode) ||
+      observation.modifiedMilliseconds.length > CENSUS_MAX_METADATA_DIGITS ||
       !/^-?[0-9]+$/.test(observation.modifiedMilliseconds) ||
       !validDigests
     ) {
@@ -4066,6 +4088,12 @@ export function summarizeArtifactCensusObservations(
   for (const [key, inode] of [...inodes.entries()].sort(([left], [right]) =>
     asciiCompare(left, right),
   )) {
+    if (inode.links < BigInt(inode.aliases)) {
+      throw new HarnessError(
+        "ARTIFACT_CENSUS_DRIFT",
+        "a regular-file inode reports fewer links than the aliases observed in the census.",
+      );
+    }
     uniqueBytes += inode.size;
     uniqueAllocated += inode.allocated;
     updateCensusHashField(content, key);
@@ -4077,6 +4105,12 @@ export function summarizeArtifactCensusObservations(
       if (inode.links > BigInt(inode.aliases)) externalLinkGroups += 1;
       if (inode.aliases > maxObservedAliases) maxObservedAliases = inode.aliases;
     }
+  }
+  if (uniqueBytes > context.hashByteLimit) {
+    throw new HarnessError(
+      "ARTIFACT_CENSUS_INVALID",
+      "artifact census observations exceed their declared unique-byte hashing bound.",
+    );
   }
 
   const authoritative =
@@ -4094,9 +4128,7 @@ export function summarizeArtifactCensusObservations(
     artifact_root_identity: context.artifactRootIdentity,
     complete: context.complete,
     stable: context.stable,
-    archive_candidate:
-      authoritative &&
-      false,
+    archive_candidate: false,
     incomplete_reason: context.incompleteReason,
     limits: {
       entries: context.entryLimit,
@@ -4308,6 +4340,27 @@ function censusRegistryName(raw: Buffer): string | null {
     : null;
 }
 
+export type ArtifactWriterLeaseChildShape = "open" | "closed" | "malformed";
+
+/**
+ * Classify only the append-only child-name grammar of one writer lease.
+ * Filesystem identity and the exact empty `closed` directory are proved by the
+ * caller after this pure classification.
+ */
+export function classifyArtifactWriterLeaseChildren(
+  children: readonly Uint8Array[],
+): ArtifactWriterLeaseChildShape {
+  if (children.length === 0) return "open";
+  if (
+    children.length === 1 &&
+    censusRegistryName(censusBuffer(children[0] as Uint8Array)) ===
+      ARTIFACT_WRITER_LEASE_CLOSED_NAME
+  ) {
+    return "closed";
+  }
+  return "malformed";
+}
+
 function censusWriterLeases(root: string, artifactRootIdentity: string): ArtifactWriterLeaseCensus {
   let open = 0;
   let closed = 0;
@@ -4358,7 +4411,10 @@ function censusWriterLeases(root: string, artifactRootIdentity: string): Artifac
       }
       for (const rawEpochName of [...epochs.names].sort(Buffer.compare)) {
         const epochName = censusRegistryName(rawEpochName);
-        if (epochName === null) {
+        if (
+          epochName === null ||
+          !/^dev-[0-9]+-ino-[0-9]+$/.test(epochName)
+        ) {
           malformed += 1;
           witness.push(
             `malformed-epoch:${createHash("sha256").update(rawEpochName).digest("hex")}`,
@@ -4415,15 +4471,12 @@ function censusWriterLeases(root: string, artifactRootIdentity: string): Artifac
             witness.push("lease-child-limit");
             continue;
           }
-          if (leaseChildren.names.length === 0) {
+          const leaseShape = classifyArtifactWriterLeaseChildren(leaseChildren.names);
+          if (leaseShape === "open") {
             open += 1;
             continue;
           }
-          if (
-            leaseChildren.names.length !== 1 ||
-            censusRegistryName(leaseChildren.names[0] as Buffer) !==
-              ARTIFACT_WRITER_LEASE_CLOSED_NAME
-          ) {
+          if (leaseShape === "malformed") {
             malformed += 1;
             witness.push(
               `malformed-lease-children:${createHash("sha256")

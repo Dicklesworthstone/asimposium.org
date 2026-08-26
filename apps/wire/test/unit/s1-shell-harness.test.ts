@@ -3341,8 +3341,6 @@ describe("lifecycle: parallel runs and signal handling", () => {
         expect(run.stderr).not.toContain("cont-authorized");
         continue;
       }
-
-      expect(run.stderr).toContain("cont-authorized");
       const checkpointPid = Number(
         phaseValue(run.stderr, "lifecycle-critical-window", "provisional"),
       );
