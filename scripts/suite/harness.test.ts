@@ -701,6 +701,30 @@ describe("execution lifecycle", () => {
     expect(() => store.writeJUnit([])).toThrow(/ARTIFACT_WRITER_LEASE_CLOSED|lease is closed/);
   });
 
+  test("a forged lease directory cannot be asserted or receive a closed marker", () => {
+    const root = fixtureRoot("writer-lease-foreign-directory");
+    const storage = fixtureStorage();
+    const lease = acquireArtifactWriterLeaseAtRoot(root, storage);
+    const foreignDirectory = join(root, "foreign-directory");
+    storage.mkdir(foreignDirectory);
+    const forged: ArtifactWriterLease = {
+      ...lease,
+      directory: foreignDirectory,
+      identity: storage.directoryIdentity(foreignDirectory),
+    };
+
+    expect(() => assertArtifactWriterLeaseOpen(forged)).toThrow(
+      /ARTIFACT_WRITER_LEASE_INVALID|outside its exact artifact-root epoch/,
+    );
+    expect(() => closeArtifactWriterLease(forged)).toThrow(
+      /ARTIFACT_WRITER_LEASE_INVALID|outside its exact artifact-root epoch/,
+    );
+    expect(
+      storage.exists(join(foreignDirectory, ARTIFACT_WRITER_LEASE_CLOSED_NAME)),
+    ).toBe(false);
+    closeArtifactWriterLease(lease);
+  });
+
   for (const failurePoint of ["onOutput", "onEvent", "storage.append"] as const) {
     test(`reaps the detached process group before ${failurePoint} failure closes its lease`, async () => {
       const root = fixtureRoot(`writer-lease-${failurePoint}`);
@@ -3200,6 +3224,20 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
     expect(() => publishFailureBlob({ ...input, writerLease: closedLease })).toThrow(
       /ARTIFACT_WRITER_LEASE_CLOSED|lease is absent, replaced, or closed/,
     );
+    expect(existsSync(blobStore(root))).toBe(false);
+
+    const openLease = fixtureWriterLease();
+    const foreignDirectory = retainedIntegrationDirectory();
+    expect(() =>
+      publishFailureBlob({
+        ...input,
+        writerLease: {
+          ...openLease,
+          directory: foreignDirectory,
+          identity: nodeArtifactStorage.directoryIdentity(foreignDirectory),
+        },
+      }),
+    ).toThrow(/ARTIFACT_WRITER_LEASE_INVALID|outside its exact artifact-root epoch/);
     expect(existsSync(blobStore(root))).toBe(false);
   });
 

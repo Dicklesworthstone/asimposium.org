@@ -4045,6 +4045,32 @@ function artifactWriterLeaseEpochName(rootIdentity: string): string {
   );
 }
 
+function artifactWriterLeaseDirectory(lease: ArtifactWriterLease): string {
+  const expectedEpoch = join(
+    lease.root,
+    "e2e",
+    ARTIFACT_WRITER_LEASES_NAME,
+    artifactWriterLeaseEpochName(lease.artifactRootIdentity),
+  );
+  if (
+    dirname(lease.directory) !== expectedEpoch ||
+    !/^lease-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/.test(basename(lease.directory))
+  ) {
+    throw new HarnessError(
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      "artifact writer lease is outside its exact artifact-root epoch.",
+    );
+  }
+  const actual = realDirectory(lease.directory, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
+  if (actual !== lease.directory || lease.storage.directoryIdentity(actual) !== lease.identity) {
+    throw new HarnessError(
+      "ARTIFACT_WRITER_LEASE_INVALID",
+      "artifact writer lease was replaced or redirected.",
+    );
+  }
+  return actual;
+}
+
 export function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void {
   assertArtifactWriterBoundary(
     lease.root,
@@ -4052,11 +4078,9 @@ export function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void 
     lease.artifactRootIdentity,
     lease.storage,
   );
-  const actual = realDirectory(lease.directory, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
+  const actual = artifactWriterLeaseDirectory(lease);
   const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
   if (
-    actual !== lease.directory ||
-    lease.storage.directoryIdentity(actual) !== lease.identity ||
     lease.storage.exists(closed) ||
     lease.storage.isSymlink(closed)
   ) {
@@ -4074,13 +4098,7 @@ export function assertArtifactWriterLeaseOpen(lease: ArtifactWriterLease): void 
 }
 
 export function closeArtifactWriterLease(lease: ArtifactWriterLease): void {
-  const actual = realDirectory(lease.directory, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
-  if (actual !== lease.directory || lease.storage.directoryIdentity(actual) !== lease.identity) {
-    throw new HarnessError(
-      "ARTIFACT_WRITER_LEASE_INVALID",
-      "artifact writer lease was replaced and cannot be closed safely.",
-    );
-  }
+  const actual = artifactWriterLeaseDirectory(lease);
   const closed = join(actual, ARTIFACT_WRITER_LEASE_CLOSED_NAME);
   if (lease.storage.exists(closed) || lease.storage.isSymlink(closed)) {
     const physicalClosed = realDirectory(closed, "ARTIFACT_WRITER_LEASE_INVALID", lease.storage);
