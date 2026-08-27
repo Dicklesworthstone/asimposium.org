@@ -102,6 +102,8 @@ SERVER_SUPERVISOR_RESPONSE=""
 SERVER_SUPERVISOR_STARTED=""
 SERVER_SUPERVISOR_FAULT=""
 SERVER_SUPERVISOR_RETIREMENT=""
+SERVER_SUPERVISOR_LEASE=""
+SERVER_SUPERVISOR_LEASE_FD=""
 SERVER_TARGET_GATE_OPENED=0
 SUPERVISOR_PLANT_DIRECT_PID=""
 SUPERVISOR_PLANT_DESCENDANT_PID=""
@@ -1532,7 +1534,14 @@ stop_worker() {
   SERVER_PGID=""
   SERVER_LEADER_IDENTITY=""
   SERVER_IDENTITY_STATE=""
+  close_server_supervisor_lease
   emit "{\"suite\":\"${SUITE}\",\"assertion\":\"workerd_group_descendants_listener_and_state_fds_reaped\",\"status\":\"pass\",\"pgid\":\"${worker_pgid}\"}"
+}
+
+close_server_supervisor_lease() {
+  [[ -n "${SERVER_SUPERVISOR_LEASE_FD}" ]] || return 0
+  exec {SERVER_SUPERVISOR_LEASE_FD}>&-
+  SERVER_SUPERVISOR_LEASE_FD=""
 }
 
 finalize() {
@@ -1545,6 +1554,7 @@ finalize() {
   if ! stop_auxiliary_child "${BUSY_PORT_PID}" "BUSY_PORT" \
     "${BUSY_PORT_IDENTITY}" "${BUSY_PORT_MARKER}"; then status=1; fi
   if ! stop_worker; then status=1; fi
+  close_server_supervisor_lease
   exit "${status}"
 }
 
@@ -1593,6 +1603,11 @@ SERVER_SUPERVISOR_RESPONSE="${STATE_DIR}/supervisor.response"
 SERVER_SUPERVISOR_STARTED="${STATE_DIR}/supervisor.started"
 SERVER_SUPERVISOR_FAULT="${STATE_DIR}/supervisor.fault"
 SERVER_SUPERVISOR_RETIREMENT="${STATE_DIR}/supervisor.retirement"
+SERVER_SUPERVISOR_LEASE="${PROBE_DIR}/supervisor-parent.lease"
+mkfifo -m 600 "${SERVER_SUPERVISOR_LEASE}" || {
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_LEASE_UNAVAILABLE"
+  exit 1
+}
 STATE_CENSUS_NONCE="$(${BUN} --eval 'console.log(crypto.randomUUID())')"
 [[ -n "${STATE_CENSUS_NONCE}" ]] || { fail "TOKEN_LIFECYCLE_STATE_CENSUS_NONCE_UNAVAILABLE"; exit 1; }
 
@@ -1673,6 +1688,10 @@ seed_session_problem || exit 1
 # launch Wrangler until the parent validates its private ready record and opens
 # the go gate, and it continues answering fresh challenges while the Worker is
 # live. Secret bindings remain environment-only and never enter argv.
+exec {SERVER_SUPERVISOR_LEASE_FD}<>"${SERVER_SUPERVISOR_LEASE}" || {
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_LEASE_UNAVAILABLE"
+  exit 1
+}
 (
   AGORA_ORIGIN="https://asimposium.org" ENROLLMENT_REPLAY_KEY="${REPLAY_KEY}" \
     STOA_ORIGIN="${ORIGIN}" \
@@ -1687,6 +1706,7 @@ seed_session_problem || exit 1
     TOKEN_LIFECYCLE_SUPERVISOR_STARTED="${SERVER_SUPERVISOR_STARTED}" \
     TOKEN_LIFECYCLE_SUPERVISOR_FAULT="${SERVER_SUPERVISOR_FAULT}" \
     TOKEN_LIFECYCLE_SUPERVISOR_RETIREMENT="${SERVER_SUPERVISOR_RETIREMENT}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_LEASE_FD="${SERVER_SUPERVISOR_LEASE_FD}" \
     TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" \
     TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" \
     TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE:-0}" \
@@ -1702,6 +1722,28 @@ seed_session_problem || exit 1
       my $worker_reaped = 0;
       my $retiring = 0;
       $SIG{"TERM"} = sub { exit 125 unless defined($worker) && $worker > 0; };
+      my $lease_anchor_fd = $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_LEASE_FD"};
+      die "lease-anchor-fd" unless defined($lease_anchor_fd) && $lease_anchor_fd =~ /^\d+$/;
+      open(my $lease_anchor, "<&=", $lease_anchor_fd) or die "lease-anchor-open";
+      close($lease_anchor) or die "lease-anchor-close";
+      my $lease_nonce = <STDIN>;
+      die "lease-nonce" unless defined($lease_nonce);
+      chomp($lease_nonce);
+      die "lease-nonce" unless $lease_nonce eq $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"};
+      my $parent_lease_is_open = sub {
+        my $readable = "";
+        vec($readable, fileno(STDIN), 1) = 1;
+        my $selected = select($readable, undef, undef, 0);
+        return 0 if !defined($selected);
+        return 1 if $selected == 0;
+        my $bytes = sysread(STDIN, my $unexpected, 1);
+        return 0 if !defined($bytes) || $bytes == 0;
+        return 0;
+      };
+      my $retire_orphaned_group = sub {
+        kill "KILL", -$group;
+        POSIX::_exit(125);
+      };
       open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready";
       print $ready join("\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
       close($ready);
@@ -1725,6 +1767,7 @@ seed_session_problem || exit 1
         $last_challenge = $challenge;
       };
       until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) {
+        $retire_orphaned_group->() unless $parent_lease_is_open->();
         $answer_challenge->();
         select(undef, undef, undef, 0.01);
       }
@@ -1760,6 +1803,7 @@ seed_session_problem || exit 1
       die "fork" unless defined($worker);
       if ($worker == 0) {
         $SIG{"TERM"} = "DEFAULT";
+        open STDIN, "<", "/dev/null" or POSIX::_exit(127);
         exit 0 if $ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE"} eq "1";
         if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE"} eq "1") {
           while (1) { select(undef, undef, undef, 1); }
@@ -1799,6 +1843,7 @@ seed_session_problem || exit 1
       }
       my $status;
       while (1) {
+        $retire_orphaned_group->() unless $parent_lease_is_open->();
         eval { $answer_challenge->(); 1 } or $retire_group->();
         my $done = waitpid($worker, WNOHANG);
         if ($done == $worker) { $status = $?; last; }
@@ -1813,10 +1858,14 @@ seed_session_problem || exit 1
     ' "${SERVER_SUPERVISOR_MARKER}" "${WRANGLER}" dev --config "${CONFIG}" --local \
       --persist-to "${STATE_DIR}" --port "${PORT}" --inspector-port 0 --log-level error \
       --env-file /dev/null
-) >"${SERVER_LOG}" 2>&1 &
+) <"${SERVER_SUPERVISOR_LEASE}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 SERVER_PGID="${SERVER_PID}"
 SERVER_IDENTITY_STATE="supervisor"
+printf '%s\n' "${SERVER_SUPERVISOR_NONCE}" >&"${SERVER_SUPERVISOR_LEASE_FD}" || {
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_LEASE_UNAVAILABLE"
+  exit 1
+}
 
 supervisor_ready_deadline=$((SECONDS + 5))
 (( supervisor_ready_deadline > SCRIPT_DEADLINE )) && supervisor_ready_deadline="${SCRIPT_DEADLINE}"

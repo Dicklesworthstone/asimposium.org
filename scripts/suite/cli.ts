@@ -130,6 +130,11 @@ const SUITE_TIMEOUT_MS: Readonly<Record<Suite, number>> = {
   performance: 10 * 60_000,
   e2e: 30 * 60_000,
 };
+// The root unit bridge composes the process-heavy dispatcher self-tests with
+// seed and environment checks. A canonical run demonstrated that the CLI
+// matrix alone can take more than the generic five-minute package bound, so
+// keep this finite parent outside that bounded child composition.
+const ROOT_UNIT_SUITE_TIMEOUT_MS = 15 * 60_000;
 // The real Wire unit composition includes sequential local-D1 and token-lifecycle
 // subprocess matrices. Canonical full runs crossed both the old 30-minute and
 // 45-minute parent bounds while fresh children were still inside their own
@@ -156,6 +161,13 @@ export function suiteExecutionLimits(
   suite: Suite,
   unit: { readonly dir: string },
 ): SuiteExecutionLimits {
+  if (suite === "unit" && unit.dir === ".") {
+    return {
+      timeoutMs: ROOT_UNIT_SUITE_TIMEOUT_MS,
+      retainedStreamBytes: OWNED_PROCESS_STREAM_RETAINED_BYTES,
+      retainedOutputBytes: OWNED_PROCESS_AGGREGATE_RETAINED_BYTES,
+    };
+  }
   if (suite === "unit" && unit.dir === "apps/wire") {
     return {
       timeoutMs: WIRE_UNIT_SUITE_TIMEOUT_MS,

@@ -1724,9 +1724,14 @@ describe("owned session launcher", () => {
 });
 
 describe("routing to real package commands", () => {
-  test("the shell-heavy Wire unit composition has its own bounded parent deadline", () => {
+  test("the process-heavy root and Wire unit compositions have bounded parent deadlines", () => {
     const wire = { name: "@asimposium/wire", dir: "apps/wire" };
 
+    expect(suiteExecutionLimits("unit", { dir: "." })).toEqual({
+      timeoutMs: 15 * 60_000,
+      retainedStreamBytes: 64 * 1024,
+      retainedOutputBytes: 96 * 1024,
+    });
     expect(suiteExecutionLimits("unit", wire)).toEqual({
       timeoutMs: 60 * 60_000,
       retainedStreamBytes: 512 * 1024,
@@ -2122,7 +2127,9 @@ describe("secret-safe diagnostics", () => {
       expect(typeof unit.duration_ms).toBe("number");
       expect(["pass", "fail", "blocked", "missing", "skip"]).toContain(unit.status);
       expect(unit.reproduce.length).toBeGreaterThan(0);
-      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 60 * 60_000 : 5 * 60_000);
+      expect(unit.timeout_ms).toBe(
+        unit.dir === "apps/wire" ? 60 * 60_000 : unit.dir === "." ? 15 * 60_000 : 5 * 60_000,
+      );
       expect(unit.retained_stream_limit_bytes).toBe(
         unit.dir === "apps/wire" ? 512 * 1024 : 64 * 1024,
       );
@@ -2299,7 +2306,7 @@ describe("--list plans without running", () => {
     expect(plans.find((plan) => plan.dir === ".")).toEqual(
       expect.objectContaining({
         action: "run",
-        timeout_ms: 5 * 60_000,
+        timeout_ms: 15 * 60_000,
         retained_stream_limit_bytes: 64 * 1024,
         retained_output_limit_bytes: 96 * 1024,
       }),

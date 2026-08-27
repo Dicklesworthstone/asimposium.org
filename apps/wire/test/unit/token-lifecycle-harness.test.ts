@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   closeSync,
@@ -21,6 +21,13 @@ const EXTERNAL_TMPDIR = "/Volumes/USB_NVME";
 const OUTER_LIVE_BUDGET_MS = 180_000;
 const OUTER_TERM_GRACE_MS = 15_000;
 const OUTER_KILL_GRACE_MS = 5_000;
+const OWNED_PROCESS_TEST_TIMEOUT_MS =
+  OUTER_LIVE_BUDGET_MS + OUTER_TERM_GRACE_MS + OUTER_KILL_GRACE_MS + 10_000;
+
+// The test parent must outlive the harness's finite natural-run, TERM, KILL,
+// and reap budgets. Cutting the parent off first defeats the cleanup proof and
+// was the direct cause of stranded inner supervisors in cancelled full runs.
+setDefaultTimeout(OWNED_PROCESS_TEST_TIMEOUT_MS);
 
 const FAULT_PLANTS = {
   TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE: "0",
@@ -266,6 +273,7 @@ my $worker = fork();
 die "fork" unless defined $worker;
 if ($worker == 0) {
   $SIG{"TERM"} = "DEFAULT";
+  open STDIN, "<", "/dev/null" or _exit(127);
   exec @ARGV or die "exec";
 }
 
@@ -465,11 +473,13 @@ async function runOwnedProcess(options: {
     try {
       await settleSpawnFailure(child, exited, identity, options.termGraceMs, options.killGraceMs);
     } catch (cleanupError) {
+      closeParentLease();
       throw new AggregateError(
         [error, cleanupError],
         "token lifecycle supervisor failed and could not prove bounded cleanup",
       );
     }
+    closeParentLease();
     throw error;
   }
 
@@ -848,29 +858,37 @@ const FAULT_CASES: readonly {
 ];
 
 for (const current of FAULT_CASES) {
-  test(`token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`, async () => {
-    const result = await runHarness([], { [current.plant]: "1" });
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain(`"code":"${current.code}"`);
-    expect(result.stdout).not.toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
-    expect(result.stdout).not.toContain('"record":"mounted-pack-performance-observation"');
-    if (current.requiresWorkerCleanup) {
-      expect(result.stdout).toContain(
-        '"assertion":"workerd_group_descendants_listener_and_state_fds_reaped","status":"pass"',
-      );
-    } else if (current.reachesWorkerReady !== true) {
-      expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
-    }
-    for (const assertion of current.cleanupAssertions ?? []) {
-      expect(result.stdout).toContain(`"assertion":"${assertion}","status":"pass"`);
-    }
-    if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE") {
-      expect(result.stdout).toContain(
-        '"assertion":"startup_gate_supervisor_reaped_before_target_launch","status":"pass","wrangler_started":false',
-      );
-      expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
-    }
-  }, 120_000);
+  test(
+    `token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`,
+    async () => {
+      const result = await runHarness([], { [current.plant]: "1" });
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain(`"code":"${current.code}"`);
+      expect(result.stdout).not.toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
+      expect(result.stdout).not.toContain('"record":"mounted-pack-performance-observation"');
+      if (current.requiresWorkerCleanup) {
+        expect(result.stdout).toContain(
+          '"assertion":"workerd_group_descendants_listener_and_state_fds_reaped","status":"pass"',
+        );
+      } else if (current.reachesWorkerReady !== true) {
+        expect(result.stdout).not.toContain(
+          "ready_workerd_responder_pid_pgid_start_and_argv_pinned",
+        );
+      }
+      for (const assertion of current.cleanupAssertions ?? []) {
+        expect(result.stdout).toContain(`"assertion":"${assertion}","status":"pass"`);
+      }
+      if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE") {
+        expect(result.stdout).toContain(
+          '"assertion":"startup_gate_supervisor_reaped_before_target_launch","status":"pass","wrangler_started":false',
+        );
+        expect(result.stdout).not.toContain(
+          "ready_workerd_responder_pid_pgid_start_and_argv_pinned",
+        );
+      }
+    },
+    OWNED_PROCESS_TEST_TIMEOUT_MS,
+  );
 }
 
 test("PLANTED: combined lifecycle evidence omits the unevidenced active cap", () => {

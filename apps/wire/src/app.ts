@@ -713,7 +713,15 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // /p/<id>/full.md would reach the broad digest handler and be reported as a
   // missing problem. Refuse every nested /p path before the ledger router: the
   // route does not exist, and deciding that must never require a D1 read.
-  app.on(["GET", "HEAD"], "/p/:id/*", (c) => routeNotFound(c.req.url));
+  app.on(["GET", "HEAD"], "/p/:id/*", async (c, next) => {
+    const segments = new URL(c.req.url).pathname.split("/");
+    const encodedSeparator = /%(?:2f|5c)/iu.test(segments[2] ?? "");
+    if (segments.length === 3 && !encodedSeparator) {
+      await next();
+      return;
+    }
+    return routeNotFound(c.req.url);
+  });
 
   // W6.4 source exists, but its response contract and dependencies do not.
   // Keep this explicit pin alongside the general nested-path guard so mounting

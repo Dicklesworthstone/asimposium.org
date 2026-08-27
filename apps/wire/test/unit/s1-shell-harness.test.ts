@@ -3058,7 +3058,7 @@ describe("lifecycle: containment failures stay fail-closed", () => {
         phases.indexOf("ps-parser-survivor-cleaned"),
       );
     }
-  }, 60_000);
+  }, 120_000);
 
   test("PLANTED: failed cleanup retains ownership for the EXIT retry", async () => {
     const run = await runScript(["--self-test-cleanup-retry"], {

@@ -24,7 +24,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 8500
+      "body_bytes": 9696
     },
     {
       "id": "problem",
@@ -36,7 +36,7 @@
       "id": "screening",
       "url": "https://a.asimposium.org/schemas/screening.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 179671
+      "body_bytes": 180791
     },
     {
       "id": "sessions",
