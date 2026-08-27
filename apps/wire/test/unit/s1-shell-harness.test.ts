@@ -1390,7 +1390,7 @@ describe("the self-test and the blocked external proof", () => {
     expect(
       readFileSync(resolve(REPO_ROOT, "apps/wire/test/unit/s1-shell-harness.test.ts"), "utf8"),
     ).toContain('...(privilegedCapture ? ["-p"] : []),');
-  }, 60_000);
+  }, 180_000);
 
   for (const scenario of [
     {

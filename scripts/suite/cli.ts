@@ -131,10 +131,11 @@ const SUITE_TIMEOUT_MS: Readonly<Record<Suite, number>> = {
   e2e: 30 * 60_000,
 };
 // The real Wire unit composition includes sequential local-D1 and token-lifecycle
-// subprocess matrices. A fresh full run crossed the old 30-minute parent bound
-// while its children remained inside their own finite per-test limits. Keep the
-// parent finite with enough scheduling margin for the process-heavy composition.
-const WIRE_UNIT_SUITE_TIMEOUT_MS = 45 * 60_000;
+// subprocess matrices. Canonical full runs crossed both the old 30-minute and
+// 45-minute parent bounds while fresh children were still inside their own
+// finite per-test limits. Keep the parent finite, but outside the demonstrated
+// process-heavy composition rather than terminating its final live-D1 proof.
+const WIRE_UNIT_SUITE_TIMEOUT_MS = 60 * 60_000;
 const WIRE_UNIT_STREAM_RETAINED_BYTES = 512 * 1024;
 const WIRE_UNIT_OUTPUT_RETAINED_BYTES = 768 * 1024;
 

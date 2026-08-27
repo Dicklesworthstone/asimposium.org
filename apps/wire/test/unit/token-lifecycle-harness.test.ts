@@ -193,6 +193,102 @@ async function settleSpawnFailure(
   }
 }
 
+const OWNED_PROCESS_SUPERVISOR = String.raw`
+use strict;
+use warnings;
+use POSIX qw(setsid WNOHANG _exit);
+
+setsid() or die "setsid";
+my $leader = $$;
+my $group = getpgrp(0);
+
+sub parent_lease_is_open {
+  my $readable = "";
+  vec($readable, fileno(STDIN), 1) = 1;
+  my $selected = select($readable, undef, undef, 0);
+  return 0 if !defined $selected;
+  return 1 if $selected == 0;
+  my $bytes = sysread(STDIN, my $unexpected, 1);
+  return 0 if !defined $bytes || $bytes == 0;
+  return 0;
+}
+
+sub retire_orphaned_group {
+  kill "KILL", -$group;
+  _exit(125);
+}
+
+my $lease_nonce = <STDIN>;
+retire_orphaned_group() if !defined $lease_nonce;
+chomp $lease_nonce;
+retire_orphaned_group() if $lease_nonce ne $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"};
+
+open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready";
+print $ready join(
+  "\t",
+  $leader,
+  $group,
+  $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"},
+  $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"},
+) . "\n";
+close($ready);
+
+my $last_challenge = "";
+sub answer_challenge {
+  return unless -e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"};
+  open(my $challenge_file, "<", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"})
+    or die "challenge";
+  my $challenge = <$challenge_file> // "";
+  close($challenge_file) or die "challenge-close";
+  $challenge =~ s/\s+$//;
+  return if $challenge eq "" || $challenge eq $last_challenge;
+  open(my $response, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE"}) or die "response";
+  print $response join(
+    "\t",
+    $challenge,
+    $leader,
+    $group,
+    $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"},
+    $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"},
+  ) . "\n";
+  close($response) or die "response-close";
+  $last_challenge = $challenge;
+}
+
+until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) {
+  retire_orphaned_group() unless parent_lease_is_open();
+  answer_challenge();
+  select(undef, undef, undef, 0.01);
+}
+
+$SIG{"TERM"} = sub {};
+my $worker = fork();
+die "fork" unless defined $worker;
+if ($worker == 0) {
+  $SIG{"TERM"} = "DEFAULT";
+  exec @ARGV or die "exec";
+}
+
+my $status;
+while (1) {
+  retire_orphaned_group() unless parent_lease_is_open();
+  answer_challenge();
+  my $done = waitpid($worker, WNOHANG);
+  if ($done == $worker) {
+    $status = $?;
+    last;
+  }
+  die "waitpid" if $done < 0;
+  select(undef, undef, undef, 0.01);
+}
+
+my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+open(my $status_file, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STATUS"}) or die "status";
+print $status_file join("\t", $worker, $status, $code) . "\n";
+close($status_file);
+exit($code);
+`;
+
 async function runOwnedProcess(options: {
   readonly cmd: readonly string[];
   readonly expectedCommandToken: string;
@@ -202,7 +298,7 @@ async function runOwnedProcess(options: {
   readonly termGraceMs: number;
   readonly killGraceMs: number;
   /** Test-only causal hook: it runs after identity pinning and before go. */
-  readonly beforeGo?: (pgid: number) => void;
+  readonly beforeGo?: (pgid: number, closeParentLease: () => void) => void | Promise<void>;
 }): Promise<OwnedProcessResult> {
   const captureRoot = existsSync(EXTERNAL_TMPDIR)
     ? EXTERNAL_TMPDIR
@@ -230,6 +326,23 @@ async function runOwnedProcess(options: {
   let exitCode = -1;
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let exited: Promise<number> | undefined;
+  let parentLease:
+    | {
+        write(bytes: string): number;
+        flush(): number | Promise<number>;
+        end(): void;
+      }
+    | undefined;
+  let parentLeaseClosed = false;
+  const closeParentLease = (): void => {
+    if (parentLeaseClosed || parentLease === undefined) return;
+    parentLeaseClosed = true;
+    try {
+      parentLease.end();
+    } catch {
+      // EOF or a broken writer is the supervisor's fail-closed retirement signal.
+    }
+  };
 
   try {
     // The Perl launcher remains the group leader while its command runs. Its
@@ -237,13 +350,7 @@ async function runOwnedProcess(options: {
     // parent has pinned the exact leader identity. No existing or previously
     // orphaned group is inspected as a cleanup target.
     child = Bun.spawn({
-      cmd: [
-        "perl",
-        "-MPOSIX=setsid,WNOHANG",
-        "-e",
-        'setsid() or die "setsid"; my $leader = $$; my $group = getpgrp(0); open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready"; print $ready join("\\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"}) . "\\n"; close($ready); my $last_challenge = ""; sub answer_challenge { if (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) { open(my $challenge_file, "<", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) or die "challenge"; my $challenge = <$challenge_file> // ""; close($challenge_file); $challenge =~ s/\\s+$//; if ($challenge ne "" && $challenge ne $last_challenge) { open(my $response, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE"}) or die "response"; print $response join("\\t", $challenge, $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"}) . "\\n"; close($response); $last_challenge = $challenge; } } } until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) { answer_challenge(); select(undef, undef, undef, 0.01); } $SIG{"TERM"} = sub {}; my $worker = fork(); die "fork" unless defined($worker); if ($worker == 0) { $SIG{"TERM"} = "DEFAULT"; exec @ARGV or die "exec"; } my $status; while (1) { answer_challenge(); my $done = waitpid($worker, WNOHANG); if ($done == $worker) { $status = $?; last; } die "waitpid" if $done < 0; select(undef, undef, undef, 0.01); } my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8; open(my $status_file, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STATUS"}) or die "status"; print $status_file join("\\t", $worker, $status, $code) . "\\n"; close($status_file); exit($code);',
-        ...options.cmd,
-      ],
+      cmd: ["perl", "-e", OWNED_PROCESS_SUPERVISOR, ...options.cmd],
       cwd: ROOT,
       env: {
         ...options.env,
@@ -255,11 +362,22 @@ async function runOwnedProcess(options: {
         TOKEN_LIFECYCLE_SUPERVISOR_NONCE: supervisorNonce,
         TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN: options.expectedCommandToken,
       },
+      stdin: "pipe",
       stdout: Bun.file(stdoutPath),
       stderr: Bun.file(stderrPath),
     });
     const spawnedChild = child;
     exited = spawnedChild.exited;
+    const ownershipLease = spawnedChild.stdin as Exclude<typeof parentLease, undefined>;
+    parentLease = ownershipLease;
+    const leaseRecord = `${supervisorNonce}\n`;
+    if (ownershipLease.write(leaseRecord) !== Buffer.byteLength(leaseRecord)) {
+      throw new Error("token lifecycle supervisor parent lease write was partial");
+    }
+    const leaseFlushed = await settleWithin(Promise.resolve(ownershipLease.flush()), 5_000);
+    if (leaseFlushed === undefined) {
+      throw new Error("token lifecycle supervisor parent lease flush exceeded its bound");
+    }
     const identityReady = await waitUntil(() => {
       if (!existsSync(supervisorReadyPath)) return false;
       const [pid, pgid, nonce, commandToken] = readFileSync(supervisorReadyPath, "utf8")
@@ -286,7 +404,7 @@ async function runOwnedProcess(options: {
     if (!identityReady || identity === undefined) {
       throw new Error("token lifecycle supervisor could not pin its new group leader");
     }
-    options.beforeGo?.(identity.pgid);
+    await options.beforeGo?.(identity.pgid, closeParentLease);
     writeFileSync(supervisorGoPath, "go\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
     if (
       options.readyOutput !== undefined &&
@@ -355,6 +473,8 @@ async function runOwnedProcess(options: {
     throw error;
   }
 
+  closeParentLease();
+
   return {
     exitCode,
     stdout: readFileSync(stdoutPath, "utf8"),
@@ -391,6 +511,28 @@ async function runHarness(
   if (result.timedOut) throw new Error("token lifecycle harness exceeded its bounded local budget");
   return result;
 }
+
+test("PLANTED: parent-lease EOF retires the exact supervisor group without test cleanup", async () => {
+  const result = await runOwnedProcess({
+    cmd: ["perl", "-e", "while (1) { select undef, undef, undef, 1; }"],
+    expectedCommandToken: "parent-lease-retirement-plant",
+    env: { ...process.env },
+    liveBudgetMs: 2_000,
+    termGraceMs: 500,
+    killGraceMs: 500,
+    beforeGo: async (_pgid, closeParentLease) => {
+      closeParentLease();
+      await Bun.sleep(100);
+    },
+  });
+
+  expect(result.exitCode).not.toBe(0);
+  expect(result.timedOut).toBe(false);
+  expect(result.termSent).toBe(false);
+  expect(result.killSent).toBe(false);
+  expect(result.reaped).toBe(true);
+  expect(result.groupEmpty).toBe(true);
+});
 
 test("token lifecycle harness self-test is ordinary-unit registered and never launches Wrangler", async () => {
   const result = await runHarness(["--self-test"]);

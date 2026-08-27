@@ -708,9 +708,16 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // attestation endpoint, not an agent face.
   app.post(SCREENING_ROUTE_PATH, (c) => handleScreeningRequest(c.req.raw, c.env));
 
+  // Only the one-segment digest faces are contracted today. Hono's regex
+  // parameter can otherwise consume slashes, so a nested spelling such as
+  // /p/<id>/full.md would reach the broad digest handler and be reported as a
+  // missing problem. Refuse every nested /p path before the ledger router: the
+  // route does not exist, and deciding that must never require a D1 read.
+  app.on(["GET", "HEAD"], "/p/:id/*", (c) => routeNotFound(c.req.url));
+
   // W6.4 source exists, but its response contract and dependencies do not.
-  // Refuse this shape before the broader /p/<id>.json face can reinterpret an
-  // event-tail request and touch D1.
+  // Keep this explicit pin alongside the general nested-path guard so mounting
+  // the event tail later requires a deliberate contract and route change.
   app.on(["GET", "HEAD"], "/p/:id/events.json", (c) => routeNotFound(c.req.url));
 
   // The contracted public ledger faces (no auth, ever). The event-tail guard

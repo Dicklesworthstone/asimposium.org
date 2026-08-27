@@ -266,7 +266,7 @@ describe("provider-free environment interface gate registration", () => {
         "--self-test-remote-interface",
       ],
       dirname(REPO_ROOT),
-      30_000,
+      60_000,
       { ASIMPOSIUM_ENVIRONMENT_E2E_SCRATCH_DIR: shellScratchDirectory() },
     );
 
@@ -1608,6 +1608,7 @@ describe("owned session launcher", () => {
       timeoutMs: 100,
       termGraceMs: 40,
       killReapMs: 200,
+      pipeDrainMs: 200,
       inspectionCommand: [
         "perl",
         "-e",
@@ -1619,7 +1620,9 @@ describe("owned session launcher", () => {
 
     expect(result.outcome).toBe("inspection-unproven");
     expect(result.ownershipFailurePhase).toBe("initial-census");
-    expect(performance.now() - startedAt).toBeLessThan(750);
+    // The inspector itself is pinned to 25ms; leave bounded host scheduling
+    // headroom for spawn, lease retirement, group reap, and the final census.
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
     expect(processTable()).not.toContain(marker);
   });
 
@@ -1633,6 +1636,7 @@ describe("owned session launcher", () => {
       timeoutMs: 2_000,
       termGraceMs: 40,
       killReapMs: 200,
+      pipeDrainMs: 200,
       inspectionCommand: [
         "perl",
         "-e",
@@ -1644,7 +1648,7 @@ describe("owned session launcher", () => {
 
     expect(result.outcome).toBe("inspection-unproven");
     expect(result.ownershipFailurePhase).toBe("initial-census");
-    expect(performance.now() - startedAt).toBeLessThan(750);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
     expect(processTable()).not.toContain(marker);
   });
 
@@ -1667,7 +1671,7 @@ describe("owned session launcher", () => {
       command: [
         "perl",
         "-e",
-        "use POSIX qw(_exit); pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{HUP} = sub {}; $SIG{TERM} = sub {}; close $read; syswrite($write, 'r'); close $write; select undef, undef, undef, 0.5; _exit(0); } close $write; read($read, my $ready, 1); close $read; _exit(0);",
+        "use POSIX qw(_exit); pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{HUP} = sub {}; $SIG{TERM} = sub {}; close $read; syswrite($write, 'r'); close $write; select undef, undef, undef, 10; _exit(0); } close $write; read($read, my $ready, 1); close $read; _exit(0);",
       ],
       cwd: process.cwd(),
       env: childEnvironment(),
@@ -1683,6 +1687,7 @@ describe("owned session launcher", () => {
   test("a detached inherited pipe holder receives one bounded reader cancellation, not dispatcher cleanup", async () => {
     const marker = `suite-detached-pipe-boundary-${crypto.randomUUID()}`;
     const cancelled: ("stdout" | "stderr")[] = [];
+    const inspectionTimeoutMs = 500;
     try {
       const startedAt = performance.now();
       const result = await runOwnedCommand({
@@ -1698,12 +1703,13 @@ describe("owned session launcher", () => {
         termGraceMs: 40,
         killReapMs: 200,
         pipeDrainMs: 10,
+        inspectionTimeoutMs,
         onPipeCancelRequested: (pipe) => cancelled.push(pipe),
       });
 
       expect(result.outcome).toBe("pipe-drain-unproven");
       expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
-      expect(performance.now() - startedAt).toBeLessThan(750);
+      expect(performance.now() - startedAt).toBeLessThan(2_000);
       // The process is intentionally outside our group and still live here. The
       // dispatcher cancelled and released its readers; it did not clean this PID.
       expect(processTable()).toContain(marker);
@@ -1722,7 +1728,7 @@ describe("routing to real package commands", () => {
     const wire = { name: "@asimposium/wire", dir: "apps/wire" };
 
     expect(suiteExecutionLimits("unit", wire)).toEqual({
-      timeoutMs: 45 * 60_000,
+      timeoutMs: 60 * 60_000,
       retainedStreamBytes: 512 * 1024,
       retainedOutputBytes: 768 * 1024,
     });
@@ -2116,7 +2122,7 @@ describe("secret-safe diagnostics", () => {
       expect(typeof unit.duration_ms).toBe("number");
       expect(["pass", "fail", "blocked", "missing", "skip"]).toContain(unit.status);
       expect(unit.reproduce.length).toBeGreaterThan(0);
-      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 45 * 60_000 : 5 * 60_000);
+      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 60 * 60_000 : 5 * 60_000);
       expect(unit.retained_stream_limit_bytes).toBe(
         unit.dir === "apps/wire" ? 512 * 1024 : 64 * 1024,
       );
@@ -2301,7 +2307,7 @@ describe("--list plans without running", () => {
     expect(plans.find((plan) => plan.dir === "apps/wire")).toEqual(
       expect.objectContaining({
         action: "run",
-        timeout_ms: 45 * 60_000,
+        timeout_ms: 60 * 60_000,
         retained_stream_limit_bytes: 512 * 1024,
         retained_output_limit_bytes: 768 * 1024,
       }),

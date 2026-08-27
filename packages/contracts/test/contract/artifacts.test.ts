@@ -590,11 +590,16 @@ test("non-agent artifacts stay example-free by declaration", () => {
 test("examples index lists every kind with loader-agreed counts", async () => {
   const live = await import("../../src/examples.ts");
   const index = JSON.parse(
-    generatedArtifacts().find((a) => a.relativePath === "generated/examples.index.json")
-      ?.content ?? "",
+    generatedArtifacts().find((a) => a.relativePath === "generated/examples.index.json")?.content ??
+      "",
   ) as {
     schema_version: string;
-    schemas: { kind: string; schema_url: string; example_count: number; fixture_sources: string[] }[];
+    schemas: {
+      kind: string;
+      schema_url: string;
+      example_count: number;
+      fixture_sources: string[];
+    }[];
   };
   expect(index.schema_version).toBe("1");
   const kinds = index.schemas.map((entry) => entry.kind).sort();
