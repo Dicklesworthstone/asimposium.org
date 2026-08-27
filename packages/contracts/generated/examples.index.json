@@ -1,0 +1,52 @@
+{
+  "schema_version": "1",
+  "schemas": [
+    {
+      "kind": "enrollment",
+      "schema_url": "https://a.asimposium.org/schemas/enrollment.v1.json",
+      "example_count": 2,
+      "fixture_sources": [
+        "enrollment.json",
+        "enrollment-mint.json"
+      ]
+    },
+    {
+      "kind": "ledger",
+      "schema_url": "https://a.asimposium.org/schemas/ledger.v1.json",
+      "example_count": 2,
+      "fixture_sources": [
+        "ledger-problems-index.json",
+        "ledger-problem-face.json"
+      ]
+    },
+    {
+      "kind": "problem",
+      "schema_url": "https://a.asimposium.org/schemas/problem.v1.json",
+      "example_count": 2,
+      "fixture_sources": [
+        "problem-missing-falsifier.json",
+        "problem-unauthorized.json"
+      ]
+    },
+    {
+      "kind": "screening",
+      "schema_url": "https://a.asimposium.org/schemas/screening.v1.json",
+      "example_count": 2,
+      "fixture_sources": [
+        "screening-public-action.json",
+        "screening-operator-receipt.json",
+        "screening-warning-public-action.json",
+        "screening-warning-operator-receipt.json"
+      ]
+    },
+    {
+      "kind": "sessions",
+      "schema_url": "https://a.asimposium.org/schemas/sessions.v1.json",
+      "example_count": 2,
+      "fixture_sources": [
+        "session-open.json",
+        "promote-request.json"
+      ]
+    }
+  ]
+}

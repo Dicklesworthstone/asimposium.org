@@ -150,6 +150,7 @@ const ENROLLMENT_CAPSULE_SCHEMA_ID = "https://a.asimposium.org/schemas/enrollmen
 const PROBLEM_TYPES_ARTIFACT = "generated/problem.types.ts";
 const PROBLEM_JSON_SCHEMA_ARTIFACT = "generated/problem.schema.json";
 const PROBLEM_SCHEMA_ID = "https://a.asimposium.org/schemas/problem.v1.json";
+const EXAMPLES_INDEX_ARTIFACT = "generated/examples.index.json";
 const S2_COST_RECEIPT_TYPES_ARTIFACT = "generated/s2-cost-receipt.types.ts";
 const S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT = "generated/s2-cost-receipt.schema.json";
 const S2_COST_RECEIPT_SCHEMA_ID = "https://a.asimposium.org/schemas/s2-cost-receipt.v1.json";
@@ -664,7 +665,37 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
       content: generatedS2CostReceiptJsonSchema(),
     },
     { relativePath: S2_COST_RECEIPT_TYPES_ARTIFACT, content: generatedS2CostReceiptTypes() },
+    { relativePath: EXAMPLES_INDEX_ARTIFACT, content: generatedExamplesIndex() },
   ];
+}
+
+/** Served URL per kind's schema document (ids are the canonical constants). */
+const EXAMPLES_SERVED_URL_BY_KIND: Readonly<Record<string, string>> = Object.freeze({
+  enrollment: ENROLLMENT_SCHEMA_ID,
+  ledger: LEDGER_SCHEMA_ID,
+  problem: PROBLEM_SCHEMA_ID,
+  screening: SCREENING_SCHEMA_ID,
+  sessions: SESSIONS_SCHEMA_ID,
+});
+
+const EXAMPLE_KINDS: readonly string[] = Object.keys(EXAMPLES_SERVED_URL_BY_KIND);
+
+/**
+ * Machine-readable index of every embedded examples set (goc W1.4). Lists
+ * exactly the agent-facing schemas that embed corpus examples, with their
+ * served schema URL, example count, and source fixture names.
+ */
+export function generatedExamplesIndex(): string {
+  const schemas = EXAMPLE_KINDS.map((kind) => {
+    const loaded = embeddedExamplesFor(kind);
+    return {
+      kind,
+      schema_url: EXAMPLES_SERVED_URL_BY_KIND[kind],
+      example_count: loaded.examples.length,
+      fixture_sources: [...loaded.fixtures],
+    };
+  });
+  return formatJson({ schema_version: "1", schemas });
 }
 
 export function compareGeneratedArtifact(

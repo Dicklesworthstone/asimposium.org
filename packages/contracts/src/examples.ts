@@ -114,6 +114,7 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
 export interface EmbeddedDomainExamples {
   readonly kind: string;
   readonly examples: readonly unknown[];
+  readonly fixtures: readonly string[];
 }
 
 export function embeddedExamplesFor(kind: string): EmbeddedDomainExamples {
@@ -132,5 +133,5 @@ export function embeddedExamplesFor(kind: string): EmbeddedDomainExamples {
       }
     }
   }
-  return { kind, examples: asList };
+  return { kind, examples: asList, fixtures: [...spec.fixtures] };
 }

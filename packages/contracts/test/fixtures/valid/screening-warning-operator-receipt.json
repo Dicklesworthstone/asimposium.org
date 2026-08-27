@@ -9,6 +9,8 @@
   "configuration_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "decided_at": "2026-08-17T08:15:00Z",
   "outcome": "allow-with-warning",
+  "provider_status": "ok",
+  "decision_path": "direct-content-warning",
   "public_action": {
     "category": "spam-commercial",
     "action": "published-with-warning",
