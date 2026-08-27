@@ -459,7 +459,19 @@ class OuterSupervisorProtocol {
       this.fail("socket " + reason + " before expected acknowledgement: " + this.expected.record);
       return;
     }
-    if (!this.closureExpected) this.fail("socket " + reason + " unexpectedly");
+    if (!this.closureExpected) {
+      if (this.terminalSeen) {
+        // Orderly self-retirement: the script published its canonical
+        // terminal record and exited before the parent's retirement command
+        // was issued. Under load that exit wins the race with the parent's
+        // DIE dispatch; post-terminal EOF is the transport consequence of a
+        // proven-complete run, not a protocol fault. Pre-terminal EOF still
+        // fails below.
+        this.closureExpected = true;
+        return;
+      }
+      this.fail("socket " + reason + " unexpectedly");
+    }
   }
 
   private acceptBytes(chunk: Buffer): void {
