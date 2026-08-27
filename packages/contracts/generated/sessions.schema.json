@@ -3038,5 +3038,25 @@
     "relation_file_request",
     "relation_filed_response"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "examples": [
+    {
+      "session_open_request": {
+        "problem_id": "P-4DSP",
+        "intent": "prove"
+      }
+    },
+    {
+      "promote_request": {
+        "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+        "kind": "conjecture",
+        "statement": "Every toggle-invariant labeling of the 4-path factors through the quotient by the orientation-reversing involution.",
+        "falsifier": "A labeling of the 4-path that is toggle-invariant but does not factor through that quotient.",
+        "relates_to": [
+          "C-12"
+        ],
+        "depends_on": []
+      }
+    }
+  ]
 }

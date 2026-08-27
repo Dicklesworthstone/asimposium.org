@@ -528,3 +528,61 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
     expect(validator(candidate), label).toBe(false);
   }
 });
+
+/* ---------------------------------------------------------------------- */
+/* Embedded examples (bead asimposiumorg-zjs9): every agent-facing served  */
+/* schema carries at least one corpus-derived, contract-validated example. */
+/* ---------------------------------------------------------------------- */
+
+const AGENT_FACING_EXAMPLE_KINDS: Record<string, string> = {
+  "generated/enrollment.schema.json": "enrollment",
+  "generated/ledger.schema.json": "ledger",
+  "generated/problem.schema.json": "problem",
+  "generated/screening.schema.json": "screening",
+  "generated/sessions.schema.json": "sessions",
+};
+
+test("agent-facing artifacts embed validated corpus examples", async () => {
+  for (const [relativePath, kind] of Object.entries(AGENT_FACING_EXAMPLE_KINDS)) {
+    const artifact = generatedArtifacts().find(
+      (candidate) => candidate.relativePath === relativePath,
+    );
+    expect(artifact, `${relativePath} must exist`).toBeDefined();
+    if (artifact === undefined) continue;
+
+    const doc = JSON.parse(artifact.content) as { examples?: unknown[] };
+    expect(
+      Array.isArray(doc.examples),
+      `${relativePath} must carry an examples array`,
+    ).toBe(true);
+    expect(
+      doc.examples!.length,
+      `${relativePath} needs at least one example (goc W1.4)`,
+    ).toBeGreaterThanOrEqual(1);
+
+    // The committed bytes and the generator output must agree sample-for-
+    // sample; embeddedExamplesFor revalidates each against its own contract.
+    const live = await import("../../src/examples.ts");
+    const expected = live.embeddedExamplesFor(kind).examples;
+    expect(doc.examples, `${relativePath} examples must match the loader`).toEqual(expected);
+  }
+});
+
+test("non-agent artifacts stay example-free by declaration", () => {
+  const nonAgent: string[] = [
+    "generated/internal-health.schema.json",
+    "generated/batch.schema.json",
+    "generated/s2-cost-receipt.schema.json",
+    "generated/contracts-scaffold.schema.json",
+    "generated/enrollment-capsule.schema.json",
+  ];
+  for (const relativePath of nonAgent) {
+    const artifact = generatedArtifacts().find(
+      (candidate) => candidate.relativePath === relativePath,
+    );
+    expect(artifact, `${relativePath} must exist`).toBeDefined();
+    if (artifact === undefined) continue;
+    expect(JSON.parse(artifact.content).examples, `${relativePath} intentionally has none`)
+      .toBeUndefined();
+  }
+});

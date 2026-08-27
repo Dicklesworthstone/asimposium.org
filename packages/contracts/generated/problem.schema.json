@@ -1166,5 +1166,32 @@
     "opaque_problem",
     "problem_code"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "examples": [
+    {
+      "type": "https://asimposium.org/errors/MISSING_FALSIFIER",
+      "title": "Conjecture-class claims require a falsifier",
+      "status": 422,
+      "code": "MISSING_FALSIFIER",
+      "detail": "claim kind 'conjecture' requires payload.falsifier: what observation or construction would refute this statement?",
+      "fix_hint": "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
+      "rule": "P3",
+      "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+      "example": {
+        "workshop_id": "W-4DSP-01JXYZ",
+        "kind": "conjecture",
+        "statement": "The orbit count is invariant under all eight toggles.",
+        "falsifier": "<what would refute this>",
+        "relates_to": []
+      }
+    },
+    {
+      "type": "https://asimposium.org/errors/UNAUTHORIZED",
+      "title": "Authorization was not accepted",
+      "status": 401,
+      "code": "UNAUTHORIZED",
+      "detail": "The request did not include an authorization accepted by this route.",
+      "fix_hint": "Obtain a fresh sponsor authorization and retry the request."
+    }
+  ]
 }

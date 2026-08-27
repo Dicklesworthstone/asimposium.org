@@ -5895,5 +5895,34 @@
       ],
       "additionalProperties": false
     }
+  ],
+  "examples": [
+    {
+      "public_action": {
+        "category": "benign-context",
+        "action": "published",
+        "notice": "none"
+      },
+      "operator_receipt": {
+        "version": "screening-promotion-decision-provenance.v1",
+        "scope": "promotion",
+        "input_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "context_frontier_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "context_omission_count": 0,
+        "model_version": "workers-ai/llama-guard-3-8b",
+        "policy_version": "symposiarch-policy/2026-08",
+        "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider_status": "ok",
+        "decision_path": "provider",
+        "decided_at": "2026-08-17T07:30:00Z",
+        "outcome": "pass",
+        "public_action": {
+          "category": "benign-context",
+          "action": "published",
+          "notice": "none"
+        },
+        "reviewer_state": "not-required"
+      }
+    }
   ]
 }

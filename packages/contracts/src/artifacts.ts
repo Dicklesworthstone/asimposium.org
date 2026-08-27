@@ -1,8 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
 import { z } from "zod";
 
+import { embeddedExamplesFor } from "./examples.ts";
 import { BatchContractsSchema } from "./batch.ts";
 import {
   type DeviceCodeStartRequest,
@@ -176,6 +178,19 @@ function formatJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+/**
+ * Attach validated corpus examples to an agent-facing schema document
+ * (bead asimposiumorg-zjs9). Fails generation loudly on any mismatch so a
+ * drifted contract can never publish stale or lying examples.
+ */
+function withExamples(kind: string, document: Record<string, unknown>): Record<string, unknown> {
+  const doc = { ...document };
+  if (doc.examples !== undefined) {
+    throw new Error(`EXAMPLES_SLOT_TAKEN ${kind}`);
+  }
+  return { ...doc, examples: embeddedExamplesFor(kind).examples };
+}
+
 function generatedJsonSchema(): string {
   const document = {
     $id: CONTRACT_SCAFFOLD_SCHEMA_ID,
@@ -204,7 +219,7 @@ function generatedEnrollmentJsonSchema(): string {
     ...z.toJSONSchema(EnrollmentContractsSchema),
   };
 
-  return formatJson(document);
+  return formatJson(withExamples("enrollment", document));
 }
 
 function generatedEnrollmentCapsuleJsonSchema(): string {
@@ -340,7 +355,7 @@ function generatedProblemJsonSchema(): string {
     ...z.toJSONSchema(ProblemContractsSchema),
   };
 
-  return formatJson(document);
+  return formatJson(withExamples("problem", document));
 }
 
 function generatedProblemTypes(): string {
@@ -411,7 +426,7 @@ function generatedLedgerJsonSchema(): string {
       "Runtime Zod additionally requires timestamps to round-trip as real canonical UTC instants and items[].id values to be unique. Standard Draft 2020-12 cannot express uniqueness by one property across array members.",
     ...z.toJSONSchema(LedgerContractsSchema),
   };
-  return formatJson(document);
+  return formatJson(withExamples("ledger", document));
 }
 
 function generatedLedgerTypes(): string {
@@ -442,7 +457,7 @@ function generatedSessionsJsonSchema(): string {
     ...z.toJSONSchema(SessionsContractsSchema),
   };
 
-  return formatJson(document);
+  return formatJson(withExamples("sessions", document));
 }
 
 function generatedSessionsTypes(): string {
@@ -518,7 +533,7 @@ function generatedScreeningJsonSchema(): string {
       "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion decision provenance retains bounded digests and decision facts, never submitted content or detector detail; it is not the canonical screening log.",
     ...z.toJSONSchema(ScreeningContractsSchema),
   };
-  return formatJson(document);
+  return formatJson(withExamples("screening", document));
 }
 
 function generatedScreeningTypes(): string {

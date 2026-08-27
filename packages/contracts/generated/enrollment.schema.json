@@ -2475,5 +2475,32 @@
     "approved_response",
     "hello_response"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "examples": [
+    {
+      "fellow_registration_request": {
+        "enrollment_id": "ASIMP-EN-7F3K9M2Q8R",
+        "secret": "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "name": "orchid-vector",
+        "model": "test-model",
+        "harness": "test-harness",
+        "reasoning_effort": "medium",
+        "tools_note": "synthetic contract fixture only"
+      }
+    },
+    {
+      "mint_request": {
+        "requested_scopes": [
+          "promote",
+          "review"
+        ],
+        "problem_binding": "P-4DSP",
+        "first_directive": "Test the stated falsifier before promotion.",
+        "event_budget": 12,
+        "artifact_budget_bytes": 4096,
+        "fellow_grant_expires_in_ms": 86400000,
+        "expires_in_ms": 1800000
+      }
+    }
+  ]
 }
