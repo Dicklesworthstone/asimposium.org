@@ -121,6 +121,57 @@ readonly EX_WATCHDOG_UNAVAILABLE=126
 # The supervisor could not validate and acknowledge the bounded input bootstrap.
 readonly EX_INPUT_BOOTSTRAP_UNAVAILABLE=127
 readonly REPRODUCE="bash scripts/e2e-s6-cross-plane-auth.sh"
+# ---------------------------------------------------------------------------
+# EARLY HIDDEN VICTIM MODES (bead asimposiumorg-9ba1).
+#
+# The self-test plants spawn this script in victim modes from subshells whose
+# readiness markers sit inside fixed proof windows. Dispatching those modes
+# HERE - before the ~4.2k-line parse of the production body - removes the
+# dominant startup cost from the timing-critical publication legs. Bodies are
+# the moved originals; the signal-victim stays in main because it needs
+# run_bounded, and its inner ack-victim child is served by this block.
+# ---------------------------------------------------------------------------
+self_test_forge_result() {
+  local search_root="${1:?search root required}" candidate record token
+  for candidate in "$search_root"/s6-watchdog.*/result; do
+    [[ -p "$candidate" ]] || continue
+    exec 41<>"$candidate" 2>/dev/null || continue
+    if IFS= read -r -t 1 record <&41; then
+      token="${record#*:}"
+      token="${token%%:*}"
+      printf '%s\nchild:%s:0\n' "$record" "$token" >&41 2>/dev/null || true
+    fi
+    exec 41>&- 41<&-
+  done
+  exit 9
+}
+
+self_test_ack_victim() {
+  local ready_marker="${1:?ready marker required}"
+  local terminated_marker="${2:?terminated marker required}"
+  local hold_fifo="${ready_marker}.hold"
+  trap '' HUP
+  trap 'printf term-observed > "$terminated_marker"; exit 0' TERM
+  rm -f "$hold_fifo" 2>/dev/null || true
+  mkfifo -m 600 "$hold_fifo" || exit "$EX_FAIL"
+  exec 6<>"$hold_fifo" || exit "$EX_FAIL"
+  printf '%s' "$BASHPID" > "$ready_marker"
+  while :; do IFS= read -r -t 3600 _ <&6 || true; done
+}
+
+self_test_stopped_victim() {
+  local stopped_marker="${1:?stopped marker required}"
+  trap '' HUP TERM
+  printf '%s' "$BASHPID" > "$stopped_marker"
+  kill -STOP "$BASHPID"
+  while :; do sleep 3600; done
+}
+
+case "${1:-}" in
+  --self-test-forge-result) shift; self_test_forge_result "$@"; exit $? ;;
+  --self-test-ack-victim) shift; self_test_ack_victim "$@"; exit $? ;;
+  --self-test-stopped-victim) shift; self_test_stopped_victim "$@"; exit $? ;;
+esac
 
 # One monotonic budget for the whole run, measured from a single start stamp so
 # a later phase cannot silently extend it. The reserve keeps enough time to
@@ -3932,51 +3983,8 @@ main() {
     exit "$bootstrap_status"
   fi
 
-  # Hidden stopped child for successful-dispatch/no-settlement plants. It owns
-  # its readiness marker and stops itself only after publishing the exact pid;
-  # the parent never probes that number after cleanup.
-  if [[ "${1:-}" == "--self-test-stopped-victim" ]]; then
-    local stopped_marker="${2:?stopped marker required}"
-    trap '' HUP TERM
-    printf '%s' "$BASHPID" > "$stopped_marker"
-    kill -STOP "$BASHPID"
-    while :; do sleep 3600; done
-  fi
 
-  # Hidden acknowledgement child used by cleanup plants. It publishes readiness
-  # only after its TERM trap is installed, then owns the termination record; no
-  # parent needs to probe or signal its numeric pid after cleanup.
-  if [[ "${1:-}" == "--self-test-ack-victim" ]]; then
-    local ready_marker="${2:?ready marker required}"
-    local terminated_marker="${3:?terminated marker required}"
-    local hold_fifo="${ready_marker}.hold"
-    trap '' HUP
-    trap 'printf term-observed > "$terminated_marker"; exit 0' TERM
-    rm -f "$hold_fifo" 2>/dev/null || true
-    mkfifo -m 600 "$hold_fifo" || exit "$EX_FAIL"
-    exec 6<>"$hold_fifo" || exit "$EX_FAIL"
-    printf '%s' "$BASHPID" > "$ready_marker"
-    while :; do IFS= read -r -t 3600 _ <&6 || true; done
-  fi
 
-  # Hidden hostile-target mode. It receives only a non-secret search root. If a
-  # rejected named result stream ever reappears, it opens that path RDWR, steals
-  # and replays the first token-bearing record, injects token-bound success, and
-  # then really exits 9. With the anonymous coprocess transport there is no path.
-  if [[ "${1:-}" == "--self-test-forge-result" ]]; then
-    local search_root="${2:?search root required}" candidate record token
-    for candidate in "$search_root"/s6-watchdog.*/result; do
-      [[ -p "$candidate" ]] || continue
-      exec 41<>"$candidate" 2>/dev/null || continue
-      if IFS= read -r -t 1 record <&41; then
-        token="${record#*:}"
-        token="${token%%:*}"
-        printf '%s\nchild:%s:0\n' "$record" "$token" >&41 2>/dev/null || true
-      fi
-      exec 41>&- 41<&-
-    done
-    exit 9
-  fi
 
   # Hidden mode used only by the signal plant: hold a live descendant and wait
   # to be signalled, so the INT/TERM trap can be exercised against a real group.
