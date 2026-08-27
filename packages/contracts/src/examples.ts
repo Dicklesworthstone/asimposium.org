@@ -25,7 +25,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ZodTypeAny } from "zod";
 import { FellowRegistrationRequestSchema, MintEnrollmentRequestSchema } from "./enrollment.ts";
-import { ProblemsIndexResponseSchema } from "./ledger.ts";
+import { ProblemFaceResponseSchema, ProblemsIndexResponseSchema } from "./ledger.ts";
 import { ProblemDocumentSchema } from "./problem.ts";
 import { ScreeningContractsSchema } from "./screening.ts";
 import { PromoteRequestSchema, SessionOpenRequestSchema } from "./sessions.ts";
@@ -72,14 +72,13 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
   },
   {
     kind: "ledger",
-    fixtures: ["ledger-problems-index.json"],
-    schema: ProblemsIndexResponseSchema,
-    build: ({ bodies }: BuilderInput): unknown => bodies[0],
+    fixtures: ["ledger-problems-index.json", "ledger-problem-face.json"],
+    build: ({ bodies }: BuilderInput): unknown => [
+      { problems_index_response: ProblemsIndexResponseSchema.parse(bodies[0]) },
+      { problem_face_response: ProblemFaceResponseSchema.parse(bodies[1]) },
+    ],
   },
   {
-    // The problem domain IS the contract-error family: teaching refusals are
-    // valid ProblemDocuments, so embedding real refusal bodies fulfills the
-    // fix_hint example promise directly.
     kind: "problem",
     fixtures: ["problem-missing-falsifier.json", "problem-unauthorized.json"],
     schema: ProblemDocumentSchema,
@@ -87,14 +86,20 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
   },
   {
     kind: "screening",
-    fixtures: ["screening-public-action.json", "screening-operator-receipt.json"],
+    fixtures: [
+      "screening-public-action.json",
+      "screening-operator-receipt.json",
+      "screening-warning-public-action.json",
+      "screening-warning-operator-receipt.json",
+    ],
     schema: ScreeningContractsSchema,
-    // One whole matched-contract example assembled from its two published
-    // faces, so the union validates the assembled truth, not fragments.
-    build: ({ bodies }: BuilderInput): unknown => ({
-      public_action: bodies[0],
-      operator_receipt: bodies[1],
-    }),
+    // Two whole matched-contract examples assembled from their published
+    // face pairs (benign pass + warning allow), so the union validates the
+    // assembled truth, not fragments.
+    build: ({ bodies }: BuilderInput): unknown => [
+      { public_action: bodies[0], operator_receipt: bodies[1] },
+      { public_action: bodies[2], operator_receipt: bodies[3] },
+    ],
   },
   {
     kind: "sessions",

@@ -1,0 +1,18 @@
+{
+  "version": "screening-promotion-decision-provenance.v1",
+  "scope": "promotion",
+  "input_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "context_frontier_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "context_omission_count": 2,
+  "model_version": "workers-ai/llama-guard-3-8b",
+  "policy_version": "symposiarch-policy/2026-08",
+  "configuration_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "decided_at": "2026-08-17T08:15:00Z",
+  "outcome": "allow-with-warning",
+  "public_action": {
+    "category": "spam-commercial",
+    "action": "published-with-warning",
+    "notice": "screening-warning"
+  },
+  "reviewer_state": "not-required"
+}
