@@ -27,3 +27,16 @@ This is substantial W1+ product contract coverage, not yet the complete Fable
 §16.2 corpus over every object/error combination, and it does not establish the
 promised byte-for-byte `asimp validate` parity because that CLI command is not
 implemented.
+
+## Embedded examples
+
+Five agent-facing served schemas (enrollment, ledger, problem, screening,
+sessions) embed top-level `examples` drawn from the corpus fixtures in
+`test/fixtures/valid` and validated at generation time against the very Zod
+contract each example claims to represent — whole-value union parse for the
+screening matched arm, member-key placement for bundled documents. Generation
+refuses loudly on any mismatch (a drifted contract can never publish stale or
+lying examples), `generated/examples.index.json` is the machine-readable
+index (kind, schema_url, example_count, fixture_sources), and the drift gate
+asserts loader agreement. Non-agent artifacts carry no examples by
+declaration. Rationale and acceptance: bead asimposiumorg-zjs9 (W1.4/goc).
