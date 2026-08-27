@@ -130,8 +130,15 @@ const MAX_CAPTURE_BYTES = 1_048_576;
 const RUN_TIMEOUT_MS = 100_000;
 /** Maximum wait after an outer SIGKILL attempt before cleanup is unproven. */
 const POST_KILL_SETTLE_MS = 2_000;
-/** Supervisor capability records are tiny; refuse a runaway/forged stream. */
-const OUTER_CONTROL_MAX_BYTES = 4_096;
+/**
+ * This ceiling refuses a runaway/forged stream; it does not bound the trusted
+ * run's bookkeeping. The self-test makes 48 run_bounded invocations whose
+ * BOOT/ready/STARTED/ack/CHILD records sum well past 4 KB over a full pass,
+ * so 64 KB restores the intended semantics while the suite's bookkeeping
+ * fits. Raising it did NOT by itself resolve the residual socket-end flake -
+ * that investigation continues on bead asimposiumorg-9y1.2 with its own RCA.
+ */
+const OUTER_CONTROL_MAX_BYTES = 65_536;
 /** Per-operation cap; every operation also consumes its caller's one absolute deadline. */
 const OUTER_CONTROL_STEP_MS = 2_000;
 
