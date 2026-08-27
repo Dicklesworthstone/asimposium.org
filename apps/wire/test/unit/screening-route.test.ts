@@ -5,7 +5,12 @@ import {
   verifyObservationBodyBindings,
 } from "../../src/screening/index";
 import { handleScreeningRequest, SCREENING_MAX_REQUEST_BYTES } from "../../src/screening/route";
-import { WORKERS_AI_MODEL } from "../../src/screening/workers-ai";
+import {
+  screenPromotionWithWorkersAI,
+  WORKERS_AI_MAX_PROMOTION_BODY_BYTES,
+  WORKERS_AI_MODEL,
+  WorkersAIScreeningProvider,
+} from "../../src/screening/workers-ai";
 import { boundEnv, executionContext } from "../support/bindings";
 
 /**
@@ -176,6 +181,106 @@ function screeningRequest(body: string, bearer: string | null): Request {
     body,
   });
 }
+
+const PROMOTION_INPUT = {
+  problemId: "P-4DSP",
+  fellowId: "F-screen-test",
+  kind: "conjecture",
+  statement: "The orbit count is invariant under all eight toggles.",
+  falsifier: "A toggle sequence that changes the orbit count.",
+} as const;
+
+describe("production promotion screening adapter", () => {
+  test("screens every author-controlled public claim field without sending scope identifiers", async () => {
+    const ai = passingAi();
+    const result = await screenPromotionWithWorkersAI(ai, PROMOTION_INPUT);
+
+    expect(result).toMatchObject({
+      decision: "pass",
+      coarse_category: "benign-context",
+      provider_status: "ok",
+      decision_path: "provider",
+      status_code: "SCREENED",
+    });
+    expect(ai.calls).toHaveLength(1);
+    const call = ai.calls[0];
+    expect(call?.model).toBe(WORKERS_AI_MODEL);
+    const input = call?.input as {
+      messages?: readonly { role?: string; content?: string }[];
+    };
+    const userContent = input.messages?.find((message) => message.role === "user")?.content ?? "";
+    expect(userContent).toContain(PROMOTION_INPUT.kind);
+    expect(userContent).toContain(PROMOTION_INPUT.statement);
+    expect(userContent).toContain(PROMOTION_INPUT.falsifier);
+    expect(userContent).not.toContain(PROMOTION_INPUT.problemId);
+    expect(userContent).not.toContain(PROMOTION_INPUT.fellowId);
+  });
+
+  test("missing, throwing, and malformed providers all fail closed", async () => {
+    const cases = [
+      undefined,
+      {
+        async run() {
+          throw new Error("private provider failure");
+        },
+      },
+      {
+        async run() {
+          return { response: "not-json" };
+        },
+      },
+    ] as const;
+
+    for (const ai of cases) {
+      const result = await screenPromotionWithWorkersAI(ai, PROMOTION_INPUT);
+      expect(result).toMatchObject({
+        decision: "quarantine",
+        coarse_category: "provider-unavailable",
+        provider_status: "error",
+        decision_path: "provider-error-fail-closed",
+        status_code: "SCREENING_PROVIDER_ERROR",
+      });
+    }
+  });
+
+  test("the provider bound admits the worst-case JSON expansion of a valid promotion", async () => {
+    const ai = passingAi();
+    const result = await screenPromotionWithWorkersAI(ai, {
+      ...PROMOTION_INPUT,
+      statement: "\u0000".repeat(8 * 1024),
+      falsifier: "\ud800".repeat(4 * 1024),
+    });
+
+    expect(result).toMatchObject({
+      decision: "pass",
+      coarse_category: "benign-context",
+      provider_status: "ok",
+    });
+    expect(ai.calls).toHaveLength(1);
+    const userContent = (
+      ai.calls[0]?.input as {
+        messages?: readonly { role?: string; content?: string }[];
+      }
+    ).messages?.find((message) => message.role === "user")?.content;
+    expect(userContent).toBeDefined();
+    expect(new TextEncoder().encode(userContent).byteLength).toBeLessThanOrEqual(
+      WORKERS_AI_MAX_PROMOTION_BODY_BYTES + 64,
+    );
+  });
+
+  test("the exported provider refuses an invalid or unbounded byte ceiling", () => {
+    const ai = passingAi();
+    for (const maxBodyBytes of [0, -1, Number.POSITIVE_INFINITY, 2 ** 53]) {
+      expect(
+        () =>
+          new WorkersAIScreeningProvider(ai, {
+            maxBodyBytes,
+            resolveBody: () => "bounded",
+          }),
+      ).toThrow(TypeError);
+    }
+  });
+});
 
 async function postScreening(
   body: unknown,

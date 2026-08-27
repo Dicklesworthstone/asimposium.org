@@ -2,10 +2,12 @@ import type {
   PolicyCategory,
   ScoreBand,
   ScreeningDecision,
+  ScreeningObservation,
   ScreeningProvider,
   ScreeningProviderRequest,
 } from "./types";
 import { POLICY_CATEGORIES, SCREENING_DECISIONS } from "./types";
+import { screenWithProvider } from "./provider";
 
 /**
  * The live Workers AI adapter for the S-4 staging screening surface
@@ -49,6 +51,15 @@ export const WORKERS_AI_PROMPT_VERSION = "s4-prompt:v1";
  * hash to. The route refuses them at ingress; this is the adapter's own guard.
  */
 export const WORKERS_AI_MAX_BODY_BYTES = 8192;
+/**
+ * Contract-valid promotion text contains at most 12,288 UTF-16 code units.
+ * JSON escaping can expand each code unit to six ASCII bytes, so 64 KiB is
+ * insufficient for some valid inputs (notably control characters and lone
+ * surrogates). This exact ceiling covers that worst case plus fixed keys.
+ */
+export const WORKERS_AI_MAX_PROMOTION_BODY_BYTES =
+  6 * (8 * 1024 + 4 * 1024) + 256;
+export const WORKERS_AI_PROMOTION_TIMEOUT_MS = 12_000;
 
 /**
  * The narrow slice of the Workers AI binding this adapter consumes. Declared
@@ -192,10 +203,25 @@ function parseClassification(raw: unknown): {
 
 export class WorkersAIScreeningProvider implements ScreeningProvider {
   readonly #ai: WorkersAiBinding;
+  readonly #maxBodyBytes: number;
   readonly #resolveBody: ScreeningBodyResolver;
 
-  constructor(ai: WorkersAiBinding, options: { resolveBody: ScreeningBodyResolver }) {
+  constructor(
+    ai: WorkersAiBinding,
+    options: { resolveBody: ScreeningBodyResolver; maxBodyBytes?: number },
+  ) {
+    const maxBodyBytes = options.maxBodyBytes ?? WORKERS_AI_MAX_BODY_BYTES;
+    if (
+      !Number.isSafeInteger(maxBodyBytes) ||
+      maxBodyBytes < 1 ||
+      maxBodyBytes > WORKERS_AI_MAX_PROMOTION_BODY_BYTES
+    ) {
+      throw new TypeError(
+        `maxBodyBytes must be a positive safe integer no larger than ${WORKERS_AI_MAX_PROMOTION_BODY_BYTES}.`,
+      );
+    }
     this.#ai = ai;
+    this.#maxBodyBytes = maxBodyBytes;
     this.#resolveBody = options.resolveBody;
   }
 
@@ -209,7 +235,7 @@ export class WorkersAIScreeningProvider implements ScreeningProvider {
   }> {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
     const body = await this.#resolveBody(request);
-    if (new TextEncoder().encode(body).byteLength > WORKERS_AI_MAX_BODY_BYTES) {
+    if (new TextEncoder().encode(body).byteLength > this.#maxBodyBytes) {
       throw new TypeError("Screening body exceeds the provider ingress bound.");
     }
     const raw = await this.#ai.run(WORKERS_AI_MODEL, {
@@ -226,4 +252,82 @@ export class WorkersAIScreeningProvider implements ScreeningProvider {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
     return parseClassification(raw);
   }
+}
+
+export interface WorkersAIPromotionInput {
+  readonly problemId: string;
+  readonly fellowId: string;
+  readonly kind: string;
+  readonly statement: string;
+  readonly falsifier: string | null;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Production promotion ingress. It screens every author-controlled public
+ * claim field through the same live Workers AI adapter as the S-4 corpus
+ * route. Missing bindings, transport failures, timeouts, and malformed model
+ * output all become the adapter's fail-closed quarantine observation.
+ *
+ * This is intentionally the direct-content slice. The server-owned problem
+ * statement and same-Fellow history are not yet present in the production
+ * problem projection, so this function does not pretend to run the separate
+ * contextual aggregation screen proved by the local S-4 harness.
+ */
+export async function screenPromotionWithWorkersAI(
+  ai: WorkersAiBinding | undefined,
+  input: WorkersAIPromotionInput,
+  timeoutMs = WORKERS_AI_PROMOTION_TIMEOUT_MS,
+): Promise<ScreeningObservation> {
+  const body = JSON.stringify({
+    kind: input.kind,
+    statement: input.statement,
+    falsifier: input.falsifier,
+  });
+  const bodyDigest = `sha256:${await sha256Hex(body)}`;
+  const contextDigest = `sha256:${await sha256Hex(
+    JSON.stringify({
+      scope: "promotion-direct-v1",
+      problem_id: input.problemId,
+      fellow_id: input.fellowId,
+      body_digest: bodyDigest,
+    }),
+  )}`;
+  const identity = {
+    corpus_revision: "promotion-direct-v1",
+    corpus_digest: bodyDigest,
+    model_version: WORKERS_AI_MODEL_VERSION,
+    policy_version: WORKERS_AI_POLICY_VERSION,
+    configuration_digest: await workersAIConfigurationDigest(),
+  } as const;
+  const provider: ScreeningProvider =
+    ai === undefined
+      ? {
+          async screen() {
+            throw new TypeError("Workers AI binding is unavailable.");
+          },
+        }
+      : new WorkersAIScreeningProvider(ai, {
+          maxBodyBytes: WORKERS_AI_MAX_PROMOTION_BODY_BYTES,
+          resolveBody: (request) => {
+            if (request.body_digest !== bodyDigest) {
+              throw new TypeError("Promotion screening body binding is invalid.");
+            }
+            return body;
+          },
+        });
+  return screenWithProvider(
+    provider,
+    {
+      example_id: "promotion-direct",
+      body_digest: bodyDigest,
+      context_digest: contextDigest,
+      identity,
+    },
+    { timeout_ms: timeoutMs },
+  );
 }

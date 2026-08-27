@@ -59,6 +59,28 @@ interface LocalD1Options {
    * deterministically instead of racing a timer.
    */
   readonly beforeBatch?: () => Promise<void>;
+  /** Promotion-time classifier override; omitted fixtures receive a coherent pass. */
+  readonly screenPromotion?: (
+    input: Readonly<{
+      problemId: string;
+      fellowId: string;
+      kind: string;
+      statement: string;
+      falsifier: string | null;
+    }>,
+  ) => Promise<{
+    readonly decision: "pass" | "allow-with-warning" | "quarantine" | "reject";
+    readonly coarse_category:
+      | "benign-context"
+      | "spam-commercial"
+      | "injection"
+      | "dual-use-boundary"
+      | "operational-harm"
+      | "harassment"
+      | "sexual-content"
+      | "provider-unavailable";
+    readonly provider_status: "ok" | "timeout" | "error";
+  }>;
 }
 
 /** A D1 shim over bun:sqlite, following the enrollment-atomicity lane's pattern. */
@@ -391,7 +413,17 @@ async function fixture(options: LocalD1Options = {}) {
     replayProtector,
   });
   const enrollmentRouter = createEnrollmentRouter({ service });
-  const sessionRouter = createSessionRouter({ service, replayProtector });
+  const sessionRouter = createSessionRouter({
+    service,
+    replayProtector,
+    screenPromotion:
+      options.screenPromotion ??
+      (async () => ({
+        decision: "pass",
+        coarse_category: "benign-context",
+        provider_status: "ok",
+      })),
+  });
   const db = migratedDb(options);
   const sponsor = { type: "sponsor", sponsorId: "usr_sessionsponsor1" } as const;
   const minted = await service.mint(sponsor, {
@@ -1721,6 +1753,278 @@ describe("session protocol routes", () => {
         .prepare("SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote'")
         .first<{ count: number }>(),
     ).toEqual({ count: 0 });
+  });
+
+  test("PLANTED: quarantine blocks before every public promotion effect", async () => {
+    const screeningInputs: unknown[] = [];
+    const { call, db, binding } = await fixture({
+      screenPromotion: async (input) => {
+        screeningInputs.push(input);
+        return {
+          decision: "quarantine",
+          coarse_category: "dual-use-boundary",
+          provider_status: "ok",
+        };
+      },
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "screen-hold-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "screen-hold-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Private screening witness",
+        body_md: "This draft must remain private when the full-depth screen holds it.",
+        relates_to: [],
+      }),
+    });
+    const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+
+    const held = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "screen-hold-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "A held promotion has no public side effect.",
+        falsifier: "Any public claim, event, replay, outbox row, or cursor movement.",
+        relates_to: [],
+        depends_on: [],
+      }),
+    });
+
+    expect(held.status).toBe(202);
+    expect(held.headers.get("cache-control")).toBe("private, no-store");
+    expect(await held.json()).toEqual({
+      code: "SCREENING_HOLD",
+      coarse_category: "dual-use-boundary",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    });
+    expect(screeningInputs).toEqual([
+      {
+        problemId: "P-4DSP",
+        fellowId: binding.fellowId,
+        kind: "conjecture",
+        statement: "A held promotion has no public side effect.",
+        falsifier: "Any public claim, event, replay, outbox row, or cursor movement.",
+      },
+    ]);
+    for (const table of [
+      "claims",
+      "claim_projections",
+      "claim_versions",
+      "claim_deps",
+      "events",
+      "event_content",
+      "idempotency",
+      "outbox",
+      "integrity_checkpoints",
+      "public_claim_fts",
+    ] as const) {
+      expect(
+        await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+    }
+    expect(
+      await db
+        .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+        .first<{ cursor: number }>(),
+    ).toEqual({ cursor: 0 });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote'")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+  });
+
+  test("rejects and provider failures stay private with one coarse policy face", async () => {
+    const cases = [
+      {
+        label: "hard-reject",
+        screenPromotion: async () => ({
+          decision: "reject" as const,
+          coarse_category: "operational-harm" as const,
+          provider_status: "ok" as const,
+        }),
+        status: 403,
+        body: {
+          code: "POLICY_DENIED",
+          coarse_category: "operational-harm",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+        },
+      },
+      {
+        label: "provider-error",
+        screenPromotion: async () => ({
+          // A permissive outcome paired with a failed provider must never pass.
+          decision: "pass" as const,
+          coarse_category: "benign-context" as const,
+          provider_status: "error" as const,
+        }),
+        status: 202,
+        body: {
+          code: "SCREENING_HOLD",
+          coarse_category: "provider-unavailable",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+        },
+      },
+      {
+        label: "incoherent-pass",
+        screenPromotion: async () => ({
+          decision: "pass" as const,
+          coarse_category: "injection" as const,
+          provider_status: "ok" as const,
+        }),
+        status: 202,
+        body: {
+          code: "SCREENING_HOLD",
+          coarse_category: "provider-unavailable",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+        },
+      },
+      {
+        label: "provider-throw",
+        screenPromotion: async () => {
+          throw new Error("PRIVATE_SCREENING_EXCEPTION_CANARY");
+        },
+        status: 202,
+        body: {
+          code: "SCREENING_HOLD",
+          coarse_category: "provider-unavailable",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+        },
+      },
+    ] as const;
+
+    for (const policyCase of cases) {
+      const { call, db } = await fixture({ screenPromotion: policyCase.screenPromotion });
+      const opened = await call("/v1/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `${policyCase.label}-open`,
+        },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      const session = SessionOpenResponseSchema.parse(await opened.json());
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `${policyCase.label}-push`,
+        },
+        body: JSON.stringify({
+          type: "draft",
+          title: `Policy case ${policyCase.label}`,
+          body_md: "This body remains private if screening does not return a coherent pass.",
+          relates_to: [],
+        }),
+      });
+      const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+      const response = await call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `${policyCase.label}-promote`,
+        },
+        body: JSON.stringify({
+          workshop_id: workshop.workshop_id,
+          kind: "conjecture",
+          statement: `The ${policyCase.label} case cannot publish.`,
+          falsifier: "A public event from this request.",
+          relates_to: [],
+          depends_on: [],
+        }),
+      });
+      expect(response.status, policyCase.label).toBe(policyCase.status);
+      expect(response.headers.get("cache-control"), policyCase.label).toBe("private, no-store");
+      const responseText = await response.text();
+      expect(JSON.parse(responseText), policyCase.label).toEqual(policyCase.body);
+      expect(responseText, policyCase.label).not.toContain("PRIVATE_SCREENING_EXCEPTION_CANARY");
+      expect(
+        await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+        policyCase.label,
+      ).toEqual({ count: 0 });
+      expect(
+        await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
+        policyCase.label,
+      ).toEqual({ count: 0 });
+      expect(
+        await db
+          .prepare("SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote'")
+          .first<{ count: number }>(),
+        policyCase.label,
+      ).toEqual({ count: 0 });
+      expect(
+        await db
+          .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+          .first<{ cursor: number }>(),
+        policyCase.label,
+      ).toEqual({ cursor: 0 });
+    }
+  });
+
+  test("a committed promotion replay is a historical fact and never re-screens", async () => {
+    let screeningCalls = 0;
+    const { call } = await fixture({
+      screenPromotion: async () => {
+        screeningCalls += 1;
+        return screeningCalls === 1
+          ? {
+              decision: "pass",
+              coarse_category: "benign-context",
+              provider_status: "ok",
+            }
+          : {
+              decision: "reject",
+              coarse_category: "operational-harm",
+              provider_status: "ok",
+            };
+      },
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "screen-replay-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "screen-replay-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Replay screening witness",
+        body_md: "A committed result replays without a second classifier call.",
+        relates_to: [],
+      }),
+    });
+    const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+    const body = JSON.stringify({
+      workshop_id: workshop.workshop_id,
+      kind: "conjecture",
+      statement: "A committed promotion is not screened again during exact replay.",
+      falsifier: "The exact replay invokes the classifier a second time.",
+      relates_to: [],
+      depends_on: [],
+    });
+    const promote = () =>
+      call(`/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "screen-replay" },
+        body,
+      });
+    const first = await promote();
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+    const replay = await promote();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(firstBody);
+    expect(screeningCalls).toBe(1);
   });
 
   test("a promotion mints the pinned v1 content version with a durable kind and falsifier", async () => {
@@ -7056,11 +7360,24 @@ describe("committed promotion outbox nudge", () => {
     const prepared = await fixture(options);
     const recorder = recordingContext(prepared.db);
     const nudgePaths: string[] = [];
+    const screeningCalls: unknown[] = [];
     const env = {
       DB: prepared.db,
       STOA_ORIGIN: "https://a-staging.asimposium.org",
       AGORA_ORIGIN: "https://staging.asimposium.org",
       ENROLLMENT_REPLAY_KEY: "C".repeat(43),
+      AI: {
+        async run(_model: string, input: unknown) {
+          screeningCalls.push(input);
+          return {
+            response: JSON.stringify({
+              decision: "pass",
+              coarse_category: "benign-context",
+              bands: {},
+            }),
+          };
+        },
+      },
       KRATER_OUTBOX: {
         idFromName: (name: string) => ({ name }),
         get: () => ({
@@ -7090,11 +7407,12 @@ describe("committed promotion outbox nudge", () => {
       prepared.db
         .prepare("SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending'")
         .first<{ count: number }>();
-    return { ...prepared, recorder, env, nudgePaths, outboxRows, mountedCall };
+    return { ...prepared, recorder, env, nudgePaths, screeningCalls, outboxRows, mountedCall };
   }
 
   test("the createApp mount propagates the ExecutionContext so a committed promotion wakes the drainer once", async () => {
-    const { recorder, mountedCall, nudgePaths, outboxRows } = await mountedHarness();
+    const { recorder, mountedCall, nudgePaths, screeningCalls, outboxRows } =
+      await mountedHarness();
     const call = mountedCall(recorder.ctx);
     const prepared = await preparedPromotion(call, "mounted-nudge");
     // Open and workshop push are durable writes, not promotions: no wake yet.
@@ -7106,6 +7424,7 @@ describe("committed promotion outbox nudge", () => {
       body: promoteBody(prepared.workshopId, "The mounted promote wakes the drainer exactly once."),
     });
     expect(promoted.status).toBe(201);
+    expect(screeningCalls).toHaveLength(1);
     // Without app.ts propagating the context this is 0 -- the mounted nudge threw
     // on an absent ExecutionContext and was swallowed. One wake proves the mount.
     expect(recorder.scheduled).toHaveLength(1);
@@ -7133,6 +7452,55 @@ describe("committed promotion outbox nudge", () => {
     expect(recorder.scheduled).toHaveLength(0);
     expect(nudgePaths).toEqual([]);
     expect(await outboxRows()).toEqual({ count: 1 });
+  });
+
+  test("the production mount holds a promotion when its AI binding is absent", async () => {
+    const { recorder, env, enrollmentStore, token, db } = await mountedHarness();
+    const app = createApp({ createEnrollmentStore: () => enrollmentStore });
+    const envWithoutAi = { ...env, AI: undefined } as unknown as SessionEnv;
+    const call: Caller = (path, init = {}) =>
+      app.fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          ...init,
+          headers: {
+            authorization: `Bearer ${token}`,
+            ...(init.headers ?? {}),
+          },
+        }),
+        envWithoutAi,
+        recorder.ctx,
+      ) as Promise<Response>;
+    const prepared = await preparedPromotion(call, "mounted-screen-unavailable");
+
+    const held = await call(`/v1/sessions/${prepared.sessionId}/promote`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "mounted-screen-unavailable-promote",
+      },
+      body: promoteBody(
+        prepared.workshopId,
+        "A deployment without its screening dependency cannot publish.",
+      ),
+    });
+
+    expect(held.status).toBe(202);
+    expect(await held.json()).toEqual({
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await db
+        .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+        .first<{ cursor: number }>(),
+    ).toEqual({ cursor: 0 });
   });
 
   // asimposiumorg-phg.1.1: the root-face contract only demanded a non-404 from

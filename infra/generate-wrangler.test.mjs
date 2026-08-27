@@ -144,11 +144,12 @@ const cases = [
   {
     // The optional AI binding is deliberately outside the required roster
     // above, so it reconciles here instead: present exactly where the topology
-    // declares it, under the declared name, and nowhere else. The staging
-    // declaration is load-bearing — it is the reason this binding exists.
+    // declares it, under the declared name, and nowhere else. Staging proves
+    // the corpus seam; production needs the same binding for promotion ingest.
     name: "ai-binding-reconciles-exactly",
     execute() {
       assert.ok(report.environments.staging.ai, "staging declares no AI binding");
+      assert.ok(report.environments.production.ai, "production declares no AI binding");
       for (const [name, environment] of Object.entries(report.environments)) {
         const rendered = parsed[name].ai;
         if (!environment.ai) {

@@ -10,9 +10,13 @@ import {
   SCREENING_REVIEW_STATES,
   ScreeningContractsSchema,
   ScreeningDecisionPathSchema,
+  ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionDecisionProvenanceSchema,
+  ScreeningPromotionHoldResponseSchema,
+  ScreeningPromotionPolicyResponseSchema,
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
+  ScreeningSchemaDocumentSchema,
 } from "../../src/screening.ts";
 
 const VALID_PUBLIC_ACTION = new URL(
@@ -29,6 +33,22 @@ const INVALID_PUBLIC_ACTION_PRIVATE_DETAIL = new URL(
 );
 const INVALID_OPERATOR_RECEIPT_PRIVATE_DETAIL = new URL(
   "../fixtures/invalid/screening-operator-receipt-private-detail.json",
+  import.meta.url,
+);
+const VALID_PROMOTION_HOLD = new URL(
+  "../fixtures/valid/screening-promotion-hold.json",
+  import.meta.url,
+);
+const VALID_PROMOTION_DENIED = new URL(
+  "../fixtures/valid/screening-promotion-denied.json",
+  import.meta.url,
+);
+const INVALID_PROMOTION_HOLD_PRIVATE_DETAIL = new URL(
+  "../fixtures/invalid/screening-promotion-hold-private-detail.json",
+  import.meta.url,
+);
+const INVALID_PROMOTION_DENIED_BENIGN = new URL(
+  "../fixtures/invalid/screening-promotion-denied-benign.json",
   import.meta.url,
 );
 
@@ -174,6 +194,31 @@ test("golden private-detail fixtures are rejected from both screening faces", as
   expect(
     ScreeningPromotionDecisionProvenanceSchema.safeParse(
       await fixture(INVALID_OPERATOR_RECEIPT_PRIVATE_DETAIL),
+    ).success,
+  ).toBe(false);
+});
+
+test("promotion policy responses expose only a coarse category and appeal path", async () => {
+  const hold = await fixture(VALID_PROMOTION_HOLD);
+  const denied = await fixture(VALID_PROMOTION_DENIED);
+
+  expect(ScreeningPromotionHoldResponseSchema.safeParse(hold).success).toBe(true);
+  expect(ScreeningPromotionDeniedResponseSchema.safeParse(denied).success).toBe(true);
+  expect(ScreeningPromotionPolicyResponseSchema.safeParse(hold).success).toBe(true);
+  expect(ScreeningPromotionPolicyResponseSchema.safeParse(denied).success).toBe(true);
+  expect(ScreeningContractsSchema.safeParse(hold).success).toBe(false);
+  expect(ScreeningContractsSchema.safeParse(denied).success).toBe(false);
+  expect(ScreeningSchemaDocumentSchema.safeParse(hold).success).toBe(true);
+  expect(ScreeningSchemaDocumentSchema.safeParse(denied).success).toBe(true);
+
+  expect(
+    ScreeningPromotionPolicyResponseSchema.safeParse(
+      await fixture(INVALID_PROMOTION_HOLD_PRIVATE_DETAIL),
+    ).success,
+  ).toBe(false);
+  expect(
+    ScreeningPromotionPolicyResponseSchema.safeParse(
+      await fixture(INVALID_PROMOTION_DENIED_BENIGN),
     ).success,
   ).toBe(false);
 });

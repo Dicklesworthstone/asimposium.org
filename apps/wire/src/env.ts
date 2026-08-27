@@ -59,10 +59,11 @@ export interface Env {
    */
   AGORA_ORIGIN?: string;
   /**
-   * Workers AI binding for the S-4 staging screening surface
-   * (asimposiumorg-xeg). Optional in the topology: only staging declares it,
-   * and `POST /internal/screen` fails closed with a typed 503 wherever it is
-   * absent rather than falling back to another classifier.
+   * Workers AI binding for promotion-time policy screening and the S-4 staging
+   * corpus surface (asimposiumorg-xeg). Optional at the type/topology level so
+   * local development can start without a provider account; promotion fails
+   * closed to a private hold, and `POST /internal/screen` returns a typed 503,
+   * wherever it is absent.
    */
   AI?: Ai;
   /**

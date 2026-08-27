@@ -24,11 +24,21 @@ import {
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
+  SCREENING_APPEAL_CODE,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorIdSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
+  type ScreeningCoarseCategory,
+  ScreeningCoarseCategorySchema,
+  type ScreeningOutcome,
+  ScreeningOutcomeSchema,
+  ScreeningPromotionDeniedResponseSchema,
+  ScreeningPromotionHoldResponseSchema,
+  type ScreeningProviderStatus,
+  ScreeningProviderStatusSchema,
+  ScreeningPublicActionSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -71,6 +81,10 @@ import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
+import {
+  screenPromotionWithWorkersAI,
+  type WorkersAiBinding,
+} from "../screening/workers-ai";
 import {
   duplicateClaimRefusal,
   normHash,
@@ -138,7 +152,31 @@ export interface SessionRouterOptions {
       }
     | Response
   >;
+  /**
+   * Promotion-time policy seam. Production omits this override and uses the
+   * Worker's AI binding; local tests inject a deterministic decision.
+   */
+  readonly screenPromotion?: PromotionScreener;
 }
+
+export interface PromotionScreeningInput {
+  readonly problemId: string;
+  readonly fellowId: string;
+  readonly kind: string;
+  readonly statement: string;
+  readonly falsifier: string | null;
+}
+
+export interface PromotionScreeningDecision {
+  readonly decision: ScreeningOutcome;
+  readonly coarse_category: ScreeningCoarseCategory;
+  readonly provider_status: ScreeningProviderStatus;
+}
+
+export type PromotionScreener = (
+  input: PromotionScreeningInput,
+  env: Env,
+) => Promise<PromotionScreeningDecision>;
 
 function verifiedSponsorSnapshot(value: unknown):
   | {
@@ -402,6 +440,43 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
   };
   type SessionPreparedStatement = ReturnType<Env["DB"]["prepare"]>;
+
+  const screenPromotion: PromotionScreener =
+    options.screenPromotion ??
+    ((input, env) =>
+      screenPromotionWithWorkersAI(env.AI as unknown as WorkersAiBinding | undefined, input));
+
+  const promotionScreeningHold = (category: ScreeningCoarseCategory): Response =>
+    privateNoStore(
+      new Response(
+        JSON.stringify(
+          ScreeningPromotionHoldResponseSchema.parse({
+            code: "SCREENING_HOLD",
+            coarse_category: category,
+            appeal: SCREENING_APPEAL_CODE,
+          }),
+        ),
+        {
+          status: 202,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        },
+      ),
+    );
+
+  const promotionScreeningDenied = (category: ScreeningCoarseCategory): Response | undefined => {
+    const parsed = ScreeningPromotionDeniedResponseSchema.safeParse({
+      code: "POLICY_DENIED",
+      coarse_category: category,
+      appeal: SCREENING_APPEAL_CODE,
+    });
+    if (!parsed.success) return undefined;
+    return privateNoStore(
+      new Response(JSON.stringify(parsed.data), {
+        status: 403,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+    );
+  };
 
   type ReplayScope =
     | "session_open"
@@ -2226,6 +2301,65 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
+    }
+
+    // Fable §9.1: a promotion is still private until the live direct-content
+    // policy dependency returns a coherent pass. This runs after the
+    // cheap contract/authorization/duplicate/reference gates, but before any
+    // Krater id, replay row, event, projection, cursor, or outbox effect.
+    let screening: PromotionScreeningDecision;
+    try {
+      const raw = await screenPromotion(
+        {
+          problemId: session.problem_id,
+          fellowId: auth.binding.fellowId,
+          kind: parsed.data.kind,
+          statement: parsed.data.statement,
+          falsifier: parsed.data.falsifier ?? null,
+        },
+        c.env,
+      );
+      const decision = ScreeningOutcomeSchema.safeParse(raw.decision);
+      const category = ScreeningCoarseCategorySchema.safeParse(raw.coarse_category);
+      const providerStatus = ScreeningProviderStatusSchema.safeParse(raw.provider_status);
+      if (!decision.success || !category.success || !providerStatus.success) {
+        return promotionScreeningHold("provider-unavailable");
+      }
+      screening = {
+        decision: decision.data,
+        coarse_category: category.data,
+        provider_status: providerStatus.data,
+      };
+    } catch {
+      return promotionScreeningHold("provider-unavailable");
+    }
+
+    // A transport/provider failure can never publish even if an injected or
+    // future adapter accidentally pairs it with a permissive outcome.
+    if (screening.provider_status !== "ok") {
+      return promotionScreeningHold("provider-unavailable");
+    }
+    if (screening.decision === "reject") {
+      return (
+        promotionScreeningDenied(screening.coarse_category) ??
+        promotionScreeningHold("provider-unavailable")
+      );
+    }
+    if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
+      // Warning publication needs its durable public notice and decision
+      // provenance. Until that projection lands, holding is the only honest
+      // non-lossy behavior; silently publishing without the notice is not.
+      return promotionScreeningHold(screening.coarse_category);
+    }
+    // `pass` is publishable only in the contract's coherent benign tuple.
+    if (
+      !ScreeningPublicActionSchema.safeParse({
+        category: screening.coarse_category,
+        action: "published",
+        notice: "none",
+      }).success
+    ) {
+      return promotionScreeningHold("provider-unavailable");
     }
 
     try {

@@ -9,7 +9,7 @@ provider resource exists. The Worker workspace pins Wrangler exactly because a
 range is not a reproducible toolchain contract.
 
 The configuration pins the Worker entrypoint, Workers compatibility date, D1
-migration directory, R2 binding names, and served-text module rule for
+migration directory, R2 binding names, optional Workers AI binding, and served-text module rule for
 Markdown, `llms.txt`, and generated `*.schema.json` documents so later work
 has one fixed place to land.
 `validate-scaffold.mjs` uses the repository's
@@ -119,6 +119,12 @@ is a new disclosure that fails rather than passing unnoticed. The checked-in
 key set is pinned by the same suite. Reconciliation also enumerates the
 directory, so a stale config left behind by a renamed environment is reported
 as surplus rather than sitting unnoticed beside the generated set.
+
+Workers AI is optional in the topology roster because local development must
+validate without a provider account. Staging and production declare the same
+`AI` binding; production promotion holds fail-closed if the deployed binding is
+absent or errors. A declaration proves configuration shape only, never provider
+availability or screening quality.
 
 **These files are not directly deployable as written.** Resource ids remain
 `${VAR}` references and Wrangler does not interpolate environment variables in

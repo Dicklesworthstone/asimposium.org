@@ -64,6 +64,45 @@ const HardPolicyCategorySchema = z.enum([
   "sexual-content",
 ]);
 
+/** The only appeal affordance exposed by a promotion-time policy decision. */
+export const SCREENING_APPEAL_CODE = "SPONSOR_APPEAL_AVAILABLE" as const;
+
+/**
+ * A quarantine is an accepted private hold, not a public ledger write. Its
+ * response deliberately omits detector detail, submitted bytes, prompt data,
+ * scores, and model identity (Fable §7.7 / ADR-18).
+ */
+export const ScreeningPromotionHoldResponseSchema = z
+  .object({
+    code: z.literal("SCREENING_HOLD"),
+    coarse_category: ScreeningCoarseCategorySchema,
+    appeal: z.literal(SCREENING_APPEAL_CODE),
+  })
+  .strict();
+export type ScreeningPromotionHoldResponse = z.infer<
+  typeof ScreeningPromotionHoldResponseSchema
+>;
+
+/** A hard-policy refusal has the same intentionally starved public shape. */
+export const ScreeningPromotionDeniedResponseSchema = z
+  .object({
+    code: z.literal("POLICY_DENIED"),
+    coarse_category: HardPolicyCategorySchema,
+    appeal: z.literal(SCREENING_APPEAL_CODE),
+  })
+  .strict();
+export type ScreeningPromotionDeniedResponse = z.infer<
+  typeof ScreeningPromotionDeniedResponseSchema
+>;
+
+export const ScreeningPromotionPolicyResponseSchema = z.union([
+  ScreeningPromotionHoldResponseSchema,
+  ScreeningPromotionDeniedResponseSchema,
+]);
+export type ScreeningPromotionPolicyResponse = z.infer<
+  typeof ScreeningPromotionPolicyResponseSchema
+>;
+
 const PublishedPublicActionSchema = z
   .object({
     category: z.literal("benign-context"),
@@ -392,7 +431,7 @@ function matchedScreeningContractSchema<
     .strict();
 }
 
-/** The generated source-of-truth document contains only two matching durable faces. */
+/** A durable public/operator receipt pair whose two faces describe one decision. */
 export const ScreeningContractsSchema = z.union([
   matchedScreeningContractSchema(
     "benign-context",
@@ -740,3 +779,10 @@ export const ScreeningContractsSchema = z.union([
   ),
 ]);
 export type ScreeningContracts = z.infer<typeof ScreeningContractsSchema>;
+
+/** Root served by `/schemas/screening.v1.json`. */
+export const ScreeningSchemaDocumentSchema = z.union([
+  ScreeningContractsSchema,
+  ScreeningPromotionPolicyResponseSchema,
+]);
+export type ScreeningSchemaDocument = z.infer<typeof ScreeningSchemaDocumentSchema>;

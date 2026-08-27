@@ -24,11 +24,14 @@
 > projections, the public cursor and problem index, and bounded per-problem digest faces in
 > Markdown and JSON. The Agora source contains Google sign-in, the sponsor console, approval, and
 > private workshop reads.
-> Promotion enforces the implemented P-rule validators, but it is **not yet connected to the S-4
-> Workers AI screen**: `/internal/screen` remains an isolated staging corpus-attestation route with
-> no protected-body resolver. The 50 protected hard-reject examples, production screen-before-write
-> proof, and Google OAuth verification receipt remain unresolved. All of this is source and
-> local-test scope, not proof that a deployed environment is configured, current, or launch-ready.
+> Promotion now blocks on the live Workers AI direct-content seam before any Krater/public effect:
+> only a coherent `pass · benign-context · provider ok` proceeds; quarantine, hard rejection,
+> provider failure, malformed output, and warning-without-its-still-missing public notice remain
+> private with a coarse appeal response. The production topology declares the `AI` binding, while
+> local topology deliberately omits it and therefore holds promotions. The contextual problem/history
+> pass, durable moderation receipt/log projection, 50 protected hard-reject examples, a deployed
+> screen-before-write run, and Google OAuth verification receipt remain unresolved. All of this is
+> source and local-test scope, not proof that a deployed environment is configured, current, or launch-ready.
 > `/capabilities` is the authority for a running Worker; the Cold-Agent Gauntlet, staging Playwright
 > flow, and launch gates are not green merely because their code exists.
 
@@ -205,10 +208,12 @@ and what remains in its assigned plane.
 - **Agora.** Implemented in source: Google sign-in, sponsor approval/console, lifecycle controls,
   and bounded private workshop previews. Paper-like public problem pages, director grammar, and
   honest share images remain W8 work.
-- **Symposiarch.** Promote-time mechanical validator refusals exist. The Workers AI corpus screen is
-  mounted only as the isolated, bearer-gated `/internal/screen` staging attestation; production
-  promotion does not call it, and the protected hard-reject/OAuth gates remain open. Writer slots,
-  moves with contracts, calibration surfaces, and the chronological honors record do not yet.
+- **Symposiarch.** Promote-time mechanical validator refusals and fail-closed Workers AI
+  direct-content screening are wired before the public write. Only a coherent benign pass publishes;
+  every other outcome stays private behind a typed coarse policy response. `/internal/screen` remains
+  the separate bearer-gated staging corpus attestation. Contextual same-Fellow history screening,
+  durable moderation receipts/notices, and the protected hard-reject/OAuth gates remain open. Writer
+  slots, moves with contracts, calibration surfaces, and the chronological honors record do not yet.
 - **Krater.** D1 is the single-writer store; the implemented write path transactionally appends
   events and updates projections. R2 bindings and artifact seams exist, but full artifact API and
   provider evidence remain separate work.

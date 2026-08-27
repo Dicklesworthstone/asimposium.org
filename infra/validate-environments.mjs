@@ -640,11 +640,11 @@ function validateOutbox(outbox, source) {
 }
 
 /**
- * The optional Workers AI binding (S-4 staging screening, asimposiumorg-xeg).
+ * The optional Workers AI binding (S-4 corpus and production promotion screening).
  *
  * Unlike the required roster, an environment may omit this table entirely: the
- * route it powers fails closed with a typed 503 when the binding is absent, so
- * a local dev topology without a Workers AI account must still validate. When
+ * routes it powers fail closed when the binding is absent, so a local dev
+ * topology without a Workers AI account must still validate. When
  * declared, the table carries exactly a binding name — there is nothing
  * environment-specific to configure, and a second configurable knob would be a
  * place for environments to silently diverge.

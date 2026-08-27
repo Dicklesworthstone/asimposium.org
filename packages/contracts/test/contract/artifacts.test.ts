@@ -22,7 +22,10 @@ import {
   generatedArtifacts,
 } from "../../src/artifacts.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
-import { ScreeningContractsSchema } from "../../src/screening.ts";
+import {
+  ScreeningContractsSchema,
+  ScreeningSchemaDocumentSchema,
+} from "../../src/screening.ts";
 
 const GENERATED_SCREENING_SCHEMA = new URL(
   "../../generated/screening.schema.json",
@@ -42,6 +45,22 @@ const INVALID_PUBLIC_ACTION_PRIVATE_DETAIL = new URL(
 );
 const INVALID_OPERATOR_RECEIPT_PRIVATE_DETAIL = new URL(
   "../fixtures/invalid/screening-operator-receipt-private-detail.json",
+  import.meta.url,
+);
+const VALID_PROMOTION_HOLD = new URL(
+  "../fixtures/valid/screening-promotion-hold.json",
+  import.meta.url,
+);
+const VALID_PROMOTION_DENIED = new URL(
+  "../fixtures/valid/screening-promotion-denied.json",
+  import.meta.url,
+);
+const INVALID_PROMOTION_HOLD_PRIVATE_DETAIL = new URL(
+  "../fixtures/invalid/screening-promotion-hold-private-detail.json",
+  import.meta.url,
+);
+const INVALID_PROMOTION_DENIED_BENIGN = new URL(
+  "../fixtures/invalid/screening-promotion-denied-benign.json",
   import.meta.url,
 );
 
@@ -338,6 +357,10 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
   const operatorReceipt = await jsonFixture(VALID_OPERATOR_RECEIPT);
   const privatePublicAction = await jsonFixture(INVALID_PUBLIC_ACTION_PRIVATE_DETAIL);
   const privateReceipt = await jsonFixture(INVALID_OPERATOR_RECEIPT_PRIVATE_DETAIL);
+  const validPromotionHold = await jsonFixture(VALID_PROMOTION_HOLD);
+  const validPromotionDenied = await jsonFixture(VALID_PROMOTION_DENIED);
+  const privatePromotionHold = await jsonFixture(INVALID_PROMOTION_HOLD_PRIVATE_DETAIL);
+  const benignPromotionDenied = await jsonFixture(INVALID_PROMOTION_DENIED_BENIGN);
   const schema = await jsonFixture(GENERATED_SCREENING_SCHEMA);
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
@@ -355,6 +378,21 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
   expect(
     generatedReceiptToPackage(packageReceiptToGenerated(zodValid.data.operator_receipt)),
   ).toEqual(zodValid.data.operator_receipt);
+
+  for (const [label, response] of [
+    ["promotion hold", validPromotionHold],
+    ["promotion denial", validPromotionDenied],
+  ] as const) {
+    expect(ScreeningSchemaDocumentSchema.safeParse(response).success, label).toBe(true);
+    expect(validator(response), label).toBe(true);
+  }
+  for (const [label, response] of [
+    ["promotion hold with private detail", privatePromotionHold],
+    ["promotion denial with benign category", benignPromotionDenied],
+  ] as const) {
+    expect(ScreeningSchemaDocumentSchema.safeParse(response).success, label).toBe(false);
+    expect(validator(response), label).toBe(false);
+  }
 
   const base = asRecord(operatorReceipt, "valid screening operator receipt");
   const timeout = {

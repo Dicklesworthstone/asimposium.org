@@ -39,6 +39,9 @@ storage = "sqlite"
 # infra/environments.toml but is not bound here, because the Worker entrypoint
 # does not export its class yet. Binding it would make this config undeployable.
 
+[ai]
+binding = "AI"
+
 [vars]
 STOA_ORIGIN = "https://a.asimposium.org"
 AGORA_ORIGIN = "https://asimposium.org"

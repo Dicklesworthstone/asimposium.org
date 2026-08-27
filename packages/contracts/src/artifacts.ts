@@ -89,7 +89,6 @@ import {
 import { CONTRACT_SCAFFOLD_SCHEMA_ID, ContractScaffoldSchema } from "./schema.ts";
 import {
   type ScreeningCoarseCategory,
-  ScreeningContractsSchema,
   type ScreeningDecisionPath,
   type ScreeningOutcome,
   type ScreeningPromotionDecisionProvenance,
@@ -98,6 +97,7 @@ import {
   type ScreeningPublicationAction,
   type ScreeningPublicNotice,
   type ScreeningReviewState,
+  ScreeningSchemaDocumentSchema,
 } from "./screening.ts";
 import {
   type ClaimId,
@@ -530,8 +530,8 @@ function generatedScreeningJsonSchema(): string {
     $id: SCREENING_SCHEMA_ID,
     title: "ASImposium screening promotion decision contracts",
     description:
-      "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion decision provenance retains bounded digests and decision facts, never submitted content or detector detail; it is not the canonical screening log.",
-    ...z.toJSONSchema(ScreeningContractsSchema),
+      "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion policy responses contain only a coarse category and appeal path. Decision provenance retains bounded digests and decision facts, never submitted content or detector detail; it is not the canonical screening log.",
+    ...z.toJSONSchema(ScreeningSchemaDocumentSchema),
   };
   return formatJson(withExamples("screening", document));
 }
@@ -542,12 +542,16 @@ function generatedScreeningTypes(): string {
     "ScreeningContracts",
     "ScreeningDecisionPath",
     "ScreeningPromotionDecisionProvenance",
+    "ScreeningPromotionDeniedResponse",
+    "ScreeningPromotionHoldResponse",
+    "ScreeningPromotionPolicyResponse",
     "ScreeningOutcome",
     "ScreeningProviderStatus",
     "ScreeningPublicationAction",
     "ScreeningPublicAction",
     "ScreeningPublicNotice",
     "ScreeningReviewState",
+    "ScreeningSchemaDocument",
   ] as const satisfies readonly (keyof {
     ScreeningCoarseCategory: ScreeningCoarseCategory;
     ScreeningContracts: import("./screening.ts").ScreeningContracts;

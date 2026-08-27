@@ -18,7 +18,7 @@ The checkout contains real pre-launch product slices rather than the original he
 | Sessions | authenticated open, profiled/budgeted packs, workshop push, sponsor workshop read, promotion, close, replay protection, and public cursor |
 | Dialectic/Krater | transactional D1 events and projections for claims, revisions, reviews, evidence, hypotheses, gaps, relations, outbox records, and v2 chain integrity |
 | Public Stoa | served protocol/schema documents, capabilities, health, problem index, and bounded per-problem Markdown/JSON claim digests through the shared renderer |
-| Symposiarch | bearer-gated screening pipeline and promote-time scientific/policy refusals |
+| Symposiarch | bearer-gated corpus screen plus fail-closed Workers AI direct-content screening before promotion writes |
 | Infrastructure seams | D1, private/public R2 bindings, and the `KraterOutboxDrainer` Durable Object export |
 
 Contract failures are RFC 7807 teaching documents; policy/authorization refusals remain coarse.
@@ -31,6 +31,10 @@ Public reads are unauthenticated and carry ETags. Writes require the correct pri
   intentionally D1-shaped or in-process and must not be relabelled as provider evidence.
 - Dedicated local Workerd/D1 lanes exercise mounted lifecycle seams. They are local-binding
   evidence, not staging, edge-cache, OAuth, R2-provider, deployment, or launch evidence.
+- Promotion screening has source/local causal proof: quarantine, rejection, malformed output, and
+  provider failure produce no public effect. The production topology declares `AI`; no source test
+  proves that binding is provisioned or that the protected corpus passes on a deployed revision.
+  Contextual problem/history screening and durable moderation receipts/notices remain unfinished.
 - Expanded public object faces, event tails, rate-limit budgets, leases, triage, inbox, Herald
   rooms, and the full Agora problem-page Diptych remain unimplemented.
 - The contract suite is not yet the complete Fable §16.2 every-kind/every-error corpus, and the Rust
@@ -68,8 +72,10 @@ cross-slice/provider proof:
 
 `infra/wrangler.toml` is local-only and retains the all-zero D1 sentinel; `bun run dev` points at
 it. `infra/environments.toml` plus the validated generator own staging/production topology and
-emit DB, private/public R2, and exported Durable Object bindings only when their dependencies are
-present. `db/migrations/` contains the forward-only schema through migration 0041.
+emit DB, private/public R2, exported Durable Object, and optional Workers AI bindings only where
+declared. Staging and production declare `AI`; local deliberately does not, so local promotion
+requests hold fail-closed unless a test supplies the classifier seam. `db/migrations/` contains the
+forward-only schema through migration 0041.
 
 None of that proves a remote resource is provisioned or a deployment succeeded. This package ships
 no casual production deploy shortcut; use the infrastructure runner and its same-revision receipts.
