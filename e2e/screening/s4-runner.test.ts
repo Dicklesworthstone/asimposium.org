@@ -110,6 +110,50 @@ function mountedContractAi() {
   };
 }
 
+function mountedWorkerEnv(ai: ReturnType<typeof mountedContractAi>) {
+  const env = {
+    AI: ai,
+    S4_SCREENING_BEARER: MOUNTED_SCREENING_BEARER,
+  } as unknown as Parameters<typeof worker.fetch>[1];
+  const context = {
+    waitUntil: () => undefined,
+    passThroughOnException: () => undefined,
+  } as unknown as Parameters<typeof worker.fetch>[2];
+  return { env, context };
+}
+
+/**
+ * Bind the runner POST to the mounted route. Optional `mutate` is the planted
+ * request-shape defect: the runner still goes through fetchBoundedLiveJson, but
+ * the bytes the route sees are wrong.
+ */
+function mountedFetchImpl(
+  env: Parameters<typeof worker.fetch>[1],
+  context: Parameters<typeof worker.fetch>[2],
+  mutate?: (body: Record<string, unknown>) => unknown,
+): {
+  readonly posted: Record<string, unknown>[];
+  readonly fetch_impl: (url: URL, init: RequestInit) => Promise<Response>;
+} {
+  const posted: Record<string, unknown>[] = [];
+  return {
+    posted,
+    fetch_impl: async (url, init) => {
+      if (typeof init.body !== "string") {
+        throw new Error("mounted S-4 runner must POST a JSON string");
+      }
+      const parsed = JSON.parse(init.body) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("mounted S-4 runner must POST a JSON object");
+      }
+      const body = parsed as Record<string, unknown>;
+      posted.push(body);
+      const forwarded = mutate === undefined ? init.body : JSON.stringify(mutate(body));
+      return worker.fetch(new Request(url.toString(), { ...init, body: forwarded }), env, context);
+    },
+  };
+}
+
 describe("S-4 frozen corpus", () => {
   test("has diverse safe bodies and records that absent protected bodies BLOCK live accuracy evidence", async () => {
     const corpus = await createS4Corpus();
@@ -178,14 +222,8 @@ describe("S-4 frozen corpus", () => {
     // protected rows have neither bodies nor digests and remain unmeasured.
     const corpus = await createS4Corpus();
     const ai = mountedContractAi();
-    const env = {
-      AI: ai,
-      S4_SCREENING_BEARER: MOUNTED_SCREENING_BEARER,
-    } as unknown as Parameters<typeof worker.fetch>[1];
-    const context = {
-      waitUntil: () => undefined,
-      passThroughOnException: () => undefined,
-    } as unknown as Parameters<typeof worker.fetch>[2];
+    const { env, context } = mountedWorkerEnv(ai);
+    const { posted, fetch_impl } = mountedFetchImpl(env, context);
     const writes: string[] = [];
     let failure: unknown;
     try {
@@ -193,8 +231,7 @@ describe("S-4 frozen corpus", () => {
         corpus,
         screening_url: new URL("https://a-staging.asimposium.org/internal/screen"),
         bearer: MOUNTED_SCREENING_BEARER,
-        fetch_impl: async (url, init) =>
-          worker.fetch(new Request(url.toString(), init), env, context),
+        fetch_impl,
         write: (line) => writes.push(line),
       });
     } catch (error) {
@@ -217,6 +254,14 @@ describe("S-4 frozen corpus", () => {
       reserved_count: 50,
       exit_code: 78,
     });
+    expect(posted).toHaveLength(1);
+    const request = posted[0] ?? {};
+    expect(request.partial_run).toBe(true);
+    expect(Array.isArray(request.examples)).toBe(true);
+    const examples = request.examples as { source?: { kind?: string }; body?: unknown }[];
+    expect(examples).toHaveLength(150);
+    expect(examples.every((example) => example.source?.kind === "inline-safe")).toBe(true);
+    expect(examples.every((example) => typeof example.body === "string")).toBe(true);
     expect(ai.calls).toHaveLength(150);
     expect(ai.calls.every((model) => model === WORKERS_AI_MODEL)).toBe(true);
     expect(corpus.filter((example) => example.source.kind === "protected-staging")).toHaveLength(
@@ -232,6 +277,73 @@ describe("S-4 frozen corpus", () => {
             example.source.availability === "blocked",
         ),
     ).toBe(true);
+  });
+
+  test("PLANTED NEGATIVE: dropping partial_run from the runner POST is refused by the mounted route with no aggregate", async () => {
+    const corpus = await createS4Corpus();
+    const ai = mountedContractAi();
+    const { env, context } = mountedWorkerEnv(ai);
+    const { fetch_impl } = mountedFetchImpl(env, context, (body) => {
+      const rest = { ...body };
+      delete rest.partial_run;
+      return rest;
+    });
+    const writes: string[] = [];
+    let failure: unknown;
+    try {
+      await runLiveScreening({
+        corpus,
+        screening_url: new URL("https://a-staging.asimposium.org/internal/screen"),
+        bearer: MOUNTED_SCREENING_BEARER,
+        fetch_impl,
+        write: (line) => writes.push(line),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "WORKERS_AI_STAGING_UNAVAILABLE",
+      exit_code: 78,
+    });
+    expect(writes).toEqual([]);
+    expect(ai.calls).toEqual([]);
+  });
+
+  test("PLANTED NEGATIVE: appending a real protected-staging row to the runner POST is refused with no aggregate", async () => {
+    const corpus = await createS4Corpus();
+    const protectedRow = corpus.find((example) => example.source.kind === "protected-staging");
+    if (protectedRow === undefined) throw new Error("expected a protected-staging corpus row");
+    expect(protectedRow.body).toBeUndefined();
+    expect(protectedRow.body_digest).toBeUndefined();
+    const ai = mountedContractAi();
+    const { env, context } = mountedWorkerEnv(ai);
+    const { posted, fetch_impl } = mountedFetchImpl(env, context, (body) => ({
+      ...body,
+      examples: [...((body.examples as unknown[]) ?? []), protectedRow],
+    }));
+    const writes: string[] = [];
+    let failure: unknown;
+    try {
+      await runLiveScreening({
+        corpus,
+        screening_url: new URL("https://a-staging.asimposium.org/internal/screen"),
+        bearer: MOUNTED_SCREENING_BEARER,
+        fetch_impl,
+        write: (line) => writes.push(line),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "WORKERS_AI_STAGING_UNAVAILABLE",
+      exit_code: 78,
+    });
+    expect(writes).toEqual([]);
+    expect(ai.calls).toEqual([]);
+    expect(posted).toHaveLength(1);
+    const postedExamples = posted[0]?.examples;
+    expect(Array.isArray(postedExamples)).toBe(true);
+    expect(Array.isArray(postedExamples) ? postedExamples.length : 0).toBe(150);
   });
 
   test("PLANTED NEGATIVE: the real self-test reports the identity of the available bodies, never a placeholder digest", async () => {
