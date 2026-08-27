@@ -1443,6 +1443,7 @@ run_bounded() {
     else
       status="$EX_WATCHDOG_UNAVAILABLE"
       RUN_BOUNDED_OUTCOME="unavailable"
+      RUN_BOUNDED_STAGE="record-decode"
     fi
   else
     # Outer branch: `read_group_outcome` did not deliver a terminal record.
@@ -1459,6 +1460,7 @@ run_bounded() {
     else
       status="$EX_WATCHDOG_UNAVAILABLE"
       RUN_BOUNDED_OUTCOME="unavailable"
+      RUN_BOUNDED_STAGE="terminal-record-missing"
     fi
   fi
 
@@ -1885,7 +1887,7 @@ mint_envelope_config() {
   # EXACTLY one newline-terminated bounded record, then end of stream.
   local extra="" extra_status=0
   IFS= read -r -t 10 MINTED_CONFIG <&8 || MINTED_CONFIG=""
-  IFS= read -r -t 2 extra <&8 || extra_status=$?
+  IFS= read -r -t 5 extra <&8 || extra_status=$?
   # EXACT end-of-stream is required. `read` returns 1 at EOF and >128 on
   # timeout; the previous form treated both as "no extra bytes", so a writer
   # that stayed open — the very deadlock this transport had — was accepted as a
@@ -2550,7 +2552,13 @@ self_test() {
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"self-test\"}"
     else
       failures=$((failures + 1))
-      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"fail\",\"detail\":\"expected $(json_string "$3"), got $(json_string "$2")\"}"
+      local got_display="$2"
+      # A 125 is honest teardown-unproven; naming the stage makes the late-
+      # suite leg diagnosable instead of a mystery status (S-6 RCA, 9ba1).
+      if [[ "$2" == "$EX_CLEANUP_UNPROVEN" || "$2" == "$EX_WATCHDOG_UNAVAILABLE" || "$2" == "$EX_INPUT_BOOTSTRAP_UNAVAILABLE" || "$2" == "124" ]]; then
+        got_display="$2 (run_bounded_stage=${RUN_BOUNDED_STAGE})"
+      fi
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"fail\",\"detail\":\"expected $(json_string "$3"), got $(json_string "$got_display")\"}"
     fi
   }
 
@@ -3131,13 +3139,15 @@ self_test() {
     chmod 700 "$dir" 2>/dev/null || true
     printf '%s' "${dir}/marker"
   }
-
   # Wait until a marker holds a numeric pid, then echo it. Empty on timeout.
   local plant_pid=""
   await_planted_pid() {
     local marker="$1" waited=0
     plant_pid=""
-    while (( waited < 50 )); do
+    # S-6 RCA (9ba1): under load the ack-victim pays a full script re-parse
+    # before publishing its pid; 50x0.1s missed real windows. 120x0.1s keeps
+    # the fail-closed timeout semantics with sane headroom.
+    while (( waited < 120 )); do
       if [[ -f "$marker" ]]; then
         plant_pid="$(cat "$marker" 2>/dev/null || printf '')"
         [[ "$plant_pid" =~ ^[0-9]+$ ]] && return 0
@@ -3153,7 +3163,8 @@ self_test() {
   await_marker_value() {
     local marker="$1" expected="$2" waited=0
     marker_value=""
-    while (( waited < 50 )); do
+    # Same load headroom rationale as await_planted_pid above (9ba1).
+    while (( waited < 120 )); do
       if [[ -f "$marker" ]]; then
         marker_value="$(cat "$marker" 2>/dev/null || printf '')"
         [[ "$marker_value" == "$expected" ]] && return 0
@@ -3295,7 +3306,7 @@ self_test() {
     # only after that trap is installed, so the plant has a causal readiness
     # barrier but never probes or signals the number after cleanup.
     run_bounded "$bound" "$bounded_out" - \
-      bash -c "bash \"\$1\" --self-test-ack-victim \"\$2\" \"\$3\" & waited=0; while [[ ! -f \"\$2\" && \$waited -lt 250 ]]; do sleep 0.02; waited=\$((waited + 1)); done; sleep 0.05; ${trailer}" \
+      bash -c "bash \"\$1\" --self-test-ack-victim \"\$2\" \"\$3\" & waited=0; while [[ ! -f \"\$2\" && \$waited -lt 600 ]]; do sleep 0.02; waited=\$((waited + 1)); done; sleep 0.05; ${trailer}" \
       _ "$SCRIPT_SELF" "$marker" "$terminated" || true
     local child=""
     [[ -f "$marker" ]] && child="$(cat "$marker" 2>/dev/null || printf '')"
