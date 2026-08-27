@@ -10,8 +10,8 @@ import {
   SCREENING_REVIEW_STATES,
   ScreeningContractsSchema,
   ScreeningDecisionPathSchema,
-  ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionDecisionProvenanceSchema,
+  ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   ScreeningPromotionPolicyResponseSchema,
   ScreeningProviderStatusSchema,
@@ -217,9 +217,8 @@ test("promotion policy responses expose only a coarse category and appeal path",
     ).success,
   ).toBe(false);
   expect(
-    ScreeningPromotionPolicyResponseSchema.safeParse(
-      await fixture(INVALID_PROMOTION_DENIED_BENIGN),
-    ).success,
+    ScreeningPromotionPolicyResponseSchema.safeParse(await fixture(INVALID_PROMOTION_DENIED_BENIGN))
+      .success,
   ).toBe(false);
 });
 

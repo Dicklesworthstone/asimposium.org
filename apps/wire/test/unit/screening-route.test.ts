@@ -243,6 +243,46 @@ describe("production promotion screening adapter", () => {
     }
   });
 
+  test("malformed or inventive classification shapes cannot pair with a permissive decision", async () => {
+    const valid = JSON.parse(cannedClassification("pass").response) as Record<string, unknown>;
+    const validBands = valid.bands as Record<string, unknown>;
+    const cases = [
+      {
+        label: "missing bands",
+        value: { decision: "pass", coarse_category: "benign-context" },
+      },
+      {
+        label: "malformed band",
+        value: { ...valid, bands: { ...validBands, harassment: false } },
+      },
+      {
+        label: "foreign band",
+        value: { ...valid, bands: { ...validBands, invented: "low" } },
+      },
+      {
+        label: "foreign top-level field",
+        value: { ...valid, explanation: "private model prose" },
+      },
+    ] as const;
+
+    for (const classification of cases) {
+      const result = await screenPromotionWithWorkersAI(
+        {
+          async run() {
+            return { response: JSON.stringify(classification.value) };
+          },
+        },
+        PROMOTION_INPUT,
+      );
+      expect(result, classification.label).toMatchObject({
+        decision: "quarantine",
+        coarse_category: "provider-unavailable",
+        provider_status: "error",
+        decision_path: "provider-error-fail-closed",
+      });
+    }
+  });
+
   test("the provider bound admits the worst-case JSON expansion of a valid promotion", async () => {
     const ai = passingAi();
     const result = await screenPromotionWithWorkersAI(ai, {
@@ -257,8 +297,10 @@ describe("production promotion screening adapter", () => {
       provider_status: "ok",
     });
     expect(ai.calls).toHaveLength(1);
+    const call = ai.calls[0];
+    if (call === undefined) throw new Error("Workers AI call was not recorded.");
     const userContent = (
-      ai.calls[0]?.input as {
+      call.input as {
         messages?: readonly { role?: string; content?: string }[];
       }
     ).messages?.find((message) => message.role === "user")?.content;

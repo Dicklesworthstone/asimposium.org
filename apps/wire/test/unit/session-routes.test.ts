@@ -7373,7 +7373,16 @@ describe("committed promotion outbox nudge", () => {
             response: JSON.stringify({
               decision: "pass",
               coarse_category: "benign-context",
-              bands: {},
+              bands: {
+                "benign-context": "high",
+                "spam-commercial": "low",
+                injection: "low",
+                "dual-use-boundary": "low",
+                "operational-harm": "low",
+                harassment: "low",
+                "sexual-content": "low",
+                "provider-unavailable": null,
+              },
             }),
           };
         },

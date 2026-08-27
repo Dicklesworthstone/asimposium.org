@@ -557,12 +557,16 @@ function generatedScreeningTypes(): string {
     ScreeningContracts: import("./screening.ts").ScreeningContracts;
     ScreeningDecisionPath: ScreeningDecisionPath;
     ScreeningPromotionDecisionProvenance: ScreeningPromotionDecisionProvenance;
+    ScreeningPromotionDeniedResponse: import("./screening.ts").ScreeningPromotionDeniedResponse;
+    ScreeningPromotionHoldResponse: import("./screening.ts").ScreeningPromotionHoldResponse;
+    ScreeningPromotionPolicyResponse: import("./screening.ts").ScreeningPromotionPolicyResponse;
     ScreeningOutcome: ScreeningOutcome;
     ScreeningProviderStatus: ScreeningProviderStatus;
     ScreeningPublicationAction: ScreeningPublicationAction;
     ScreeningPublicAction: ScreeningPublicAction;
     ScreeningPublicNotice: ScreeningPublicNotice;
     ScreeningReviewState: ScreeningReviewState;
+    ScreeningSchemaDocument: import("./screening.ts").ScreeningSchemaDocument;
   })[];
   return [
     "// Generated from src/screening.ts by `bun run generate`. Do not edit.",

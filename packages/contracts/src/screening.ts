@@ -79,9 +79,7 @@ export const ScreeningPromotionHoldResponseSchema = z
     appeal: z.literal(SCREENING_APPEAL_CODE),
   })
   .strict();
-export type ScreeningPromotionHoldResponse = z.infer<
-  typeof ScreeningPromotionHoldResponseSchema
->;
+export type ScreeningPromotionHoldResponse = z.infer<typeof ScreeningPromotionHoldResponseSchema>;
 
 /** A hard-policy refusal has the same intentionally starved public shape. */
 export const ScreeningPromotionDeniedResponseSchema = z

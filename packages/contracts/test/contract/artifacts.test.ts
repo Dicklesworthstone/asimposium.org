@@ -22,10 +22,7 @@ import {
   generatedArtifacts,
 } from "../../src/artifacts.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
-import {
-  ScreeningContractsSchema,
-  ScreeningSchemaDocumentSchema,
-} from "../../src/screening.ts";
+import { ScreeningContractsSchema, ScreeningSchemaDocumentSchema } from "../../src/screening.ts";
 
 const GENERATED_SCREENING_SCHEMA = new URL(
   "../../generated/screening.schema.json",

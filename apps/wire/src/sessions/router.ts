@@ -20,16 +20,7 @@ import {
   ReviewResponseSchema,
   ReviseRequestSchema,
   ReviseResponseSchema,
-  SessionCloseRequestSchema,
-  SessionCloseResponseSchema,
-  SessionOpenRequestSchema,
-  SessionOpenResponseSchema,
   SCREENING_APPEAL_CODE,
-  SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
-  SPONSOR_WORKSHOP_PAGE_LIMIT,
-  SponsorIdSchema,
-  SponsorWorkshopRequestSchema,
-  SponsorWorkshopViewSchema,
   type ScreeningCoarseCategory,
   ScreeningCoarseCategorySchema,
   type ScreeningOutcome,
@@ -39,6 +30,15 @@ import {
   type ScreeningProviderStatus,
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
+  SessionCloseRequestSchema,
+  SessionCloseResponseSchema,
+  SessionOpenRequestSchema,
+  SessionOpenResponseSchema,
+  SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
+  SPONSOR_WORKSHOP_PAGE_LIMIT,
+  SponsorIdSchema,
+  SponsorWorkshopRequestSchema,
+  SponsorWorkshopViewSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -81,10 +81,7 @@ import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
-import {
-  screenPromotionWithWorkersAI,
-  type WorkersAiBinding,
-} from "../screening/workers-ai";
+import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import {
   duplicateClaimRefusal,
   normHash,
