@@ -4839,10 +4839,30 @@ describe("anti-vacuity: the blocked exit is load-bearing", () => {
       // If the suite still passed against a script whose `exit "$EX_CONFIG"`
       // was removed, the exit-78 assertion would be decoration.
       const source = read(SCRIPT);
+      // Defense-in-depth reality: the no-configuration path terminates with
+      // EX_CONFIG at MULTIPLE guards (repository-root init, named inputs,
+      // origin/revision/evidence-dir validation). Removing one exit just
+      // moves the termination to the next guard, which is exactly what the
+      // defense is for. The anti-vacuity mutation therefore removes EVERY
+      // EX_CONFIG termination (both block forms) and requires the mutant to
+      // terminate some other way: if the boundary still sees 78 from a
+      // mutant, some guard was missed and the boundary IS decoration.
       const marker = '    CLEANED_UP=1\n    exit "$EX_CONFIG"\n  fi';
+      const oneLiner = 'CLEANED_UP=1; exit "$EX_CONFIG"';
       expect(source).toContain(marker);
-      const mutant = source.replace(marker, "    CLEANED_UP=1\n  fi");
+      expect(source).toContain(oneLiner);
+      // Reroute (not delete) every EX_CONFIG termination: a mutant whose
+      // vocabulary cannot produce 78 anywhere proves the boundary below is
+      // load-bearing; any surviving 78 path means a guard was missed.
+      const mutant = source
+        .split(marker)
+        .join('    CLEANED_UP=1\n    exit "$EX_FAIL"\n  fi')
+        .split(oneLiner)
+        .join('CLEANED_UP=1; exit "$EX_FAIL"')
+        .split('exit "$EX_CONFIG"')
+        .join('exit "$EX_FAIL"');
       expect(mutant).not.toBe(source);
+      expect(mutant).not.toContain('exit "$EX_CONFIG"');
 
       const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-mutant-"));
       const mutantPath = join(dir, "mutant.sh");
