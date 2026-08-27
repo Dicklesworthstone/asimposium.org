@@ -211,6 +211,10 @@ export class KraterSequenceExhaustedError extends Error {
   readonly code = "KRATER_SEQUENCE_EXHAUSTED";
 }
 
+export class KraterLedgerPreconditionError extends Error {
+  readonly code = "KRATER_LEDGER_PRECONDITION_FAILED";
+}
+
 interface IdempotencyRow {
   request_digest: string;
   event_id: string | null;
@@ -1727,11 +1731,12 @@ export async function writeClaim(
         ...companionStatements,
       ]);
     } catch (error) {
-      const latestHead = await readProblemHead(db, input.problemId);
-      if (
-        retryCount < MAX_CHAIN_RETRIES &&
-        (isRetryableChainConflict(error) || latestHead.chain_digest !== before.chain_digest)
-      ) {
+      // The atomic replay companion deliberately aborts a same-caller-key
+      // loser after another request has won ownership. Its head will differ,
+      // but retrying can never make that loser own the replay row. True event
+      // chain races surface one of the explicit retryable SQLite/trigger
+      // errors; only those should consume the bounded retry budget here.
+      if (retryCount < MAX_CHAIN_RETRIES && isRetryableChainConflict(error)) {
         retryCount += 1;
         continue;
       }
@@ -2307,6 +2312,323 @@ export async function writeClaimRevision(
       retryCount,
     };
   }
+  throw new Error("Krater chain retry budget exhausted.");
+}
+
+/**
+ * One event-sourced transaction for ledger object kinds whose projection row
+ * is supplied by the route. The event, content, object projection, checkpoint,
+ * idempotency settlement, and sealed response companion share one D1 batch.
+ *
+ * `preconditionSql` is internal SQL (never request text) appended to both the
+ * sequence election and event insertion. It lets a guarded transition such as
+ * hypothesis kill admit only an open route. Projection statements execute
+ * after the immutable event exists and must bind that event id; any constraint
+ * failure rolls the complete batch back.
+ */
+export interface KraterLedgerEventInput {
+  readonly problemId: string;
+  readonly eventId: string;
+  readonly idempotencyKey: string;
+  readonly requestDigest: string;
+  readonly eventType: string;
+  readonly objectKind: string;
+  readonly objectId: string;
+  readonly objectVersion: number;
+  readonly payloadJson: string;
+  readonly createdAt: string;
+  readonly attribution: {
+    readonly fellowId: string;
+    readonly sponsorId: string;
+    readonly sessionId: string;
+    readonly modelSelfDeclared: string;
+    readonly harness: string;
+    readonly credentialId?: string;
+  };
+}
+
+export interface KraterLedgerProjectionPlan {
+  readonly preconditionSql?: string;
+  readonly preconditionBindings?: readonly unknown[];
+  readonly statementsAfterEvent: (settlement: {
+    readonly sequence: number;
+    readonly eventId: string;
+    readonly objectId: string;
+    readonly payloadSha256: string;
+  }) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[];
+}
+
+export async function writeLedgerEvent(
+  db: D1Database,
+  input: KraterLedgerEventInput,
+  projection: KraterLedgerProjectionPlan,
+  _hooks: KraterWriteHooks = {},
+  companion?: KraterAtomicCompanion,
+): Promise<KraterWriteResult> {
+  const writeStartedAt = performance.now();
+  const serverNowMs = Date.now();
+  requireIdentifier("problemId", input.problemId);
+  requireIdentifier("eventId", input.eventId);
+  requireIdentifier("idempotencyKey", input.idempotencyKey);
+  requireIdentifier("eventType", input.eventType);
+  requireIdentifier("objectKind", input.objectKind);
+  requireIdentifier("objectId", input.objectId);
+  requireIdentifier("attribution.fellowId", input.attribution.fellowId);
+  requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
+  requireIdentifier("attribution.sessionId", input.attribution.sessionId);
+  if (
+    !Number.isSafeInteger(input.objectVersion) ||
+    input.objectVersion < 1 ||
+    !/^[0-9a-f]{64}$/.test(input.requestDigest)
+  ) {
+    inputError("ledger object version and request digest must be exact bounded values.");
+  }
+  if (
+    input.payloadJson.length === 0 ||
+    new TextEncoder().encode(input.payloadJson).byteLength > 512 * 1024
+  ) {
+    inputError("ledger payload JSON must be non-empty and within the ingress byte limit.");
+  }
+  try {
+    JSON.parse(input.payloadJson);
+  } catch {
+    inputError("ledger payload must be valid JSON.");
+  }
+  validateKraterIngressTimestamp(input.createdAt, serverNowMs);
+  const preconditionSql = projection.preconditionSql ?? "";
+  if (preconditionSql !== "" && !/^\s+AND\s+/u.test(preconditionSql)) {
+    inputError("ledger precondition SQL must be an appended AND predicate.");
+  }
+  const preconditionBindings = projection.preconditionBindings ?? [];
+  const preflight = await backfillKraterIntegrity(
+    db,
+    input.problemId,
+    input.createdAt,
+    serverNowMs,
+  );
+  const writePhaseStartedAt = performance.now();
+  let retryCount = 0;
+
+  while (retryCount <= MAX_CHAIN_RETRIES) {
+    const before = await readProblemHead(db, input.problemId);
+    if (
+      !Number.isSafeInteger(before.public_seq) ||
+      before.public_seq < 0 ||
+      before.public_seq >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new KraterSequenceExhaustedError(
+        "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+      );
+    }
+    const candidateSeq = before.public_seq + 1;
+    const payloadSha256 = await sha256Hex(input.payloadJson);
+    const nextRowDigest = await eventEnvelopeRowDigest({
+      eventId: input.eventId,
+      problemId: input.problemId,
+      seq: candidateSeq,
+      type: input.eventType,
+      objectKind: input.objectKind,
+      objectId: input.objectId,
+      objectVersion: input.objectVersion,
+      payloadSha256,
+      createdAt: input.createdAt,
+      actorFellowId: input.attribution.fellowId,
+      actorSponsorId: input.attribution.sponsorId,
+      actorSessionId: input.attribution.sessionId,
+      modelStringSelfDeclared: input.attribution.modelSelfDeclared,
+      harness: input.attribution.harness,
+      writerCredentialId: input.attribution.credentialId ?? null,
+    });
+    const nextChainDigest = await eventChainDigest(
+      input.problemId,
+      candidateSeq,
+      payloadSha256,
+      nextRowDigest,
+      before.chain_digest,
+    );
+    const nextCheckpointDigest = await checkpointDigest(
+      input.problemId,
+      candidateSeq,
+      nextChainDigest,
+    );
+
+    let results: D1Result<SequenceRow>[];
+    try {
+      results = await db.batch<SequenceRow>([
+        statement(
+          db,
+          `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
+           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+           ON CONFLICT(problem_id, idempotency_key) DO NOTHING`,
+          input.problemId,
+          input.idempotencyKey,
+          input.requestDigest,
+          input.createdAt,
+          input.problemId,
+        ),
+        statement(
+          db,
+          `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
+           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2
+             AND EXISTS (
+               SELECT 1 FROM idempotency
+               WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
+                 AND event_id IS NULL
+             )${preconditionSql}
+           RETURNING public_seq`,
+          nextChainDigest,
+          input.createdAt,
+          input.problemId,
+          before.public_seq,
+          before.chain_digest,
+          input.problemId,
+          input.idempotencyKey,
+          input.requestDigest,
+          ...preconditionBindings,
+        ),
+        statement(
+          db,
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+              row_digest, chain_digest, created_at,
+              actor_fellow_id, actor_sponsor_id, actor_session_id,
+              model_string_self_declared, harness, writer_credential_id)
+           SELECT ?, p.id, p.public_seq, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+             AND i.request_digest = ?
+           WHERE p.id = ? AND i.event_id IS NULL
+             AND p.public_seq = ? AND p.chain_digest = ?${preconditionSql}`,
+          input.eventId,
+          input.eventType,
+          input.objectKind,
+          input.objectId,
+          input.objectVersion,
+          payloadSha256,
+          nextRowDigest,
+          nextChainDigest,
+          input.createdAt,
+          input.attribution.fellowId,
+          input.attribution.sponsorId,
+          input.attribution.sessionId,
+          input.attribution.modelSelfDeclared,
+          input.attribution.harness,
+          input.attribution.credentialId ?? null,
+          input.idempotencyKey,
+          input.requestDigest,
+          input.problemId,
+          candidateSeq,
+          nextChainDigest,
+          ...preconditionBindings,
+        ),
+        statement(
+          db,
+          `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+           SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+          input.eventId,
+          payloadSha256,
+          input.payloadJson,
+          input.eventId,
+        ),
+        ...(await projection.statementsAfterEvent({
+          sequence: candidateSeq,
+          eventId: input.eventId,
+          objectId: input.objectId,
+          payloadSha256,
+        })),
+        statement(
+          db,
+          `INSERT INTO integrity_checkpoints
+             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
+              checkpoint_version, checkpoint_mode, created_at)
+           SELECT e.problem_id, e.seq, ?, ?, 1, 'unsigned-v0', ?
+           FROM events e WHERE e.id = ?`,
+          nextChainDigest,
+          nextCheckpointDigest,
+          input.createdAt,
+          input.eventId,
+        ),
+        statement(
+          db,
+          `UPDATE idempotency SET event_id = ?, event_seq = ?
+           WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
+             AND event_id IS NULL
+             AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+          input.eventId,
+          candidateSeq,
+          input.problemId,
+          input.idempotencyKey,
+          input.requestDigest,
+          input.eventId,
+        ),
+        ...((await companion?.statementsAfterIdempotencySettlement({
+          sequence: candidateSeq,
+          claimId: input.objectId,
+          eventId: input.eventId,
+        })) ?? []),
+        // A failed guarded transition must not retain an unresolved key. A
+        // concurrent/same-key winner has event_id set and is never touched.
+        statement(
+          db,
+          `DELETE FROM idempotency
+           WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
+             AND event_id IS NULL`,
+          input.problemId,
+          input.idempotencyKey,
+          input.requestDigest,
+        ),
+      ]);
+    } catch (error) {
+      if (retryCount < MAX_CHAIN_RETRIES && isRetryableChainConflict(error)) {
+        retryCount += 1;
+        continue;
+      }
+      throw error;
+    }
+
+    const settled = await statement(
+      db,
+      `SELECT request_digest, event_id, event_seq
+       FROM idempotency WHERE problem_id = ? AND idempotency_key = ?`,
+      input.problemId,
+      input.idempotencyKey,
+    ).first<IdempotencyRow>();
+    if (settled === null) {
+      throw new KraterLedgerPreconditionError("the guarded ledger transition no longer applies.");
+    }
+    if (settled.request_digest !== input.requestDigest) {
+      throw new KraterIdempotencyConflictError("the idempotency key names another request.");
+    }
+    if (settled.event_id === null || settled.event_seq === null) {
+      throw new Error("Krater ledger write did not settle an event envelope.");
+    }
+    const event = await readEventById(db, settled.event_id);
+    const checkpoint = await readCheckpointByEvent(db, event);
+    const after = await readProblemHead(db, input.problemId);
+    return {
+      eventId: event.id,
+      claimId: event.object_id,
+      seq: event.seq,
+      idempotent: event.id !== input.eventId,
+      preCursor: before.public_seq,
+      postCursor: after.public_seq,
+      payloadSha256: event.payload_sha256,
+      rowDigest: event.row_digest ?? "",
+      buildDigest: "",
+      chainDigest: event.chain_digest ?? "",
+      chainVersion: KRATER_CHAIN_VERSION,
+      checkpointDigest: checkpoint.checkpoint_digest,
+      writePhaseMs: Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000,
+      successfulBatchRowsRead: metricSum(results, "rows_read"),
+      successfulBatchRowsWritten: metricSum(results, "rows_written"),
+      successfulBatchSqlMs: sqlDuration(results),
+      preflight,
+      writeClaimWallMs: Math.round((performance.now() - writeStartedAt) * 1_000) / 1_000,
+      lockWaitMs: null,
+      retryCount,
+    };
+  }
+
   throw new Error("Krater chain retry budget exhausted.");
 }
 

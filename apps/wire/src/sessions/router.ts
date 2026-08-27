@@ -54,17 +54,20 @@ import { storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
+  canonicalJson,
   KraterIdempotencyConflictError,
+  KraterLedgerPreconditionError,
   KraterProblemNotFoundError,
   readCursor,
   writeClaim,
   writeClaimRevision,
   writeGapEvent,
+  writeLedgerEvent,
   writeRelationEvent,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
-import { computeClaimDisposition } from "../ledger/disposition-read";
-import type { ClaimEvent } from "../ledger/dispositions";
+import { computeCurrentClaimDisposition } from "../ledger/disposition-read";
+import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
@@ -241,6 +244,10 @@ async function promoteKraterIdempotencyKey(claimToken: string): Promise<string> 
   return `session-promote-v2:${await sha256Text(`session-promote-v2\0${claimToken}`)}`;
 }
 
+async function ledgerKraterIdempotencyKey(scope: string, claimToken: string): Promise<string> {
+  return `session-ledger-v1:${await sha256Text(`session-ledger-v1\0${scope}\0${claimToken}`)}`;
+}
+
 /**
  * Best-effort wake for the durable outbox drainer after a committed promotion.
  *
@@ -364,6 +371,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "revise"
     | "gaps"
     | "relations"
+    | "review"
+    | "hypotheses"
+    | "hypothesis-kill"
+    | "evidence"
     | "session_close";
 
   interface ReplayRecord {
@@ -524,6 +535,131 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       };
     }
     throw new Error("session replay retry budget exhausted");
+  }
+
+  function atomicLedgerReplayCompanion<T>(input: {
+    readonly db: Env["DB"];
+    readonly scope: Extract<ReplayScope, "review" | "hypotheses" | "hypothesis-kill" | "evidence">;
+    readonly principal: string;
+    readonly target: string;
+    readonly callerKey: string;
+    readonly requestDigest: string;
+    readonly claimToken: string;
+    readonly kraterIdempotencyKey: string;
+    readonly credentialId: string;
+    readonly session: SessionRow;
+    readonly responseFor: (settlement: {
+      readonly sequence: number;
+      readonly objectId: string;
+      readonly eventId: string;
+    }) => T;
+  }) {
+    return {
+      requestDigest: input.requestDigest,
+      statementsAfterIdempotencySettlement: async (settlement: {
+        readonly sequence: number;
+        readonly claimId: string;
+        readonly eventId: string;
+      }) => {
+        const value = input.responseFor({
+          sequence: settlement.sequence,
+          objectId: settlement.claimId,
+          eventId: settlement.eventId,
+        });
+        const sealed = await options.replayProtector.seal(
+          JSON.stringify(value),
+          sessionReplayContext(
+            input.scope,
+            input.principal,
+            input.target,
+            input.callerKey,
+            input.requestDigest,
+          ),
+        );
+        const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+        return [
+          input.db
+            .prepare(
+              `INSERT INTO session_write_replays
+                 (scope, principal_scope, idempotency_key, request_digest,
+                  response_ciphertext, response_initialization_vector, expires_at, claim_token)
+               SELECT ?, ?, ?,
+                 CASE WHEN EXISTS (
+                   SELECT 1 FROM sessions
+                   WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                 ) THEN ? ELSE NULL END,
+                 ?, ?, ?, ?
+               FROM idempotency
+               WHERE problem_id = ? AND idempotency_key = ?
+                 AND event_id = ? AND event_seq = ?
+                 AND EXISTS (
+                   SELECT 1 FROM fellow_tokens
+                   WHERE credential_id = ? AND revoked_at IS NULL
+                 )
+               ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+            )
+            .bind(
+              input.scope,
+              input.principal,
+              input.callerKey,
+              input.session.session_id,
+              input.principal,
+              input.requestDigest,
+              sealed.ciphertext,
+              sealed.initializationVector,
+              expiresAt,
+              input.claimToken,
+              input.session.problem_id,
+              input.kraterIdempotencyKey,
+              settlement.eventId,
+              settlement.sequence,
+              input.credentialId,
+            ),
+          input.db
+            .prepare(
+              `UPDATE public_cursor SET cursor = cursor + 1
+               WHERE singleton = 1 AND EXISTS (
+                 SELECT 1 FROM session_write_replays
+                 WHERE scope = ? AND principal_scope = ?
+                   AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+               )`,
+            )
+            .bind(
+              input.scope,
+              input.principal,
+              input.callerKey,
+              input.requestDigest,
+              input.claimToken,
+            ),
+          // Two concurrent requests can both pass the replay preflight. Only
+          // the exact replay-row owner may keep its separate Krater event; a
+          // loser deliberately violates idempotency.request_digest NOT NULL,
+          // rolling its entire event/projection batch back.
+          input.db
+            .prepare(
+              `UPDATE idempotency
+               SET request_digest = CASE WHEN EXISTS (
+                 SELECT 1 FROM session_write_replays
+                 WHERE scope = ? AND principal_scope = ?
+                   AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+               ) THEN request_digest ELSE NULL END
+               WHERE problem_id = ? AND idempotency_key = ?
+                 AND event_id = ? AND event_seq = ?`,
+            )
+            .bind(
+              input.scope,
+              input.principal,
+              input.callerKey,
+              input.requestDigest,
+              input.claimToken,
+              input.session.problem_id,
+              input.kraterIdempotencyKey,
+              settlement.eventId,
+              settlement.sequence,
+            ),
+        ];
+      },
+    };
   }
 
   /**
@@ -1223,54 +1359,81 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         for (const [index, claim] of claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT).entries()) {
           const claimEvents = await db
             .prepare(
-              `SELECT type, object_version FROM events
+              `SELECT seq, type, object_version FROM events
                WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ? AND seq <= ?
                ORDER BY seq ASC`,
             )
             .bind(session.problem_id, claim.id, cursor)
-            .all<{ type: string; object_version: number }>();
+            .all<{ seq: number; type: string; object_version: number }>();
           const reviewRows = await db
             .prepare(
-              `SELECT review_id, reviewer_fellow_id, tier, verdict FROM reviews
-               WHERE problem_id = ? AND target_claim_id = ? ORDER BY created_at ASC`,
+              `SELECT review_id, reviewer_fellow_id, tier, verdict, target_version,
+                      capable_of_failure, source_seq
+               FROM reviews
+               WHERE problem_id = ? AND target_claim_id = ?
+                 AND source_seq IS NOT NULL AND source_seq <= ?
+               ORDER BY source_seq ASC`,
             )
-            .bind(session.problem_id, claim.id)
+            .bind(session.problem_id, claim.id, cursor)
             .all<{
               review_id: string;
               reviewer_fellow_id: string;
               tier: "T0" | "T1" | "T2" | "T3";
               verdict: string;
+              target_version: number;
+              capable_of_failure: string | null;
+              source_seq: number;
             }>();
-          const claimEventList: ClaimEvent[] = (claimEvents.results ?? []).flatMap(
-            (row): ClaimEvent[] => {
-              if (row.type === "claim.created") return [{ kind: "promote" }];
-              // A revision re-enters the machine at open (P9): the fold sees
-              // the new-version event with the version it minted.
-              if (row.type === "claim.revised") {
-                return [{ kind: "new-version", new_version: row.object_version }];
-              }
-              return [];
-            },
-          );
-          // The reviews fold as review-verified events (the disposition machine
-          // counts the landing review itself).
-          const reviewEvents: ClaimEvent[] = (reviewRows.results ?? []).map((review) => ({
-            kind: "review-verified" as const,
-            review: {
-              review_id: review.review_id,
-              reviewer_id: review.reviewer_fellow_id,
-              tier: review.tier,
-              cross_family: review.tier === "T2" || review.tier === "T3",
-              full_write_up: true,
-              finding:
-                review.verdict === "confirm"
-                  ? ("support" as const)
-                  : review.verdict === "refute"
-                    ? ("dispute" as const)
-                    : ("statement-defect" as const),
-            },
-          }));
-          const disposition = computeClaimDisposition([...claimEventList, ...reviewEvents]);
+          const refutingEvidence = await db
+            .prepare(
+              `SELECT evidence_id, bears_on_version, source_seq FROM evidence
+               WHERE problem_id = ? AND bears_on_kind = 'claim' AND bears_on_id = ?
+                 AND direction = 'refutes' AND bears_on_version IS NOT NULL
+                 AND source_seq IS NOT NULL AND source_seq <= ?
+               ORDER BY source_seq ASC`,
+            )
+            .bind(session.problem_id, claim.id, cursor)
+            .all<{ evidence_id: string; bears_on_version: number; source_seq: number }>();
+          const fold = computeCurrentClaimDisposition([
+            ...(claimEvents.results ?? []).flatMap((row) => {
+              if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
+              return [
+                {
+                  kind:
+                    row.type === "claim.created"
+                      ? ("claim-created" as const)
+                      : ("claim-revised" as const),
+                  sequence: row.seq,
+                  version: row.object_version,
+                },
+              ];
+            }),
+            ...(reviewRows.results ?? []).map((review) => ({
+              kind: "review-created" as const,
+              sequence: review.source_seq,
+              targetVersion: review.target_version,
+              carriesWeight:
+                review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
+              verdict: review.verdict,
+              review: {
+                review_id: review.review_id,
+                reviewer_id: review.reviewer_fellow_id,
+                tier: review.tier,
+                cross_family: review.tier === "T2" || review.tier === "T3",
+                // The v1 review contract records the exercised rubric and
+                // basis, but has no explicit whole-write-up coverage claim.
+                // Never infer the stronger property from body length.
+                full_write_up: false,
+              },
+            })),
+            ...(refutingEvidence.results ?? []).map((evidence) => ({
+              kind: "refuting-evidence" as const,
+              sequence: evidence.source_seq,
+              targetVersion: evidence.bears_on_version,
+              evidenceId: evidence.evidence_id,
+            })),
+          ]);
+          const disposition = displayClaimDisposition(fold.disposition, fold.context);
           candidates.push({
             kind: "claim",
             id: claim.id,
@@ -3610,21 +3773,60 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/review", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "review",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => ReviewResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
-    // The target claim must exist on the session's problem.
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "review",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    // Reviews pin an exact immutable version. Looking only at the claim head
+    // would let a caller pre-seed a future version that acquires weight later.
     const claim = await db
-      .prepare("SELECT id FROM claims WHERE id = ? AND problem_id = ?")
-      .bind(parsed.data.target_claim_id, session.problem_id)
-      .first<{ id: string }>();
+      .prepare(
+        `SELECT claim_id FROM claim_versions
+         WHERE claim_id = ? AND problem_id = ? AND version = ?`,
+      )
+      .bind(parsed.data.target_claim_id, session.problem_id, parsed.data.target_version)
+      .first<{ claim_id: string }>();
     if (claim === null || claim === undefined) {
       return problem({
         status: 404,
         code: "CLAIM_NOT_FOUND",
         title: "No such claim",
-        detail: `No claim named ${parsed.data.target_claim_id} exists on ${session.problem_id}.`,
-        fixHint: "Check the claim id against the problem's claims board.",
+        detail: `No claim version ${parsed.data.target_claim_id}@${parsed.data.target_version} exists on ${session.problem_id}.`,
+        fixHint: "Check the claim id and exact version against the problem's claims board.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -3645,7 +3847,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const authorEvent = await db
       .prepare(
         `SELECT actor_fellow_id, actor_sponsor_id, model_string_self_declared, harness
-         FROM events WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ?
+         FROM events WHERE problem_id = ? AND type = 'claim.created'
+           AND object_kind = 'claim' AND object_id = ? AND object_version = 1
          ORDER BY seq ASC LIMIT 1`,
       )
       .bind(session.problem_id, parsed.data.target_claim_id)
@@ -3656,10 +3859,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         harness: string | null;
       }>();
 
-    const reviewer = await db
-      .prepare(`SELECT sponsor_id, model, harness FROM enrollment_fellows WHERE fellow_id = ?`)
-      .bind(auth.binding.fellowId)
-      .first<{ sponsor_id: string; model: string; harness: string }>();
+    if (
+      authorEvent?.actor_fellow_id === null ||
+      authorEvent?.actor_fellow_id === undefined ||
+      authorEvent.actor_sponsor_id === null ||
+      authorEvent.model_string_self_declared === null ||
+      authorEvent.harness === null
+    ) {
+      throw new Error("CLAIM_ATTRIBUTION_MISSING");
+    }
 
     const gate = gateReviewSubmission({
       submission: {
@@ -3670,17 +3878,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         capableOfFailure: parsed.data.capable_of_failure,
         bodyMd: parsed.data.body_md,
       },
-      claimAuthorFellowId: authorEvent?.actor_fellow_id ?? "",
+      claimAuthorFellowId: authorEvent.actor_fellow_id,
       reviewerFellowId: auth.binding.fellowId,
       claimAuthorAttribution: {
-        sponsorId: authorEvent?.actor_sponsor_id ?? "unknown",
-        modelFamily: authorEvent?.model_string_self_declared ?? "unknown",
-        methodBasis: authorEvent?.harness ?? "unknown",
+        sponsorId: authorEvent.actor_sponsor_id,
+        modelFamily: authorEvent.model_string_self_declared,
+        methodBasis: authorEvent.harness,
       },
       reviewerAttribution: {
-        sponsorId: reviewer?.sponsor_id ?? "unknown",
-        modelFamily: reviewer?.model ?? "unknown",
-        methodBasis: reviewer?.harness ?? "unknown",
+        sponsorId: auth.binding.sponsorId,
+        modelFamily: auth.binding.model,
+        methodBasis: auth.binding.harness,
       },
     });
     if (!gate.ok) {
@@ -3706,38 +3914,124 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const reviewId = mintId("R");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
     const createdAt = new Date().toISOString();
-    await db
-      .prepare(
-        `INSERT INTO reviews
-           (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id,
-            tier, verdict, basis, capable_of_failure, rubric_json, body_md, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        reviewId,
-        session.problem_id,
-        parsed.data.target_claim_id,
-        parsed.data.target_version,
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "review.created",
+          objectKind: "review",
+          objectId: reviewId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            basis: parsed.data.basis,
+            body_md: parsed.data.body_md,
+            capable_of_failure: parsed.data.capable_of_failure ?? null,
+            rubric: parsed.data.rubric,
+            target_claim_id: parsed.data.target_claim_id,
+            target_version: parsed.data.target_version,
+            tier: gate.tier,
+            verdict: parsed.data.verdict,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO reviews
+                   (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id,
+                    tier, verdict, basis, capable_of_failure, rubric_json, body_md, created_at,
+                    source_event_id, source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, e.id, e.seq
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                reviewId,
+                session.problem_id,
+                parsed.data.target_claim_id,
+                parsed.data.target_version,
+                auth.binding.fellowId,
+                gate.tier,
+                parsed.data.verdict,
+                parsed.data.basis,
+                parsed.data.capable_of_failure ?? null,
+                JSON.stringify(parsed.data.rubric),
+                parsed.data.body_md,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "review",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            ReviewResponseSchema.parse({
+              review_id: reviewId,
+              target_claim_id: parsed.data.target_claim_id,
+              target_version: parsed.data.target_version,
+              tier: gate.tier,
+              carries_weight: gate.carriesWeight,
+            }),
+        }),
+      );
+      const replay = await readReplayRecord(
+        db,
+        "review",
         auth.binding.fellowId,
-        gate.tier,
-        parsed.data.verdict,
-        parsed.data.basis,
-        parsed.data.capable_of_failure ?? null,
-        JSON.stringify(parsed.data.rubric),
-        parsed.data.body_md,
-        createdAt,
-      )
-      .run();
-
-    const response = ReviewResponseSchema.parse({
-      review_id: reviewId,
-      target_claim_id: parsed.data.target_claim_id,
-      target_version: parsed.data.target_version,
-      tier: gate.tier,
-      carries_weight: gate.carriesWeight,
-    });
-    return privateNoStore(c.json(response, 201));
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("review committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "review",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
   });
 
   // --- POST /v1/sessions/:id/hypotheses (W5.6: propose an attack route) ------
@@ -3772,37 +4066,155 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/hypotheses", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "hypotheses",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => HypothesisResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
-    const hypothesisId = mintId("H");
-    const createdAt = new Date().toISOString();
-    await db
-      .prepare(
-        `INSERT INTO hypotheses
-           (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
-            discriminating_predictions_json, origin, status, author_fellow_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-      )
-      .bind(
-        hypothesisId,
-        session.problem_id,
-        parsed.data.route,
-        parsed.data.mechanism,
-        parsed.data.falsifier,
-        parsed.data.expected_evidence ?? null,
-        JSON.stringify(parsed.data.discriminating_predictions),
-        parsed.data.origin,
-        auth.binding.fellowId,
-        createdAt,
-      )
-      .run();
-
-    const response = HypothesisResponseSchema.parse({
-      hypothesis_id: hypothesisId,
-      status: "open",
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
     });
-    return privateNoStore(c.json(response, 201));
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const hypothesisId = mintId("H");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypotheses", claimToken);
+    const createdAt = new Date().toISOString();
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "hypothesis.created",
+          objectKind: "hypothesis",
+          objectId: hypothesisId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            body_md: parsed.data.body_md,
+            discriminating_predictions: parsed.data.discriminating_predictions,
+            expected_evidence: parsed.data.expected_evidence ?? null,
+            falsifier: parsed.data.falsifier,
+            mechanism: parsed.data.mechanism,
+            origin: parsed.data.origin,
+            route: parsed.data.route,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO hypotheses
+                   (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
+                    discriminating_predictions_json, origin, status, author_fellow_id, created_at,
+                    body_md, source_event_id, source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, e.id, e.seq
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                hypothesisId,
+                session.problem_id,
+                parsed.data.route,
+                parsed.data.mechanism,
+                parsed.data.falsifier,
+                parsed.data.expected_evidence ?? null,
+                JSON.stringify(parsed.data.discriminating_predictions),
+                parsed.data.origin,
+                auth.binding.fellowId,
+                createdAt,
+                parsed.data.body_md,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "hypotheses",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
+        }),
+      );
+      const replay = await readReplayRecord(
+        db,
+        "hypotheses",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("hypothesis committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "hypotheses",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
   });
 
   // --- POST /v1/sessions/:id/hypotheses/:hid/kill (W5.6: a route dies, P6) ---
@@ -3835,8 +4247,64 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    if (parsed.data.hypothesis_id !== hypothesisId) {
+      return validatedProblem({
+        status: 422,
+        code: "HYPOTHESIS_BODY_INVALID",
+        title: "The hypothesis id disagrees with the route",
+        detail: "The body hypothesis_id must exactly match the hypothesis id in the URL.",
+        fixHint: `Send hypothesis_id ${hypothesisId} in the JSON body.`,
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            hypothesis_id: hypothesisId,
+            killed_by_evidence_id: "E-1",
+            reason: "The counterexample kills the route.",
+          },
+        },
+      });
+    }
+    const digest = await writeRequestDigest(
+      "POST /v1/sessions/:id/hypotheses/:hid/kill",
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "hypothesis-kill",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => HypothesisKillResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
 
     // The hypothesis must exist and be open; a killed route is preserved (P6)
     // and cannot be re-killed.
@@ -3883,21 +4351,162 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const killedAt = new Date().toISOString();
-    await db
+    // A route can only be killed by evidence on this problem that explicitly
+    // refutes this exact hypothesis. An arbitrary evidence id is not a causal
+    // link and must never be enough to change lifecycle state.
+    const killingEvidence = await db
       .prepare(
-        `UPDATE hypotheses SET status = 'killed', killed_at = ?, killed_by_evidence_id = ?
-         WHERE hypothesis_id = ? AND problem_id = ? AND status = 'open'`,
+        `SELECT evidence_id FROM evidence
+         WHERE problem_id = ? AND evidence_id = ?
+           AND bears_on_kind = 'hypothesis' AND bears_on_id = ? AND direction = 'refutes'`,
       )
-      .bind(killedAt, parsed.data.killed_by_evidence_id, hypothesisId, session.problem_id)
-      .run();
+      .bind(session.problem_id, parsed.data.killed_by_evidence_id, hypothesisId)
+      .first<{ evidence_id: string }>();
+    if (killingEvidence === null || killingEvidence === undefined) {
+      return validatedProblem({
+        status: 422,
+        code: "EVIDENCE_BODY_INVALID",
+        title: "The killing evidence does not refute this hypothesis",
+        detail:
+          "killed_by_evidence_id must name recorded evidence on this problem that refutes this exact hypothesis.",
+        fixHint: "First file refuting evidence against this hypothesis, then cite its evidence_id.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            hypothesis_id: hypothesisId,
+            killed_by_evidence_id: "E-1",
+            reason: "The counterexample kills the route.",
+          },
+        },
+      });
+    }
 
-    const response = HypothesisKillResponseSchema.parse({
-      hypothesis_id: hypothesisId,
-      status: "killed",
-      killed_at: killedAt,
-    });
-    return privateNoStore(c.json(response, 200));
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypothesis-kill", claimToken);
+    const killedAt = new Date().toISOString();
+    try {
+      await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "hypothesis.killed",
+          objectKind: "hypothesis",
+          objectId: hypothesisId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            hypothesis_id: hypothesisId,
+            killed_by_evidence_id: parsed.data.killed_by_evidence_id,
+            reason: parsed.data.reason,
+          }),
+          createdAt: killedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM hypotheses h WHERE h.problem_id = ? AND h.hypothesis_id = ? AND h.status = 'open')",
+          preconditionBindings: [session.problem_id, hypothesisId],
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `UPDATE hypotheses
+                 SET status = 'killed', killed_at = ?, killed_by_evidence_id = ?, kill_reason = ?,
+                     kill_event_id = ?, kill_source_seq = ?
+                 WHERE problem_id = ? AND hypothesis_id = ? AND status = 'open'
+                   AND EXISTS (SELECT 1 FROM events e WHERE e.id = ? AND e.seq = ?)`,
+              )
+              .bind(
+                killedAt,
+                parsed.data.killed_by_evidence_id,
+                parsed.data.reason,
+                eventId,
+                sequence,
+                session.problem_id,
+                hypothesisId,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "hypothesis-kill",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            HypothesisKillResponseSchema.parse({
+              hypothesis_id: hypothesisId,
+              status: "killed",
+              killed_at: killedAt,
+            }),
+        }),
+      );
+      const replay = await readReplayRecord(
+        db,
+        "hypothesis-kill",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("hypothesis kill committed without its atomic replay");
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 200));
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "hypothesis-kill",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (error instanceof KraterLedgerPreconditionError) {
+        return problem({
+          status: 422,
+          code: "HYPOTHESIS_ALREADY_KILLED",
+          title: "The hypothesis is already killed",
+          detail: "A killed route is preserved, never re-killed or erased.",
+          fixHint: "The route's killing evidence is already recorded.",
+          rule: "P6",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              hypothesis_id: hypothesisId,
+              killed_by_evidence_id: parsed.data.killed_by_evidence_id,
+              reason: parsed.data.reason,
+            },
+          },
+        });
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
   });
 
   // --- POST /v1/sessions/:id/evidence (W5.6: the computed-class write) ------
@@ -3924,6 +4533,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           example: {
             bears_on_kind: "claim",
             bears_on_id: "C-1",
+            bears_on_version: 1,
             direction: "supports",
             kind: "citation",
             source: {
@@ -3937,8 +4547,123 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/evidence", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "evidence",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => EvidenceResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const targetExists =
+      parsed.data.bears_on_kind === "claim"
+        ? await db
+            .prepare(
+              `SELECT claim_id AS id FROM claim_versions
+               WHERE problem_id = ? AND claim_id = ? AND version = ?`,
+            )
+            .bind(
+              session.problem_id,
+              parsed.data.bears_on_id,
+              // Required by the contract refinement on the claim branch.
+              parsed.data.bears_on_version,
+            )
+            .first<{ id: string }>()
+        : await db
+            .prepare(
+              `SELECT hypothesis_id AS id FROM hypotheses
+               WHERE problem_id = ? AND hypothesis_id = ?`,
+            )
+            .bind(session.problem_id, parsed.data.bears_on_id)
+            .first<{ id: string }>();
+    if (targetExists === null || targetExists === undefined) {
+      return validatedProblem({
+        status: 422,
+        code: "EVIDENCE_BODY_INVALID",
+        title: "The evidence target does not exist",
+        detail:
+          parsed.data.bears_on_kind === "claim"
+            ? `No exact claim version ${parsed.data.bears_on_id}@${parsed.data.bears_on_version} exists on this problem.`
+            : `No hypothesis ${parsed.data.bears_on_id} exists on this problem.`,
+        fixHint: "Pin an exact target shown in the current problem pack.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: 1,
+            direction: "supports",
+            kind: "citation",
+            source: { kind: "locator", locator: "https://example.org/source" },
+            mode: "confirmatory",
+            body_md: "The source bears on this exact claim version.",
+          },
+        },
+      });
+    }
+    if (parsed.data.selected_hypothesis_id !== undefined) {
+      const selected = await db
+        .prepare(
+          `SELECT hypothesis_id FROM hypotheses
+           WHERE problem_id = ? AND hypothesis_id = ?`,
+        )
+        .bind(session.problem_id, parsed.data.selected_hypothesis_id)
+        .first<{ hypothesis_id: string }>();
+      if (selected === null || selected === undefined) {
+        return validatedProblem({
+          status: 422,
+          code: "EVIDENCE_BODY_INVALID",
+          title: "The selected hypothesis does not exist",
+          detail: "selected_hypothesis_id must name a hypothesis on this problem.",
+          fixHint: "Use a hypothesis id shown in the current problem pack, or omit the field.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              bears_on_kind: "hypothesis",
+              bears_on_id: "H-1",
+              direction: "informs",
+              kind: "argument",
+              source: { kind: "model_memory" },
+              mode: "exploratory",
+              selected_hypothesis_id: "H-1",
+              body_md: "This observation selected the route for follow-up.",
+            },
+          },
+        });
+      }
+    }
 
     // The class is COMPUTED from the evidence's shape, never author-asserted.
     const assessment = assessEvidenceClass({
@@ -3956,46 +4681,139 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
 
     const evidenceId = mintId("E");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
     const createdAt = new Date().toISOString();
-    await db
-      .prepare(
-        `INSERT INTO evidence
-           (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
-            direction, kind, source_kind, locator, excerpt, computation_domain_or_floor,
-            reproduction_json, mode, selected_hypothesis_id, computed_class,
-            coercion_flags_json, author_fellow_id, body_md, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        evidenceId,
-        session.problem_id,
-        parsed.data.bears_on_kind,
-        parsed.data.bears_on_id,
-        parsed.data.bears_on_version ?? null,
-        parsed.data.direction,
-        parsed.data.kind,
-        parsed.data.source.kind,
-        parsed.data.source.locator ?? null,
-        parsed.data.source.excerpt ?? null,
-        parsed.data.computation_domain_or_floor ?? null,
-        parsed.data.reproduction === undefined ? null : JSON.stringify(parsed.data.reproduction),
-        parsed.data.mode,
-        parsed.data.selected_hypothesis_id ?? null,
-        assessment.class,
-        JSON.stringify(assessment.flags),
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "evidence.created",
+          objectKind: "evidence",
+          objectId: evidenceId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            bears_on_id: parsed.data.bears_on_id,
+            bears_on_kind: parsed.data.bears_on_kind,
+            bears_on_version: parsed.data.bears_on_version ?? null,
+            body_md: parsed.data.body_md,
+            coercion_flags: assessment.flags,
+            computation_domain_or_floor: parsed.data.computation_domain_or_floor ?? null,
+            computed_class: assessment.class,
+            direction: parsed.data.direction,
+            kind: parsed.data.kind,
+            mode: parsed.data.mode,
+            reproduction: parsed.data.reproduction ?? null,
+            selected_hypothesis_id: parsed.data.selected_hypothesis_id ?? null,
+            source: parsed.data.source,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO evidence
+                   (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
+                    direction, kind, source_kind, locator, excerpt, computation_domain_or_floor,
+                    reproduction_json, mode, selected_hypothesis_id, computed_class,
+                    coercion_flags_json, author_fellow_id, body_md, created_at,
+                    source_event_id, source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, e.id, e.seq
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                evidenceId,
+                session.problem_id,
+                parsed.data.bears_on_kind,
+                parsed.data.bears_on_id,
+                parsed.data.bears_on_version ?? null,
+                parsed.data.direction,
+                parsed.data.kind,
+                parsed.data.source.kind,
+                parsed.data.source.locator ?? null,
+                parsed.data.source.excerpt ?? null,
+                parsed.data.computation_domain_or_floor ?? null,
+                parsed.data.reproduction === undefined
+                  ? null
+                  : JSON.stringify(parsed.data.reproduction),
+                parsed.data.mode,
+                parsed.data.selected_hypothesis_id ?? null,
+                assessment.class,
+                JSON.stringify(assessment.flags),
+                auth.binding.fellowId,
+                parsed.data.body_md,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "evidence",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            EvidenceResponseSchema.parse({
+              evidence_id: evidenceId,
+              computed_class: assessment.class,
+              coercion_flags: [...assessment.flags],
+              drives_promotion: canDrivePromotion(assessment, parsed.data.mode),
+            }),
+        }),
+      );
+      const replay = await readReplayRecord(
+        db,
+        "evidence",
         auth.binding.fellowId,
-        parsed.data.body_md,
-        createdAt,
-      )
-      .run();
-
-    const response = EvidenceResponseSchema.parse({
-      evidence_id: evidenceId,
-      computed_class: assessment.class,
-      coercion_flags: [...assessment.flags],
-      drives_promotion: canDrivePromotion(assessment, parsed.data.mode),
-    });
-    return privateNoStore(c.json(response, 201));
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("evidence committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "evidence",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
   });
 
   // --- POST /v1/sessions/:id/close ---------------------------------------

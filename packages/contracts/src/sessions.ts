@@ -456,56 +456,70 @@ export type ReviewResponse = z.infer<typeof ReviewResponseSchema>;
 
 /** §6.7 the evidence write: a Fellow submits material bearing on a claim or
  * hypothesis. The class is COMPUTED by the server, never author-asserted. */
-export const EvidenceRequestSchema = z
-  .object({
-    bears_on_kind: z.enum(["claim", "hypothesis"]),
-    bears_on_id: z.string().min(1).max(80),
-    /** Version-pinned where the target is versioned (P9). */
-    bears_on_version: z.number().int().min(1).optional(),
-    direction: z.enum([
-      "supports",
-      "refutes",
-      "informs",
-      "bounds",
-      "reproduces",
-      "fails-to-reproduce",
-    ]),
-    kind: z.enum([
-      "citation",
-      "computation",
-      "certificate",
-      "construction",
-      "argument",
-      "negative-result",
-      "null-result",
-      "formalization-friction",
-    ]),
-    source: z
-      .object({
-        kind: z.enum(["locator", "model_memory"]),
-        locator: z.string().max(500).optional(),
-        excerpt: z.string().max(1000).optional(),
-      })
-      .strict(),
-    /** Computations state their domain or detection floor, else P5 coerces them. */
-    computation_domain_or_floor: z.string().max(500).optional(),
-    reproduction: z
-      .object({
-        commands: z.array(z.string().min(1).max(500)).max(16),
-        environment: z.string().max(500),
-        seed: z.string().max(120).optional(),
-      })
-      .strict()
-      .optional(),
-    mode: z.enum(["exploratory", "confirmatory"]),
-    /** Selection disclosure: this evidence selected or tuned a hypothesis. */
-    selected_hypothesis_id: z.string().min(1).max(80).optional(),
-    body_md: z
-      .string()
-      .min(1)
-      .max(64 * 1024),
-  })
-  .strict();
+const EvidenceRequestCommonFields = {
+  bears_on_id: z.string().min(1).max(80),
+  direction: z.enum([
+    "supports",
+    "refutes",
+    "informs",
+    "bounds",
+    "reproduces",
+    "fails-to-reproduce",
+  ]),
+  kind: z.enum([
+    "citation",
+    "computation",
+    "certificate",
+    "construction",
+    "argument",
+    "negative-result",
+    "null-result",
+    "formalization-friction",
+  ]),
+  source: z
+    .object({
+      kind: z.enum(["locator", "model_memory"]),
+      locator: z.string().max(500).optional(),
+      excerpt: z.string().max(1000).optional(),
+    })
+    .strict(),
+  /** Computations state their domain or detection floor, else P5 coerces them. */
+  computation_domain_or_floor: z.string().max(500).optional(),
+  reproduction: z
+    .object({
+      commands: z.array(z.string().min(1).max(500)).max(16),
+      environment: z.string().max(500),
+      seed: z.string().max(120).optional(),
+    })
+    .strict()
+    .optional(),
+  mode: z.enum(["exploratory", "confirmatory"]),
+  /** Selection disclosure: this evidence selected or tuned a hypothesis. */
+  selected_hypothesis_id: z.string().min(1).max(80).optional(),
+  body_md: z
+    .string()
+    .min(1)
+    .max(64 * 1024),
+} as const;
+
+export const EvidenceRequestSchema = z.discriminatedUnion("bears_on_kind", [
+  z
+    .object({
+      ...EvidenceRequestCommonFields,
+      bears_on_kind: z.literal("claim"),
+      /** Claims are versioned, so evidence must pin the exact head it bears on (P9). */
+      bears_on_version: z.number().int().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      ...EvidenceRequestCommonFields,
+      bears_on_kind: z.literal("hypothesis"),
+      /** Hypotheses are immutable v1 objects; accepting a version here would invent a pin. */
+      bears_on_version: z.never().optional(),
+    })
+    .strict(),
+]);
 export type EvidenceRequest = z.infer<typeof EvidenceRequestSchema>;
 
 export const EvidenceResponseSchema = z
@@ -584,7 +598,11 @@ export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema
 export const ReviseRequestSchema = z
   .object({
     claim_id: ClaimIdSchema,
-    base_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
+    base_version: z
+      .number()
+      .int()
+      .min(1)
+      .max(Number.MAX_SAFE_INTEGER - 1),
     kind: ClaimKindSchema,
     statement: z
       .string()

@@ -169,6 +169,7 @@ function ensureProblemHarness(): {
         if (sql.includes("FROM events e") && sql.includes("WHERE e.problem_id")) {
           return fakeD1Result();
         }
+        if (sql.includes("FROM integrity_checkpoints")) return fakeD1Result();
         throw new Error(`unexpected ensureProblem all query: ${sql}`);
       },
       first: async () => null,
@@ -294,7 +295,7 @@ function retryingWriteHarness(
         ) {
           return idempotency;
         }
-        if (sql.includes("FROM events WHERE id = ?")) {
+        if (sql.includes("FROM events e") && sql.includes("WHERE e.id = ?")) {
           if (normalizeSql(sql) !== EVENT_READ_SQL || bindings.length !== 1) {
             throw new Error("retry-harness event observation SQL drifted");
           }
@@ -836,16 +837,15 @@ describe("Krater deterministic contracts", () => {
     expect(wrong.persistedWrite()).toBeUndefined();
 
     const exact = retryingWriteHarness();
-    await expect(
-      writeClaim(exact.db, {
-        problemId: "P-empty-exact-genesis",
-        claimId: "C-empty-exact-genesis",
-        eventId: "E-empty-exact-genesis",
-        idempotencyKey: "IK-empty-exact-genesis",
-        statement: "The exact genesis control remains writable.",
-        createdAt: "2026-08-19T00:00:00.000Z",
-      }),
-    ).resolves.toMatchObject({ seq: 1, preflight: { upgraded_fast_path: true } });
+    const exactWrite = await writeClaim(exact.db, {
+      problemId: "P-empty-exact-genesis",
+      claimId: "C-empty-exact-genesis",
+      eventId: "E-empty-exact-genesis",
+      idempotencyKey: "IK-empty-exact-genesis",
+      statement: "The exact genesis control remains writable.",
+      createdAt: "2026-08-19T00:00:00.000Z",
+    });
+    expect(exactWrite).toMatchObject({ seq: 1, preflight: { upgraded_fast_path: true } });
   });
 
   test("PLANTED: a missing 0040 witness blocks legacy replay before any write", async () => {
@@ -997,7 +997,7 @@ describe("Krater deterministic contracts", () => {
     ).toBe(true);
   });
 
-  test("PLANTED: the retained 0001 upgrade fixture carries the current envelope projection digest", async () => {
+  test("PLANTED: the retained 0001 upgrade fixture carries its legacy envelope projection digest", async () => {
     const database = new Database(":memory:", { strict: true });
     database.run(
       readFileSync(
@@ -1013,17 +1013,18 @@ describe("Krater deterministic contracts", () => {
         "SELECT build_digest FROM claim_projections WHERE problem_id = 'P-upgrade-existing' AND claim_id = 'C-upgrade-existing-001'",
       )
       .get();
-    const expected = await eventRowDigest(
-      {
-        problemId: "P-upgrade-existing",
-        claimId: "C-upgrade-existing-001",
-        eventId: "E-upgrade-existing-001",
-        idempotencyKey: "IK-upgrade-existing-001",
-        statement: "Legacy retained claim.",
-        createdAt: "2026-08-14T00:00:00.000Z",
-      },
-      1,
-      "4478d240c1c16feba4147299312ababf59e5b21738913577e967754f8cac2050",
+    const expected = await sha256Hex(
+      canonicalJson({
+        created_at: "2026-08-14T00:00:00.000Z",
+        event_id: "E-upgrade-existing-001",
+        object_id: "C-upgrade-existing-001",
+        object_kind: "claim",
+        object_version: 1,
+        payload_sha256: "4478d240c1c16feba4147299312ababf59e5b21738913577e967754f8cac2050",
+        problem_id: "P-upgrade-existing",
+        seq: 1,
+        type: "claim.created",
+      }),
     );
 
     expect(projection).toEqual({ build_digest: expected });
@@ -1796,8 +1797,11 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
       expect(() => insertEventSidecar(eventId, otherProblemId, 1)).toThrow(
         "KRATER_CHAIN_V2_EVENT_BINDING_MISMATCH",
       );
+      // 0040's newer contiguity trigger is deliberately the first refusal for
+      // a skipped sequence. The absent-event and wrong-problem plants above
+      // independently retain exact 0039 event binding coverage.
       expect(() => insertEventSidecar(eventId, problemId, 2)).toThrow(
-        "KRATER_CHAIN_V2_EVENT_BINDING_MISMATCH",
+        "KRATER_CHAIN_V2_PREDECESSOR_MISSING",
       );
       expect(sqlite.query("SELECT COUNT(*) AS count FROM event_chain_v2").get()).toEqual({
         count: 0,
@@ -1817,7 +1821,7 @@ describe("migrations 0039-0040 replay an exact completed v1 history into one v2 
         "KRATER_CHECKPOINT_CHAIN_V2_BINDING_MISMATCH",
       );
       expect(() => insertCheckpointSidecar(2, root)).toThrow(
-        "KRATER_CHECKPOINT_CHAIN_V2_BINDING_MISMATCH",
+        "KRATER_CHECKPOINT_CHAIN_V2_PREDECESSOR_MISSING",
       );
       expect(sqlite.query("SELECT COUNT(*) AS count FROM checkpoint_chain_v2").get()).toEqual({
         count: 0,

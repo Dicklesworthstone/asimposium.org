@@ -121,9 +121,12 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = Object.entrie
   .map(([key, summary]) => {
     const spaceAt = key.indexOf(" ");
     const method = key.slice(0, spaceAt);
+    if (method !== "GET" && method !== "POST") {
+      throw new TypeError(`discovery operation has an unsupported method: ${method}`);
+    }
     const honoPath = key.slice(spaceAt + 1);
     const openApiPath = normalizeOpenApiPath(honoPath);
-    return {
+    const operation: DisclosedOperation = {
       method,
       honoPath,
       openApiPath,
@@ -132,6 +135,7 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = Object.entrie
       requiresBearer:
         BEARER_REQUIRED[key] === true || (method === "POST" && honoPath.startsWith("/v1/")),
     };
+    return operation;
   })
   .filter((op) => DISCOVERY_UNDISCLOSED_ROUTES[`${op.method} ${op.honoPath}`] !== true)
   .sort((a, b) => a.openApiPath.localeCompare(b.openApiPath) || a.method.localeCompare(b.method));

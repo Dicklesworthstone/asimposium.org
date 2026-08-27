@@ -2342,132 +2342,257 @@
       "additionalProperties": false
     },
     "evidence_request": {
-      "type": "object",
-      "properties": {
-        "bears_on_kind": {
-          "type": "string",
-          "enum": [
-            "claim",
-            "hypothesis"
-          ]
-        },
-        "bears_on_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 80
-        },
-        "bears_on_version": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        },
-        "direction": {
-          "type": "string",
-          "enum": [
-            "supports",
-            "refutes",
-            "informs",
-            "bounds",
-            "reproduces",
-            "fails-to-reproduce"
-          ]
-        },
-        "kind": {
-          "type": "string",
-          "enum": [
-            "citation",
-            "computation",
-            "certificate",
-            "construction",
-            "argument",
-            "negative-result",
-            "null-result",
-            "formalization-friction"
-          ]
-        },
-        "source": {
+      "oneOf": [
+        {
           "type": "object",
           "properties": {
+            "bears_on_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "supports",
+                "refutes",
+                "informs",
+                "bounds",
+                "reproduces",
+                "fails-to-reproduce"
+              ]
+            },
             "kind": {
               "type": "string",
               "enum": [
-                "locator",
-                "model_memory"
+                "citation",
+                "computation",
+                "certificate",
+                "construction",
+                "argument",
+                "negative-result",
+                "null-result",
+                "formalization-friction"
               ]
             },
-            "locator": {
+            "source": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "locator",
+                    "model_memory"
+                  ]
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "excerpt": {
+                  "type": "string",
+                  "maxLength": 1000
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            "computation_domain_or_floor": {
               "type": "string",
               "maxLength": 500
             },
-            "excerpt": {
+            "reproduction": {
+              "type": "object",
+              "properties": {
+                "commands": {
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "environment": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "seed": {
+                  "type": "string",
+                  "maxLength": 120
+                }
+              },
+              "required": [
+                "commands",
+                "environment"
+              ],
+              "additionalProperties": false
+            },
+            "mode": {
               "type": "string",
-              "maxLength": 1000
+              "enum": [
+                "exploratory",
+                "confirmatory"
+              ]
+            },
+            "selected_hypothesis_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "body_md": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "bears_on_kind": {
+              "type": "string",
+              "const": "claim"
+            },
+            "bears_on_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
             }
           },
           "required": [
-            "kind"
+            "bears_on_id",
+            "direction",
+            "kind",
+            "source",
+            "mode",
+            "body_md",
+            "bears_on_kind",
+            "bears_on_version"
           ],
           "additionalProperties": false
         },
-        "computation_domain_or_floor": {
-          "type": "string",
-          "maxLength": 500
-        },
-        "reproduction": {
+        {
           "type": "object",
           "properties": {
-            "commands": {
-              "maxItems": 16,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 500
-              }
+            "bears_on_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
             },
-            "environment": {
+            "direction": {
+              "type": "string",
+              "enum": [
+                "supports",
+                "refutes",
+                "informs",
+                "bounds",
+                "reproduces",
+                "fails-to-reproduce"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "citation",
+                "computation",
+                "certificate",
+                "construction",
+                "argument",
+                "negative-result",
+                "null-result",
+                "formalization-friction"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "locator",
+                    "model_memory"
+                  ]
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "excerpt": {
+                  "type": "string",
+                  "maxLength": 1000
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            "computation_domain_or_floor": {
               "type": "string",
               "maxLength": 500
             },
-            "seed": {
+            "reproduction": {
+              "type": "object",
+              "properties": {
+                "commands": {
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "environment": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "seed": {
+                  "type": "string",
+                  "maxLength": 120
+                }
+              },
+              "required": [
+                "commands",
+                "environment"
+              ],
+              "additionalProperties": false
+            },
+            "mode": {
               "type": "string",
-              "maxLength": 120
+              "enum": [
+                "exploratory",
+                "confirmatory"
+              ]
+            },
+            "selected_hypothesis_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "body_md": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "bears_on_kind": {
+              "type": "string",
+              "const": "hypothesis"
+            },
+            "bears_on_version": {
+              "not": {}
             }
           },
           "required": [
-            "commands",
-            "environment"
+            "bears_on_id",
+            "direction",
+            "kind",
+            "source",
+            "mode",
+            "body_md",
+            "bears_on_kind"
           ],
           "additionalProperties": false
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "exploratory",
-            "confirmatory"
-          ]
-        },
-        "selected_hypothesis_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 80
-        },
-        "body_md": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 65536
         }
-      },
-      "required": [
-        "bears_on_kind",
-        "bears_on_id",
-        "direction",
-        "kind",
-        "source",
-        "mode",
-        "body_md"
-      ],
-      "additionalProperties": false
+      ]
     },
     "evidence_response": {
       "type": "object",

@@ -930,9 +930,7 @@ describe("Krater outbox Durable Object contracts", () => {
     sqlite.prepare("UPDATE outbox SET dedupe_key = ? WHERE id = 1").run("replacement:handoff");
     expect(cas.run(...selectedBindings).changes).toBe(0);
     expect(
-      sqlite
-        .prepare("SELECT quarantined_at, quarantine_code FROM outbox WHERE id = 1")
-        .get(),
+      sqlite.prepare("SELECT quarantined_at, quarantine_code FROM outbox WHERE id = 1").get(),
     ).toEqual({ quarantined_at: null, quarantine_code: null });
 
     // Non-vacuity: the old primary-key-only predicate quarantines the replaced

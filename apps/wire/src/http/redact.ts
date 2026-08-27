@@ -23,9 +23,10 @@
 
 const MAX_SEGMENT_LENGTH = 24;
 const MAX_SEGMENTS = 8;
-// A still-printable segment can contain at most eleven nested `%25` wrappers
-// around one encoded byte. Decode one pass beyond that bound for inspection so
-// a short multiply-encoded credential prefix cannot evade the prefix rule.
+// A still-printable segment can require at most ten percent-decode passes to
+// reveal even the shortest credential prefix. Keep two passes of margin so a
+// short multiply-encoded prefix cannot evade the prefix rule if the shapes
+// above change without this bound changing in lockstep.
 const MAX_PERCENT_DECODE_PASSES = 12;
 
 /** Known credential shapes, redacted regardless of length. */
@@ -48,27 +49,26 @@ const REDACTED = "<redacted>";
 const TRUNCATED = "...";
 
 function decodeAsciiPercentEscapes(value: string): string {
-  return value.replace(/%([0-9a-f]{2})/giu, (escape, hex: string) => {
+  return value.replace(/%([0-9a-f]{2})/giu, (encoded, hex: string) => {
     const byte = Number.parseInt(hex, 16);
-    return byte <= 0x7f ? String.fromCharCode(byte) : escape;
+    return byte <= 0x7f ? String.fromCharCode(byte) : encoded;
   });
 }
 
 function carriesCredentialPrefix(segment: string): boolean {
   let inspected = segment;
-  for (let pass = 0; pass < MAX_PERCENT_DECODE_PASSES; pass += 1) {
+  for (let pass = 0; pass <= MAX_PERCENT_DECODE_PASSES; pass += 1) {
     // Encoded slashes create path-component boundaries after decoding. Check
     // each resulting component rather than searching arbitrary substrings, so
     // safe text such as `workflow_v1.config` remains printable.
     if (
       inspected
         .split("/")
-        .some((part) =>
-          CREDENTIAL_PREFIXES.some((prefix) => part.toLowerCase().startsWith(prefix)),
-        )
+        .some((part) => CREDENTIAL_PREFIXES.some((prefix) => part.toLowerCase().startsWith(prefix)))
     ) {
       return true;
     }
+    if (pass === MAX_PERCENT_DECODE_PASSES) break;
     const decoded = decodeAsciiPercentEscapes(inspected);
     if (decoded === inspected) break;
     inspected = decoded;

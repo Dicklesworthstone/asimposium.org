@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import {
   EvidenceRequestSchema,
   EvidenceResponseSchema,
@@ -424,6 +425,25 @@ test("evidence request and response schemas validate strictly", () => {
     body_md: "Computation details and script.",
   };
   expect(EvidenceRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(
+    EvidenceRequestSchema.safeParse({ ...validRequest, bears_on_version: undefined }).success,
+  ).toBe(false);
+  expect(
+    EvidenceRequestSchema.safeParse({
+      ...validRequest,
+      bears_on_kind: "hypothesis",
+      bears_on_id: "H-1",
+      bears_on_version: undefined,
+    }).success,
+  ).toBe(true);
+  expect(
+    EvidenceRequestSchema.safeParse({
+      ...validRequest,
+      bears_on_kind: "hypothesis",
+      bears_on_id: "H-1",
+      bears_on_version: 1,
+    }).success,
+  ).toBe(false);
   expect(EvidenceRequestSchema.safeParse({ ...validRequest, direction: "invalid" }).success).toBe(
     false,
   );
@@ -441,6 +461,35 @@ test("evidence request and response schemas validate strictly", () => {
   expect(EvidenceResponseSchema.safeParse(validResponse).success).toBe(true);
   expect(
     EvidenceResponseSchema.safeParse({ ...validResponse, computed_class: "magic" }).success,
+  ).toBe(false);
+});
+
+test("the generated evidence schema enforces the same version-pin branches", async () => {
+  const generated = (await fixture(GENERATED_SESSIONS_SCHEMA)) as {
+    properties?: { evidence_request?: object };
+  };
+  const evidenceSchema = generated.properties?.evidence_request;
+  if (evidenceSchema === undefined) throw new Error("generated evidence request schema is missing");
+  const validates = new Ajv2020({ allErrors: true, strict: true }).compile(evidenceSchema);
+  const common = {
+    bears_on_id: "C-1",
+    direction: "supports",
+    kind: "argument",
+    source: { kind: "model_memory" },
+    mode: "exploratory",
+    body_md: "An exact generated-contract branch test.",
+  };
+
+  expect(validates({ ...common, bears_on_kind: "claim", bears_on_version: 1 })).toBe(true);
+  expect(validates({ ...common, bears_on_kind: "claim" })).toBe(false);
+  expect(validates({ ...common, bears_on_kind: "hypothesis", bears_on_id: "H-1" })).toBe(true);
+  expect(
+    validates({
+      ...common,
+      bears_on_kind: "hypothesis",
+      bears_on_id: "H-1",
+      bears_on_version: 1,
+    }),
   ).toBe(false);
 });
 
@@ -493,6 +542,22 @@ test("revision request and response schemas validate strictly", () => {
   };
   expect(ReviseRequestSchema.safeParse(validRequest).success).toBe(true);
   expect(ReviseRequestSchema.safeParse({ ...validRequest, base_version: 0 }).success).toBe(false);
+  expect(
+    ReviseRequestSchema.safeParse({
+      ...validRequest,
+      base_version: Number.MAX_SAFE_INTEGER - 1,
+    }).success,
+  ).toBe(true);
+  expect(
+    ReviseRequestSchema.safeParse({ ...validRequest, base_version: Number.MAX_SAFE_INTEGER })
+      .success,
+  ).toBe(false);
+  expect(
+    ReviseRequestSchema.safeParse({
+      ...validRequest,
+      base_version: Number.MAX_SAFE_INTEGER + 1,
+    }).success,
+  ).toBe(false);
   expect(ReviseRequestSchema.safeParse({ ...validRequest, kind: "unknown" }).success).toBe(false);
 
   const validResponse = {

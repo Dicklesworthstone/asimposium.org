@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0040_krater_chain_v2_contiguity.sql`.
+schema through `0041_ledger_write_atomicity.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -24,6 +24,13 @@ Migration `0040_krater_chain_v2_contiguity.sql` first refuses any pre-existing
 forward-only predecessor guards to both v2 sidecar streams. Because v2 rows
 are already immutable, a terminal sidecar can serve as a bounded
 complete-stream witness only when no insertion can skip an earlier sequence.
+
+Migration `0041_ledger_write_atomicity.sql` widens the sealed replay scope for
+reviews, hypotheses, hypothesis kills, and evidence, and binds each new object
+projection to the exact ledger event and public sequence committed with it.
+Hypothesis bodies and kill reasons also become durable instead of being dropped
+after request validation. Pre-migration projection rows remain nullable because
+the missing immutable event cannot be reconstructed honestly.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
