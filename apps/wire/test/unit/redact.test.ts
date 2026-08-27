@@ -34,6 +34,13 @@ describe("redactPathname", () => {
     expect(redactPathname("/%252561simp_ag_x")).toBe("/<redacted>");
     expect(redactPathname("/safe%2Fasimp_ag_x")).toBe("/<redacted>");
     expect(redactPathname("/safe%252Fv1.9f2c")).toBe("/<redacted>");
+
+    let maximumPrintableDepth = "%761.";
+    for (let pass = 1; pass < 10; pass += 1) {
+      maximumPrintableDepth = maximumPrintableDepth.replaceAll("%", "%25");
+    }
+    expect(maximumPrintableDepth.length).toBeLessThanOrEqual(24);
+    expect(redactPathname(`/${maximumPrintableDepth}`)).toBe("/<redacted>");
   });
 
   test("redacts an enrollment fragment secret that leaked into the path", () => {

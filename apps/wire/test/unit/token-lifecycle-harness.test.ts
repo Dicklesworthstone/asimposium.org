@@ -702,9 +702,7 @@ const FAULT_CASES: readonly {
 ];
 
 for (const current of FAULT_CASES) {
-  test(
-    `token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`,
-    async () => {
+  test(`token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`, async () => {
     const result = await runHarness([], { [current.plant]: "1" });
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain(`"code":"${current.code}"`);

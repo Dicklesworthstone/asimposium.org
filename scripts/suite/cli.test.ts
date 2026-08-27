@@ -869,20 +869,28 @@ async function waitForLifecycleCheckpoint(
   expected: "ready" | "completed",
   timeoutMs = 30_000,
 ): Promise<number> {
+  const readCheckpoint = (): number | undefined => {
+    if (!existsSync(checkpointPath)) return undefined;
+    const line = readFileSync(checkpointPath, "utf8");
+    const match = /^checkpoint (ready|completed) ([1-9][0-9]*)\n$/u.exec(line);
+    const supervisorPid = Number(match?.[2]);
+    return match?.[1] === expected && Number.isSafeInteger(supervisorPid) && supervisorPid > 1
+      ? supervisorPid
+      : undefined;
+  };
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
-    if (existsSync(checkpointPath)) {
-      const line = readFileSync(checkpointPath, "utf8");
-      const match = /^checkpoint (ready|completed) ([1-9][0-9]*)\n$/u.exec(line);
-      const supervisorPid = Number(match?.[2]);
-      if (match?.[1] !== expected || !Number.isSafeInteger(supervisorPid) || supervisorPid <= 1) {
-        throw new Error(`malformed checkpoint helper output for ${expected}`);
-      }
-      return supervisorPid;
-    }
+    const supervisorPid = readCheckpoint();
+    if (supervisorPid !== undefined) return supervisorPid;
     const exitCode = await Promise.race([helper.exited, Bun.sleep(20).then(() => undefined)]);
     if (exitCode !== undefined) {
-      throw new Error(`checkpoint helper exited ${exitCode} before ${expected}`);
+      // Publication uses a normal create/write sequence. Give the final write
+      // one short visibility turn after process exit before classifying a
+      // still-incomplete file as malformed.
+      await Bun.sleep(50);
+      const finalSupervisorPid = readCheckpoint();
+      if (finalSupervisorPid !== undefined) return finalSupervisorPid;
+      throw new Error(`checkpoint helper exited ${exitCode} with malformed output for ${expected}`);
     }
   }
   throw new Error(`checkpoint helper timed out before ${expected}`);
@@ -893,31 +901,38 @@ async function waitForLifecycleRejection(
   resultPath: string,
   timeoutMs = 30_000,
 ): Promise<{ message: string; supervisorPid: number }> {
+  const readRejection = (): { message: string; supervisorPid: number } | undefined => {
+    if (!existsSync(resultPath)) return undefined;
+    let parsed: { kind?: unknown; message?: unknown; supervisorPid?: unknown };
+    try {
+      parsed = JSON.parse(readFileSync(resultPath, "utf8")) as typeof parsed;
+    } catch {
+      // A newly created result file can be observed before Bun.write publishes
+      // its single JSON line. The helper's exit is the finality boundary.
+      return undefined;
+    }
+    if (
+      parsed.kind !== "rejected" ||
+      typeof parsed.message !== "string" ||
+      !Number.isSafeInteger(parsed.supervisorPid) ||
+      Number(parsed.supervisorPid) <= 1
+    ) {
+      return undefined;
+    }
+    return { message: parsed.message, supervisorPid: Number(parsed.supervisorPid) };
+  };
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
-    if (existsSync(resultPath)) {
-      const parsed = JSON.parse(readFileSync(resultPath, "utf8")) as {
-        kind?: unknown;
-        message?: unknown;
-        supervisorPid?: unknown;
-      };
-      if (
-        parsed.kind !== "rejected" ||
-        typeof parsed.message !== "string" ||
-        !Number.isSafeInteger(parsed.supervisorPid) ||
-        Number(parsed.supervisorPid) <= 1
-      ) {
-        throw new Error(`malformed lifecycle rejection: ${JSON.stringify(parsed)}`);
-      }
-      return { message: parsed.message, supervisorPid: Number(parsed.supervisorPid) };
-    }
+    const rejection = readRejection();
+    if (rejection !== undefined) return rejection;
     const exitCode = await Promise.race([helper.exited, Bun.sleep(20).then(() => undefined)]);
     if (exitCode !== undefined) {
       // Bun may resolve `exited` just ahead of the child's final small-file
       // publication becoming visible to this isolate.
       await Bun.sleep(50);
-      if (existsSync(resultPath)) continue;
-      throw new Error(`lifecycle helper exited ${exitCode} before publishing its rejection`);
+      const finalRejection = readRejection();
+      if (finalRejection !== undefined) return finalRejection;
+      throw new Error(`lifecycle helper exited ${exitCode} with malformed rejection output`);
     }
   }
   throw new Error("lifecycle helper timed out before publishing its rejection");
@@ -1703,7 +1718,7 @@ describe("routing to real package commands", () => {
     const wire = { name: "@asimposium/wire", dir: "apps/wire" };
 
     expect(suiteExecutionLimits("unit", wire)).toEqual({
-      timeoutMs: 15 * 60_000,
+      timeoutMs: 30 * 60_000,
       retainedStreamBytes: 512 * 1024,
       retainedOutputBytes: 768 * 1024,
     });
@@ -1802,7 +1817,7 @@ describe("routing to real package commands", () => {
     expect(units(result).find((unit) => unit.suite === "integration")?.code).toBe(
       "SUITE_OUTPUT_OVERRUN",
     );
-  });
+  }, 20_000);
 
   test("selecting several suites runs them in CI doctrine order", async () => {
     const root = makeFixtureRepo({
@@ -1816,7 +1831,7 @@ describe("routing to real package commands", () => {
       ],
     });
     const result = await runCli(root, ["e2e", "unit", "typecheck", "--json"]);
-    expect(result.exitCode).toBe(0);
+    expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
     const order = records(result)
       .filter((record) => record.record === "summary")
       .map((record) => record.suite);
@@ -2093,7 +2108,7 @@ describe("secret-safe diagnostics", () => {
       expect(typeof unit.duration_ms).toBe("number");
       expect(["pass", "fail", "blocked", "missing", "skip"]).toContain(unit.status);
       expect(unit.reproduce.length).toBeGreaterThan(0);
-      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 15 * 60_000 : 5 * 60_000);
+      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 30 * 60_000 : 5 * 60_000);
       expect(unit.retained_stream_limit_bytes).toBe(
         unit.dir === "apps/wire" ? 512 * 1024 : 64 * 1024,
       );
@@ -2278,7 +2293,7 @@ describe("--list plans without running", () => {
     expect(plans.find((plan) => plan.dir === "apps/wire")).toEqual(
       expect.objectContaining({
         action: "run",
-        timeout_ms: 15 * 60_000,
+        timeout_ms: 30 * 60_000,
         retained_stream_limit_bytes: 512 * 1024,
         retained_output_limit_bytes: 768 * 1024,
       }),

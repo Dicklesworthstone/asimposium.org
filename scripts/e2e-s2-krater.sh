@@ -148,6 +148,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0038_events_writer_credential.sql
   db/migrations/0039_krater_chain_v2.sql
   db/migrations/0040_krater_chain_v2_contiguity.sql
+  db/migrations/0041_ledger_write_atomicity.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -309,6 +310,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0038_events_writer_credential.sql
   0039_krater_chain_v2.sql
   0040_krater_chain_v2_contiguity.sql
+  0041_ledger_write_atomicity.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

@@ -54,7 +54,7 @@ openssl x509 -req -in "$scratch/leaf.csr" -CA "$scratch/ca.pem" -CAkey "$scratch
 
 start_server() { # $1 = defect name -> echoes base URL; pid lands in server.pid
   local defect="$1"
-  local attempt url=""
+  local url=""
   : > "$scratch/ready"
   SMOKE_FIXTURE_DEFECT="$defect" \
   SMOKE_FIXTURE_READY_FILE="$scratch/ready" \
@@ -63,7 +63,7 @@ start_server() { # $1 = defect name -> echoes base URL; pid lands in server.pid
   SMOKE_FIXTURE_KEY="$scratch/leaf.key" \
     python3 "$fixture_origin" 0 >>"$scratch/server.log" 2>&1 &
   echo "$!" > "$scratch/server.pid"
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$scratch/ready" ]]; then
       url="$(cat "$scratch/ready")"
       if [[ -n "$url" ]]; then

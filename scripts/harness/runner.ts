@@ -18,8 +18,8 @@ import {
   linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   opendirSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -3738,15 +3738,14 @@ const ARTIFACT_CENSUS_NODE_TYPES: ReadonlySet<string> = new Set<ArtifactCensusNo
   "character",
   "unknown",
 ]);
-const ARTIFACT_CENSUS_INCOMPLETE_REASONS: ReadonlySet<string> = new Set<
-  ArtifactCensusIncompleteReason
->([
-  "entry-limit",
-  "depth-limit",
-  "hash-byte-limit",
-  "filesystem-drift",
-  "unreadable-node",
-]);
+const ARTIFACT_CENSUS_INCOMPLETE_REASONS: ReadonlySet<string> =
+  new Set<ArtifactCensusIncompleteReason>([
+    "entry-limit",
+    "depth-limit",
+    "hash-byte-limit",
+    "filesystem-drift",
+    "unreadable-node",
+  ]);
 
 function isArtifactCensusObservationRecord(
   observation: unknown,
@@ -3768,8 +3767,7 @@ function isArtifactCensusObservationRecord(
     typeof candidate.blocks === "string" &&
     typeof candidate.modifiedMilliseconds === "string" &&
     (candidate.contentSha256 === null || typeof candidate.contentSha256 === "string") &&
-    (candidate.symlinkTargetSha256 === null ||
-      typeof candidate.symlinkTargetSha256 === "string")
+    (candidate.symlinkTargetSha256 === null || typeof candidate.symlinkTargetSha256 === "string")
   );
 }
 
@@ -4023,8 +4021,7 @@ export function summarizeArtifactCensusObservations(
       observation.blocks,
     ];
     const validNumbers = numericMetadata.every(
-      (value) =>
-        value.length <= CENSUS_MAX_METADATA_DIGITS && CENSUS_UNSIGNED_DECIMAL.test(value),
+      (value) => value.length <= CENSUS_MAX_METADATA_DIGITS && CENSUS_UNSIGNED_DECIMAL.test(value),
     );
     const validDigests =
       observation.type === "regular"
@@ -4492,10 +4489,7 @@ function censusWriterLeases(root: string, artifactRootIdentity: string): Artifac
       }
       for (const rawEpochName of [...epochs.names].sort(Buffer.compare)) {
         const epochName = censusRegistryName(rawEpochName);
-        if (
-          epochName === null ||
-          !/^dev-[0-9]+-ino-[0-9]+$/.test(epochName)
-        ) {
+        if (epochName === null || !/^dev-[0-9]+-ino-[0-9]+$/.test(epochName)) {
           malformed += 1;
           witness.push(
             `malformed-epoch:${createHash("sha256").update(rawEpochName).digest("hex")}`,

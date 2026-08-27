@@ -10,12 +10,11 @@ import {
   DISCLOSED_OPERATIONS,
   DISCOVERY_UNDISCLOSED_ROUTES,
   DISCOVERY_VERSION,
+  generateOpenApiDocument,
   generateSchemaIndexDocument,
   generateWellKnownDocument,
-  generateOpenApiDocument,
   normalizeOpenApiPath,
 } from "../../src/discovery/discovery";
-import { boundEnv } from "../support/bindings";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const GOLDEN_DIR = resolve(ROOT, "apps/wire/test/golden/discovery");

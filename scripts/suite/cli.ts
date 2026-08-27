@@ -96,7 +96,12 @@ const TOOLCHAIN_INTEGRATION_TERM_GRACE_MS = 2_000;
 const TOOLCHAIN_INTEGRATION_KILL_REAP_MS = 2_000;
 const OWNED_PROCESS_TERM_GRACE_MS = 500;
 const OWNED_PROCESS_KILL_REAP_MS = 500;
-const OWNED_PROCESS_PIPE_DRAIN_MS = 500;
+// Control EOF proves the supervisor closed its own output descriptors first,
+// but Bun delivers EOF for each independent ReadableStream asynchronously.
+// A 500ms observation window produced a false leak after a successful real
+// web lint run; two seconds stays bounded while separating runtime delivery
+// latency from a genuinely inherited writer (which still fails closed).
+const OWNED_PROCESS_PIPE_DRAIN_MS = 2_000;
 const OWNED_PROCESS_STREAM_RETAINED_BYTES = 64 * 1024;
 const OWNED_PROCESS_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const OWNED_PROCESS_CONTROL_BUFFER_CHARS = 512;
@@ -123,7 +128,11 @@ const SUITE_TIMEOUT_MS: Readonly<Record<Suite, number>> = {
   performance: 10 * 60_000,
   e2e: 30 * 60_000,
 };
-const WIRE_UNIT_SUITE_TIMEOUT_MS = 15 * 60_000;
+// The real Wire unit composition includes sequential local-D1 and token-lifecycle
+// subprocess matrices. A fresh full run crossed the old 15-minute parent bound
+// while its children remained inside their own 120-second per-test limits. Keep
+// the parent finite, but outside the measured ~26-minute package runtime.
+const WIRE_UNIT_SUITE_TIMEOUT_MS = 30 * 60_000;
 const WIRE_UNIT_STREAM_RETAINED_BYTES = 512 * 1024;
 const WIRE_UNIT_OUTPUT_RETAINED_BYTES = 768 * 1024;
 
@@ -554,17 +563,16 @@ my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
 $SIG{USR1} = sub { exit $exit; };
 publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n");
-# Seal the exact two-record transcript while the parent lease still keeps this
-# supervisor alive. The dispatcher proves fd3 EOF before it sends SIGUSR1, so a
-# Bun stream-close anomaly cannot race an otherwise successful leader reap.
-close($control) or retire_orphaned_group();
 # The target has been reaped, so the supervisor is now the only legitimate
-# owner of the outer output writers. Seal both while the parent lease still
-# pins this exact group. A detached inheritor keeps a writer open and therefore
-# remains a typed pipe-drain refusal; a normal run no longer races EOF against
-# supervisor reap in Bun's ReadableStream wrapper.
+# owner of the outer output writers. Seal both before fd3: the dispatcher's
+# observation of control EOF then orders after these closes instead of racing
+# the supervisor between control close and output close. A detached inheritor
+# keeps a writer open and therefore remains a typed pipe-drain refusal.
 close(STDOUT) or retire_orphaned_group();
 close(STDERR) or retire_orphaned_group();
+# Seal the exact two-record transcript last while the parent lease still keeps
+# this supervisor alive. The dispatcher proves fd3 EOF before it sends SIGUSR1.
+close($control) or retire_orphaned_group();
 while (parent_lease_is_open()) { select undef, undef, undef, 0.05; }
 retire_orphaned_group();
 `;

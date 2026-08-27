@@ -26,7 +26,11 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
-import { genesisChainDigest } from "../../src/krater/krater.ts";
+import {
+  genesisChainDigest,
+  KraterIdempotencyConflictError,
+  writeLedgerEvent,
+} from "../../src/krater/krater.ts";
 import {
   KRATER_OUTBOX_NUDGE_DEADLINE_MS,
   KraterOutboxDeadlineError,
@@ -465,6 +469,67 @@ async function fixture(options: LocalD1Options = {}) {
     replayProtector,
     sponsor,
   };
+}
+
+async function addApprovedFellow(
+  base: Awaited<ReturnType<typeof fixture>>,
+  input: {
+    readonly suffix: string;
+    readonly scopes: readonly ("promote" | "review")[];
+    readonly model?: string;
+    readonly harness?: string;
+  },
+) {
+  const enrollmentRouter = createEnrollmentRouter({ service: base.service });
+  const minted = await base.service.mint(base.sponsor, {
+    requested_scopes: [...input.scopes],
+    problem_binding: "P-4DSP",
+  });
+  const registration = await enrollmentRouter.fetch(
+    new Request("https://a-staging.asimposium.org/v1/fellows", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `${input.suffix}-registration`,
+      },
+      body: JSON.stringify({
+        enrollment_id: minted.enrollmentId,
+        secret: minted.secret,
+        name: `${input.suffix}-fellow`,
+        model: input.model ?? "test-review-model",
+        harness: input.harness ?? "test-review-harness",
+      }),
+    }),
+  );
+  expect(registration.status).toBe(202);
+  const { flow_handle: flowHandle } = (await registration.json()) as { flow_handle: string };
+  await base.service.decide(base.sponsor, minted.enrollmentId, {
+    enrollment_id: minted.enrollmentId,
+    decision: "approve",
+    step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+  });
+  const issued = await enrollmentRouter.fetch(
+    new Request("https://a-staging.asimposium.org/v1/device-token", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `${input.suffix}-token` },
+      body: JSON.stringify({ flow_handle: flowHandle }),
+    }),
+  );
+  expect(issued.status).toBe(200);
+  const { token } = (await issued.json()) as { token?: string };
+  if (token === undefined) throw new Error(`${input.suffix}: token was not issued`);
+  const binding = await base.service.credentialBinding(token);
+  if (binding === undefined) throw new Error(`${input.suffix}: credential binding missing`);
+  await seedCredentialRow(base.db, binding);
+  const call = (path: string, init: RequestInit = {}) =>
+    base.router.fetch(
+      new Request(`https://a-staging.asimposium.org${path}`, {
+        ...init,
+        headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+      }),
+      base.env,
+    );
+  return { binding, call, token };
 }
 
 describe("session protocol routes", () => {
@@ -1124,11 +1189,7 @@ describe("session protocol routes", () => {
         .first<{ count: number }>(),
     ).toEqual({ count: 1 });
 
-    barrier.arm([
-      /FROM session_write_replays/,
-      /SELECT public_seq, chain_digest.*FROM problems/,
-      /SELECT public_seq, chain_digest.*FROM problems/,
-    ]);
+    barrier.arm([/FROM session_write_replays/, /SELECT public_seq, chain_digest.*FROM problems/]);
     const promoted = await race(
       `/v1/sessions/${String(sessionId)}/promote`,
       "race-promote",
@@ -1462,11 +1523,7 @@ describe("session protocol routes", () => {
         }),
       });
 
-    barrier.arm([
-      /FROM session_write_replays/,
-      /SELECT public_seq, chain_digest.*FROM problems/,
-      /SELECT public_seq, chain_digest.*FROM problems/,
-    ]);
+    barrier.arm([/FROM session_write_replays/, /SELECT public_seq, chain_digest.*FROM problems/]);
     const responses = await Promise.all([
       promote("The first concurrent body may own this key."),
       promote("The second concurrent body must receive a typed conflict."),
@@ -3658,7 +3715,9 @@ describe("session protocol routes", () => {
   });
 
   test("a Fellow cannot review their own claim (P1), and the review contract validates", async () => {
-    const { call } = await fixture();
+    const barrier = stagedReadBarrier();
+    const base = await fixture({ afterFirstRead: barrier.afterFirstRead });
+    const { call, db } = base;
     const opened = await call("/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "review-open" },
@@ -3707,6 +3766,129 @@ describe("session protocol routes", () => {
     const selfBody = (await selfReview.json()) as { code?: string };
     expect(selfBody.code).toBe("REVIEWER_IS_AUTHOR");
 
+    const reviewer = await addApprovedFellow(base, {
+      suffix: "review-independent",
+      scopes: ["review"],
+    });
+    const reviewerOpened = await reviewer.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "reviewer-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(reviewerOpened.status).toBe(201);
+    const reviewerSession = (await reviewerOpened.json()) as { session_id: string };
+    const reviewRequest = {
+      target_claim_id: claim_id,
+      target_version: 1,
+      verdict: "confirm",
+      basis: "I checked the exact published statement against its falsifier.",
+      capable_of_failure: "A toggle that changes the orbit count.",
+      rubric: ["quantifiers checked", "counterexample route exercised"],
+      body_md: "The quantifier scope and the toggle action agree for this exact version.",
+    } as const;
+    const cursorBeforeReview = await db
+      .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+      .first<{ cursor: number }>();
+    barrier.arm([/FROM session_write_replays/]);
+    const reviewAttempt = () =>
+      reviewer.call(`/v1/sessions/${reviewerSession.session_id}/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "review-independent" },
+        body: JSON.stringify(reviewRequest),
+      });
+    const reviewed = await Promise.all([reviewAttempt(), reviewAttempt()]);
+    expect(reviewed.map((response) => response.status).sort()).toEqual([200, 201]);
+    const reviewedPayloads = (await Promise.all(reviewed.map((response) => response.json()))) as {
+      review_id: string;
+      target_claim_id: string;
+      target_version: number;
+      tier: string;
+      carries_weight: boolean;
+    }[];
+    expect(reviewedPayloads[1]).toEqual(reviewedPayloads[0]);
+    const reviewedBody = reviewedPayloads[0];
+    if (reviewedBody === undefined) throw new Error("review race returned no receipt");
+    expect(
+      await db
+        .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+        .first<{ cursor: number }>(),
+    ).toEqual({ cursor: (cursorBeforeReview?.cursor ?? -1) + 1 });
+    expect(reviewedBody).toMatchObject({
+      target_claim_id: claim_id,
+      target_version: 1,
+      carries_weight: true,
+    });
+    expect(reviewedBody.review_id).toMatch(/^R-/);
+    const reviewProjection = await db
+      .prepare(
+        `SELECT r.source_event_id, r.source_seq, r.target_version, r.body_md,
+                e.type, e.object_kind, e.object_id, e.actor_fellow_id, e.actor_sponsor_id,
+                e.actor_session_id, e.model_string_self_declared, e.harness, c.payload_json
+         FROM reviews r
+         JOIN events e ON e.id = r.source_event_id AND e.seq = r.source_seq
+         JOIN event_content c ON c.event_id = e.id
+         WHERE r.problem_id = 'P-4DSP' AND r.review_id = ?`,
+      )
+      .bind(reviewedBody.review_id)
+      .first<{
+        source_event_id: string;
+        source_seq: number;
+        target_version: number;
+        body_md: string;
+        type: string;
+        object_kind: string;
+        object_id: string;
+        actor_fellow_id: string;
+        actor_sponsor_id: string;
+        actor_session_id: string;
+        model_string_self_declared: string;
+        harness: string;
+        payload_json: string;
+      }>();
+    expect(reviewProjection).toMatchObject({
+      target_version: 1,
+      body_md: reviewRequest.body_md,
+      type: "review.created",
+      object_kind: "review",
+      object_id: reviewedBody.review_id,
+      actor_fellow_id: reviewer.binding.fellowId,
+      actor_sponsor_id: reviewer.binding.sponsorId,
+      actor_session_id: reviewerSession.session_id,
+      model_string_self_declared: reviewer.binding.model,
+      harness: reviewer.binding.harness,
+    });
+    expect(JSON.parse(reviewProjection?.payload_json ?? "null")).toMatchObject({
+      basis: reviewRequest.basis,
+      body_md: reviewRequest.body_md,
+      target_claim_id: claim_id,
+      target_version: 1,
+      verdict: "confirm",
+    });
+
+    const reviewReplay = await reviewer.call(`/v1/sessions/${reviewerSession.session_id}/review`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "review-independent",
+      },
+      body: JSON.stringify(reviewRequest),
+    });
+    expect(reviewReplay.status).toBe(200);
+    expect(await reviewReplay.json()).toEqual(reviewedBody);
+
+    const futureReview = await reviewer.call(`/v1/sessions/${reviewerSession.session_id}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-future" },
+      body: JSON.stringify({ ...reviewRequest, target_version: 2 }),
+    });
+    expect(futureReview.status).toBe(404);
+    expect(((await futureReview.json()) as { code?: string }).code).toBe("CLAIM_NOT_FOUND");
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'review.created'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+
     // A malformed review body is refused at the contract.
     const malformed = await call(`/v1/sessions/${session.session_id}/review`, {
       method: "POST",
@@ -3716,8 +3898,73 @@ describe("session protocol routes", () => {
     expect(malformed.status).toBe(422);
   });
 
+  test("PLANTED: a foreign pending ledger key cannot advance the log or be deleted", async () => {
+    const { db } = await fixture();
+    const key = "IK-pending-ledger-owner";
+    const ownerDigest = "a".repeat(64);
+    const contenderDigest = "b".repeat(64);
+    const createdAt = new Date().toISOString();
+    const before = await db
+      .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+      .first<{ public_seq: number }>();
+    await db
+      .prepare(
+        `INSERT INTO idempotency
+           (problem_id, idempotency_key, request_digest, created_at)
+         VALUES ('P-4DSP', ?, ?, ?)`,
+      )
+      .bind(key, ownerDigest, createdAt)
+      .run();
+
+    await expect(
+      writeLedgerEvent(
+        db,
+        {
+          problemId: "P-4DSP",
+          eventId: "E-pending-ledger-contender",
+          idempotencyKey: key,
+          requestDigest: contenderDigest,
+          eventType: "review.created",
+          objectKind: "review",
+          objectId: "R-pending-ledger-contender",
+          objectVersion: 1,
+          payloadJson: "{}",
+          createdAt,
+          attribution: {
+            fellowId: "F-pending-ledger-contender",
+            sponsorId: "U-pending-ledger-contender",
+            sessionId: "S-pending-ledger-contender",
+            modelSelfDeclared: "model",
+            harness: "harness",
+          },
+        },
+        { statementsAfterEvent: () => [] },
+      ),
+    ).rejects.toBeInstanceOf(KraterIdempotencyConflictError);
+
+    expect(
+      await db
+        .prepare(
+          `SELECT request_digest, event_id, event_seq
+           FROM idempotency WHERE problem_id = 'P-4DSP' AND idempotency_key = ?`,
+        )
+        .bind(key)
+        .first<{ request_digest: string; event_id: string | null; event_seq: number | null }>(),
+    ).toEqual({ request_digest: ownerDigest, event_id: null, event_seq: null });
+    expect(
+      await db
+        .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>(),
+    ).toEqual(before);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE id = 'E-pending-ledger-contender'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 0 });
+  });
+
   test("a hypothesis proposal records the attack route with its mandatory falsifier (W5.6)", async () => {
-    const { call } = await fixture();
+    const { binding, call, db } = await fixture();
     const opened = await call("/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "hyp-open" },
@@ -3726,21 +3973,176 @@ describe("session protocol routes", () => {
     const session = (await opened.json()) as { session_id: string };
 
     // A hypothesis with a falsifier records.
+    const hypothesisRequest = {
+      route: "induction on the path length",
+      mechanism: "the toggle preserves the count, so induction on length closes it",
+      falsifier: "a path where the toggle changes the count",
+      origin: "proposed",
+      body_md: "Proposing induction on the path length.",
+    } as const;
     const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "hyp-propose" },
-      body: JSON.stringify({
-        route: "induction on the path length",
-        mechanism: "the toggle preserves the count, so induction on length closes it",
-        falsifier: "a path where the toggle changes the count",
-        origin: "proposed",
-        body_md: "Proposing induction on the path length.",
-      }),
+      body: JSON.stringify(hypothesisRequest),
     });
     expect(proposed.status).toBe(201);
     const body = (await proposed.json()) as { hypothesis_id?: string; status?: string };
     expect(body.hypothesis_id).toMatch(/^H-/);
     expect(body.status).toBe("open");
+    if (body.hypothesis_id === undefined) throw new Error("hypothesis id missing");
+    const created = await db
+      .prepare(
+        `SELECT h.body_md, h.source_event_id, h.source_seq,
+                e.type, e.object_kind, e.object_id, e.actor_fellow_id, e.actor_sponsor_id,
+                e.actor_session_id, e.model_string_self_declared, e.harness, c.payload_json
+         FROM hypotheses h
+         JOIN events e ON e.id = h.source_event_id AND e.seq = h.source_seq
+         JOIN event_content c ON c.event_id = e.id
+         WHERE h.problem_id = 'P-4DSP' AND h.hypothesis_id = ?`,
+      )
+      .bind(body.hypothesis_id)
+      .first<{
+        body_md: string;
+        source_event_id: string;
+        source_seq: number;
+        type: string;
+        object_kind: string;
+        object_id: string;
+        actor_fellow_id: string;
+        actor_sponsor_id: string;
+        actor_session_id: string;
+        model_string_self_declared: string;
+        harness: string;
+        payload_json: string;
+      }>();
+    expect(created).toMatchObject({
+      body_md: hypothesisRequest.body_md,
+      type: "hypothesis.created",
+      object_kind: "hypothesis",
+      object_id: body.hypothesis_id,
+      actor_fellow_id: binding.fellowId,
+      actor_sponsor_id: binding.sponsorId,
+      actor_session_id: session.session_id,
+      model_string_self_declared: binding.model,
+      harness: binding.harness,
+    });
+    expect(JSON.parse(created?.payload_json ?? "null")).toMatchObject({
+      body_md: hypothesisRequest.body_md,
+      falsifier: hypothesisRequest.falsifier,
+      mechanism: hypothesisRequest.mechanism,
+      route: hypothesisRequest.route,
+    });
+
+    const replay = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "hyp-propose" },
+      body: JSON.stringify(hypothesisRequest),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(body);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'hypothesis.created'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+
+    const refutation = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "hyp-refutation" },
+      body: JSON.stringify({
+        bears_on_kind: "hypothesis",
+        bears_on_id: body.hypothesis_id,
+        direction: "refutes",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "The four-path changes the count and refutes this exact route.",
+      }),
+    });
+    expect(refutation.status, await refutation.clone().text()).toBe(201);
+    const refutationBody = (await refutation.json()) as { evidence_id: string };
+
+    const mismatchedKill = await call(
+      `/v1/sessions/${session.session_id}/hypotheses/${body.hypothesis_id}/kill`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "hyp-kill-mismatch" },
+        body: JSON.stringify({
+          hypothesis_id: "H-WRONG",
+          killed_by_evidence_id: refutationBody.evidence_id,
+          reason: "This body must not be allowed to kill a different path target.",
+        }),
+      },
+    );
+    expect(mismatchedKill.status).toBe(422);
+    expect(((await mismatchedKill.json()) as { code?: string }).code).toBe(
+      "HYPOTHESIS_BODY_INVALID",
+    );
+
+    const killRequest = {
+      hypothesis_id: body.hypothesis_id,
+      killed_by_evidence_id: refutationBody.evidence_id,
+      reason: "The recorded four-path counterexample kills the induction route.",
+    };
+    const killed = await call(
+      `/v1/sessions/${session.session_id}/hypotheses/${body.hypothesis_id}/kill`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "hyp-kill" },
+        body: JSON.stringify(killRequest),
+      },
+    );
+    expect(killed.status, await killed.clone().text()).toBe(200);
+    const killedBody = (await killed.json()) as {
+      hypothesis_id: string;
+      status: string;
+      killed_at: string;
+    };
+    expect(killedBody).toMatchObject({ hypothesis_id: body.hypothesis_id, status: "killed" });
+    const killedProjection = await db
+      .prepare(
+        `SELECT h.status, h.killed_by_evidence_id, h.kill_reason, h.kill_event_id,
+                h.kill_source_seq, e.type, e.actor_fellow_id, c.payload_json
+         FROM hypotheses h
+         JOIN events e ON e.id = h.kill_event_id AND e.seq = h.kill_source_seq
+         JOIN event_content c ON c.event_id = e.id
+         WHERE h.problem_id = 'P-4DSP' AND h.hypothesis_id = ?`,
+      )
+      .bind(body.hypothesis_id)
+      .first<{
+        status: string;
+        killed_by_evidence_id: string;
+        kill_reason: string;
+        kill_event_id: string;
+        kill_source_seq: number;
+        type: string;
+        actor_fellow_id: string;
+        payload_json: string;
+      }>();
+    expect(killedProjection).toMatchObject({
+      status: "killed",
+      killed_by_evidence_id: refutationBody.evidence_id,
+      kill_reason: killRequest.reason,
+      type: "hypothesis.killed",
+      actor_fellow_id: binding.fellowId,
+    });
+    expect(JSON.parse(killedProjection?.payload_json ?? "null")).toEqual(killRequest);
+
+    const killedReplay = await call(
+      `/v1/sessions/${session.session_id}/hypotheses/${body.hypothesis_id}/kill`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "hyp-kill" },
+        body: JSON.stringify(killRequest),
+      },
+    );
+    expect(killedReplay.status).toBe(200);
+    expect(await killedReplay.json()).toEqual(killedBody);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'hypothesis.killed'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
 
     // A hypothesis WITHOUT a falsifier is refused at the contract (P3 for hypotheses).
     const noFalsifier = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
@@ -3757,13 +4159,37 @@ describe("session protocol routes", () => {
   });
 
   test("an evidence submission records the computed class, never author-asserted (W5.6)", async () => {
-    const { call } = await fixture();
+    const { binding, call, db } = await fixture();
     const opened = await call("/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "ev-open" },
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
     });
     const session = (await opened.json()) as { session_id: string };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Evidence target",
+        body_md: "The exact target version for the evidence route.",
+        relates_to: [],
+      }),
+    });
+    const workshop = (await pushed.json()) as { workshop_id: string };
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "The evidence target has an exact first version.",
+        falsifier: "A counterexample to the versioned statement.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+    const { claim_id: claimId } = (await promoted.json()) as { claim_id: string };
 
     // A model_memory source with no locator/excerpt computes assertion (P8).
     const submitted = await call(`/v1/sessions/${session.session_id}/evidence`, {
@@ -3771,7 +4197,8 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "ev-submit" },
       body: JSON.stringify({
         bears_on_kind: "claim",
-        bears_on_id: "C-1",
+        bears_on_id: claimId,
+        bears_on_version: 1,
         direction: "supports",
         kind: "argument",
         source: { kind: "model_memory" },
@@ -3779,10 +4206,96 @@ describe("session protocol routes", () => {
         body_md: "I recall a similar result.",
       }),
     });
-    expect(submitted.status).toBe(201);
+    expect(submitted.status, await submitted.clone().text()).toBe(201);
     const body = (await submitted.json()) as { computed_class?: string; coercion_flags?: string[] };
     expect(body.computed_class).toBe("assertion");
     expect(body.coercion_flags).toContain("p8_model_memory_caps_at_assertion");
+    const submittedBody = body as typeof body & { evidence_id?: string };
+    expect(submittedBody.evidence_id).toMatch(/^E-/);
+    const evidenceProjection = await db
+      .prepare(
+        `SELECT v.source_event_id, v.source_seq, v.bears_on_version, v.body_md,
+                e.type, e.object_kind, e.object_id, e.actor_fellow_id, e.actor_sponsor_id,
+                e.actor_session_id, e.model_string_self_declared, e.harness, c.payload_json
+         FROM evidence v
+         JOIN events e ON e.id = v.source_event_id AND e.seq = v.source_seq
+         JOIN event_content c ON c.event_id = e.id
+         WHERE v.problem_id = 'P-4DSP' AND v.evidence_id = ?`,
+      )
+      .bind(submittedBody.evidence_id)
+      .first<{
+        source_event_id: string;
+        source_seq: number;
+        bears_on_version: number;
+        body_md: string;
+        type: string;
+        object_kind: string;
+        object_id: string;
+        actor_fellow_id: string;
+        actor_sponsor_id: string;
+        actor_session_id: string;
+        model_string_self_declared: string;
+        harness: string;
+        payload_json: string;
+      }>();
+    expect(evidenceProjection).toMatchObject({
+      bears_on_version: 1,
+      body_md: "I recall a similar result.",
+      type: "evidence.created",
+      object_kind: "evidence",
+      object_id: submittedBody.evidence_id,
+      actor_fellow_id: binding.fellowId,
+      actor_sponsor_id: binding.sponsorId,
+      actor_session_id: session.session_id,
+      model_string_self_declared: binding.model,
+      harness: binding.harness,
+    });
+    expect(JSON.parse(evidenceProjection?.payload_json ?? "null")).toMatchObject({
+      bears_on_id: claimId,
+      bears_on_kind: "claim",
+      bears_on_version: 1,
+      body_md: "I recall a similar result.",
+      computed_class: "assertion",
+    });
+
+    const replayed = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-submit" },
+      body: JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: claimId,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "I recall a similar result.",
+      }),
+    });
+    expect(replayed.status).toBe(200);
+    expect(await replayed.json()).toEqual(submittedBody);
+
+    const futureTarget = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "ev-future" },
+      body: JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: claimId,
+        bears_on_version: 2,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "This must not attach to a future version.",
+      }),
+    });
+    expect(futureTarget.status).toBe(422);
+    expect(((await futureTarget.json()) as { code?: string }).code).toBe("EVIDENCE_BODY_INVALID");
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'evidence.created'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
 
     // A computation with no detection floor coerces to heuristic (P5).
     const coerced = await call(`/v1/sessions/${session.session_id}/evidence`, {
@@ -3790,7 +4303,8 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "ev-coerced" },
       body: JSON.stringify({
         bears_on_kind: "claim",
-        bears_on_id: "C-1",
+        bears_on_id: claimId,
+        bears_on_version: 1,
         direction: "supports",
         kind: "computation",
         source: { kind: "locator", locator: "https://example.org", excerpt: "the result" },

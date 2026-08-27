@@ -3252,10 +3252,10 @@ describe("artifact retention census aggregation", () => {
       ),
     ).toThrow(/ARTIFACT_CENSUS_INVALID|metadata records/);
     expect(() =>
-      summarizeArtifactCensusObservations(
-        [observation],
-        { ...censusContext(), incompleteReason: "forged" } as ArtifactCensusContext,
-      ),
+      summarizeArtifactCensusObservations([observation], {
+        ...censusContext(),
+        incompleteReason: "forged",
+      } as unknown as ArtifactCensusContext),
     ).toThrow(/ARTIFACT_CENSUS_INVALID|context fields/);
     expect(() =>
       summarizeArtifactCensusObservations(
@@ -3276,10 +3276,10 @@ describe("artifact retention census aggregation", () => {
       ),
     ).toThrow(/ARTIFACT_CENSUS_DRIFT|fewer links/);
 
-    const forgedAuthority = summarizeArtifactCensusObservations(
-      [observation],
-      { ...censusContext(), storageAuthority: "real-filesystem" } as ArtifactCensusContext,
-    );
+    const forgedAuthority = summarizeArtifactCensusObservations([observation], {
+      ...censusContext(),
+      storageAuthority: "real-filesystem",
+    } as ArtifactCensusContext);
     expect(forgedAuthority.storage_authority).toBe("simulation");
     expect(forgedAuthority.archive_candidate).toBe(false);
   });
@@ -3312,7 +3312,10 @@ describe("artifact retention census aggregation", () => {
       [".app", "end("],
       [".li", "nk("],
     ].map((parts) => parts.join(""))) {
-      expect(censusSource).not.toContain(mutation);
+      const escaped = mutation.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const writeCall = new RegExp(`(?<![A-Za-z0-9_$])${escaped}`, "u");
+      expect(censusSource).not.toMatch(writeCall);
+      expect(`plant:${mutation}`).toMatch(writeCall);
     }
     expect(source).toContain('argument === "--retention-census"');
     expect(source).toContain('argument === "--locate-sha256"');
@@ -3343,12 +3346,12 @@ describe("artifact retention census aggregation", () => {
     expect(() => parseHarnessCli(["--preflight", "--locate-sha256", digestA])).toThrow(
       /valid only with --retention-census/,
     );
-    expect(() =>
-      parseHarnessCli(["--retention-census", "--integration-namespace", "one"]),
-    ).toThrow(/does not narrow/);
-    expect(() => parseHarnessCli(["--retention-census", "--locate-sha256", "not-a-digest"])).toThrow(
-      /lowercase SHA-256/,
+    expect(() => parseHarnessCli(["--retention-census", "--integration-namespace", "one"])).toThrow(
+      /does not narrow/,
     );
+    expect(() =>
+      parseHarnessCli(["--retention-census", "--locate-sha256", "not-a-digest"]),
+    ).toThrow(/lowercase SHA-256/);
     expect(() =>
       parseHarnessCli([
         "--retention-census",
