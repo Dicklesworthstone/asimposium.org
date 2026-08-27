@@ -4010,9 +4010,9 @@ describe("registered S2 shell and lifecycle regressions", () => {
    *
    * `s2_run_owned_deadline` and `s2_bounded_capture` are the only bound on every
    * external command the harness runs, so a wrapper that can hang is a harness
-   * that can hang. Both plants below run against the real helpers rather than a
-   * copy, and both target a specific way the previous implementation failed to
-   * return at all — not merely returned late.
+   * that can hang. These plants run against the real helpers rather than a copy
+   * and cover pre-handshake cleanup, the direct-child reap certificate, and a
+   * TERM-resistant descendant holding capture pipes open.
    */
   test(
     "PLANTED: a deadline expiring before setsid still terminates and reaps",
@@ -4033,6 +4033,33 @@ describe("registered S2 shell and lifecycle regressions", () => {
           // 124 is the honest timeout. 123 would mean the group outlived the
           // kill, which is a different fact and must not read as a clean one.
           wrapper_status: 124,
+          survivors: 0,
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: clean timeout is refused when the direct-child reap certificate is withheld",
+    () => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "owned-wrapper-reap-certificate",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(0);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario:
+            "owned-wrapper-refuses-clean-timeout-without-positive-direct-child-reap-certificate",
+          // 123 is cleanup-unproven. Returning 124 here would falsely certify
+          // that the owned command was fully reaped.
+          wrapper_status: 123,
           survivors: 0,
         }),
       );

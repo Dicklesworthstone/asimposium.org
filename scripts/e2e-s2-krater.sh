@@ -372,6 +372,9 @@ readonly S2_OWNED_COMMAND_PROGRAM='
   my $pre_setsid_delay_ms = $ENV{S2_PLANT_WRAPPER_PRE_SETSID_DELAY_MS};
   $pre_setsid_delay_ms = 0 unless defined $pre_setsid_delay_ms && $pre_setsid_delay_ms ne "";
   $pre_setsid_delay_ms =~ /^[0-9]{1,6}$/ or exit 125;
+  my $reap_proof_failure = $ENV{S2_PLANT_WRAPPER_REAP_PROOF_FAILURE};
+  $reap_proof_failure = 0 unless defined $reap_proof_failure && $reap_proof_failure ne "";
+  $reap_proof_failure =~ /^[01]$/ or exit 125;
 
   pipe(my $ready_reader, my $ready_writer) or exit 125;
   my $child = fork();
@@ -400,7 +403,7 @@ readonly S2_OWNED_COMMAND_PROGRAM='
   }
 
   sub terminate_owned {
-    my ($pid, $have_group, $grace_seconds, $settle) = @_;
+    my ($pid, $have_group, $grace_seconds, $settle, $plant_reap_proof_failure) = @_;
     # Before the handshake the group does not exist, so the pid is the only
     # honest target. Signalling -$pid here would be a no-op wearing the costume
     # of a group kill.
@@ -408,18 +411,28 @@ readonly S2_OWNED_COMMAND_PROGRAM='
     kill "TERM", $signalled;
     my $grace_deadline = time() + $grace_seconds;
     while (time() < $grace_deadline) {
-      waitpid($pid, WNOHANG);
+      # Do not reap the direct child while another signal may still be needed.
+      # Its unreaped pid is the authority that prevents a recycled numeric
+      # target from being mistaken for this command during TERM -> KILL.
       last unless owned_alive($pid, $have_group);
       select undef, undef, undef, 0.05;
     }
     kill "KILL", $signalled if owned_alive($pid, $have_group);
     my $reap_deadline = time() + $settle;
+    my $reaped = 0;
     while (time() < $reap_deadline) {
-      last if waitpid($pid, WNOHANG) != 0;
+      if (waitpid($pid, WNOHANG) == $pid) {
+        $reaped = 1;
+        last;
+      }
       select undef, undef, undef, 0.02;
     }
+    # Causal fault injection: cleanup did reap the child, but the certificate
+    # is deliberately withheld. Exit 124 must still be impossible.
+    $reaped = 0 if $plant_reap_proof_failure;
+    return 0 unless $reaped;
     # Without a group there is nothing further to prove empty; the pid was the
-    # whole owned set.
+    # whole owned set, and the positive reap above is its completion proof.
     return 1 unless $have_group;
     my $settle_deadline = time() + $settle;
     while (time() < $settle_deadline) {
@@ -444,7 +457,13 @@ readonly S2_OWNED_COMMAND_PROGRAM='
       $have_group = 1 if defined $got && $got == 1 && $ready_byte eq "R";
     }
     if (time() >= $deadline) {
-      my $no_survivors = terminate_owned($child, $have_group, $term_grace_seconds, $settle_seconds);
+      my $no_survivors = terminate_owned(
+        $child,
+        $have_group,
+        $term_grace_seconds,
+        $settle_seconds,
+        $reap_proof_failure,
+      );
       exit($no_survivors ? 124 : 123);
     }
     select undef, undef, undef, 0.02;
@@ -5916,6 +5935,26 @@ run_s2_shell_regression_test() {
     (( wrapper_elapsed <= 15 )) || return 1
     if pgrep -f "${wrapper_group_marker}" >/dev/null 2>&1; then return 1; fi
     emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"owned-wrapper-deadline-before-setsid-terminates-without-hanging\",\"wrapper_status\":${wrapper_status},\"elapsed_seconds\":${wrapper_elapsed},\"survivors\":0,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owned-wrapper-pre-setsid scripts/e2e-s2-krater.sh\"}"
+    return 0
+  fi
+
+  if [[ "${mode}" == "owned-wrapper-reap-certificate" ]]; then
+    local wrapper_started wrapper_elapsed wrapper_status wrapper_group_marker
+    wrapper_group_marker="s2-wrapper-reap-proof-$(random_hex 8)" || return 1
+    wrapper_started=${SECONDS}
+    # Withhold only the final reap certificate after the real child has been
+    # reaped. The watchdog must fail closed as cleanup-incomplete (123); the
+    # former unconditional no-group success returned a false clean timeout.
+    S2_PLANT_WRAPPER_DEADLINE_SECONDS=0 \
+    S2_PLANT_WRAPPER_PRE_SETSID_DELAY_MS=1500 \
+    S2_PLANT_WRAPPER_REAP_PROOF_FAILURE=1 \
+      s2_run_owned_deadline /bin/sh -c "exec -a ${wrapper_group_marker} /bin/sleep 45"
+    wrapper_status=$?
+    wrapper_elapsed=$((SECONDS - wrapper_started))
+    [[ ${wrapper_status} -eq 123 ]] || return 1
+    (( wrapper_elapsed <= 15 )) || return 1
+    if pgrep -f "${wrapper_group_marker}" >/dev/null 2>&1; then return 1; fi
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"owned-wrapper-refuses-clean-timeout-without-positive-direct-child-reap-certificate\",\"wrapper_status\":${wrapper_status},\"elapsed_seconds\":${wrapper_elapsed},\"survivors\":0,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owned-wrapper-reap-certificate scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
 

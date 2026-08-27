@@ -5052,7 +5052,15 @@ describe("session protocol routes", () => {
   });
 
   test("mounted packs budget the exact rendered face and quarantine hostile ledger text", async () => {
-    const { call, db, binding } = await fixture();
+    const dispositionReads: LocalRead[] = [];
+    let recordDispositionReads = false;
+    const { call, db, binding } = await fixture({
+      beforeRead: async (read) => {
+        if (recordDispositionReads && /\bWITH selected_claims AS\b/iu.test(read.sql)) {
+          dispositionReads.push(read);
+        }
+      },
+    });
     const opened = await call("/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "safe-pack-open" },
@@ -5173,14 +5181,39 @@ describe("session protocol routes", () => {
       )
       .run();
     await db.prepare("UPDATE problems SET public_seq = 130 WHERE id = 'P-4DSP'").run();
+    recordDispositionReads = true;
     const capped = await call(
       `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=8000`,
     );
+    recordDispositionReads = false;
     expect(capped.status).toBe(200);
     const cappedPack = PackResponseSchema.parse(await capped.json());
     expect(cappedPack.omitted).toContainEqual({ reason: "candidate_limit", detail: "claims" });
-    // Full pack composition over a seeded ledger sits close to bun's default
-    // 5s per-test budget under peer build load; assertions unchanged.
+    expect(
+      dispositionReads.map((read) => ({
+        kind: read.kind,
+        sql: read.sql,
+        bindings: read.bindings,
+      })),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "run",
+        sql: expect.stringContaining("FROM events JOIN selected_claims"),
+        bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
+      }),
+      expect.objectContaining({
+        kind: "run",
+        sql: expect.stringContaining("FROM reviews JOIN selected_claims"),
+        bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
+      }),
+      expect.objectContaining({
+        kind: "run",
+        sql: expect.stringContaining("FROM evidence JOIN selected_claims"),
+        bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
+      }),
+    ]);
+    // The cap-level regression above pins disposition reads to one three-query
+    // batch; adding another per-claim read must fail this exact witness.
   }, 20000);
 
   test("PLANTED: createApp refuses a corrupt oversized claim without reflecting it", async () => {

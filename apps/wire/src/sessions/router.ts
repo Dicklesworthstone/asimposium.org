@@ -351,6 +351,45 @@ interface PackSessionRow {
   readonly closed_at: string | null;
 }
 
+interface PackClaimEventRow {
+  readonly claim_id: string;
+  readonly seq: number;
+  readonly type: string;
+  readonly object_version: number;
+}
+
+interface PackReviewRow {
+  readonly claim_id: string;
+  readonly review_id: string;
+  readonly reviewer_fellow_id: string;
+  readonly tier: "T0" | "T1" | "T2" | "T3";
+  readonly verdict: string;
+  readonly target_version: number;
+  readonly capable_of_failure: string | null;
+  readonly source_seq: number;
+}
+
+interface PackRefutingEvidenceRow {
+  readonly claim_id: string;
+  readonly evidence_id: string;
+  readonly bears_on_version: number;
+  readonly source_seq: number;
+}
+
+function groupPackRows<Row>(
+  rows: readonly Row[],
+  claimIdOf: (row: Row) => string,
+): ReadonlyMap<string, readonly Row[]> {
+  const grouped = new Map<string, Row[]>();
+  for (const row of rows) {
+    const claimId = claimIdOf(row);
+    const existing = grouped.get(claimId);
+    if (existing === undefined) grouped.set(claimId, [row]);
+    else existing.push(row);
+  }
+  return grouped;
+}
+
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   const privateNoStore = (response: Response): Response => {
@@ -1356,46 +1395,89 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // ledger events (never a stored field) and displayed with the claim.
         // The promote opens it; the reviews on the exact pinned version drive
         // it further (corroborated, disputed, …) via the state machine.
-        for (const [index, claim] of claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT).entries()) {
-          const claimEvents = await db
+        const selectedClaims = claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT);
+        const selectedClaimCte = `SELECT id FROM claims
+          WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?`;
+        const dispositionResults = await db.batch([
+          db
             .prepare(
-              `SELECT seq, type, object_version FROM events
-               WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ? AND seq <= ?
-               ORDER BY seq ASC`,
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT events.object_id AS claim_id, events.seq, events.type, events.object_version
+               FROM events JOIN selected_claims ON selected_claims.id = events.object_id
+               WHERE events.problem_id = ? AND events.object_kind = 'claim' AND events.seq <= ?
+               ORDER BY events.seq ASC`,
             )
-            .bind(session.problem_id, claim.id, cursor)
-            .all<{ seq: number; type: string; object_version: number }>();
-          const reviewRows = await db
+            .bind(
+              session.problem_id,
+              cursor,
+              PACK_CLAIM_CANDIDATE_LIMIT,
+              session.problem_id,
+              cursor,
+            ),
+          db
             .prepare(
-              `SELECT review_id, reviewer_fellow_id, tier, verdict, target_version,
-                      capable_of_failure, source_seq
-               FROM reviews
-               WHERE problem_id = ? AND target_claim_id = ?
-                 AND source_seq IS NOT NULL AND source_seq <= ?
-               ORDER BY source_seq ASC`,
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
+                      reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
+                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq
+               FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
+               WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
+                 AND reviews.source_seq <= ?
+               ORDER BY reviews.source_seq ASC`,
             )
-            .bind(session.problem_id, claim.id, cursor)
-            .all<{
-              review_id: string;
-              reviewer_fellow_id: string;
-              tier: "T0" | "T1" | "T2" | "T3";
-              verdict: string;
-              target_version: number;
-              capable_of_failure: string | null;
-              source_seq: number;
-            }>();
-          const refutingEvidence = await db
+            .bind(
+              session.problem_id,
+              cursor,
+              PACK_CLAIM_CANDIDATE_LIMIT,
+              session.problem_id,
+              cursor,
+            ),
+          db
             .prepare(
-              `SELECT evidence_id, bears_on_version, source_seq FROM evidence
-               WHERE problem_id = ? AND bears_on_kind = 'claim' AND bears_on_id = ?
-                 AND direction = 'refutes' AND bears_on_version IS NOT NULL
-                 AND source_seq IS NOT NULL AND source_seq <= ?
-               ORDER BY source_seq ASC`,
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT evidence.bears_on_id AS claim_id, evidence.evidence_id,
+                      evidence.bears_on_version, evidence.source_seq
+               FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
+               WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
+                 AND evidence.direction = 'refutes' AND evidence.bears_on_version IS NOT NULL
+                 AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
+               ORDER BY evidence.source_seq ASC`,
             )
-            .bind(session.problem_id, claim.id, cursor)
-            .all<{ evidence_id: string; bears_on_version: number; source_seq: number }>();
+            .bind(
+              session.problem_id,
+              cursor,
+              PACK_CLAIM_CANDIDATE_LIMIT,
+              session.problem_id,
+              cursor,
+            ),
+        ]);
+        const [claimEventsResult, reviewRowsResult, refutingEvidenceResult] = dispositionResults;
+        if (
+          claimEventsResult === undefined ||
+          reviewRowsResult === undefined ||
+          refutingEvidenceResult === undefined
+        ) {
+          throw new Error("pack disposition batch returned an incomplete result set");
+        }
+        const claimEventsById = groupPackRows(
+          (claimEventsResult.results ?? []) as PackClaimEventRow[],
+          (row) => row.claim_id,
+        );
+        const reviewRowsById = groupPackRows(
+          (reviewRowsResult.results ?? []) as PackReviewRow[],
+          (row) => row.claim_id,
+        );
+        const refutingEvidenceById = groupPackRows(
+          (refutingEvidenceResult.results ?? []) as PackRefutingEvidenceRow[],
+          (row) => row.claim_id,
+        );
+
+        for (const [index, claim] of selectedClaims.entries()) {
+          const claimEvents = claimEventsById.get(claim.id) ?? [];
+          const reviewRows = reviewRowsById.get(claim.id) ?? [];
+          const refutingEvidence = refutingEvidenceById.get(claim.id) ?? [];
           const fold = computeCurrentClaimDisposition([
-            ...(claimEvents.results ?? []).flatMap((row) => {
+            ...claimEvents.flatMap((row) => {
               if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
               return [
                 {
@@ -1408,7 +1490,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 },
               ];
             }),
-            ...(reviewRows.results ?? []).map((review) => ({
+            ...reviewRows.map((review) => ({
               kind: "review-created" as const,
               sequence: review.source_seq,
               targetVersion: review.target_version,
@@ -1426,7 +1508,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 full_write_up: false,
               },
             })),
-            ...(refutingEvidence.results ?? []).map((evidence) => ({
+            ...refutingEvidence.map((evidence) => ({
               kind: "refuting-evidence" as const,
               sequence: evidence.source_seq,
               targetVersion: evidence.bears_on_version,

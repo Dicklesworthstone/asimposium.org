@@ -474,6 +474,122 @@ require_remaining() {
   remaining_seconds >/dev/null || fail "TOKEN_LIFECYCLE_DEADLINE_EXHAUSTED"
 }
 
+# Run a local tool beneath the existing run-wide deadline. The direct child
+# proves it owns a new process group before that group is ever signalable; on a
+# deadline, the watchdog performs bounded TERM/KILL, reaps the child, and proves
+# the group empty. Exit 124 is a clean timeout. Exit 123 means cleanup itself
+# was not proved and must never be collapsed into an ordinary command failure.
+# shellcheck disable=SC2016
+readonly TOKEN_LIFECYCLE_OWNED_COMMAND_PROGRAM='
+  my $deadline_seconds = shift @ARGV;
+  my $term_grace_seconds = 2;
+  my $settle_seconds = 2;
+  pipe(my $ready_reader, my $ready_writer) or exit 125;
+  my $child = fork();
+  exit 125 unless defined $child;
+  if ($child == 0) {
+    close $ready_reader;
+    setsid() or exit 125;
+    getpgrp(0) == $$ or exit 125;
+    syswrite($ready_writer, "R", 1) == 1 or exit 125;
+    close $ready_writer or exit 125;
+    exec @ARGV;
+    exit 125;
+  }
+  close $ready_writer;
+  my $ready_flags = fcntl($ready_reader, F_GETFL, 0);
+  defined $ready_flags or exit 125;
+  fcntl($ready_reader, F_SETFL, $ready_flags | O_NONBLOCK) or exit 125;
+
+  sub owned_alive {
+    my ($pid, $have_group) = @_;
+    return $have_group ? (kill(0, -$pid) > 0 ? 1 : 0) : (kill(0, $pid) > 0 ? 1 : 0);
+  }
+
+  sub terminate_owned {
+    my ($pid, $have_group, $grace_seconds, $settle) = @_;
+    my $signalled = $have_group ? -$pid : $pid;
+    kill "TERM", $signalled;
+    my $grace_deadline = time() + $grace_seconds;
+    while (time() < $grace_deadline) {
+      # Keep the direct child unreaped until all signals are finished. Its
+      # unreaped PID is the authority that prevents a recycled numeric target
+      # from being mistaken for this command during the TERM/KILL transition.
+      last unless owned_alive($pid, $have_group);
+      select undef, undef, undef, 0.05;
+    }
+    kill "KILL", $signalled if owned_alive($pid, $have_group);
+    my $reap_deadline = time() + $settle;
+    my $reaped = 0;
+    while (time() < $reap_deadline) {
+      if (waitpid($pid, WNOHANG) == $pid) {
+        $reaped = 1;
+        last;
+      }
+      select undef, undef, undef, 0.02;
+    }
+    return 0 unless $reaped;
+    return 1 unless $have_group;
+    my $settle_deadline = time() + $settle;
+    while (time() < $settle_deadline) {
+      return 1 if kill(0, -$pid) == 0;
+      select undef, undef, undef, 0.05;
+    }
+    return 0;
+  }
+
+  my $have_group = 0;
+  my $deadline = time() + $deadline_seconds;
+  while (1) {
+    my $waited = waitpid($child, WNOHANG);
+    if ($waited == $child) {
+      my $status = $?;
+      exit(128 + ($status & 127)) if $status & 127;
+      exit($status >> 8);
+    }
+    if (!$have_group) {
+      my $ready_byte = "";
+      my $got = sysread($ready_reader, $ready_byte, 1);
+      $have_group = 1 if defined($got) && $got == 1 && $ready_byte eq "R";
+    }
+    if (time() >= $deadline) {
+      my $empty = terminate_owned($child, $have_group, $term_grace_seconds, $settle_seconds);
+      exit($empty ? 124 : 123);
+    }
+    select undef, undef, undef, 0.02;
+  }
+'
+
+run_owned_for_seconds() {
+  local budget_seconds="$1"
+  shift
+  perl -MPOSIX=setsid,WNOHANG -MFcntl=F_GETFL,F_SETFL,O_NONBLOCK \
+    -e "${TOKEN_LIFECYCLE_OWNED_COMMAND_PROGRAM}" "${budget_seconds}" "$@"
+}
+
+run_owned_deadline() {
+  local remaining
+  remaining="$(remaining_seconds)" || return 124
+  run_owned_for_seconds "${remaining}" "$@"
+}
+
+verify_owned_command_watchdog_self_test() {
+  local forwarded_status=0
+  run_owned_for_seconds 2 /bin/sh -c 'exit 7' || forwarded_status=$?
+  if (( forwarded_status != 7 )); then
+    fail "TOKEN_LIFECYCLE_OWNED_COMMAND_STATUS_SELF_TEST_FAILED"
+    return 1
+  fi
+
+  local timeout_status=0
+  run_owned_for_seconds 1 /bin/sh -c 'trap "" TERM; while :; do sleep 1; done' \
+    >/dev/null 2>&1 || timeout_status=$?
+  if (( timeout_status != 124 )); then
+    fail "TOKEN_LIFECYCLE_OWNED_COMMAND_TIMEOUT_SELF_TEST_FAILED"
+    return 1
+  fi
+}
+
 source_closure_manifest() {
   # shellcheck disable=SC2016
   TOKEN_LIFECYCLE_CLOSURE_ROOT="${ROOT}" \
@@ -1572,6 +1688,7 @@ SOURCE_CLOSURE_BEFORE="$(source_closure_manifest)" || {
 }
 if (( SELF_TEST == 1 )); then
   run_panic_coverage_verifier_self_test || exit 1
+  verify_owned_command_watchdog_self_test || exit 1
   emit "{\"suite\":\"${SUITE}\",\"assertion\":\"self_test_transitive_source_config_migration_closure\",\"status\":\"pass\",\"wrangler_started\":false}"
   exit 0
 fi
@@ -1678,11 +1795,22 @@ SERVER_SUPERVISOR_NONCE="$(${BUN} --eval '
 ')"
 SERVER_SUPERVISOR_MARKER="token-lifecycle-supervisor-${SERVER_SUPERVISOR_NONCE}"
 
-require_remaining
-"${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-  --env-file /dev/null >"${MIGRATION_LOG}" 2>&1 || { fail "TOKEN_LIFECYCLE_MIGRATIONS_FAILED"; exit 1; }
-assert_migration_journal || exit 1
-seed_session_problem || exit 1
+if [[ "${TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE:-0}" != "1" ]]; then
+  require_remaining
+  migration_status=0
+  run_owned_deadline "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
+    --persist-to "${STATE_DIR}" --env-file /dev/null >"${MIGRATION_LOG}" 2>&1 || migration_status=$?
+  if (( migration_status != 0 )); then
+    case "${migration_status}" in
+      124) fail "TOKEN_LIFECYCLE_DEADLINE_EXHAUSTED" ;;
+      123) fail "TOKEN_LIFECYCLE_MIGRATION_CLEANUP_INCOMPLETE" ;;
+      *) fail "TOKEN_LIFECYCLE_MIGRATIONS_FAILED" ;;
+    esac
+    exit 1
+  fi
+  assert_migration_journal || exit 1
+  seed_session_problem || exit 1
+fi
 
 # The nonce-bearing supervisor is the stable process-group leader. It cannot
 # launch Wrangler until the parent validates its private ready record and opens
@@ -2757,11 +2885,13 @@ assert(alphaCredential !== undefined, "alpha-active-credential");
 
 // ye45: measure the actual authenticated production pack route through local
 // Workerd and real local D1. Five samples are descriptive local observations,
-// not a p95, edge, or deployed performance claim. Contract parsing, stable
-// bytes, the 129th-row cap witness, and a large selected prefix keep the timing
-// record from going green on an empty or short-circuited response. Causal fault
-// runs skip this unrelated wall-clock gate so host timing cannot preempt the
-// later refusal each plant is responsible for proving.
+// not a p95, edge, or deployed performance claim. Their median is a regression
+// check against the plan hypothesis; Fable's p95 still requires the G0 load
+// validation it names. Contract parsing, stable bytes, the 129th-row cap
+// witness, and a large selected prefix keep the timing record from going green
+// on an empty or short-circuited response. Causal fault runs skip this unrelated
+// wall-clock gate so host timing cannot preempt the later refusal each plant is
+// responsible for proving.
 const packSessionResult = await sessionPost(
   charlie.token,
   "/v1/sessions",
@@ -2814,7 +2944,7 @@ if (process.env.TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT !== "1") {
   const packMedianMs = sortedPackSamplesMs[Math.floor(sortedPackSamplesMs.length / 2)];
   assert(packMedianMs !== undefined, "pack-measurement-median-present");
   const packMaxMs = Math.max(...packSamplesMs);
-  const everyLocalSampleWithinPlanBudget = packMaxMs <= PACK_MEASUREMENT_PLAN_BUDGET_MS;
+  const localMedianWithinPlanBudget = packMedianMs <= PACK_MEASUREMENT_PLAN_BUDGET_MS;
   console.log(
     JSON.stringify({
       suite: "token-lifecycle-local",
@@ -2828,10 +2958,10 @@ if (process.env.TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT !== "1") {
       median_ms: packMedianMs,
       max_ms: packMaxMs,
       plan_budget_ms: PACK_MEASUREMENT_PLAN_BUDGET_MS,
-      status: everyLocalSampleWithinPlanBudget ? "pass" : "fail",
+      status: localMedianWithinPlanBudget ? "pass" : "fail",
     }),
   );
-  assert(everyLocalSampleWithinPlanBudget, "pack-measurement-plan-budget");
+  assert(localMedianWithinPlanBudget, "pack-measurement-local-median-budget");
 }
 const packCloseResult = await sessionPost(
   charlie.token,

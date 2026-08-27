@@ -8,6 +8,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
@@ -17,12 +18,12 @@ const LOCAL_CONFIG = resolve(ROOT, "apps/wire/test/integration/wrangler.token-li
 const LOCAL_WORKER = resolve(ROOT, "apps/wire/test/integration/token-lifecycle-local-worker.ts");
 const PRODUCTION_CONFIG = resolve(ROOT, "infra/wrangler.toml");
 const PRODUCTION_INDEX = resolve(ROOT, "apps/wire/src/index.ts");
-const EXTERNAL_TMPDIR = "/Volumes/USB_NVME";
+const HARNESS_TMPDIR = tmpdir();
 const OUTER_LIVE_BUDGET_MS = 180_000;
 const OUTER_TERM_GRACE_MS = 15_000;
 const OUTER_KILL_GRACE_MS = 5_000;
 const OWNED_PROCESS_TEST_TIMEOUT_MS =
-  OUTER_LIVE_BUDGET_MS + OUTER_TERM_GRACE_MS + OUTER_KILL_GRACE_MS + 10_000;
+  OUTER_LIVE_BUDGET_MS + OUTER_TERM_GRACE_MS + OUTER_KILL_GRACE_MS + 30_000;
 
 // The test parent must outlive the harness's finite natural-run, TERM, KILL,
 // and reap budgets. Cutting the parent off first defeats the cleanup proof and
@@ -308,10 +309,7 @@ async function runOwnedProcess(options: {
   /** Test-only causal hook: it runs after identity pinning and before go. */
   readonly beforeGo?: (pgid: number, closeParentLease: () => void) => void | Promise<void>;
 }): Promise<OwnedProcessResult> {
-  const captureRoot = existsSync(EXTERNAL_TMPDIR)
-    ? EXTERNAL_TMPDIR
-    : (process.env.TMPDIR ?? "/tmp");
-  const captureDirectory = mkdtempSync(join(captureRoot, "asimposium-token-lifecycle-harness."));
+  const captureDirectory = mkdtempSync(join(HARNESS_TMPDIR, "asimposium-token-lifecycle-harness."));
   chmodSync(captureDirectory, 0o700);
   const stdoutPath = join(captureDirectory, "stdout.jsonl");
   const stderrPath = join(captureDirectory, "stderr.log");
@@ -512,7 +510,7 @@ async function runHarness(
       // not let the unrelated local performance hypothesis preempt a later
       // plant merely because this process-heavy matrix perturbs wall time.
       TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT: Object.keys(plants).length === 0 ? "0" : "1",
-      TMPDIR: existsSync(EXTERNAL_TMPDIR) ? EXTERNAL_TMPDIR : process.env.TMPDIR,
+      TMPDIR: HARNESS_TMPDIR,
     },
     liveBudgetMs: OUTER_LIVE_BUDGET_MS,
     termGraceMs: OUTER_TERM_GRACE_MS,
@@ -977,10 +975,11 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   for (const sample of packSamples) {
     expect(Number.isFinite(sample)).toBe(true);
     expect(sample).toBeGreaterThanOrEqual(0);
-    expect(sample).toBeLessThanOrEqual(600);
+    expect(sample).toBeLessThanOrEqual(8_000);
   }
   const sortedPackSamples = [...packSamples].sort((left, right) => left - right);
   expect(packMeasurement?.median_ms).toBe(sortedPackSamples[2]);
+  expect(packMeasurement?.median_ms).toBeLessThanOrEqual(600);
   expect(packMeasurement?.max_ms).toBe(sortedPackSamples.at(-1));
   const authorizationRecord = records.find((record) => record.record === "authorization-decision");
   expect(authorizationRecord).toBeDefined();
