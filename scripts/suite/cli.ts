@@ -24,7 +24,8 @@
  * Run `bun run suite --help` for the full contract.
  */
 
-import { closeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, openSync, readSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -96,20 +97,21 @@ const TOOLCHAIN_INTEGRATION_TERM_GRACE_MS = 2_000;
 const TOOLCHAIN_INTEGRATION_KILL_REAP_MS = 2_000;
 const OWNED_PROCESS_TERM_GRACE_MS = 500;
 const OWNED_PROCESS_KILL_REAP_MS = 500;
-// Control EOF proves the supervisor closed its own output descriptors first,
-// but Bun delivers EOF for each independent ReadableStream asynchronously.
-// A 500ms observation window produced a false leak after a successful real
-// web lint run; two seconds stays bounded while separating runtime delivery
-// latency from a genuinely inherited writer (which still fails closed).
-const OWNED_PROCESS_PIPE_DRAIN_MS = 2_000;
+// Control EOF proves the supervisor closed its own output descriptors first.
+// Five seconds stays bounded while separating descriptor-delivery latency from
+// a genuinely inherited writer (which still fails closed).
+const OWNED_PROCESS_PIPE_DRAIN_MS = 5_000;
 const OWNED_PROCESS_STREAM_RETAINED_BYTES = 64 * 1024;
 const OWNED_PROCESS_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const OWNED_PROCESS_CONTROL_BUFFER_CHARS = 512;
-const OWNED_PROCESS_INSPECTION_TIMEOUT_MS = 500;
+// The group-scoped census is an external process and can exceed 500ms while
+// the lifecycle matrix is rapidly spawning peers. It remains byte-bounded and
+// fail-closed; two seconds gives the ownership observer scheduling headroom
+// without weakening any PID, PGID, or post-signal proof.
+const OWNED_PROCESS_INSPECTION_TIMEOUT_MS = 2_000;
 const OWNED_PROCESS_INSPECTION_STREAM_RETAINED_BYTES = 64 * 1024;
 const OWNED_PROCESS_INSPECTION_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const OWNED_PROCESS_MAX_INSPECTIONS_PER_CLEANUP = 6;
-const ACTIVE_OWNED_CONTROL_FILES = new Set<ReturnType<typeof Bun.file>>();
 const TOOLCHAIN_INTEGRATION_TOTAL_TIMEOUT_MS =
   TOOLCHAIN_INTEGRATION_STEPS.reduce((total, step) => total + step.timeoutMs, 0) +
   TOOLCHAIN_INTEGRATION_STEPS.length *
@@ -129,10 +131,10 @@ const SUITE_TIMEOUT_MS: Readonly<Record<Suite, number>> = {
   e2e: 30 * 60_000,
 };
 // The real Wire unit composition includes sequential local-D1 and token-lifecycle
-// subprocess matrices. A fresh full run crossed the old 15-minute parent bound
-// while its children remained inside their own 120-second per-test limits. Keep
-// the parent finite, but outside the measured ~26-minute package runtime.
-const WIRE_UNIT_SUITE_TIMEOUT_MS = 30 * 60_000;
+// subprocess matrices. A fresh full run crossed the old 30-minute parent bound
+// while its children remained inside their own finite per-test limits. Keep the
+// parent finite with enough scheduling margin for the process-heavy composition.
+const WIRE_UNIT_SUITE_TIMEOUT_MS = 45 * 60_000;
 const WIRE_UNIT_STREAM_RETAINED_BYTES = 512 * 1024;
 const WIRE_UNIT_OUTPUT_RETAINED_BYTES = 768 * 1024;
 
@@ -495,6 +497,16 @@ if (!defined setsid()) {
 
 open(my $control, ">&=3") or exit 125;
 defined fcntl($control, F_SETFD, FD_CLOEXEC) or exit 125;
+# Bun's special stdout/stderr ReadableStreams can withhold EOF after the direct
+# child is reaped. Route production bytes through ordinary raw extra pipes so
+# EOF remains a kernel fact. Unlike fd3, these descriptors deliberately survive
+# exec as the target's stdout/stderr and therefore expose detached inheritors.
+open(my $stdout_pipe, ">&=4") or exit 125;
+open(my $stderr_pipe, ">&=5") or exit 125;
+open(STDOUT, ">&", $stdout_pipe) or exit 125;
+open(STDERR, ">&", $stderr_pipe) or exit 125;
+close($stdout_pipe) or exit 125;
+close($stderr_pipe) or exit 125;
 
 sub parent_lease_is_open {
   my $readable = "";
@@ -628,68 +640,63 @@ async function inspectOwnedProcessGroup(
   const timeoutMs = Math.min(options.timeoutMs, millisecondsBefore(deadlineAt));
   if (timeoutMs <= 0) return { state: "inspection-unproven" };
 
-  let snapshot: ReturnType<typeof Bun.spawn>;
+  const command =
+    options.command === undefined
+      ? ["/usr/bin/pgrep", "-g", String(leaderPid), ".*"]
+      : [...options.command];
+  const executable = command[0];
+  if (executable === undefined || executable === "") {
+    return { state: "inspection-unproven" };
+  }
+
+  let snapshot: ReturnType<typeof spawnSync>;
   try {
-    snapshot = Bun.spawn({
-      cmd:
-        options.command === undefined
-          ? ["/usr/bin/pgrep", "-g", String(leaderPid), ".*"]
-          : [...options.command],
+    // The census is a tiny serial cleanup primitive, not product execution.
+    // A synchronous bounded observer avoids depending on Bun's asynchronous
+    // process/ReadableStream EOF delivery while the surrounding matrix is
+    // rapidly forking. SIGKILL makes even a planted TERM-resistant inspector
+    // return at the declared deadline.
+    snapshot = spawnSync(executable, command.slice(1), {
       env: environmentForSuite(),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "buffer",
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+      maxBuffer: Math.max(options.streamLimitBytes, options.outputLimitBytes),
     });
   } catch {
     return { state: "inspection-unproven" };
   }
 
-  const budget: RetainedOutputBudget = {
-    retainedBytes: 0,
-    limitBytes: options.outputLimitBytes,
-  };
-  const stdout = captureBoundedPipe(
-    snapshot.stdout as ReadableStream<Uint8Array>,
-    options.streamLimitBytes,
-    budget,
-  );
-  const stderr = captureBoundedPipe(
-    snapshot.stderr as ReadableStream<Uint8Array>,
-    options.streamLimitBytes,
-    budget,
-  );
-  const observation = await valueBefore(
-    Promise.race([
-      snapshot.exited.then((exitCode) => ({ kind: "exited" as const, exitCode })),
-      stdout.overrun.then(() => ({ kind: "output-overrun" as const })),
-      stderr.overrun.then(() => ({ kind: "output-overrun" as const })),
-    ]),
-    timeoutMs,
-  );
+  const stdoutBytes = Buffer.isBuffer(snapshot.stdout)
+    ? snapshot.stdout
+    : Buffer.from(snapshot.stdout ?? "", "utf8");
+  const stderrBytes = Buffer.isBuffer(snapshot.stderr)
+    ? snapshot.stderr
+    : Buffer.from(snapshot.stderr ?? "", "utf8");
   if (
-    observation?.kind !== "exited" ||
-    (observation.exitCode !== 0 && observation.exitCode !== 1)
+    snapshot.error !== undefined ||
+    snapshot.signal !== null ||
+    (snapshot.status !== 0 && snapshot.status !== 1) ||
+    stdoutBytes.byteLength > options.streamLimitBytes ||
+    stderrBytes.byteLength > options.streamLimitBytes ||
+    stdoutBytes.byteLength + stderrBytes.byteLength > options.outputLimitBytes
   ) {
-    cancelCapturedPipes([stdout, stderr]);
-    killDirectChild(snapshot, "SIGKILL");
-    await reapDirectChild(snapshot, millisecondsBefore(deadlineAt));
-    await drainWithin([stdout, stderr], millisecondsBefore(deadlineAt));
-    return { state: "inspection-unproven" };
-  }
-  if (
-    !(await drainWithin([stdout, stderr], millisecondsBefore(deadlineAt))) ||
-    stdout.overflowed() ||
-    stderr.overflowed()
-  ) {
-    cancelCapturedPipes([stdout, stderr]);
-    killDirectChild(snapshot, "SIGKILL");
-    await reapDirectChild(snapshot, millisecondsBefore(deadlineAt));
     return { state: "inspection-unproven" };
   }
 
-  const stdoutText = stdout.text();
-  if (stderr.text() !== "") return { state: "inspection-unproven" };
-  if (observation.exitCode === 1) {
+  let stdoutText: string;
+  let stderrText: string;
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    stdoutText = decoder.decode(stdoutBytes);
+    stderrText = decoder.decode(stderrBytes);
+  } catch {
+    return { state: "inspection-unproven" };
+  }
+
+  if (stderrText !== "") return { state: "inspection-unproven" };
+  if (snapshot.status === 1) {
     // `pgrep` reserves exit 1 for an empty match. Output with that status is a
     // contradiction, never an empty census that may prove a post-KILL group is gone.
     return stdoutText === "" ? { state: "census", members: [] } : { state: "inspection-unproven" };
@@ -813,6 +820,40 @@ interface RetainedOutputBudget {
 
 function retainedByteLimit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function rawPipeReadableStream(fd: number): ReadableStream<Uint8Array> {
+  let cancelled = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const buffer = Buffer.allocUnsafe(16 * 1024);
+      while (!cancelled) {
+        try {
+          const bytesRead = readSync(fd, buffer, 0, buffer.byteLength, null);
+          if (bytesRead === 0) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(buffer.subarray(0, bytesRead));
+          return;
+        } catch (error) {
+          const code =
+            error instanceof Error && "code" in error && typeof error.code === "string"
+              ? error.code
+              : "";
+          if (code === "EAGAIN" || code === "EWOULDBLOCK") {
+            await Bun.sleep(5);
+            continue;
+          }
+          controller.error(error);
+          return;
+        }
+      }
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
 }
 
 function captureBoundedPipe(
@@ -1204,12 +1245,21 @@ async function drainWithin(
   streams: readonly DrainableCapture[],
   milliseconds: number,
 ): Promise<boolean> {
+  const drained = await streamsSettledWithin(streams, milliseconds);
+  if (drained) return true;
+  cancelCapturedPipes(streams);
+  return false;
+}
+
+async function streamsSettledWithin(
+  streams: readonly DrainableCapture[],
+  milliseconds: number,
+): Promise<boolean> {
   const drained = await valueBefore(
     Promise.all(streams.map((stream) => stream.done)),
     milliseconds,
   );
   if (drained !== undefined && !streams.some((stream) => stream.failed())) return true;
-  cancelCapturedPipes(streams);
   return false;
 }
 
@@ -1292,11 +1342,17 @@ async function releaseOrKillOwnedSession(
   };
   const killOwnedGroupAndProveEmpty = async (): Promise<OwnedCommandOutcome | undefined> => {
     const signal = await signalOwnedSession(leaderPid, "SIGKILL", inspection, cleanupDeadlineAt);
-    if (signal === "inspection-unproven") return abandon("inspection-unproven");
+    if (signal === "inspection-unproven") {
+      recordOwnershipFailure?.("kill-signal");
+      return abandon("inspection-unproven");
+    }
     if (signal !== "signalled") return ownershipUnproven("kill-signal");
     if (!(await reapBefore(child, cleanupDeadlineAt))) return ownershipUnproven("kill-reap");
     const finalCensus = await inspectOwnedProcessGroup(leaderPid, inspection, cleanupDeadlineAt);
-    if (finalCensus.state === "inspection-unproven") return "inspection-unproven";
+    if (finalCensus.state === "inspection-unproven") {
+      recordOwnershipFailure?.("final-census");
+      return "inspection-unproven";
+    }
     if (finalCensus.members.length === 0) return undefined;
     recordOwnershipFailure?.("final-census");
     return "ownership-unproven";
@@ -1306,13 +1362,19 @@ async function releaseOrKillOwnedSession(
   // only in this parent's fresh, bounded, group-scoped inspection.
   void memberCount;
   const initial = await inspectOwnedSession(leaderPid, inspection, cleanupDeadlineAt);
-  if (initial.state === "inspection-unproven") return abandon("inspection-unproven");
+  if (initial.state === "inspection-unproven") {
+    recordOwnershipFailure?.("initial-census");
+    return abandon("inspection-unproven");
+  }
   if (initial.state !== "owned") return ownershipUnproven("initial-census");
 
   const hadDescendant = initial.members.some((member) => member.pid !== leaderPid);
   if (timeout || hadDescendant) {
     const term = await signalOwnedSession(leaderPid, "SIGTERM", inspection, cleanupDeadlineAt);
-    if (term === "inspection-unproven") return abandon("inspection-unproven");
+    if (term === "inspection-unproven") {
+      recordOwnershipFailure?.("term-signal");
+      return abandon("inspection-unproven");
+    }
     if (term !== "signalled") return ownershipUnproven("term-signal");
     if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) {
       return ownershipUnproven("cleanup-deadline");
@@ -1325,7 +1387,10 @@ async function releaseOrKillOwnedSession(
       return timeout ? "timeout" : "descendant-leaked";
     }
     const afterTerm = await inspectOwnedSession(leaderPid, inspection, cleanupDeadlineAt);
-    if (afterTerm.state === "inspection-unproven") return abandon("inspection-unproven");
+    if (afterTerm.state === "inspection-unproven") {
+      recordOwnershipFailure?.("post-term-census");
+      return abandon("inspection-unproven");
+    }
     if (afterTerm.state !== "owned") {
       // The supervisor deliberately ignores TERM. Its unexpected disappearance
       // means the identity pin was lost before a bounded group reap was proved.
@@ -1339,16 +1404,25 @@ async function releaseOrKillOwnedSession(
   }
 
   const release = await releaseOwnedLeader(leaderPid, inspection, cleanupDeadlineAt);
-  if (release === "inspection-unproven") return abandon("inspection-unproven");
+  if (release === "inspection-unproven") {
+    recordOwnershipFailure?.("leader-release");
+    return abandon("inspection-unproven");
+  }
   if (release === "descendant") {
     const term = await signalOwnedSession(leaderPid, "SIGTERM", inspection, cleanupDeadlineAt);
-    if (term === "inspection-unproven") return abandon("inspection-unproven");
+    if (term === "inspection-unproven") {
+      recordOwnershipFailure?.("term-signal");
+      return abandon("inspection-unproven");
+    }
     if (term !== "signalled") return ownershipUnproven("term-signal");
     if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) {
       return ownershipUnproven("cleanup-deadline");
     }
     const afterTerm = await inspectOwnedSession(leaderPid, inspection, cleanupDeadlineAt);
-    if (afterTerm.state === "inspection-unproven") return abandon("inspection-unproven");
+    if (afterTerm.state === "inspection-unproven") {
+      recordOwnershipFailure?.("post-term-census");
+      return abandon("inspection-unproven");
+    }
     if (afterTerm.state !== "owned") return ownershipUnproven("post-term-census");
     if (afterTerm.members.some((member) => member.pid !== leaderPid)) {
       const killed = await killOwnedGroupAndProveEmpty();
@@ -1414,6 +1488,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     OWNED_PROCESS_STREAM_RETAINED_BYTES,
   );
   const inspector = inspectionOptions(options);
+  const productionSupervisor = options.supervisorScript === undefined;
   let child: ReturnType<typeof Bun.spawn>;
   try {
     child = Bun.spawn({
@@ -1431,7 +1506,9 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       // release, so dispatcher death cannot leave an orphaned owned group.
       // fd3 is a supervisor-only control pipe. The fork child closes it before
       // exec, so product output cannot collide with or forge lifecycle records.
-      stdio: ["pipe", "pipe", "pipe", "pipe"],
+      stdio: productionSupervisor
+        ? ["pipe", "ignore", "ignore", "pipe", "pipe", "pipe"]
+        : ["pipe", "pipe", "pipe", "pipe"],
     });
   } catch {
     return {
@@ -1444,7 +1521,6 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     };
   }
 
-  // This spawn site fixes stdin to "pipe"; Bun therefore returns its FileSink.
   const ownershipLease = child.stdin as {
     write(bytes: string): number;
     flush(): number | Promise<number>;
@@ -1460,11 +1536,66 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       // EOF/broken-writer is the supervisor's fail-closed retirement signal.
     }
   };
-  const retireThroughParentLease =
-    options.supervisorScript === undefined ? closeOwnershipLease : undefined;
-  const controlFd = child.stdio[3];
-  if (!Number.isSafeInteger(controlFd) || Number(controlFd) < 0) {
+  const retireThroughParentLease = productionSupervisor ? closeOwnershipLease : undefined;
+  const rawPipeFdCandidates = productionSupervisor
+    ? [child.stdio[3], child.stdio[4], child.stdio[5]]
+    : [child.stdio[3]];
+  const ownedRawPipeFds: number[] = [];
+  let rawPipeFdsClosed = false;
+  const closeRawPipeFds = (): void => {
+    if (rawPipeFdsClosed) return;
+    rawPipeFdsClosed = true;
+    const closed = new Set<number>();
+    for (const candidate of ownedRawPipeFds) {
+      if (
+        !Number.isSafeInteger(candidate) ||
+        Number(candidate) < 0 ||
+        closed.has(Number(candidate))
+      ) {
+        continue;
+      }
+      closed.add(Number(candidate));
+      try {
+        closeSync(Number(candidate));
+      } catch {
+        // A raw pipe may already have been released by a failed stream.
+      }
+    }
+  };
+  if (
+    rawPipeFdCandidates.some(
+      (candidate) => !Number.isSafeInteger(candidate) || Number(candidate) < 0,
+    ) ||
+    new Set(rawPipeFdCandidates.map(Number)).size !== rawPipeFdCandidates.length
+  ) {
     closeOwnershipLease();
+    killDirectChild(child, "SIGKILL");
+    const cleanupProven = await reapDirectChild(
+      child,
+      options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS,
+    );
+    closeRawPipeFds();
+    return {
+      outcome: "spawn-failed",
+      stdout: "",
+      stderr: "",
+      retainedStdoutBytes: 0,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: 0,
+      cleanupProven,
+    };
+  }
+  try {
+    // Bun owns the numeric descriptors exposed through child.stdio and may close
+    // them as soon as it observes child exit. Independent duplicates keep the
+    // control transcript and product output readable through their required EOF
+    // seals without racing Bun's child-resource cleanup.
+    for (const candidate of rawPipeFdCandidates) {
+      ownedRawPipeFds.push(openSync(`/dev/fd/${Number(candidate)}`, "r"));
+    }
+  } catch {
+    closeOwnershipLease();
+    closeRawPipeFds();
     killDirectChild(child, "SIGKILL");
     const cleanupProven = await reapDirectChild(
       child,
@@ -1480,38 +1611,49 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       cleanupProven,
     };
   }
-  let controlFdClosed = false;
-  const closeControlFd = (): void => {
-    if (controlFdClosed) return;
-    controlFdClosed = true;
-    try {
-      closeSync(Number(controlFd));
-    } catch {
-      // The raw extra-pipe descriptor may already have been released on error.
-    }
-  };
-  let controlFile: ReturnType<typeof Bun.file> | undefined;
+  const controlFd = ownedRawPipeFds[0];
+  const stdoutFd = productionSupervisor ? ownedRawPipeFds[1] : undefined;
+  const stderrFd = productionSupervisor ? ownedRawPipeFds[2] : undefined;
+  if (
+    controlFd === undefined ||
+    (productionSupervisor && (stdoutFd === undefined || stderrFd === undefined))
+  ) {
+    closeOwnershipLease();
+    closeRawPipeFds();
+    killDirectChild(child, "SIGKILL");
+    const cleanupProven = await reapDirectChild(
+      child,
+      options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS,
+    );
+    return {
+      outcome: "spawn-failed",
+      stdout: "",
+      stderr: "",
+      retainedStdoutBytes: 0,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: 0,
+      cleanupProven,
+    };
+  }
   try {
-    // Retain the BunFile itself until `finally` closes the numeric fd. A stream
-    // created from an otherwise-temporary BunFile can lose its fd owner during a
-    // long, allocation-heavy root run even though the ReadableStream is alive.
-    controlFile = Bun.file(Number(controlFd));
-    ACTIVE_OWNED_CONTROL_FILES.add(controlFile);
+    const controlStream = rawPipeReadableStream(controlFd);
+    const stdoutStream = stdoutFd === undefined ? undefined : rawPipeReadableStream(stdoutFd);
+    const stderrStream = stderrFd === undefined ? undefined : rawPipeReadableStream(stderrFd);
     const stdout = captureBoundedPipe(
-      child.stdout as ReadableStream<Uint8Array>,
+      stdoutStream ?? (child.stdout as ReadableStream<Uint8Array>),
       streamLimitBytes,
       budget,
       undefined,
       () => options.onPipeCancelRequested?.("stdout"),
     );
     const stderr = captureBoundedPipe(
-      child.stderr as ReadableStream<Uint8Array>,
+      stderrStream ?? (child.stderr as ReadableStream<Uint8Array>),
       streamLimitBytes,
       budget,
       undefined,
       () => options.onPipeCancelRequested?.("stderr"),
     );
-    const control = captureControlPipe(controlFile.stream(), nonce, child.pid);
+    const control = captureControlPipe(controlStream, nonce, child.pid);
     const termGraceMs = options.termGraceMs ?? OWNED_PROCESS_TERM_GRACE_MS;
     const killReapMs = options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS;
     const pipeDrainMs = options.pipeDrainMs ?? OWNED_PROCESS_PIPE_DRAIN_MS;
@@ -1765,8 +1907,13 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
             await finishOutputOverrun();
           } else if (
             options.supervisorScript === undefined &&
-            !(await drainWithin([stdout, stderr], pipeDrainMs))
+            !(await streamsSettledWithin([stdout, stderr], pipeDrainMs))
           ) {
+            // Control EOF is ordered after the supervisor closes both output
+            // writers. If the raw readers have not settled within the first
+            // bound, keep them live through a fresh group census and normal
+            // leader release, then require a second bounded drain. An inherited
+            // writer still fails; no output bytes or descendant leak are excused.
             const cleanup = await releaseOrKillOwnedSession(
               child,
               supervisorPid,
@@ -1786,7 +1933,9 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
               outcome = cleanup;
             } else {
               cleanupProven = cleanup === undefined;
-              outcome = "pipe-drain-unproven";
+              outcome = (await drainWithin([stdout, stderr], pipeDrainMs))
+                ? "exited"
+                : "pipe-drain-unproven";
             }
           } else if (
             controlEvent.supervisorPid !== supervisorPid ||
@@ -1862,8 +2011,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     // also makes exceptions and fail-closed returns unable to park a
     // lease-waiting leader.
     closeOwnershipLease();
-    closeControlFd();
-    if (controlFile !== undefined) ACTIVE_OWNED_CONTROL_FILES.delete(controlFile);
+    closeRawPipeFds();
   }
 }
 
@@ -2354,7 +2502,7 @@ async function runUnit(
                 ? `"${command}" released its owned session but inherited output pipes remained open.`
                 : result.outcome === "inspection-unproven"
                   ? `"${command}" could not complete its bounded owned-group inspection; ` +
-                    "the direct supervisor was stopped, but group cleanup could not be proved."
+                    `the direct supervisor was stopped during ${result.ownershipFailurePhase ?? "an unclassified phase"}, but group cleanup could not be proved.`
                   : result.outcome === "ownership-unproven"
                     ? `"${command}" lost its owned session identity during ${result.ownershipFailurePhase ?? "an unclassified phase"} before cleanup could be proved.`
                     : `"${command}" could not start the owned session supervisor.`,

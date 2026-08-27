@@ -1238,6 +1238,7 @@ describe("owned session launcher", () => {
         termGraceMs: 40,
         killReapMs: 40,
         pipeDrainMs: 5_000,
+        inspectionTimeoutMs: 500,
         supervisorScript: stubbornReleaseSupervisor(supervisorPidPath),
         onPipeCancelRequested: (pipe) => cancelled.push(pipe),
       });
@@ -1590,6 +1591,7 @@ describe("owned session launcher", () => {
     });
 
     expect(result.outcome).toBe("inspection-unproven");
+    expect(result.ownershipFailurePhase).toBe("initial-census");
   });
 
   test("a stalled inspector retires a live target through the parent lease", async () => {
@@ -1616,6 +1618,7 @@ describe("owned session launcher", () => {
     });
 
     expect(result.outcome).toBe("inspection-unproven");
+    expect(result.ownershipFailurePhase).toBe("initial-census");
     expect(performance.now() - startedAt).toBeLessThan(750);
     expect(processTable()).not.toContain(marker);
   });
@@ -1640,6 +1643,7 @@ describe("owned session launcher", () => {
     });
 
     expect(result.outcome).toBe("inspection-unproven");
+    expect(result.ownershipFailurePhase).toBe("initial-census");
     expect(performance.now() - startedAt).toBeLessThan(750);
     expect(processTable()).not.toContain(marker);
   });
@@ -1718,7 +1722,7 @@ describe("routing to real package commands", () => {
     const wire = { name: "@asimposium/wire", dir: "apps/wire" };
 
     expect(suiteExecutionLimits("unit", wire)).toEqual({
-      timeoutMs: 30 * 60_000,
+      timeoutMs: 45 * 60_000,
       retainedStreamBytes: 512 * 1024,
       retainedOutputBytes: 768 * 1024,
     });
@@ -1813,10 +1817,14 @@ describe("routing to real package commands", () => {
     const result = await runCli(root, ["unit", "integration", "--json"]);
 
     expect(result.exitCode).toBe(1);
-    expect(units(result).find((unit) => unit.suite === "unit")?.code).toBe("SUITE_OUTPUT_OVERRUN");
-    expect(units(result).find((unit) => unit.suite === "integration")?.code).toBe(
+    const executed = units(result);
+    expect(executed.find((unit) => unit.suite === "unit")?.code, JSON.stringify(executed)).toBe(
       "SUITE_OUTPUT_OVERRUN",
     );
+    expect(
+      executed.find((unit) => unit.suite === "integration")?.code,
+      JSON.stringify(executed),
+    ).toBe("SUITE_OUTPUT_OVERRUN");
   }, 20_000);
 
   test("selecting several suites runs them in CI doctrine order", async () => {
@@ -2108,7 +2116,7 @@ describe("secret-safe diagnostics", () => {
       expect(typeof unit.duration_ms).toBe("number");
       expect(["pass", "fail", "blocked", "missing", "skip"]).toContain(unit.status);
       expect(unit.reproduce.length).toBeGreaterThan(0);
-      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 30 * 60_000 : 5 * 60_000);
+      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 45 * 60_000 : 5 * 60_000);
       expect(unit.retained_stream_limit_bytes).toBe(
         unit.dir === "apps/wire" ? 512 * 1024 : 64 * 1024,
       );
@@ -2293,7 +2301,7 @@ describe("--list plans without running", () => {
     expect(plans.find((plan) => plan.dir === "apps/wire")).toEqual(
       expect.objectContaining({
         action: "run",
-        timeout_ms: 30 * 60_000,
+        timeout_ms: 45 * 60_000,
         retained_stream_limit_bytes: 512 * 1024,
         retained_output_limit_bytes: 768 * 1024,
       }),
@@ -2403,7 +2411,12 @@ describe("the executing toolchain bridge carries its dispatch depth", () => {
     // which reset the counter and left the recursion refusal permanently unreachable.
     expect(readFileSync(join(root, DEPTH_MARKER), "utf8")).toBe("2\n");
     expect(result.stderr).toContain("BRIDGE_STEP_DEPTH=2");
-    expect(result.exitCode).toBe(0);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `toolchain bridge failed after the depth witness: exit=${result.exitCode}; ` +
+          `stdout=${result.stdout || "<empty>"}; stderr=${result.stderr || "<empty>"}`,
+      );
+    }
     expect(bridgeRecords(result).at(-1)).toEqual(
       expect.objectContaining({
         record: "toolchain-integration-summary",

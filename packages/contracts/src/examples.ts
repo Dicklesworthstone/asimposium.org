@@ -24,17 +24,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ZodTypeAny } from "zod";
-import {
-  EnrollmentClaimResponseSchema,
-  MintEnrollmentRequestSchema,
-} from "./enrollment.ts";
+import { FellowRegistrationRequestSchema, MintEnrollmentRequestSchema } from "./enrollment.ts";
 import { ProblemsIndexResponseSchema } from "./ledger.ts";
 import { ProblemDocumentSchema } from "./problem.ts";
 import { ScreeningContractsSchema } from "./screening.ts";
-import {
-  PromoteRequestSchema,
-  SessionOpenRequestSchema,
-} from "./sessions.ts";
+import { PromoteRequestSchema, SessionOpenRequestSchema } from "./sessions.ts";
 
 const FIXTURES_DIR = join(import.meta.dir, "..", "test", "fixtures", "valid");
 
@@ -46,6 +40,8 @@ interface ExampleSpec {
   readonly kind: string;
   /** Corpus files, loaded in order and handed to `build`. */
   readonly fixtures: readonly string[];
+  /** Assemble one or more schema examples from the validated corpus bodies. */
+  readonly build: (input: BuilderInput) => unknown;
   /** Whole-value validator; builders that already .parse() members omit it. */
   readonly schema?: ZodTypeAny;
 }
@@ -70,7 +66,7 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
     // Both messages are members of the bundled enrollment document; emitted
     // under their own keys because neither is a whole-bundle instance.
     build: ({ bodies }: BuilderInput): unknown => [
-      { fellow_registration_request: bodies[0] },
+      { fellow_registration_request: FellowRegistrationRequestSchema.parse(bodies[0]) },
       { mint_request: MintEnrollmentRequestSchema.parse(bodies[1]) },
     ],
   },
@@ -127,9 +123,7 @@ export function embeddedExamplesFor(kind: string): EmbeddedDomainExamples {
     if (spec.schema !== undefined) {
       const checked = spec.schema.safeParse(candidate);
       if (!checked.success) {
-        throw new Error(
-          `EXAMPLE_FIXTURE_INVALID kind=${kind}: ${checked.error.message}`,
-        );
+        throw new Error(`EXAMPLE_FIXTURE_INVALID kind=${kind}: ${checked.error.message}`);
       }
     }
   }

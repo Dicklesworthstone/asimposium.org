@@ -80,6 +80,10 @@ const S2_SHELL_REGRESSION_TEST_TIMEOUT_MS = 120_000;
 const CONCURRENT_CONTROLLER_SETUP_MS = 5_000;
 const CONCURRENT_PROCESS_GROUP_GRACE_MS = 2_000;
 const CONCURRENT_CAPTURE_TEST_TIMEOUT_MS = 25_000;
+// A full process-table snapshot can cross five seconds while the lifecycle
+// matrix is rapidly forking and reaping. The observer must still fail closed,
+// but its finite ceiling needs to sit outside that demonstrated contention.
+const S2_LIFECYCLE_PROCESS_SCAN_DEADLINE_MS = 15_000;
 const EXIT_RACE_LOAD_BARRIER_WAIT_MS = 10_000;
 const LEGACY_POSTCONDITION_LOAD_BARRIER_WAIT_MS = 20_000;
 const CONCURRENT_LEGACY_TEST_TIMEOUT_MS =
@@ -87,7 +91,7 @@ const CONCURRENT_LEGACY_TEST_TIMEOUT_MS =
   S2_SHELL_REGRESSION_WATCHDOG_MS +
   CONCURRENT_PROCESS_GROUP_GRACE_MS +
   1_000 + // controller's bounded post-KILL group-settle check
-  5_000 + // one shared retained process-table capture
+  S2_LIFECYCLE_PROCESS_SCAN_DEADLINE_MS + // one shared retained process-table capture
   10_000; // assertion and scheduler margin
 const CONCURRENT_PROCESS_GROUP_RUNNER = String.raw`
   use strict;
@@ -768,7 +772,7 @@ function captureS2LifecycleProcessTable(): ProcessTableCapture {
       "/bin/ps",
       ["-axo", "pid=,pgid=,ppid=,stat=,command="],
       {},
-      5_000,
+      S2_LIFECYCLE_PROCESS_SCAN_DEADLINE_MS,
       processTableLogRoot(),
     ),
   );
@@ -1682,7 +1686,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("packages/contracts/package.json");
     expect(shell).toContain("packages/contracts/src/index.ts");
     expect(shell).toContain("e2e/lib/run-diagnostics.sh");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('S2_SCRIPT_PATH="${S2_SCRIPT_DIRECTORY}/e2e-s2-krater.sh"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).not.toContain('bash "${BASH_SOURCE[0]}"');
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
@@ -1693,6 +1699,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(runIdValidation).toBeLessThan(runIdUnexport);
     expect(runIdUnexport).toBeLessThan(runIdReadonly);
     const nestedClaim = shell.indexOf("e2e_claim_artifact_namespaced_run_at_root");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     const mainDirectoryClaim = shell.indexOf('mkdir "${S2_RUN_DIR}/main"');
     const provenanceCapture = shell.indexOf("S2_PRE_CLOSURE_SOURCE_PROVENANCE=");
     expect(nestedClaim).toBeGreaterThan(runIdReadonly);
@@ -1761,8 +1768,10 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf("s2_begin_raw_inherited_child_owner()"),
     );
     expect(rawWrapper).toContain('trap "" TERM HUP INT');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawWrapper).toContain('exec -a "${marker}-payload"');
     expect(rawWrapper).toContain("perl -MPOSIX=setsid");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawWrapper).toContain('[[ ${group_busy} -eq 1 ]] || exit "${payload_status}"');
     for (const launch of rawInheritedLaunches) {
       const index = launch.index ?? 0;
@@ -1793,23 +1802,32 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     expect(rawInterrupt).toContain("s2_raw_inherited_descendant_is_exact");
     expect(rawInterrupt).toContain("S2_RAW_INHERITED_CHILD_DESCENDANT_PROVEN=1");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawInterrupt).toContain('s2_raw_inherited_child_command_is_exact "${raw_child_pid}"');
     expect(rawInterrupt).toContain('kill -TERM "$$"');
     const rawCleanup = shell.slice(
       shell.indexOf("cleanup_raw_inherited_child() {"),
       shell.indexOf("cleanup_workers() {"),
     );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawCleanup).toContain('kill -TERM -- "-${pgid}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawCleanup).toContain('kill -KILL -- "-${pgid}"');
     expect(rawCleanup).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       's2_raw_inherited_child_command_is_exact "${pid}" || return 1\n' +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
         '      kill -TERM -- "-${pgid}"',
     );
     expect(rawCleanup).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       's2_raw_inherited_child_command_is_exact "${pid}" || return 1\n' +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
         '      kill -KILL -- "-${pgid}"',
     );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawCleanup).not.toContain('kill -TERM "${pid}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(rawCleanup.indexOf('kill -KILL -- "-${pgid}"')).toBeLessThan(
       rawCleanup.indexOf("S2_RAW_INHERITED_CHILD_SETTLEMENT_PROVEN=1"),
     );
@@ -1820,9 +1838,12 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf('if [[ "${mode}" == "parent-loss-child" ]]'),
     );
     expect(preArmOwnerLoss).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       's2_raw_inherited_child_command_is_exact "${parent_loss_child}" || return 1\n' +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
         '    kill -KILL -- "-${parent_loss_child}"',
     );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(preArmOwnerLoss).not.toContain('kill -KILL "${parent_loss_child}"');
     expect(onExit.indexOf("e2e_close_artifact_writer_lease")).toBeLessThan(
       onExit.indexOf(
@@ -3002,6 +3023,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
           S2_SHELL_REGRESSION_TEST: "post-release-safe-checkpoint",
           S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL: "1",
           S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER: "1",
+          S2_PLANT_POST_RELEASE_CONTROLLER_TERM_CLEANUP_DELAY_SECONDS: "2",
         },
         S2_SHELL_REGRESSION_WATCHDOG_MS,
       );
@@ -3063,6 +3085,14 @@ describe("registered S2 shell and lifecycle regressions", () => {
           ).toBe(false);
           expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
           expect(run.stdout).not.toContain('"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"');
+          const main = resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "main");
+          const childStdoutPath = readdirSync(main).find((name) => name.endsWith(".child.stdout"));
+          if (childStdoutPath === undefined) {
+            throw new Error("post-release controller child stdout was not retained");
+          }
+          expect(readFileSync(resolve(main, childStdoutPath), "utf8")).toContain(
+            '"code":"S2_POST_RELEASE_TERM_CLEANUP_DELAY_PLANT_CONSUMED"',
+          );
         },
         () => liveS2LifecycleProcesses(runId),
       );

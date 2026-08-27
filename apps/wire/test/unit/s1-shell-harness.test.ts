@@ -2941,7 +2941,7 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("PROVISIONAL_INSPECTION_UNKNOWN_SELF_TEST_PASSED");
     expect(run.stderr).toContain("provisional-unknown-preexec-inspection-unknown");
-    expect(run.stderr).toContain("action=not-signalled deadline_s=1");
+    expect(run.stderr).toContain("action=not-signalled deadline_s=15");
     const pid = Number(phaseValue(run.stderr, "provisional-inspection-refused", "pid"));
     expect(Number.isInteger(pid)).toBe(true);
     expect(phaseValue(run.stderr, "provisional-inspection-refused", "survived")).toBe("yes");

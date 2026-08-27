@@ -49,6 +49,11 @@ readonly S2_SUPERVISOR_STARTUP_CREATE_STATUS=73
 readonly S2_SUPERVISOR_CHECKPOINT_IO_STATUS=74
 readonly S2_PHASE_DEADLINE_SECONDS=75
 readonly S2_TERMINATE_WAIT_TICKS=20
+# A post-release controller recursively runs this harness and must retire its
+# own pinned supervisor/watchdog before its parent escalates TERM to KILL. The
+# generic one-second leaf-process grace truncated that nested cleanup under
+# scheduler contention, so keep a five-second bound local to this one path.
+readonly S2_POST_RELEASE_CONTROLLER_TERM_WAIT_TICKS=100
 # A pre-release abort is consumed by the already-open private FIFO, never by a
 # numeric controller-side signal. This envelope dominates Bash's roughly
 # 15-second async-fork retry plus the 16-second causal delay plant.
@@ -3869,7 +3874,7 @@ cleanup_post_release_controller() {
     if post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}"; then
       S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-signal
       if kill -TERM "${pid}" 2>/dev/null; then
-        for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+        for ((tick = 0; tick < S2_POST_RELEASE_CONTROLLER_TERM_WAIT_TICKS; tick += 1)); do
           kill -0 "${pid}" 2>/dev/null || break
           sleep 0.05
         done
@@ -5155,6 +5160,16 @@ on_exit() {
     S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
   fi
   final_status="${original_status}"
+  if [[ "${S2_SHELL_REGRESSION_TEST:-}" == post-release-safe-checkpoint-child ]]; then
+    case "${S2_PLANT_POST_RELEASE_CONTROLLER_TERM_CLEANUP_DELAY_SECONDS:-0}" in
+      0) ;;
+      2)
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","record":"test-plant","code":"S2_POST_RELEASE_TERM_CLEANUP_DELAY_PLANT_CONSUMED","test_only":true,"delay_seconds":2,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL=1 S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER=1 S2_PLANT_POST_RELEASE_CONTROLLER_TERM_CLEANUP_DELAY_SECONDS=2 scripts/e2e-s2-krater.sh"}'
+        sleep 2
+        ;;
+      *) final_status=125 ;;
+    esac
+  fi
   S2_ON_EXIT_CLEANUP_ACTIVE=1
   if ! cleanup_workers; then
     final_status=125

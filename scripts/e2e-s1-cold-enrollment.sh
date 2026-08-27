@@ -124,7 +124,12 @@ readonly MIGRATION_DEADLINE_SECONDS=120
 readonly ARTIFACT_SCAN_DEADLINE_SECONDS=15
 readonly SUPERVISOR_STOP_DEADLINE_SECONDS=10
 readonly TERMINATION_GRACE_SECONDS=5
-readonly TRANSIENT_INSPECTION_DEADLINE_SECONDS=1
+# A full validated process-table snapshot has remained unavailable for more
+# than three seconds while sibling lifecycle tests rapidly fork and reap. Use
+# the same finite 15-second observation ceiling as the S2 lifecycle harness:
+# persistent unknown still fails closed, but transient post-TERM uncertainty
+# does not strand a group that this runner still owns exactly.
+readonly TRANSIENT_INSPECTION_DEADLINE_SECONDS=15
 readonly FIXTURE_START_DEADLINE_SECONDS=20
 readonly SELF_TEST_CONTROLLER_DEADLINE_SECONDS=10
 readonly EXTERNAL_RESPONSE_MAX_BYTES=262144

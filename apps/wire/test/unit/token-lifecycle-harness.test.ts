@@ -378,6 +378,10 @@ async function runHarness(
       ...process.env,
       ...FAULT_PLANTS,
       ...plants,
+      // Fault plants prove their own causal refusal and cleanup boundary. Do
+      // not let the unrelated local performance hypothesis preempt a later
+      // plant merely because this process-heavy matrix perturbs wall time.
+      TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT: Object.keys(plants).length === 0 ? "0" : "1",
       TMPDIR: existsSync(EXTERNAL_TMPDIR) ? EXTERNAL_TMPDIR : process.env.TMPDIR,
     },
     liveBudgetMs: OUTER_LIVE_BUDGET_MS,
@@ -707,6 +711,7 @@ for (const current of FAULT_CASES) {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain(`"code":"${current.code}"`);
     expect(result.stdout).not.toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
+    expect(result.stdout).not.toContain('"record":"mounted-pack-performance-observation"');
     if (current.requiresWorkerCleanup) {
       expect(result.stdout).toContain(
         '"assertion":"workerd_group_descendants_listener_and_state_fds_reaped","status":"pass"',

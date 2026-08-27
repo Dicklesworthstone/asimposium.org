@@ -2710,7 +2710,9 @@ assert(alphaCredential !== undefined, "alpha-active-credential");
 // Workerd and real local D1. Five samples are descriptive local observations,
 // not a p95, edge, or deployed performance claim. Contract parsing, stable
 // bytes, the 129th-row cap witness, and a large selected prefix keep the timing
-// record from going green on an empty or short-circuited response.
+// record from going green on an empty or short-circuited response. Causal fault
+// runs skip this unrelated wall-clock gate so host timing cannot preempt the
+// later refusal each plant is responsible for proving.
 const packSessionResult = await sessionPost(
   charlie.token,
   "/v1/sessions",
@@ -2719,67 +2721,69 @@ const packSessionResult = await sessionPost(
 );
 assert(packSessionResult.response.status === 201, "pack-measurement-session-open");
 const packSession = SessionOpenResponseSchema.parse(packSessionResult.payload);
-const PACK_MEASUREMENT_SAMPLE_COUNT = 5;
-const PACK_MEASUREMENT_PLAN_BUDGET_MS = 600;
-const packSamplesMs: number[] = [];
-let packBody: string | undefined;
-let packSelectedItems = 0;
-for (let sample = 0; sample < PACK_MEASUREMENT_SAMPLE_COUNT; sample += 1) {
-  const startedAt = performance.now();
-  const response = await boundedFetch(
-    `${origin}/v1/sessions/${packSession.session_id}/pack?profile=working&max_tokens=8000`,
-    {
-      headers: { authorization: `Bearer ${charlie.token}`, connection: "close" },
-    },
-  );
-  const body = await response.text();
-  const durationMs = performance.now() - startedAt;
-  assert(response.status === 200, `pack-measurement-status-${sample}`);
-  assert(
-    response.headers.get("cache-control") === "private, no-store",
-    `pack-measurement-cache-${sample}`,
-  );
-  const pack = PackResponseSchema.parse(json(response, body));
-  assert(pack.problem === packMeasurementProblemId, `pack-measurement-problem-${sample}`);
-  assert(pack.budget_tokens === 8_000, `pack-measurement-budget-${sample}`);
-  assert(
-    pack.omitted.some(
-      (entry) => entry.reason === "candidate_limit" && entry.detail === "claims",
-    ),
-    `pack-measurement-candidate-cap-${sample}`,
-  );
-  assert(pack.items.length >= 64, `pack-measurement-selected-prefix-${sample}`);
-  if (packBody === undefined) {
-    packBody = body;
-    packSelectedItems = pack.items.length;
-  } else {
-    assert(body === packBody, `pack-measurement-deterministic-bytes-${sample}`);
-    assert(pack.items.length === packSelectedItems, `pack-measurement-selected-count-${sample}`);
+if (process.env.TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT !== "1") {
+  const PACK_MEASUREMENT_SAMPLE_COUNT = 5;
+  const PACK_MEASUREMENT_PLAN_BUDGET_MS = 600;
+  const packSamplesMs: number[] = [];
+  let packBody: string | undefined;
+  let packSelectedItems = 0;
+  for (let sample = 0; sample < PACK_MEASUREMENT_SAMPLE_COUNT; sample += 1) {
+    const startedAt = performance.now();
+    const response = await boundedFetch(
+      `${origin}/v1/sessions/${packSession.session_id}/pack?profile=working&max_tokens=8000`,
+      {
+        headers: { authorization: `Bearer ${charlie.token}`, connection: "close" },
+      },
+    );
+    const body = await response.text();
+    const durationMs = performance.now() - startedAt;
+    assert(response.status === 200, `pack-measurement-status-${sample}`);
+    assert(
+      response.headers.get("cache-control") === "private, no-store",
+      `pack-measurement-cache-${sample}`,
+    );
+    const pack = PackResponseSchema.parse(json(response, body));
+    assert(pack.problem === packMeasurementProblemId, `pack-measurement-problem-${sample}`);
+    assert(pack.budget_tokens === 8_000, `pack-measurement-budget-${sample}`);
+    assert(
+      pack.omitted.some(
+        (entry) => entry.reason === "candidate_limit" && entry.detail === "claims",
+      ),
+      `pack-measurement-candidate-cap-${sample}`,
+    );
+    assert(pack.items.length >= 64, `pack-measurement-selected-prefix-${sample}`);
+    if (packBody === undefined) {
+      packBody = body;
+      packSelectedItems = pack.items.length;
+    } else {
+      assert(body === packBody, `pack-measurement-deterministic-bytes-${sample}`);
+      assert(pack.items.length === packSelectedItems, `pack-measurement-selected-count-${sample}`);
+    }
+    packSamplesMs.push(Number(durationMs.toFixed(3)));
   }
-  packSamplesMs.push(Number(durationMs.toFixed(3)));
+  const sortedPackSamplesMs = [...packSamplesMs].sort((left, right) => left - right);
+  const packMedianMs = sortedPackSamplesMs[Math.floor(sortedPackSamplesMs.length / 2)];
+  assert(packMedianMs !== undefined, "pack-measurement-median-present");
+  const packMaxMs = Math.max(...packSamplesMs);
+  const everyLocalSampleWithinPlanBudget = packMaxMs <= PACK_MEASUREMENT_PLAN_BUDGET_MS;
+  console.log(
+    JSON.stringify({
+      suite: "token-lifecycle-local",
+      record: "mounted-pack-performance-observation",
+      assertion: "mounted_workerd_d1_pack_candidate_cap_measured",
+      scope: "local-workerd-d1-mounted-production-route-not-p95-or-edge",
+      candidate_claims: 130,
+      selected_items: packSelectedItems,
+      sample_count: packSamplesMs.length,
+      samples_ms: packSamplesMs,
+      median_ms: packMedianMs,
+      max_ms: packMaxMs,
+      plan_budget_ms: PACK_MEASUREMENT_PLAN_BUDGET_MS,
+      status: everyLocalSampleWithinPlanBudget ? "pass" : "fail",
+    }),
+  );
+  assert(everyLocalSampleWithinPlanBudget, "pack-measurement-plan-budget");
 }
-const sortedPackSamplesMs = [...packSamplesMs].sort((left, right) => left - right);
-const packMedianMs = sortedPackSamplesMs[Math.floor(sortedPackSamplesMs.length / 2)];
-assert(packMedianMs !== undefined, "pack-measurement-median-present");
-const packMaxMs = Math.max(...packSamplesMs);
-const everyLocalSampleWithinPlanBudget = packMaxMs <= PACK_MEASUREMENT_PLAN_BUDGET_MS;
-console.log(
-  JSON.stringify({
-    suite: "token-lifecycle-local",
-    record: "mounted-pack-performance-observation",
-    assertion: "mounted_workerd_d1_pack_candidate_cap_measured",
-    scope: "local-workerd-d1-mounted-production-route-not-p95-or-edge",
-    candidate_claims: 130,
-    selected_items: packSelectedItems,
-    sample_count: packSamplesMs.length,
-    samples_ms: packSamplesMs,
-    median_ms: packMedianMs,
-    max_ms: packMaxMs,
-    plan_budget_ms: PACK_MEASUREMENT_PLAN_BUDGET_MS,
-    status: everyLocalSampleWithinPlanBudget ? "pass" : "fail",
-  }),
-);
-assert(everyLocalSampleWithinPlanBudget, "pack-measurement-plan-budget");
 const packCloseResult = await sessionPost(
   charlie.token,
   `/v1/sessions/${packSession.session_id}/close`,

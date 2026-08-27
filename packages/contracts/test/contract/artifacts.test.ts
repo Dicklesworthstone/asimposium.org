@@ -551,12 +551,10 @@ test("agent-facing artifacts embed validated corpus examples", async () => {
     if (artifact === undefined) continue;
 
     const doc = JSON.parse(artifact.content) as { examples?: unknown[] };
+    expect(Array.isArray(doc.examples), `${relativePath} must carry an examples array`).toBe(true);
+    if (!Array.isArray(doc.examples)) continue;
     expect(
-      Array.isArray(doc.examples),
-      `${relativePath} must carry an examples array`,
-    ).toBe(true);
-    expect(
-      doc.examples!.length,
+      doc.examples.length,
       `${relativePath} needs at least one example (goc W1.4)`,
     ).toBeGreaterThanOrEqual(1);
 
@@ -564,7 +562,7 @@ test("agent-facing artifacts embed validated corpus examples", async () => {
     // sample; embeddedExamplesFor revalidates each against its own contract.
     const live = await import("../../src/examples.ts");
     const expected = live.embeddedExamplesFor(kind).examples;
-    expect(doc.examples, `${relativePath} examples must match the loader`).toEqual(expected);
+    expect(doc.examples, `${relativePath} examples must match the loader`).toEqual([...expected]);
   }
 });
 
@@ -582,7 +580,9 @@ test("non-agent artifacts stay example-free by declaration", () => {
     );
     expect(artifact, `${relativePath} must exist`).toBeDefined();
     if (artifact === undefined) continue;
-    expect(JSON.parse(artifact.content).examples, `${relativePath} intentionally has none`)
-      .toBeUndefined();
+    expect(
+      JSON.parse(artifact.content).examples,
+      `${relativePath} intentionally has none`,
+    ).toBeUndefined();
   }
 });

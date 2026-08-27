@@ -3,8 +3,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
-
-import { embeddedExamplesFor } from "./examples.ts";
 import { BatchContractsSchema } from "./batch.ts";
 import {
   type DeviceCodeStartRequest,
@@ -61,6 +59,7 @@ import {
   type SponsorPanicResponse,
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
+import { embeddedExamplesFor } from "./examples.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
 import {
   LedgerContractsSchema,
