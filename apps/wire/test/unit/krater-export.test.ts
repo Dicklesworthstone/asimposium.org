@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   EXPORT_FORMAT,
   EXPORT_LICENSE,
+  type ProblemExportEvent,
   parseExportHeader,
   serializeProblemExport,
   verifyProblemExportChain,
@@ -14,11 +15,10 @@ import {
   eventChainDigest,
   eventEnvelopeRowDigest,
   genesisChainDigest,
-  type KraterEvent,
   sha256Hex,
 } from "../../src/krater/krater.ts";
 
-function event(seq: number): KraterEvent {
+function event(seq: number): ProblemExportEvent {
   return {
     eventId: `E-${seq}`,
     problemId: "P-4DSP",
@@ -38,6 +38,7 @@ function event(seq: number): KraterEvent {
     modelStringSelfDeclared: null,
     harness: null,
     writerCredentialId: null,
+    payloadJson: `payload-${seq}`,
   };
 }
 
@@ -120,7 +121,8 @@ describe("per-problem event export (W2.8)", () => {
     const plantedSecret = "asimp_ag_must-not-reflect";
     const foreignFormats: readonly unknown[] = [
       "asimposium.problem-export.v1",
-      "asimposium.problem-export.v3",
+      "asimposium.problem-export.v2",
+      "asimposium.problem-export.v4",
       plantedSecret.repeat(5_000),
       null,
       [],
@@ -160,6 +162,7 @@ describe("per-problem event export (W2.8)", () => {
       expect(event.event_id).toBeDefined();
       expect(event.seq).toBeGreaterThan(0);
       expect(event.chain_digest).toBeDefined();
+      expect(event.payload_json).toBeDefined();
     }
   });
 });
@@ -167,7 +170,7 @@ describe("per-problem event export (W2.8)", () => {
 async function chainedEvent(
   seq: number,
   previous: string,
-): Promise<{ event: KraterEvent; chain: string }> {
+): Promise<{ event: ProblemExportEvent; chain: string }> {
   const payloadSha256 = await sha256Hex(`payload-${seq}`);
   const eventId = `E-${seq}`;
   const objectId = `C-${seq}`;
@@ -182,6 +185,7 @@ async function chainedEvent(
     objectVersion: 1,
     payloadSha256,
     createdAt,
+    payloadJson: `payload-${seq}`,
     actorFellowId: seq === 1 ? "F-alpha" : null,
     actorSponsorId: seq === 1 ? "U-sponsor" : null,
     actorSessionId: seq === 1 ? "S-session" : null,
@@ -206,7 +210,7 @@ async function buildExport(
   eventCount: number,
   checkpointSeqs: readonly number[] = [],
 ): Promise<string> {
-  const events: KraterEvent[] = [];
+  const events: ProblemExportEvent[] = [];
   let previous = await genesisChainDigest("P-4DSP");
   for (let seq = 1; seq <= eventCount; seq += 1) {
     const { event, chain } = await chainedEvent(seq, previous);
@@ -278,6 +282,44 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     expect(verdict.intact).toBe(true);
   });
 
+  test("v3 event lines carry payload bytes that verify binds to their digest", async () => {
+    const ndjson = await buildExport(2);
+    const lines = ndjson.trim().split("\n");
+    const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    expect(first.payload_json).toBe("payload-1");
+    expect(first.payload_sha256).toBe(await sha256Hex("payload-1"));
+  });
+
+  test("PLANTED: swapped payload bytes are refused even with every digest intact", async () => {
+    const intact = await buildExport(2, [2]);
+    expect((await verifyProblemExportChain(intact)).intact).toBe(true);
+    const lines = intact.trim().split("\n");
+    const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    // Same envelope digests, different payload bytes: only the v3 payload
+    // binding can see this tamper.
+    lines[1] = JSON.stringify({ ...first, payload_json: "payload-1-tampered" });
+    await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
+      intact: false,
+      brokenAtSeq: 1,
+      detail:
+        "payload sha256 mismatch at seq 1 — the exported payload bytes do not match their digest",
+    });
+  });
+
+  test("PLANTED: a stripped payload_json field is refused", async () => {
+    const intact = await buildExport(1);
+    expect((await verifyProblemExportChain(intact)).intact).toBe(true);
+    const lines = intact.trim().split("\n");
+    const first = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    const { payload_json: _stripped, ...withoutPayload } = first;
+    lines[1] = JSON.stringify(withoutPayload);
+    await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
+      intact: false,
+      brokenAtSeq: 1,
+      detail: "event line does not have the exact export shape",
+    });
+  });
+
   test("a tampered event breaks the chain at its seq", async () => {
     const lines = (await buildExport(3)).trim().split("\n");
     const second = JSON.parse(lines[2] ?? "{}") as Record<string, unknown>;
@@ -342,7 +384,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     expect(verdict).toEqual({
       intact: false,
       brokenAtSeq: 1,
-      detail: "event line carries invalid v2 envelope fields",
+      detail: "event line carries invalid v3 envelope fields",
     });
   });
 
@@ -572,7 +614,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     expect(verdict.intact).toBe(false);
     if (!verdict.intact) {
       expect(verdict.brokenAtSeq).toBeNull();
-      expect(verdict.detail).toBe("terminal record does not have the exact v2 shape");
+      expect(verdict.detail).toBe("terminal record does not have the exact v3 shape");
     }
   });
 
@@ -635,7 +677,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     const verdict = await verifyProblemExportChain(`${appended}\n`);
     expect(verdict.intact).toBe(false);
     if (!verdict.intact) {
-      expect(verdict.detail).toBe("terminal record does not have the exact v2 shape");
+      expect(verdict.detail).toBe("terminal record does not have the exact v3 shape");
     }
   });
 
@@ -657,7 +699,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "header checkpoint 1 carries invalid v2 fields",
+      detail: "header checkpoint 1 carries invalid v3 fields",
     });
   });
 
@@ -674,7 +716,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "header checkpoint 1 does not have the exact v2 shape",
+      detail: "header checkpoint 1 does not have the exact v3 shape",
     });
   });
 
@@ -749,7 +791,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "header does not have the exact v2 shape",
+      detail: "header does not have the exact v3 shape",
     });
   });
 
@@ -762,7 +804,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     await expect(verifyProblemExportChain(`${lines.join("\n")}\n`)).resolves.toEqual({
       intact: false,
       brokenAtSeq: null,
-      detail: "terminal record does not have the exact v2 shape",
+      detail: "terminal record does not have the exact v3 shape",
     });
   });
 
@@ -778,7 +820,7 @@ describe("export chain verification (W2.8 tamper-evidence)", () => {
     });
   });
 
-  test("PLANTED: CRLF framing cannot be silently accepted as v2 LF", async () => {
+  test("PLANTED: CRLF framing cannot be silently accepted as v3 LF", async () => {
     const intact = await buildExport(1);
     expect((await verifyProblemExportChain(intact)).intact).toBe(true);
     await expect(verifyProblemExportChain(intact.replaceAll("\n", "\r\n"))).resolves.toEqual({

@@ -21,13 +21,14 @@ import {
   KRATER_CHAIN_VERSION,
   type KraterCheckpoint,
   type KraterEvent,
+  sha256Hex,
 } from "./krater.ts";
 
 /** The license line every public export carries (CC BY 4.0, Fable §10). */
 export const EXPORT_LICENSE = "CC BY 4.0";
 
 /** The export format version, so a consumer can reject a future shape. */
-export const EXPORT_FORMAT = "asimposium.problem-export.v2";
+export const EXPORT_FORMAT = "asimposium.problem-export.v3";
 
 /** The `control` value of the first record. Named so the scan cannot drift. */
 export const EXPORT_HEADER_CONTROL = "export_header";
@@ -68,6 +69,7 @@ const EXPORT_EVENT_KEYS = [
   "object_id",
   "object_kind",
   "object_version",
+  "payload_json",
   "payload_sha256",
   "row_digest",
   "seq",
@@ -81,6 +83,14 @@ const SHA256_HEX = /^[a-f0-9]{64}$/;
 const UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/;
 const MAX_IDENTIFIER_LENGTH = 160;
 const MAX_TITLE_LENGTH = 160;
+/**
+ * The payload-bytes bound (v3): a canonical claim payload is bounded by
+ * MAX_STATEMENT_BYTES in krater.ts plus JSON wrapper overhead; other ledger
+ * kinds wrap statements the same way. The bound is a parsing guard, not a
+ * redaction mechanism — the digest binding in verifyProblemExportChain is the
+ * integrity authority over payload bytes.
+ */
+const MAX_PAYLOAD_JSON_LENGTH = 16_384;
 
 interface ParsedCheckpoint {
   readonly checkpointSeq: number;
@@ -101,6 +111,8 @@ interface ParsedEvent {
   readonly objectId: string;
   readonly objectVersion: number;
   readonly payloadSha256: string;
+  /** The exact canonical payload text carried by the v3 event line. */
+  readonly payloadJson: string;
   readonly rowDigest: string;
   readonly chainDigest: string;
   readonly createdAt: string;
@@ -193,11 +205,17 @@ function parseJsonRecord(line: string, label: string): ParseResult<Record<string
   if (!isRecord(parsed)) return { ok: false, reason: `${label} is not an object` };
   return { ok: true, value: parsed };
 }
+/**
+ * One exportable event: the durable Krater envelope plus the exact payload
+ * text that its `payloadSha256` binds (v3). A caller that cannot produce the
+ * payload text must not produce a v3 export.
+ */
+export type ProblemExportEvent = KraterEvent & { readonly payloadJson: string };
 
 export interface ProblemExportInput {
   readonly problemId: string;
   readonly problemTitle: string;
-  readonly events: readonly KraterEvent[];
+  readonly events: readonly ProblemExportEvent[];
   readonly checkpoints: readonly KraterCheckpoint[];
   /** ISO date the export was generated (server-authored). */
   readonly generatedAt: string;
@@ -246,6 +264,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
       model_string_self_declared: event.modelStringSelfDeclared,
       harness: event.harness,
       writer_credential_id: event.writerCredentialId,
+      payload_json: event.payloadJson,
     }),
   );
   const trailer = {
@@ -263,7 +282,7 @@ function parseCheckpoint(
   index: number,
 ): ParseResult<ParsedCheckpoint> {
   if (!isRecord(value) || !hasExactKeys(value, EXPORT_CHECKPOINT_KEYS)) {
-    return { ok: false, reason: `header checkpoint ${index} does not have the exact v2 shape` };
+    return { ok: false, reason: `header checkpoint ${index} does not have the exact v3 shape` };
   }
   if (value.problem !== problem) {
     return { ok: false, reason: `header checkpoint ${index} is not bound to the header problem` };
@@ -276,7 +295,7 @@ function parseCheckpoint(
     value.checkpoint_version !== 1 ||
     value.checkpoint_mode !== "unsigned-v0"
   ) {
-    return { ok: false, reason: `header checkpoint ${index} carries invalid v2 fields` };
+    return { ok: false, reason: `header checkpoint ${index} carries invalid v3 fields` };
   }
   return {
     ok: true,
@@ -293,7 +312,7 @@ function parseHeaderRecord(line: string): ParseResult<ParsedHeader> {
   if (!parsed.ok) return parsed;
   const record = parsed.value;
   if (!hasExactKeys(record, EXPORT_HEADER_KEYS)) {
-    return { ok: false, reason: "header does not have the exact v2 shape" };
+    return { ok: false, reason: "header does not have the exact v3 shape" };
   }
   if (record.control !== EXPORT_HEADER_CONTROL) {
     return { ok: false, reason: "first line is not the export header" };
@@ -331,7 +350,7 @@ function parseHeaderRecord(line: string): ParseResult<ParsedHeader> {
   return { ok: true, value: { problem: record.problem, checkpoints } };
 }
 
-/** Parse an exact v2 header record for consumers that read it independently. */
+/** Parse an exact v3 header record for consumers that read it independently. */
 export function parseExportHeader(line: string):
   | {
       readonly ok: true;
@@ -355,7 +374,7 @@ function parseTrailerRecord(line: string): ParseResult<ParsedTrailer> {
   if (!parsed.ok) return parsed;
   const record = parsed.value;
   if (!hasExactKeys(record, EXPORT_TRAILER_KEYS)) {
-    return { ok: false, reason: "terminal record does not have the exact v2 shape" };
+    return { ok: false, reason: "terminal record does not have the exact v3 shape" };
   }
   if (record.control !== EXPORT_TRAILER_CONTROL) {
     return { ok: false, reason: "last line is not the export trailer" };
@@ -379,7 +398,7 @@ function parseTrailerRecord(line: string): ParseResult<ParsedTrailer> {
   };
 }
 
-/** Parse an exact v2 terminal record for consumers that read it independently. */
+/** Parse an exact v3 terminal record for consumers that read it independently. */
 export function parseExportTrailer(line: string):
   | {
       readonly ok: true;
@@ -412,6 +431,7 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
     !boundedNonBlankString(event.object_kind, MAX_IDENTIFIER_LENGTH) ||
     !boundedNonBlankString(event.object_id, MAX_IDENTIFIER_LENGTH) ||
     !positiveInteger(event.object_version) ||
+    !boundedNonBlankString(event.payload_json, MAX_PAYLOAD_JSON_LENGTH) ||
     !isSha256Hex(event.payload_sha256) ||
     !isSha256Hex(event.row_digest) ||
     !isSha256Hex(event.chain_digest) ||
@@ -426,7 +446,7 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
   ) {
     return {
       ok: false,
-      reason: "event line carries invalid v2 envelope fields",
+      reason: "event line carries invalid v3 envelope fields",
     };
   }
   return {
@@ -439,6 +459,7 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
       objectId: event.object_id,
       objectVersion: event.object_version,
       payloadSha256: event.payload_sha256,
+      payloadJson: event.payload_json,
       rowDigest: event.row_digest,
       chainDigest: event.chain_digest,
       createdAt: event.created_at,
@@ -464,11 +485,12 @@ function splitExactLfRecords(ndjson: string): ParseResult<readonly string[]> {
 }
 
 /**
- * The sole v2 grammar: exact LF framing, then exact header, event, and trailer
+ * The sole v3 grammar: exact LF framing, then exact header, event, and trailer
  * records. It parses every record before integrity work so malformed,
  * reordered, appended, or blank records cannot become a tolerated prefix.
+ * Restores consume the same parse so what was verified is what gets written.
  */
-function parseProblemExportV2(ndjson: string): ExportParseResult {
+export function parseProblemExport(ndjson: string): ExportParseResult {
   const framed = splitExactLfRecords(ndjson);
   if (!framed.ok) return { ok: false, brokenAtSeq: null, detail: framed.reason };
   if (framed.value.length < 2) {
@@ -514,13 +536,15 @@ function parseProblemExportV2(ndjson: string): ExportParseResult {
 
 /**
  * Verify an export's integrity chain (Fable §10.2 tamper-evidence). The strict
- * parser first proves complete v2 framing and record shapes; this then
- * recomputes every row digest, chain link, and checkpoint digest/root.
+ * parser first proves complete v3 framing and record shapes; this then
+ * recomputes every payload binding, row digest, chain link, and checkpoint
+ * digest/root.
  *
- * This is self-consistency evidence, not cryptographic authenticity: v2
- * checkpoints are still `unsigned-v0`. A caller may supply an independently
- * held root pin to detect a fully recomputed suffix, but no parser result may
- * be described as signed or authentic until ADR-23's signing path exists.
+ * This is self-consistency evidence, not cryptographic authenticity: the chain
+ * version's checkpoints are still `unsigned-v0`. A caller may supply an
+ * independently held root pin to detect a fully recomputed suffix, but no
+ * parser result may be described as signed or authentic until ADR-23's signing
+ * path exists.
  */
 export interface ProblemExportCheckpointPin {
   readonly problemId: string;
@@ -544,7 +568,7 @@ export async function verifyProblemExportChain(
   ndjson: string,
   pin?: ProblemExportCheckpointPin,
 ): Promise<ProblemExportVerification> {
-  const parsed = parseProblemExportV2(ndjson);
+  const parsed = parseProblemExport(ndjson);
   if (!parsed.ok) {
     return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
   }
@@ -572,6 +596,16 @@ export async function verifyProblemExportChain(
         intact: false,
         brokenAtSeq: expectedSeq,
         detail: `sequence gap: expected seq ${expectedSeq}, found ${event.seq}`,
+      };
+    }
+    // v3 payload binding: the line's payload bytes must hash to the envelope's
+    // payload digest. An envelope digest alone cannot see payload-byte swaps.
+    const recomputedPayloadSha256 = await sha256Hex(event.payloadJson);
+    if (recomputedPayloadSha256 !== event.payloadSha256) {
+      return {
+        intact: false,
+        brokenAtSeq: event.seq,
+        detail: `payload sha256 mismatch at seq ${event.seq} — the exported payload bytes do not match their digest`,
       };
     }
     const recomputedRow = await eventEnvelopeRowDigest({
@@ -694,7 +728,7 @@ export async function verifyProblemRestorePreflight(
   ndjson: string,
   pin: ProblemRestoreCheckpointPin,
 ): Promise<ProblemExportVerification> {
-  const parsed = parseProblemExportV2(ndjson);
+  const parsed = parseProblemExport(ndjson);
   if (!parsed.ok) {
     return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
   }

@@ -4,6 +4,15 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { type BackupBucket, backupKeyFor, backupProblem } from "../../src/krater/backup.ts";
+import { verifyProblemExportChain } from "../../src/krater/export.ts";
+import {
+  canonicalJson,
+  checkpointDigest,
+  eventChainDigest,
+  eventRowDigest,
+  genesisChainDigest,
+  sha256Hex,
+} from "../../src/krater/krater.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -49,11 +58,10 @@ async function seedClaimProblem(
   problemId: string,
   checkpointDigestOverride?: string,
 ) {
-  const { checkpointDigest, genesisChainDigest, eventChainDigest, eventRowDigest } = await import(
-    "../../src/krater/krater.ts"
-  );
+  // v3 backups carry payload bytes; the seed's payload digest must bind them.
   const genesis = await genesisChainDigest(problemId);
-  const payloadSha256 = "ab".repeat(32);
+  const payloadJson = canonicalJson({ claim_id: "C-1", kind: "claim", statement: "seeded" });
+  const payloadSha256 = await sha256Hex(payloadJson);
   const now = "2026-08-20T00:00:00Z";
   const rowDigest = await eventRowDigest(
     {
@@ -101,6 +109,12 @@ async function seedClaimProblem(
     chain,
   );
   await insert(
+    "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+    `E-1-${problemId}`,
+    payloadSha256,
+    payloadJson,
+  );
+  await insert(
     "INSERT INTO integrity_checkpoints (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version, checkpoint_mode, created_at) VALUES (?, 1, ?, ?, 1, 'unsigned-v0', ?)",
     problemId,
     chain,
@@ -110,7 +124,6 @@ async function seedClaimProblem(
 }
 
 async function seedEmptyProblem(db: ReturnType<typeof localD1>, problemId: string) {
-  const { genesisChainDigest } = await import("../../src/krater/krater.ts");
   const now = "2026-08-20T00:00:00Z";
   const genesis = await genesisChainDigest(problemId);
   const insert = (query: string, ...values: unknown[]) =>
@@ -156,7 +169,6 @@ describe("the W2.8 backup export", () => {
     expect(bucket.writes.size).toBe(1);
     const written = bucket.writes.values().next().value as string;
     // The written bytes are a self-verifying export.
-    const { verifyProblemExportChain } = await import("../../src/krater/export.ts");
     const reverify = await verifyProblemExportChain(written);
     expect(reverify.intact).toBe(true);
   });
@@ -174,5 +186,23 @@ describe("the W2.8 backup export", () => {
   test("the backup key is dated and content-addressed", async () => {
     const key = backupKeyFor("2026-08-20", "P-4DSP", `sha256:${"ab".repeat(32)}`);
     expect(key).toMatch(/^backups\/2026-08-20\/P-4DSP\/[a-f0-9]{32}\.jsonl$/);
+  });
+
+  test("PLANTED: an event whose payload bytes are missing refuses the backup write", async () => {
+    const db = freshDb();
+    const bucket = fakeBucket();
+    await seedClaimProblem(db, "P-NO-PAYLOAD");
+    await (
+      db as unknown as {
+        prepare: (q: string) => { bind: (...v: unknown[]) => { run: () => Promise<unknown> } };
+      }
+    )
+      .prepare("DELETE FROM event_content WHERE event_id = ?")
+      .bind("E-1-P-NO-PAYLOAD")
+      .run();
+    await expect(
+      backupProblem(db as never, bucket, "P-NO-PAYLOAD", "missing", "2026-08-20"),
+    ).rejects.toThrow("missing event_content payload");
+    expect(bucket.writes.size).toBe(0);
   });
 });

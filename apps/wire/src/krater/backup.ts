@@ -1,10 +1,11 @@
 /**
  * W2.8 backup export: the nightly per-problem export to the backups bucket.
- * For each problem, read the full event log, serialize the NDJSON export
- * (header + events + terminal record, integrity checkpoints embedded), VERIFY
- * the chain before trusting the bytes, then write to the backups bucket under
- * a dated, content-addressed key. A backup that fails its own chain
- * verification is never written — a corrupt backup is worse than none.
+ * For each problem, read the full event log and its canonical payload texts,
+ * serialize the NDJSON export (header + events + terminal record, integrity
+ * checkpoints embedded), VERIFY the chain before trusting the bytes, then
+ * write to the backups bucket under a dated, content-addressed key. A backup
+ * that fails its own chain verification is never written — a corrupt backup is
+ * worse than none.
  *
  * The bucket is injected so the handler is testable with a fake and the
  * binding-topology decision (which bucket, which cron) stays with OPS.6. The
@@ -13,7 +14,12 @@
 
 import type { D1Database } from "@cloudflare/workers-types";
 
-import { EXPORT_FORMAT, serializeProblemExport, verifyProblemExportChain } from "./export.ts";
+import {
+  EXPORT_FORMAT,
+  type ProblemExportEvent,
+  serializeProblemExport,
+  verifyProblemExportChain,
+} from "./export.ts";
 import { type KraterEvent, readCheckpoints, readEvents, readIntegrityState } from "./krater.ts";
 
 /** The minimal bucket surface the backup writer needs. */
@@ -53,6 +59,9 @@ export function backupKeyFor(
   return `backups/${datePrefix}/${problemId}/${digest}.jsonl`;
 }
 
+/** D1 and SQLite bound-variable ceilings differ; 90 keeps the IN list lawful. */
+const PAYLOAD_CHUNK = 90;
+
 /**
  * Back up one problem: read its log, serialize, verify, write. Returns null if
  * the problem has no events (nothing to back up). Throws on a verification
@@ -82,10 +91,35 @@ export async function backupProblem(
     readIntegrityState(db, problemId),
   ]);
 
+  // v3 exports carry the exact payload bytes each event's digest binds, so the
+  // backup reads event_content alongside the envelopes and refuses to emit a
+  // line whose payload text is missing.
+  const payloadByText = new Map<string, string>();
+  for (let offset = 0; offset < events.length; offset += PAYLOAD_CHUNK) {
+    const chunk = events.slice(offset, offset + PAYLOAD_CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = await db
+      .prepare(
+        `SELECT event_id, payload_json FROM event_content WHERE event_id IN (${placeholders})`,
+      )
+      .bind(...chunk.map((event) => event.eventId))
+      .all<{ event_id: string; payload_json: string }>();
+    for (const row of rows.results) payloadByText.set(row.event_id, row.payload_json);
+  }
+  const exportEvents: ProblemExportEvent[] = events.map((event) => {
+    const payloadJson = payloadByText.get(event.eventId);
+    if (payloadJson === undefined) {
+      throw new Error(
+        `backup of ${problemId} is missing event_content payload bytes for ${event.eventId}`,
+      );
+    }
+    return { ...event, payloadJson };
+  });
+
   const ndjson = serializeProblemExport({
     problemId,
     problemTitle,
-    events,
+    events: exportEvents,
     checkpoints,
     generatedAt: `${datePrefix}T00:00:00Z`,
   });
