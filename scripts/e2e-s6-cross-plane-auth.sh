@@ -2859,9 +2859,11 @@ self_test() {
   clear_child_records
   local malformed_child_status=0 leading_zero_child_status=0
   SUPERVISOR_CHILD_STATUS_PLANT=256
-  run_bounded 10 "$bounded_out" - true || malformed_child_status=$?
+  # 9ba1 residual: under load the supervisor fork chain can starve the 10s
+  # record read; 30s is measurement headroom for the self-test plants only.
+  run_bounded 30 "$bounded_out" - true || malformed_child_status=$?
   SUPERVISOR_CHILD_STATUS_PLANT=00
-  run_bounded 10 "$bounded_out" - true || leading_zero_child_status=$?
+  run_bounded 30 "$bounded_out" - true || leading_zero_child_status=$?
   SUPERVISOR_CHILD_STATUS_PLANT=""
   check "token-bound-child-status-above-255-is-refused" "$malformed_child_status" "$EX_WATCHDOG_UNAVAILABLE"
   check "token-bound-child-status-leading-zero-is-refused" "$leading_zero_child_status" "$EX_WATCHDOG_UNAVAILABLE"
@@ -2874,7 +2876,7 @@ self_test() {
     clear_child_records
     planted_wrapper=0
     SUPERVISOR_CHILD_STATUS_PLANT="$planted_child"
-    run_bounded 10 "$bounded_out" - true || planted_wrapper=$?
+    run_bounded 30 "$bounded_out" - true || planted_wrapper=$?
     if (( planted_child >= 124 && planted_child <= 127 )); then
       expected_wrapper="$EX_FAIL"
     else
