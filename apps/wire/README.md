@@ -69,7 +69,7 @@ cross-slice/provider proof:
 `infra/wrangler.toml` is local-only and retains the all-zero D1 sentinel; `bun run dev` points at
 it. `infra/environments.toml` plus the validated generator own staging/production topology and
 emit DB, private/public R2, and exported Durable Object bindings only when their dependencies are
-present. `db/migrations/` contains the forward-only schema through migration 0040.
+present. `db/migrations/` contains the forward-only schema through migration 0041.
 
 None of that proves a remote resource is provisioned or a deployment succeeded. This package ships
 no casual production deploy shortcut; use the infrastructure runner and its same-revision receipts.

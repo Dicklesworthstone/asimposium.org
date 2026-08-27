@@ -22,7 +22,9 @@ export default function ErrorBoundary({
       <main className="landing col" id="content">
         <header className="masthead console-head">
           <h1 className="console-title">This page failed to render</h1>
-          <p className="tagline">The record is untouched; only this view failed.</p>
+          <p className="tagline">
+            This view failed before it could confirm the record&apos;s current state.
+          </p>
         </header>
         <p>
           Something went wrong while composing this page. You can retry the render; if it keeps

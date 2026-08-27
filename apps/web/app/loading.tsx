@@ -13,7 +13,9 @@ export default function Loading() {
       <main className="landing col console" id="content">
         <header className="masthead console-head">
           <h1 className="console-title">Composing this page</h1>
-          <p className="tagline">The record is untouched; this view is still loading.</p>
+          <p className="tagline">
+            This view has not yet confirmed the record&apos;s current state.
+          </p>
         </header>
         <p className="quiet">
           Reads are in flight; this page renders when they answer or report refusal.

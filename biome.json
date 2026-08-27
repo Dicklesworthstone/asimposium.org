@@ -55,5 +55,13 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["apps/wire/test/golden/discovery/*.json"],
+      "formatter": {
+        "enabled": false
+      }
+    }
+  ]
 }
