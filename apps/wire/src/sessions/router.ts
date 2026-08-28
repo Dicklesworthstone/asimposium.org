@@ -1437,6 +1437,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
     let workshopHeadsTruncated = false;
+    let killedHypothesesTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1724,10 +1725,44 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    // W4.2: the graveyard profile preserves the Fellow's dead ends — the
-    // negative results that must never be author-erased (P6). These are the
-    // Fellow's own workshop dead-end objects, newest first.
+    // W4.2 / W5.6: the graveyard profile is the negative-knowledge register.
+    // Ledger kills are problem-public and cursor-gated; workshop dead-ends stay
+    // this Fellow's private record. Omitting "killed-hypotheses" while the kill
+    // write already exists would be a silent thin pack with a lying omitted[].
     if (profile === "graveyard") {
+      const killed = await db
+        .prepare(
+          `SELECT hypothesis_id, route, kill_reason, killed_by_evidence_id, kill_source_seq
+           FROM hypotheses
+           WHERE problem_id = ? AND status = 'killed'
+             AND kill_source_seq IS NOT NULL AND kill_source_seq <= ?
+           ORDER BY kill_source_seq ASC LIMIT 11`,
+        )
+        .bind(session.problem_id, cursor)
+        .all<{
+          hypothesis_id: string;
+          route: string;
+          kill_reason: string | null;
+          killed_by_evidence_id: string | null;
+          kill_source_seq: number;
+        }>();
+      const killedRows = killed.results ?? [];
+      // One extra row decides disclosure, matching workshop-heads (j9hw).
+      killedHypothesesTruncated = killedRows.length > 10;
+      const emittedKilled = killedRows.slice(0, 10);
+      for (const [index, hypothesis] of emittedKilled.entries()) {
+        candidates.push({
+          kind: "hypothesis",
+          id: hypothesis.hypothesis_id,
+          scope: "ledger",
+          tokens: 1,
+          untrusted: true,
+          body: `${hypothesis.hypothesis_id} killed by ${hypothesis.killed_by_evidence_id ?? "unrecorded-evidence"}: ${hypothesis.route}. ${hypothesis.kill_reason ?? ""}`.trim(),
+          why_included: "preserve a killed attack route (negative knowledge is first-class, P6)",
+          stable_prefix: 450 + index,
+        });
+      }
+
       const deadEnds = await db
         .prepare(
           `SELECT workshop_id, title, body_md, workshop_seq, created_at FROM workshop_objects
@@ -1743,15 +1778,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           created_at: string;
         }>();
       const deadEndRows = deadEnds.results ?? [];
-      if (deadEndRows.length === 0) {
+      if (deadEndRows.length === 0 && emittedKilled.length === 0) {
         candidates.push({
           kind: "standing-context",
           id: "SYS-graveyard-empty",
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: "No dead ends recorded on this problem yet. Negative results are first-class — record them as you find them.",
-          why_included: "state the dead-end baseline",
+          body: "No dead ends or killed hypotheses recorded on this problem yet. Negative results are first-class — record them as you find them.",
+          why_included: "state the negative-knowledge baseline",
           stable_prefix: 500,
         });
       } else {
@@ -1825,7 +1860,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: ["claim-detail"],
-      graveyard: ["killed-hypotheses"],
       literature: ["citations"],
       formal: ["proof-gaps", "verification-records"],
       "review-queue": ["eligible-reviews"],
@@ -1912,6 +1946,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
           : []),
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
+        ...(profile === "graveyard" && killedHypothesesTruncated
+          ? [{ reason: "candidate_limit", detail: "killed-hypotheses" }]
+          : []),
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
           : []),

@@ -3991,6 +3991,104 @@ describe("session protocol routes", () => {
     expect(pack.status).toBe(200);
     const body = await pack.text();
     expect(body).toContain("The greedy approach fails");
+    const graveyard = PackResponseSchema.parse(JSON.parse(body));
+    expect(graveyard.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "killed-hypotheses",
+    });
+    expect(graveyard.items.some((item) => item.kind === "dead-end")).toBe(true);
+  });
+
+  test("the graveyard pack serves killed hypotheses and leaves open routes out", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const route = "induction on the path length";
+    const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill-propose" },
+      body: JSON.stringify({
+        route,
+        mechanism: "the toggle preserves the count, so induction on length closes it",
+        falsifier: "a path where the toggle changes the count",
+        origin: "proposed",
+        body_md: "Proposing induction on the path length.",
+      }),
+    });
+    expect(proposed.status).toBe(201);
+    const hypothesis = (await proposed.json()) as { hypothesis_id: string };
+    expect(hypothesis.hypothesis_id.startsWith("H-")).toBe(true);
+
+    const beforeKill = await call(`/v1/sessions/${session.session_id}/pack?profile=graveyard`);
+    expect(beforeKill.status).toBe(200);
+    const beforeText = await beforeKill.text();
+    expect(beforeText).not.toContain(hypothesis.hypothesis_id);
+    expect(beforeText).not.toContain(route);
+    const beforePack = PackResponseSchema.parse(JSON.parse(beforeText));
+    expect(beforePack.items.some((item) => item.id === "SYS-graveyard-empty")).toBe(true);
+    expect(beforePack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "killed-hypotheses",
+    });
+
+    const refutation = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill-evidence" },
+      body: JSON.stringify({
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypothesis.hypothesis_id,
+        direction: "refutes",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "The four-path changes the count and refutes this exact route.",
+      }),
+    });
+    expect(refutation.status, await refutation.clone().text()).toBe(201);
+    const evidence = (await refutation.json()) as { evidence_id: string };
+    const killReason = "The recorded four-path counterexample kills the induction route.";
+    const killed = await call(
+      `/v1/sessions/${session.session_id}/hypotheses/${hypothesis.hypothesis_id}/kill`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill" },
+        body: JSON.stringify({
+          hypothesis_id: hypothesis.hypothesis_id,
+          killed_by_evidence_id: evidence.evidence_id,
+          reason: killReason,
+        }),
+      },
+    );
+    expect(killed.status, await killed.clone().text()).toBe(200);
+
+    const afterKill = await call(`/v1/sessions/${session.session_id}/pack?profile=graveyard`);
+    expect(afterKill.status).toBe(200);
+    const afterText = await afterKill.text();
+    const afterPack = PackResponseSchema.parse(JSON.parse(afterText));
+    const killedItem = afterPack.items.find((item) => item.id === hypothesis.hypothesis_id);
+    expect(killedItem).toMatchObject({
+      kind: "hypothesis",
+      scope: "ledger",
+      untrusted: true,
+    });
+    expect(killedItem?.body).toContain(hypothesis.hypothesis_id);
+    expect(killedItem?.body).toContain(`killed by ${evidence.evidence_id}`);
+    expect(killedItem?.body).toContain(route);
+    expect(killedItem?.body).toContain(killReason);
+    expect(afterPack.items.some((item) => item.id === "SYS-graveyard-empty")).toBe(false);
+    expect(afterPack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "killed-hypotheses",
+    });
+    expect(afterPack.omitted).not.toContainEqual({
+      reason: "candidate_limit",
+      detail: "killed-hypotheses",
+    });
   });
 
   test("the digest pack surfaces projection staleness honestly (W2.6)", async () => {
