@@ -1536,6 +1536,16 @@ describe("face wire format", () => {
     expect(response.status).toBe(200);
     expect(response.contentType).toBe("application/json; charset=utf-8");
     expect(response.bodyText).toBe(body);
+    expect(response.headers.get("link")).toBe('</protocol.json>; rel="canonical"');
+  });
+
+  test("Markdown aliases advertise the registry canonical path, not the request spelling", async () => {
+    const protocol = await callWorker("/protocol", {});
+    expect(protocol.status).toBe(200);
+    expect(protocol.headers.get("link")).toBe('</protocol.md>; rel="canonical"');
+    const agents = await callWorker("/AGENTS.md", {});
+    expect(agents.status).toBe(200);
+    expect(agents.headers.get("link")).toBe('</>; rel="canonical"');
   });
 
   test("GET /schemas/index.json serves the generated schema-index bytes without D1", async () => {

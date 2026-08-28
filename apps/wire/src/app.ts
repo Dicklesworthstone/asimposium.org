@@ -293,6 +293,8 @@ function servePublicRepresentation(
     "cache-control": PUBLIC_TEXT_CACHE_CONTROL,
     "content-type": representation.contentType,
     etag,
+    // Path-only: never derived from Host / forwarded headers (ADR-2 origin law).
+    link: `<${representation.servedAt}>; rel="canonical"`,
   };
   if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers });
