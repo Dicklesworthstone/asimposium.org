@@ -4215,6 +4215,16 @@ describe("session protocol routes", () => {
     expect(promoted.status).toBe(201);
     const { claim_id } = (await promoted.json()) as { claim_id: string };
 
+    const authorQueue = await call(`/v1/sessions/${session.session_id}/pack?profile=review-queue`);
+    expect(authorQueue.status).toBe(200);
+    const authorQueuePack = PackResponseSchema.parse(await authorQueue.json());
+    expect(authorQueuePack.items.some((item) => item.id === claim_id)).toBe(false);
+    expect(authorQueuePack.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(true);
+    expect(authorQueuePack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "eligible-reviews",
+    });
+
     // The author reviewing their own claim is refused with P1.
     const selfReview = await call(`/v1/sessions/${session.session_id}/review`, {
       method: "POST",
@@ -4243,6 +4253,25 @@ describe("session protocol routes", () => {
     });
     expect(reviewerOpened.status).toBe(201);
     const reviewerSession = (await reviewerOpened.json()) as { session_id: string };
+    const reviewerQueue = await reviewer.call(
+      `/v1/sessions/${reviewerSession.session_id}/pack?profile=review-queue`,
+    );
+    expect(reviewerQueue.status).toBe(200);
+    const reviewerQueuePack = PackResponseSchema.parse(await reviewerQueue.json());
+    const eligibleItem = reviewerQueuePack.items.find((item) => item.id === claim_id);
+    expect(eligibleItem).toMatchObject({
+      kind: "claim",
+      scope: "ledger",
+      untrusted: true,
+    });
+    expect(eligibleItem?.body).toContain(`${claim_id} eligible at T0:`);
+    expect(reviewerQueuePack.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(
+      false,
+    );
+    expect(reviewerQueuePack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "eligible-reviews",
+    });
     const reviewRequest = {
       target_claim_id: claim_id,
       target_version: 1,

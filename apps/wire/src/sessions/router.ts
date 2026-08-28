@@ -82,6 +82,7 @@ import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
+import { independenceTier } from "../ledger/review-independence";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import {
   duplicateClaimRefusal,
@@ -1440,6 +1441,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let killedHypothesesTruncated = false;
     let typedRelationsTruncated = false;
     let proofGapsTruncated = false;
+    let eligibleReviewsTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1503,7 +1505,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // Fable digest is "statement hash, cursor, counts, next move only" at 800
     // tokens. Loading claims/handback first dropped SYS-projection-staleness
     // on budget_exceeded — a silent thin pack for the profile's whole point.
-    if (profile !== "hello" && profile !== "digest") {
+    if (profile !== "hello" && profile !== "digest" && profile !== "review-queue") {
       const claims = await db
         .prepare(
           `SELECT id, statement, source_seq FROM claims
@@ -1842,6 +1844,78 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    // Fable review-queue: reviewable objects this Fellow is eligible to review
+    // (non-author, with the computed independence tier). P1 already refuses
+    // self-review at the write gate; omitting "eligible-reviews" while that
+    // predicate is computable from claim.created attribution would be a silent
+    // thin pack.
+    if (profile === "review-queue") {
+      const eligible = await db
+        .prepare(
+          `SELECT c.id, c.statement, c.source_seq,
+                  e.actor_sponsor_id, e.model_string_self_declared, e.harness
+           FROM claims c
+           JOIN events e
+             ON e.problem_id = c.problem_id AND e.type = 'claim.created'
+            AND e.object_kind = 'claim' AND e.object_id = c.id AND e.object_version = 1
+           WHERE c.problem_id = ? AND c.source_seq <= ?
+             AND e.actor_fellow_id IS NOT NULL AND e.actor_fellow_id != ?
+             AND e.actor_sponsor_id IS NOT NULL
+             AND e.model_string_self_declared IS NOT NULL AND e.harness IS NOT NULL
+           ORDER BY c.source_seq ASC LIMIT 11`,
+        )
+        .bind(session.problem_id, cursor, auth.binding.fellowId)
+        .all<{
+          id: string;
+          statement: string;
+          source_seq: number;
+          actor_sponsor_id: string;
+          model_string_self_declared: string;
+          harness: string;
+        }>();
+      const eligibleRows = eligible.results ?? [];
+      eligibleReviewsTruncated = eligibleRows.length > 10;
+      const emittedEligible = eligibleRows.slice(0, 10);
+      if (emittedEligible.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-review-queue-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No claims on this problem you are eligible to review. Hard rule 3: you cannot review an object you authored.",
+          why_included: "state the review-queue baseline (P1 non-author eligibility)",
+          stable_prefix: 370,
+        });
+      } else {
+        for (const [index, claim] of emittedEligible.entries()) {
+          const tier = independenceTier(
+            {
+              sponsorId: claim.actor_sponsor_id,
+              modelFamily: claim.model_string_self_declared,
+              methodBasis: claim.harness,
+            },
+            {
+              sponsorId: auth.binding.sponsorId,
+              modelFamily: auth.binding.model,
+              methodBasis: auth.binding.harness,
+            },
+          );
+          candidates.push({
+            kind: "claim",
+            id: claim.id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${claim.id} eligible at ${tier}: ${claim.statement}`,
+            why_included:
+              "match a live claim to this Fellow's P1 eligibility and independence tier",
+            stable_prefix: 370 + index,
+          });
+        }
+      }
+    }
+
     // W4.2 / W5.6: the graveyard profile is the negative-knowledge register.
     // Ledger kills are problem-public and cursor-gated; workshop dead-ends stay
     // this Fellow's private record. Omitting "killed-hypotheses" while the kill
@@ -1979,7 +2053,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       claim: ["claim-detail"],
       literature: ["citations"],
       formal: ["verification-records"],
-      "review-queue": ["eligible-reviews"],
       full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
@@ -2071,11 +2144,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(profile === "formal" && proofGapsTruncated
           ? [{ reason: "candidate_limit", detail: "proof-gaps" }]
           : []),
+        ...(profile === "review-queue" && eligibleReviewsTruncated
+          ? [{ reason: "candidate_limit", detail: "eligible-reviews" }]
+          : []),
         ...(profile === "digest"
           ? [
               { reason: "profile_excludes_claims", detail: "claims" },
               { reason: "profile_excludes_handback", detail: "handback" },
             ]
+          : []),
+        ...(profile === "review-queue"
+          ? [{ reason: "profile_excludes_handback", detail: "handback" }]
           : []),
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
