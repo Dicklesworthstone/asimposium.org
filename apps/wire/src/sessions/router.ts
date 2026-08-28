@@ -1438,6 +1438,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let claimsTruncated = false;
     let workshopHeadsTruncated = false;
     let killedHypothesesTruncated = false;
+    let typedRelationsTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1498,7 +1499,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (profile !== "hello") {
+    // Fable digest is "statement hash, cursor, counts, next move only" at 800
+    // tokens. Loading claims/handback first dropped SYS-projection-staleness
+    // on budget_exceeded — a silent thin pack for the profile's whole point.
+    if (profile !== "hello" && profile !== "digest") {
       const claims = await db
         .prepare(
           `SELECT id, statement, source_seq FROM claims
@@ -1721,8 +1725,59 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? `Projection health: ${total} claim projection(s) current, none stale.`
             : `Projection health: ${staleCount} of ${total} claim projection(s) are STALE (drifted from the log; the log wins and a rebuild is owed).`,
         why_included: "surface projection staleness honestly in the digest",
-        stable_prefix: 400,
+        stable_prefix: 3,
       });
+    }
+
+    // W5.5: claim-graph is the typed-relation board. The assert write already
+    // lands in claim_relations; omitting "typed-relations" was a silent thin pack.
+    if (profile === "claim-graph") {
+      const relations = await db
+        .prepare(
+          `SELECT r.kind, r.source_claim_id, r.source_version, r.target_ref,
+                  r.asserted_by_event, e.seq
+           FROM claim_relations r
+           JOIN events e ON e.id = r.asserted_by_event AND e.problem_id = r.problem_id
+           WHERE r.problem_id = ? AND e.seq <= ?
+           ORDER BY e.seq ASC LIMIT 11`,
+        )
+        .bind(session.problem_id, cursor)
+        .all<{
+          kind: string;
+          source_claim_id: string;
+          source_version: number;
+          target_ref: string;
+          asserted_by_event: string;
+          seq: number;
+        }>();
+      const relationRows = relations.results ?? [];
+      typedRelationsTruncated = relationRows.length > 10;
+      const emittedRelations = relationRows.slice(0, 10);
+      if (emittedRelations.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-claim-graph-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No typed claim relations asserted on this problem yet.",
+          why_included: "state the claim-graph baseline",
+          stable_prefix: 350,
+        });
+      } else {
+        for (const [index, edge] of emittedRelations.entries()) {
+          candidates.push({
+            kind: "relation",
+            id: edge.asserted_by_event,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${edge.source_claim_id}@${edge.source_version} ${edge.kind} ${edge.target_ref} (#${edge.seq})`,
+            why_included: "include a typed, version-pinned claim relation (ADR-21)",
+            stable_prefix: 350 + index,
+          });
+        }
+      }
     }
 
     // W4.2 / W5.6: the graveyard profile is the negative-knowledge register.
@@ -1863,7 +1918,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       literature: ["citations"],
       formal: ["proof-gaps", "verification-records"],
       "review-queue": ["eligible-reviews"],
-      "claim-graph": ["typed-relations"],
       full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
@@ -1948,6 +2002,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
         ...(profile === "graveyard" && killedHypothesesTruncated
           ? [{ reason: "candidate_limit", detail: "killed-hypotheses" }]
+          : []),
+        ...(profile === "claim-graph" && typedRelationsTruncated
+          ? [{ reason: "candidate_limit", detail: "typed-relations" }]
+          : []),
+        ...(profile === "digest"
+          ? [
+              { reason: "profile_excludes_claims", detail: "claims" },
+              { reason: "profile_excludes_handback", detail: "handback" },
+            ]
           : []),
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]

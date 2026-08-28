@@ -2757,6 +2757,22 @@ describe("session protocol routes", () => {
     expect(
       await db.prepare("SELECT COUNT(*) AS count FROM claim_relations").first<{ count: number }>(),
     ).toEqual({ count: 1 });
+
+    const graph = await call(`/v1/sessions/${session.session_id}/pack?profile=claim-graph`);
+    expect(graph.status).toBe(200);
+    const graphPack = PackResponseSchema.parse(await graph.json());
+    const relationItem = graphPack.items.find((item) => item.kind === "relation");
+    expect(relationItem).toMatchObject({
+      scope: "ledger",
+      untrusted: true,
+    });
+    expect(relationItem?.body).toContain("C-1@1 implies C-2@1");
+    expect(relationItem?.body).toContain("#3");
+    expect(graphPack.items.some((item) => item.id === "SYS-claim-graph-empty")).toBe(false);
+    expect(graphPack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "typed-relations",
+    });
   });
 
   test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
@@ -4116,6 +4132,26 @@ describe("session protocol routes", () => {
     // The staleness line names the stale projection — never fabricated-fresh state.
     expect(body).toContain("STALE");
     expect(body).toContain("1 of 2");
+    const digest = PackResponseSchema.parse(JSON.parse(body));
+    expect(digest.budget_tokens).toBe(800);
+    expect(digest.items.map((item) => item.id)).toEqual(
+      expect.arrayContaining([
+        "SYS-identity",
+        "SYS-inoculation",
+        "SYS-protocol",
+        "SYS-projection-staleness",
+      ]),
+    );
+    const staleness = digest.items.find((item) => item.id === "SYS-projection-staleness");
+    expect(staleness).toMatchObject({ scope: "system", untrusted: false });
+    expect(digest.omitted).not.toContainEqual({ reason: "budget_exceeded" });
+    expect(digest.omitted).toContainEqual({ reason: "profile_excludes_claims", detail: "claims" });
+    expect(digest.omitted).toContainEqual({
+      reason: "profile_excludes_handback",
+      detail: "handback",
+    });
+    expect(digest.items.some((item) => item.kind === "claim")).toBe(false);
+    expect(digest.items.some((item) => item.id === "SYS-handback-empty")).toBe(false);
   });
 
   test("a Fellow cannot review their own claim (P1), and the review contract validates", async () => {
