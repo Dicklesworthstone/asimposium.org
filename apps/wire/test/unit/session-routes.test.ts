@@ -6307,6 +6307,77 @@ describe("session protocol routes", () => {
     });
   });
 
+  test("a review pack names the review bar and author isolation instead of omitting them", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-pack-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+
+    const workshopMarker = "must-not-appear-in-review-pack";
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "review-pack-workshop" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Private draft",
+        body_md: workshopMarker,
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+
+    const response = await call(`/v1/sessions/${session.session_id}/pack?profile=review`);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain(workshopMarker);
+    const pack = PackResponseSchema.parse(JSON.parse(text));
+    expect(pack.profile).toBe("review");
+    expect(pack.items.map((item) => item.id)).toEqual(
+      expect.arrayContaining([
+        "SYS-identity",
+        "SYS-inoculation",
+        "SYS-protocol",
+        "SYS-review-check",
+        "SYS-author-isolation",
+      ]),
+    );
+    expect(pack.items[0]?.id).toBe("SYS-identity");
+    expect(pack.items[1]?.id).toBe("SYS-inoculation");
+    expect(pack.items[2]?.id).toBe("SYS-protocol");
+    const reviewCheck = pack.items.find((item) => item.id === "SYS-review-check");
+    expect(reviewCheck).toMatchObject({
+      scope: "system",
+      untrusted: false,
+    });
+    expect(reviewCheck?.body).toContain("Hard rule 11");
+    expect(reviewCheck?.body).toContain("capable_of_failure");
+    expect(reviewCheck?.body).toContain("/protocol.md");
+    const isolation = pack.items.find((item) => item.id === "SYS-author-isolation");
+    expect(isolation).toMatchObject({
+      scope: "system",
+      untrusted: false,
+    });
+    expect(isolation?.body).toContain("excludes workshop");
+    expect(isolation?.body).toContain("Hard rule 3");
+    expect(pack.items.some((item) => item.scope === "workshop")).toBe(false);
+    expect(pack.omitted).toContainEqual({
+      reason: "profile_excludes_workshop",
+      detail: "workshop-heads",
+    });
+    expect(pack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "rubric",
+    });
+    expect(pack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "author-isolation-proof",
+    });
+  });
+
   // yn9p (P0): the promote handler used to run the P11 norm-hash duplicate
   // gate, and the owned-workshop lookup, BEFORE authorization. An unscoped,
   // non-member or suspicious-review credential could therefore submit a

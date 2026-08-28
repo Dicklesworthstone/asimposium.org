@@ -1470,6 +1470,32 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       why_included: "pin the protocol/policy pair this session opened under (ADR-24)",
       stable_prefix: 2,
     });
+    if (profile === "review") {
+      // No generated rubric registry exists yet. The served protocol already
+      // names the review bar; omitting "rubric" while workshop isolation is
+      // already enforced would be a silent thin pack with a lying omitted[].
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-review-check",
+        scope: "system",
+        tokens: 1,
+        untrusted: false,
+        body: "Hard rule 11: a review names what you checked and what result would have produced a negative verdict. Send capable_of_failure. GET /protocol.md.",
+        why_included: "name the review bar before a generated rubric registry exists",
+        stable_prefix: 3,
+      });
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-author-isolation",
+        scope: "system",
+        tokens: 1,
+        untrusted: false,
+        body: "This pack excludes workshop. Hard rule 3: you cannot review, verify, or settle an object you authored.",
+        why_included:
+          "state the author isolation this profile already enforces by omitting workshop",
+        stable_prefix: 4,
+      });
+    }
 
     if (profile !== "hello") {
       const claims = await db
@@ -1799,7 +1825,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: ["claim-detail"],
-      review: ["rubric", "author-isolation-proof"],
       graveyard: ["killed-hypotheses"],
       literature: ["citations"],
       formal: ["proof-gaps", "verification-records"],
