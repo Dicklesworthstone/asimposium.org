@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0041_ledger_write_atomicity.sql`.
+schema through `0042_session_protocol_pair.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -31,6 +31,10 @@ projection to the exact ledger event and public sequence committed with it.
 Hypothesis bodies and kill reasons also become durable instead of being dropped
 after request validation. Pre-migration projection rows remain nullable because
 the missing immutable event cannot be reconstructed honestly.
+
+Migration `0042_session_protocol_pair.sql` records the ADR-24 protocol/policy
+version pair on each session row at open. Pre-migration rows stay null: they
+are honest unknowns, not today's pair back-filled onto earlier work.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

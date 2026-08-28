@@ -51,6 +51,29 @@ export const SessionOpenRequestSchema = z
   .strict();
 export type SessionOpenRequest = z.infer<typeof SessionOpenRequestSchema>;
 
+/** ADR-24: the protocol/policy pair a session records at open. */
+const HexSha256Schema = z.string().regex(/^[0-9a-f]{64}$/, "invalid sha256 hex digest");
+const ProtocolDocumentVersionSchema = z.string().min(1).max(64);
+
+export const ProtocolPairSchema = z
+  .object({
+    protocol: z
+      .object({
+        version: ProtocolDocumentVersionSchema,
+        digest: HexSha256Schema,
+      })
+      .strict(),
+    policy: z
+      .object({
+        version: ProtocolDocumentVersionSchema,
+        digest: HexSha256Schema,
+      })
+      .strict(),
+    pair_digest: HexSha256Schema,
+  })
+  .strict();
+export type ProtocolPair = z.infer<typeof ProtocolPairSchema>;
+
 export const SessionOpenResponseSchema = z
   .object({
     session_id: SessionIdSchema,
@@ -58,6 +81,7 @@ export const SessionOpenResponseSchema = z
     intent: SessionIntentSchema.nullable(),
     opened_at: z.string().datetime(),
     idle_close_at: z.string().datetime(),
+    protocol_pair: ProtocolPairSchema,
   })
   .strict();
 export type SessionOpenResponse = z.infer<typeof SessionOpenResponseSchema>;

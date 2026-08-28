@@ -15,6 +15,7 @@ import {
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
+import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
@@ -3127,7 +3128,8 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
     });
     expect(opened.status).toBe(201);
-    const session = (await opened.json()) as { session_id: string };
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    expect(session.protocol_pair).toEqual(protocolVersionPair());
 
     // A second open against the same problem is SESSION_EXISTS.
     const duplicate = await call("/v1/sessions", {
@@ -5464,6 +5466,8 @@ describe("session protocol routes", () => {
     expect(boundedText).not.toContain("large-12-");
     expect(boundedPack.items[0]?.id).toBe("SYS-identity");
     expect(boundedPack.items[1]?.id).toBe("SYS-inoculation");
+    expect(boundedPack.items[2]?.id).toBe("SYS-protocol");
+    expect(boundedPack.items[2]?.body).toContain(`pair=${protocolVersionPair().pair_digest}`);
 
     for (const invalid of ["800junk", "8001", "0", "1.5"]) {
       const refusal = await call(

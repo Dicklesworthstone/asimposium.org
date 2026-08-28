@@ -84,6 +84,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0039_krater_chain_v2.sql"
   "0040_krater_chain_v2_contiguity.sql"
   "0041_ledger_write_atomicity.sql"
+  "0042_session_protocol_pair.sql"
 )
 
 STATE_DIR=""
@@ -1153,7 +1154,7 @@ assert_migration_journal() {
       fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_MISMATCH"
       return 1
     }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0041\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0042\",\"status\":\"pass\"}"
 }
 
 seed_session_problem() {

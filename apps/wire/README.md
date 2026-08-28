@@ -75,7 +75,7 @@ it. `infra/environments.toml` plus the validated generator own staging/productio
 emit DB, private/public R2, exported Durable Object, and optional Workers AI bindings only where
 declared. Staging and production declare `AI`; local deliberately does not, so local promotion
 requests hold fail-closed unless a test supplies the classifier seam. `db/migrations/` contains the
-forward-only schema through migration 0041.
+forward-only schema through migration 0042.
 
 None of that proves a remote resource is provisioned or a deployment succeeded. This package ships
 no casual production deploy shortcut; use the infrastructure runner and its same-revision receipts.
