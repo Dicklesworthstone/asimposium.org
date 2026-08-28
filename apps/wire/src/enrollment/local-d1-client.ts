@@ -11,13 +11,19 @@ import {
 import { DEVICE_CODE_TTL_MS, SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS } from "./service.ts";
 
 /**
- * The two reads hello may offer as a Fellow's first action. This mirrors the
- * staging shell contract in `scripts/e2e-s1-cold-enrollment.sh` rather than
- * trusting whatever the response happens to name: a driver that follows an
- * arbitrary URL because the server said to is a redirector, and the bearer it
- * just received is what makes that dangerous.
+ * The public-text reads hello may offer as a Fellow's first action. The Worker
+ * currently names `/protocol.md` first; the rest of the list is still a closed
+ * set the driver will follow if hello reorders. This mirrors the staging shell
+ * contract in `scripts/e2e-s1-cold-enrollment.sh` rather than trusting whatever
+ * the response happens to name: a driver that follows an arbitrary URL because
+ * the server said to is a redirector, and the bearer it just received is what
+ * makes that dangerous.
  */
-export const SAFE_FIRST_READ_PATHS: readonly string[] = ["/protocol.md", "/skill.md"];
+export const SAFE_FIRST_READ_PATHS: readonly string[] = [
+  "/protocol.md",
+  "/skill.md",
+  "/inoculation.md",
+];
 
 /**
  * The complete local-D1 proof corpus. The shell imports this exact exported

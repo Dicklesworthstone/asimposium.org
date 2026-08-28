@@ -23,6 +23,7 @@ import {
   LOCAL_D1_COMPLETION_SKIP_PLANT,
   LOCAL_D1_EVIDENCE_CASES,
   LOCAL_RESPONSE_MAX_BYTES,
+  SAFE_FIRST_READ_PATHS,
 } from "../../src/enrollment/local-d1-client.ts";
 
 // Most cases launch the harness through its own bounded controller. Bun's
@@ -2485,6 +2486,14 @@ describe("a pinned port is validated before anything is started", () => {
     expect(codes.every((code) => typeof code === "string")).toBe(true);
     expect(new Set(codes).size).toBe(distinctModes.length);
   }, 120_000);
+
+  test("the shell first-safe-read allow-list matches SAFE_FIRST_READ_PATHS", () => {
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    expect(SAFE_FIRST_READ_PATHS[0]).toBe("/protocol.md");
+    for (const path of SAFE_FIRST_READ_PATHS) {
+      expect(source).toContain(`new URL("${path}", base).href`);
+    }
+  });
 
   test("the production evidence gate imports the client's complete declared corpus", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");

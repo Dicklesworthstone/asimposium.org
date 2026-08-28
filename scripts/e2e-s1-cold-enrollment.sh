@@ -2485,6 +2485,7 @@ if (!first || typeof first !== "object" || Array.isArray(first) || first.action 
 const allowed = [
   new URL("/protocol.md", base).href,
   new URL("/skill.md", base).href,
+  new URL("/inoculation.md", base).href,
 ];
 if (!allowed.includes(first.url)) process.exit(3);
 process.stdout.write(first.url);
