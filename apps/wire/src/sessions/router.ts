@@ -132,6 +132,14 @@ const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
 };
 /** One extra row distinguishes a complete candidate set from a bounded prefix. */
 const PACK_CLAIM_CANDIDATE_LIMIT = 128;
+/** Fable §9.6 object-level events: these feed the orient Now strip. */
+const MATERIAL_EVENT_TYPES = [
+  "claim.created",
+  "evidence.created",
+  "review.created",
+  "hypothesis.killed",
+] as const;
+const MATERIAL_EVENT_SQL_LIST = MATERIAL_EVENT_TYPES.map((type) => `'${type}'`).join(", ");
 
 export interface SessionRouterOptions {
   readonly service: EnrollmentService;
@@ -1513,6 +1521,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let claimDepsTruncated = false;
     let claimEvidenceTruncated = false;
     let claimReviewsTruncated = false;
+    let rosterTruncated = false;
+    let presenceTruncated = false;
+    let materialEventsTruncated = false;
+    let deadEndHeadlinesTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1573,16 +1585,237 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // W4.2: orient is statement/roster/counts/events/handback, not the 128-claim
+    // index. Those writes that exist are composed here; missing statement,
+    // motivation, and leases stay in omitted[]. Working inherits this prefix
+    // (Fable: working = orient + claims + workshop + move).
+    if (profile === "orient" || profile === "working") {
+      const orientBatch = await db.batch([
+        db
+          .prepare(
+            `SELECT
+               (SELECT COUNT(*) FROM claims
+                WHERE problem_id = ? AND source_seq <= ?) AS claim_count,
+               (SELECT COUNT(*) FROM hypotheses
+                WHERE problem_id = ? AND status = 'open'
+                  AND source_seq IS NOT NULL AND source_seq <= ?) AS hypothesis_count`,
+          )
+          .bind(session.problem_id, cursor, session.problem_id, cursor),
+        db
+          .prepare(
+            `SELECT synthesis_id, covers_through FROM syntheses
+             WHERE problem_id = ?
+             ORDER BY covers_through DESC, created_at DESC, synthesis_id DESC
+             LIMIT 1`,
+          )
+          .bind(session.problem_id),
+        db
+          .prepare(
+            `SELECT f.name, m.role
+             FROM problem_memberships m
+             JOIN enrollment_fellows f ON f.fellow_id = m.fellow_id
+             WHERE m.problem_id = ?
+             ORDER BY m.joined_at ASC, m.fellow_id ASC
+             LIMIT 11`,
+          )
+          .bind(session.problem_id),
+        db
+          .prepare(
+            `SELECT f.name, s.last_heartbeat_at
+             FROM sessions s
+             JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
+             WHERE s.problem_id = ? AND s.closed_at IS NULL
+             ORDER BY s.last_heartbeat_at DESC, s.session_id DESC
+             LIMIT 11`,
+          )
+          .bind(session.problem_id),
+        db
+          .prepare(
+            `SELECT id, seq, type, object_kind, object_id, object_version
+             FROM events
+             WHERE problem_id = ? AND seq <= ?
+               AND type IN (${MATERIAL_EVENT_SQL_LIST})
+             ORDER BY seq DESC
+             LIMIT 6`,
+          )
+          .bind(session.problem_id, cursor),
+        db
+          .prepare(
+            `SELECT workshop_id, title FROM workshop_objects
+             WHERE problem_id = ? AND fellow_id = ? AND type = 'dead-end'
+             ORDER BY workshop_seq DESC
+             LIMIT 11`,
+          )
+          .bind(session.problem_id, auth.binding.fellowId),
+      ]);
+      const [
+        countsResult,
+        synthesisResult,
+        rosterResult,
+        presenceResult,
+        eventsResult,
+        deadEndResult,
+      ] = orientBatch;
+      if (
+        countsResult === undefined ||
+        synthesisResult === undefined ||
+        rosterResult === undefined ||
+        presenceResult === undefined ||
+        eventsResult === undefined ||
+        deadEndResult === undefined
+      ) {
+        throw new Error("pack orient batch returned an incomplete result set");
+      }
+      const counts = ((countsResult.results ?? [])[0] ?? {
+        claim_count: 0,
+        hypothesis_count: 0,
+      }) as { claim_count: number; hypothesis_count: number };
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-live-counts",
+        scope: "system",
+        tokens: 1,
+        untrusted: false,
+        body: `claims=${counts.claim_count} open_hypotheses=${counts.hypothesis_count}`,
+        why_included: "state live hypothesis and claim counts without ranking actors",
+        stable_prefix: 3,
+      });
+      const synthesis = ((synthesisResult.results ?? [])[0] ?? null) as {
+        synthesis_id: string;
+        covers_through: number;
+      } | null;
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-synthesis-staleness",
+        scope: "system",
+        tokens: 1,
+        untrusted: false,
+        body:
+          synthesis === null
+            ? `No synthesis on this problem yet (cursor #${cursor}).`
+            : `Synthesis covers through #${synthesis.covers_through} — lag ${Math.max(0, cursor - synthesis.covers_through)} at cursor #${cursor}.`,
+        why_included: "surface synthesis coverage against the public cursor",
+        stable_prefix: 4,
+      });
+      const rosterRows = (rosterResult.results ?? []) as { name: string; role: string }[];
+      rosterTruncated = rosterRows.length > 10;
+      const rosterBody =
+        rosterRows.length === 0
+          ? "No members on this problem."
+          : `members: ${rosterRows
+              .slice(0, 10)
+              .map((row) => `${row.name} (${row.role})`)
+              .join(", ")}`;
+      candidates.push({
+        kind: "roster",
+        id: "ROSTER",
+        scope: "ledger",
+        tokens: 1,
+        untrusted: true,
+        body: rosterBody,
+        why_included: "name the Fellows currently on this problem",
+        stable_prefix: 5,
+      });
+      const presenceRows = (presenceResult.results ?? []) as {
+        name: string;
+        last_heartbeat_at: string;
+      }[];
+      presenceTruncated = presenceRows.length > 10;
+      const presenceBody =
+        presenceRows.length === 0
+          ? "No open sessions on this problem."
+          : `present: ${presenceRows
+              .slice(0, 10)
+              .map((row) => `${row.name} @ ${row.last_heartbeat_at}`)
+              .join(", ")}`;
+      candidates.push({
+        kind: "presence",
+        id: "PRESENCE",
+        scope: "ledger",
+        tokens: 1,
+        untrusted: true,
+        body: presenceBody,
+        why_included: "show open-session heartbeats on this problem",
+        stable_prefix: 6,
+      });
+      const eventRows = (eventsResult.results ?? []) as {
+        id: string;
+        seq: number;
+        type: string;
+        object_kind: string;
+        object_id: string;
+        object_version: number;
+      }[];
+      materialEventsTruncated = eventRows.length > 5;
+      const emittedEvents = eventRows.slice(0, 5).reverse();
+      if (emittedEvents.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-material-events-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No object-level ledger events on this problem yet.",
+          why_included: "state the Now-strip baseline (Fable §9.6 materiality)",
+          stable_prefix: 10,
+        });
+      } else {
+        for (const [index, event] of emittedEvents.entries()) {
+          candidates.push({
+            kind: "event",
+            id: event.id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `#${event.seq} ${event.type} ${event.object_kind} ${event.object_id}@${event.object_version}`,
+            why_included: "include a recent object-level ledger event (Now strip)",
+            stable_prefix: 10 + index,
+          });
+        }
+      }
+      const deadEndRows = (deadEndResult.results ?? []) as { workshop_id: string; title: string }[];
+      deadEndHeadlinesTruncated = deadEndRows.length > 10;
+      const emittedDeadEnds = deadEndRows.slice(0, 10);
+      if (emittedDeadEnds.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-dead-end-headlines-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No dead-end headlines in your workshop.",
+          why_included: "state the negative-knowledge headline baseline",
+          stable_prefix: 220,
+        });
+      } else {
+        for (const [index, deadEnd] of emittedDeadEnds.entries()) {
+          candidates.push({
+            kind: "dead-end",
+            id: `DEH-${deadEnd.workshop_id}`,
+            scope: "workshop",
+            tokens: 1,
+            untrusted: true,
+            body: deadEnd.title,
+            why_included: "headline a recorded dead end before starting a route",
+            stable_prefix: 220 + index,
+            requires: ["workshop:read"],
+          });
+        }
+      }
+    }
+
     // Fable digest is "statement hash, cursor, counts, next move only" at 800
     // tokens. Loading claims/handback first dropped SYS-projection-staleness
     // on budget_exceeded — a silent thin pack for the profile's whole point.
     // Claim skips this index too: its product is claim@version + deps/evidence/
     // reviews, and sharing the 128-claim list would duplicate item ids.
+    // Orient skips the claims table (Fable §7.3); it still takes the handback.
     if (
       profile !== "hello" &&
       profile !== "digest" &&
       profile !== "review-queue" &&
-      profile !== "claim"
+      profile !== "claim" &&
+      profile !== "orient"
     ) {
       const claims = await db
         .prepare(
@@ -1706,7 +1939,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           });
         }
       }
+    }
 
+    if (
+      profile !== "hello" &&
+      profile !== "digest" &&
+      profile !== "review-queue" &&
+      profile !== "claim"
+    ) {
       const handback = await db
         .prepare(
           `SELECT session_id, handback FROM sessions
@@ -2312,6 +2552,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omitted[] rather than serving a silent thin pack (§7.3's mandatory
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
+      orient: ["problem-statement", "motivation", "leases"],
+      working: ["problem-statement", "motivation", "leases", "move-contract"],
       literature: ["citations"],
       formal: ["verification-records"],
       full: ["paginated-export"],
@@ -2414,8 +2656,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               { reason: "profile_excludes_handback", detail: "handback" },
             ]
           : []),
+        ...(profile === "orient"
+          ? [{ reason: "profile_excludes_claims", detail: "claims" }]
+          : []),
         ...(profile === "claim" || profile === "review-queue"
           ? [{ reason: "profile_excludes_handback", detail: "handback" }]
+          : []),
+        ...((profile === "orient" || profile === "working") && rosterTruncated
+          ? [{ reason: "candidate_limit", detail: "roster" }]
+          : []),
+        ...((profile === "orient" || profile === "working") && presenceTruncated
+          ? [{ reason: "candidate_limit", detail: "presence" }]
+          : []),
+        ...((profile === "orient" || profile === "working") && materialEventsTruncated
+          ? [{ reason: "candidate_limit", detail: "material-events" }]
+          : []),
+        ...((profile === "orient" || profile === "working") && deadEndHeadlinesTruncated
+          ? [{ reason: "candidate_limit", detail: "dead-end-headlines" }]
           : []),
         ...(profile === "claim" && claimDepsTruncated
           ? [{ reason: "candidate_limit", detail: "deps" }]

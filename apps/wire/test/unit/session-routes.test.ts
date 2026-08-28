@@ -2317,6 +2317,183 @@ describe("session protocol routes", () => {
     expect(body.items.some((item) => item.scope === "workshop")).toBe(false);
   });
 
+  test("the orient pack composes counts, roster, presence, and omits missing writes", async () => {
+    const { call, binding } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "orient-empty-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=orient`);
+    expect(pack.status).toBe(200);
+    const text = await pack.text();
+    const body = PackResponseSchema.parse(JSON.parse(text));
+    expect(body.profile).toBe("orient");
+    expect(body.budget_tokens).toBe(1500);
+    expect(body.items.map((item) => item.id).slice(0, 3)).toEqual([
+      "SYS-identity",
+      "SYS-inoculation",
+      "SYS-protocol",
+    ]);
+    const counts = body.items.find((item) => item.id === "SYS-live-counts");
+    expect(counts).toMatchObject({ scope: "system", untrusted: false });
+    expect(counts?.body).toBe("claims=0 open_hypotheses=0");
+    const synthesis = body.items.find((item) => item.id === "SYS-synthesis-staleness");
+    expect(synthesis?.body).toContain("No synthesis");
+    expect(synthesis?.body).toContain("cursor #0");
+    const roster = body.items.find((item) => item.id === "ROSTER");
+    expect(roster).toMatchObject({ kind: "roster", scope: "ledger", untrusted: true });
+    expect(roster?.body).toContain(binding.name);
+    expect(roster?.body).toContain("contributor");
+    const presence = body.items.find((item) => item.id === "PRESENCE");
+    expect(presence).toMatchObject({ kind: "presence", scope: "ledger", untrusted: true });
+    expect(presence?.body).toContain(binding.name);
+    expect(body.items.some((item) => item.id === "SYS-material-events-empty")).toBe(true);
+    expect(body.items.some((item) => item.id === "SYS-handback-empty")).toBe(true);
+    expect(body.items.some((item) => item.id === "SYS-dead-end-headlines-empty")).toBe(true);
+    expect(body.items.some((item) => item.kind === "claim")).toBe(false);
+    expect(body.items.some((item) => item.kind === "workshop-head")).toBe(false);
+    expect(body.omitted).not.toContainEqual({ reason: "budget_exceeded" });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_excludes_claims",
+      detail: "claims",
+    });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_excludes_workshop",
+      detail: "workshop-heads",
+    });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "problem-statement",
+    });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "motivation",
+    });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "leases",
+    });
+    expect(text).not.toContain("FOREIGN-HANDBACK-MUST-NOT-LEAK");
+  });
+
+  test("orient and working inherit live counts, material events, and dead-end headlines", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "orient-live-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, type: "draft" | "dead-end", title: string, bodyMd: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type, title, body_md: bodyMd, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "orient-live-promote" },
+      body: JSON.stringify({
+        workshop_id: await push("orient-live-draft", "draft", "Base lemma", "A lemma draft."),
+        kind: "lemma",
+        statement: "The base lemma holds.",
+        relates_to: [],
+      }),
+    });
+    expect(promoted.status).toBe(201);
+    const { claim_id: claimId } = PromoteResponseSchema.parse(await promoted.json());
+    const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "orient-live-hyp" },
+      body: JSON.stringify({
+        route: "induction on path length",
+        mechanism: "the toggle preserves the count",
+        falsifier: "a path where the toggle changes the count",
+        origin: "proposed",
+        body_md: "Proposing induction.",
+      }),
+    });
+    expect(proposed.status).toBe(201);
+    const { hypothesis_id: hypothesisId } = (await proposed.json()) as { hypothesis_id: string };
+    const deadEndBody = "must-not-appear-in-orient-headline";
+    await push("orient-live-dead", "dead-end", "Greedy cycles", deadEndBody);
+
+    const orient = PackResponseSchema.parse(
+      await (
+        await call(`/v1/sessions/${session.session_id}/pack?profile=orient`)
+      ).json(),
+    );
+    const orientText = JSON.stringify(orient);
+    expect(orient.items.find((item) => item.id === "SYS-live-counts")?.body).toBe(
+      "claims=1 open_hypotheses=1",
+    );
+    const eventItem = orient.items.find((item) => item.kind === "event");
+    expect(eventItem?.body).toContain("claim.created");
+    expect(eventItem?.body).toContain(`${claimId}@1`);
+    expect(orient.items.some((item) => item.kind === "claim")).toBe(false);
+    const headline = orient.items.find((item) => item.id.startsWith("DEH-"));
+    expect(headline).toMatchObject({ kind: "dead-end", scope: "workshop", untrusted: true });
+    expect(headline?.body).toBe("Greedy cycles");
+    expect(orientText).not.toContain(deadEndBody);
+    expect(orient.omitted).not.toContainEqual({ reason: "budget_exceeded" });
+
+    const working = PackResponseSchema.parse(
+      await (
+        await call(`/v1/sessions/${session.session_id}/pack?profile=working`)
+      ).json(),
+    );
+    expect(working.items.find((item) => item.id === "SYS-live-counts")?.body).toBe(
+      "claims=1 open_hypotheses=1",
+    );
+    expect(working.items.some((item) => item.id === claimId && item.kind === "claim")).toBe(true);
+    expect(working.items.some((item) => item.kind === "workshop-head")).toBe(true);
+    expect(working.omitted).toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "move-contract",
+    });
+
+    const evidence = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "orient-live-ev" },
+      body: JSON.stringify({
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypothesisId,
+        direction: "refutes",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "The four-path changes the count.",
+      }),
+    });
+    expect(evidence.status).toBe(201);
+    const { evidence_id: evidenceId } = (await evidence.json()) as { evidence_id: string };
+    const killed = await call(`/v1/sessions/${session.session_id}/hypotheses/${hypothesisId}/kill`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "orient-live-kill" },
+      body: JSON.stringify({
+        hypothesis_id: hypothesisId,
+        killed_by_evidence_id: evidenceId,
+        reason: "The four-path kills induction.",
+      }),
+    });
+    expect(killed.status, await killed.clone().text()).toBe(200);
+    const afterKill = PackResponseSchema.parse(
+      await (
+        await call(`/v1/sessions/${session.session_id}/pack?profile=orient`)
+      ).json(),
+    );
+    expect(afterKill.items.find((item) => item.id === "SYS-live-counts")?.body).toBe(
+      "claims=1 open_hypotheses=0",
+    );
+    expect(afterKill.items.some((item) => item.body.includes("hypothesis.killed"))).toBe(true);
+  });
+
   test("a concurrent identical promotion loses its whole batch and names the winner", async () => {
     // Deterministic interleave: once armed, the first writer's batch suspends
     // before BEGIN until released. The second writer then commits in full, so
@@ -5958,11 +6135,17 @@ describe("session protocol routes", () => {
     );
     expect(atCapResponse.status).toBe(200);
     const atCap = PackResponseSchema.parse(await atCapResponse.json());
-    const atCapIds = atCap.items.filter((item) => item.scope === "ledger").map((item) => item.id);
+    const atCapIds = atCap.items.filter((item) => item.kind === "claim").map((item) => item.id);
     expect(atCapIds.length).toBeGreaterThan(0);
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
-    expect(atCap.omitted).toEqual([{ reason: "budget_exceeded" }]);
+    expect(atCap.omitted).toEqual([
+      { reason: "profile_section_not_composed", detail: "leases" },
+      { reason: "profile_section_not_composed", detail: "motivation" },
+      { reason: "profile_section_not_composed", detail: "move-contract" },
+      { reason: "profile_section_not_composed", detail: "problem-statement" },
+      { reason: "budget_exceeded" },
+    ]);
 
     // One past the cap: the same ordered budgeted prefix, with the additional
     // candidate_limit omission proving that the 129th row reached and crossed
@@ -5982,7 +6165,7 @@ describe("session protocol routes", () => {
     expect(overCapResponse.status).toBe(200);
     const overCap = PackResponseSchema.parse(await overCapResponse.json());
     const overCapIds = overCap.items
-      .filter((item) => item.scope === "ledger")
+      .filter((item) => item.kind === "claim")
       .map((item) => item.id);
     // The additional mandatory candidate_limit marker consumes envelope
     // budget, so the finalized over-cap prefix may be shorter by one or more
@@ -5994,6 +6177,10 @@ describe("session protocol routes", () => {
     expect(overCapIds).not.toContain("C-129");
     expect(overCap.omitted).toEqual([
       { reason: "candidate_limit", detail: "claims" },
+      { reason: "profile_section_not_composed", detail: "leases" },
+      { reason: "profile_section_not_composed", detail: "motivation" },
+      { reason: "profile_section_not_composed", detail: "move-contract" },
+      { reason: "profile_section_not_composed", detail: "problem-statement" },
       { reason: "budget_exceeded" },
     ]);
     // The 128-claim seed plus two full pack compositions sit close enough to
