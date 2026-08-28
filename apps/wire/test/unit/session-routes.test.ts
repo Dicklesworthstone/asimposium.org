@@ -2165,6 +2165,155 @@ describe("session protocol routes", () => {
     ).toEqual({ depends_on_claim_id: "C-1" });
   });
 
+  test("the claim pack states an empty board instead of omitting claim-detail", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-empty-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=claim`);
+    expect(pack.status).toBe(200);
+    const body = PackResponseSchema.parse(await pack.json());
+    expect(body.profile).toBe("claim");
+    expect(body.budget_tokens).toBe(2500);
+    const empty = body.items.find((item) => item.id === "SYS-claim-detail-empty");
+    expect(empty).toMatchObject({ scope: "system", untrusted: false });
+    expect(empty?.body).toContain("claim@version");
+    expect(body.items.some((item) => item.id === "SYS-handback-empty")).toBe(false);
+    expect(body.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "claim-detail",
+    });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_excludes_handback",
+      detail: "handback",
+    });
+  });
+
+  test("the claim pack composes claim@version plus deps, evidence, and reviews", async () => {
+    const base = await fixture();
+    const { call } = base;
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const push = async (key: string, title: string) => {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+      });
+      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
+    };
+    const baseClaim = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-base" },
+      body: JSON.stringify({
+        workshop_id: await push("claim-detail-push-base", "Base lemma"),
+        kind: "lemma",
+        statement: "The base lemma holds.",
+        relates_to: [],
+      }),
+    });
+    expect(baseClaim.status).toBe(201);
+    const { claim_id: baseId } = PromoteResponseSchema.parse(await baseClaim.json());
+    const dependent = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-dep" },
+      body: JSON.stringify({
+        workshop_id: await push("claim-detail-push-dep", "Dependent lemma"),
+        kind: "lemma",
+        statement: "The dependent lemma reduces to the base.",
+        depends_on: [baseId],
+        relates_to: [],
+      }),
+    });
+    expect(dependent.status).toBe(201);
+    const { claim_id: dependentId } = PromoteResponseSchema.parse(await dependent.json());
+
+    const evidence = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-evidence" },
+      body: JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: baseId,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "The covering argument supports this exact version.",
+      }),
+    });
+    expect(evidence.status, await evidence.clone().text()).toBe(201);
+    const { evidence_id: evidenceId } = (await evidence.json()) as { evidence_id: string };
+
+    const reviewer = await addApprovedFellow(base, {
+      suffix: "claim-detail-reviewer",
+      scopes: ["review"],
+    });
+    const reviewerOpened = await reviewer.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-rev-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(reviewerOpened.status).toBe(201);
+    const reviewerSession = SessionOpenResponseSchema.parse(await reviewerOpened.json());
+    const reviewed = await reviewer.call(`/v1/sessions/${reviewerSession.session_id}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-review" },
+      body: JSON.stringify({
+        target_claim_id: baseId,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "I checked the exact published statement.",
+        capable_of_failure: "A counterexample to the base lemma.",
+        body_md: "The quantifier scope holds for this version.",
+      }),
+    });
+    expect(reviewed.status, await reviewed.clone().text()).toBe(201);
+    const { review_id: reviewId } = (await reviewed.json()) as { review_id: string };
+
+    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=claim`);
+    expect(pack.status).toBe(200);
+    const text = await pack.text();
+    const body = PackResponseSchema.parse(JSON.parse(text));
+    expect(body.items.some((item) => item.id === "SYS-claim-detail-empty")).toBe(false);
+    const baseItem = body.items.find((item) => item.id === baseId);
+    expect(baseItem).toMatchObject({ kind: "claim", scope: "ledger", untrusted: true });
+    expect(baseItem?.body).toContain(`${baseId}@1`);
+    expect(baseItem?.body).toContain("The base lemma holds.");
+    const dependentItem = body.items.find((item) => item.id === dependentId);
+    expect(dependentItem?.body).toContain(`${dependentId}@1`);
+    const depItem = body.items.find((item) => item.id === `${dependentId}#${baseId}`);
+    expect(depItem).toMatchObject({ kind: "dep", scope: "ledger", untrusted: true });
+    expect(depItem?.body).toBe(`${dependentId} depends_on ${baseId}`);
+    const evidenceItem = body.items.find((item) => item.id === evidenceId);
+    expect(evidenceItem).toMatchObject({ kind: "evidence", scope: "ledger", untrusted: true });
+    expect(evidenceItem?.body).toContain(`${evidenceId} supports ${baseId}@1`);
+    expect(evidenceItem?.body).toContain("assertion");
+    expect(text).not.toContain("The covering argument supports this exact version.");
+    const reviewItem = body.items.find((item) => item.id === reviewId);
+    expect(reviewItem).toMatchObject({ kind: "review", scope: "ledger", untrusted: true });
+    expect(reviewItem?.body).toContain(`${reviewId} confirm ${baseId}@1`);
+    expect(text).not.toContain("The quantifier scope holds for this version.");
+    expect(body.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "claim-detail",
+    });
+    expect(body.omitted).toContainEqual({
+      reason: "profile_excludes_handback",
+      detail: "handback",
+    });
+    expect(body.items.some((item) => item.scope === "workshop")).toBe(false);
+  });
+
   test("a concurrent identical promotion loses its whole batch and names the winner", async () => {
     // Deterministic interleave: once armed, the first writer's batch suspends
     // before BEGIN until released. The second writer then commits in full, so
