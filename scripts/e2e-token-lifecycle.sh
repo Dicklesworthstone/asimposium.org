@@ -1661,6 +1661,25 @@ close_server_supervisor_lease() {
   SERVER_SUPERVISOR_LEASE_FD=""
 }
 
+# Remove the per-run probe scratch directory. Without this every invocation
+# left one behind: 102,266 of them had accumulated in TMPDIR by 2026-08-28.
+# The probe captures are read back inline while the suite runs, so nothing
+# downstream needs them after exit; set TOKEN_LIFECYCLE_KEEP_PROBE_DIR=1 to
+# retain one for debugging. PROBE_DIR is empty when we exit before it is
+# created, so guard rather than deleting a bare "${TMPDIR}".
+# Uses explicit `if` rather than `[[ ... ]] && return 0`: under `set -e` a
+# false test would make the whole list return 1 and could mask the suite's
+# real exit status, since this runs from the EXIT trap.
+cleanup_probe_dir() {
+  if [[ "${TOKEN_LIFECYCLE_KEEP_PROBE_DIR:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -n "${PROBE_DIR}" && -d "${PROBE_DIR}" ]]; then
+    rm -rf -- "${PROBE_DIR}"
+  fi
+  return 0
+}
+
 finalize() {
   local status=$?
   trap - EXIT INT TERM HUP
@@ -1672,6 +1691,7 @@ finalize() {
     "${BUSY_PORT_IDENTITY}" "${BUSY_PORT_MARKER}"; then status=1; fi
   if ! stop_worker; then status=1; fi
   close_server_supervisor_lease
+  cleanup_probe_dir
   exit "${status}"
 }
 
