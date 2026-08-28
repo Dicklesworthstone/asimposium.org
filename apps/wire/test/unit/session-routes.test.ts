@@ -86,12 +86,15 @@ interface LocalD1Options {
 
 /** A D1 shim over bun:sqlite, following the enrollment-atomicity lane's pattern. */
 function localD1(sqlite: Database, options: LocalD1Options = {}) {
+  const isSelect = (query: string): boolean =>
+    /^\s*SELECT\b/i.test(query) ||
+    (/^\s*WITH\b/i.test(query) && !/\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query));
   const prepare = (query: string) => {
     const methods = (...values: LocalBinding[]) => ({
       async run() {
         await options.beforeRead?.({ kind: "run", sql: query, bindings: values });
         const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
-        if (/^\s*SELECT\b/i.test(query)) {
+        if (isSelect(query)) {
           const rows = statement.all(...values);
           await options.afterRead?.({ kind: "run", sql: query, bindings: values });
           return {
