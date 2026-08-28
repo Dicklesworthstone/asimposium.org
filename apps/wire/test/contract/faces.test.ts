@@ -10,6 +10,7 @@ import {
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import {
   assertServedTextSafe,
+  generateProtocolJsonDocument,
   getDocument,
   listDocuments,
   type ProtocolDocument,
@@ -391,8 +392,8 @@ describe("the production protocol cold-path gate", () => {
 
     const withListDocumentsImport = replaceExactlyOnce(
       appSource,
-      "  type DocumentId,\n  getDocument,\n  type ProtocolDocument,",
-      "  type DocumentId,\n  getDocument,\n  listDocuments,\n  type ProtocolDocument,",
+      "  type DocumentId,\n  generateProtocolJsonDocument,\n  getDocument,\n  type ProtocolDocument,",
+      "  type DocumentId,\n  generateProtocolJsonDocument,\n  getDocument,\n  listDocuments,\n  type ProtocolDocument,",
     );
 
     // A type-valid dead gate still leaves the bare imports and a real gate call
@@ -516,7 +517,9 @@ describe("face wire format", () => {
       "/openapi.json",
       "/schemas/index.json",
       "/llms.txt",
+      "/protocol",
       "/protocol.md",
+      "/protocol.json",
       "/policy.md",
       "/skill.md",
       "/inoculation.md",
@@ -1516,6 +1519,23 @@ describe("face wire format", () => {
     expect(response.status).toBe(200);
     expect(response.contentType).toBe(handbook.media_type);
     expect(response.bodyText).toBe(handbook.body);
+  });
+
+  test("GET /protocol serves the same Markdown bytes as /protocol.md", async () => {
+    const protocol = getDocument("protocol");
+    const response = await callWorker("/protocol", {});
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe(protocol.media_type);
+    expect(response.bodyText).toBe(protocol.body);
+    expect(response.headers.get("etag")).toBe(`"${protocol.digest}"`);
+  });
+
+  test("GET /protocol.json serves the generated preamble/rules JSON without D1", async () => {
+    const body = generateProtocolJsonDocument();
+    const response = await callWorker("/protocol.json", {});
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe("application/json; charset=utf-8");
+    expect(response.bodyText).toBe(body);
   });
 
   test("GET /schemas/index.json serves the generated schema-index bytes without D1", async () => {

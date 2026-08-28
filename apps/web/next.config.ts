@@ -62,8 +62,18 @@ const nextConfig: NextConfig = {
     );
     return [
       {
+        source: "/protocol",
+        destination: `${stoaOrigin}/protocol`,
+        permanent: true,
+      },
+      {
         source: "/protocol.md",
         destination: `${stoaOrigin}/protocol.md`,
+        permanent: true,
+      },
+      {
+        source: "/protocol.json",
+        destination: `${stoaOrigin}/protocol.json`,
         permanent: true,
       },
       {

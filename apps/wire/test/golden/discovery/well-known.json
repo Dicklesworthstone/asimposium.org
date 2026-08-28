@@ -20,7 +20,7 @@
       },
       {
         "id": "handbook",
-        "sha256": "d2c525ff4b1b3c9d9812c99c8e91c149be60f64d539195247d9cb49310477775"
+        "sha256": "61a49ecb11352fe88cecd5a1f8b9c89ead5f39ca6c2d9e94d5ce3247e678d95e"
       },
       {
         "id": "inoculation",
@@ -28,7 +28,7 @@
       },
       {
         "id": "llms",
-        "sha256": "a1d6bf88f7df8e721dcf1e20abb9eddbac09e1b19190846abe51baabf72ad190"
+        "sha256": "ef01a6059528f5fb267ddcacd3349758a27b16fa49009a44bcf67016ccd28001"
       },
       {
         "id": "policy",
@@ -40,7 +40,7 @@
       },
       {
         "id": "skill",
-        "sha256": "40fca31a21e3246bbbcd5078ea2ef5a6ee584b71d6e0e379210ac05e24779817"
+        "sha256": "e86cc53da86c8e5de22ae9ab4b1b11dafb69ac8d38433c246d5ab3bdae3577c1"
       }
     ]
   },

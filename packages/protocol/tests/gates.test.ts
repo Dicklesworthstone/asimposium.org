@@ -8,15 +8,19 @@ import {
   assertProtocolInvariants,
   assertServedTextSafe,
   CAPSULE_TOKEN_BUDGET,
+  extractProtocolPreamble,
+  generateProtocolJsonDocument,
   getDocument,
   getProtocolRules,
   INOCULATION_TOKEN_BUDGET,
   listDocuments,
   measureRules,
+  PROTOCOL_JSON_SCHEMA,
   PROTOCOL_RULES_WORD_CAP,
   PROTOCOL_RULES_WORD_FLOOR,
   type ProtocolDocument,
   ProtocolError,
+  protocolJsonFace,
   protocolVersionPair,
   sha256Hex,
 } from "../src/index.ts";
@@ -57,6 +61,43 @@ describe("the protocol word cap (Rule A8 / ADR-16 / R-12)", () => {
     const protocol = getDocument("protocol");
     expect(rules.words).toBeLessThan(protocol.words);
     expect(rules.text).not.toContain("Propose boldly, promote strictly");
+  });
+});
+
+describe("the protocol JSON face (W6.5 /protocol.json)", () => {
+  test("is derived from the Markdown: same digest, preamble, and rules text", () => {
+    const protocol = getDocument("protocol");
+    const rules = getProtocolRules();
+    const face = protocolJsonFace();
+    expect(face.schema).toBe(PROTOCOL_JSON_SCHEMA);
+    expect(face.digest).toBe(protocol.digest);
+    expect(face.preamble).toBe(extractProtocolPreamble(protocol.body, protocol.source_path));
+    expect(face.preamble).toContain("Propose boldly, promote strictly");
+    expect(face.rules.text).toBe(rules.text);
+    expect(face.rules.words).toBe(rules.words);
+    expect(face.rules.cap).toBe(PROTOCOL_RULES_WORD_CAP);
+    expect(face.markdown_face).toBe("/protocol.md");
+    expect(face.json_face).toBe("/protocol.json");
+  });
+
+  test("pretty JSON is byte-stable and parseable", () => {
+    const first = generateProtocolJsonDocument();
+    const second = generateProtocolJsonDocument();
+    expect(first).toBe(second);
+    expect(first.endsWith("\n")).toBe(true);
+    expect(JSON.parse(first)).toEqual(protocolJsonFace());
+  });
+
+  test("a missing preamble heading is refused, so the JSON face cannot pass vacuously", () => {
+    const noPreamble = "# The Symposium Protocol\n\n## Rules\n\nExact statement first.\n";
+    let error: unknown;
+    try {
+      extractProtocolPreamble(noPreamble, "a fixture with no preamble heading");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ProtocolError);
+    expect((error as ProtocolError).code).toBe("PREAMBLE_SECTION_MISSING");
   });
 });
 

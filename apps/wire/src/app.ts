@@ -3,6 +3,7 @@ import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contra
 import {
   assertProtocolInvariants,
   type DocumentId,
+  generateProtocolJsonDocument,
   getDocument,
   type ProtocolDocument,
   sha256Hex,
@@ -135,6 +136,7 @@ const PUBLIC_TEXT_ROUTES: readonly {
   { path: "/AGENTS.md", document: "handbook", format: "md" },
   { path: "/llms.txt", document: "llms", format: "txt" },
   { path: "/policy.md", document: "policy", format: "md" },
+  { path: "/protocol", document: "protocol", format: "md" },
   { path: "/protocol.md", document: "protocol", format: "md" },
   { path: "/skill.md", document: "skill", format: "md" },
   { path: "/inoculation.md", document: "inoculation", format: "md" },
@@ -188,7 +190,9 @@ const capabilitiesBody = (origin: string): string =>
         "/openapi.json",
         "/schemas/index.json",
         "/llms.txt",
+        "/protocol",
         "/protocol.md",
+        "/protocol.json",
         "/policy.md",
         "/skill.md",
         "/inoculation.md",
@@ -740,6 +744,17 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       contentType: "application/json; charset=utf-8",
       digest: sha256Hex(body),
       servedAt: "/schemas/index.json",
+      format: "json",
+    });
+  });
+
+  app.on(["GET", "HEAD"], "/protocol.json", (c) => {
+    const body = generateProtocolJsonDocument();
+    return servePublicRepresentation(c.req.raw, {
+      body,
+      contentType: "application/json; charset=utf-8",
+      digest: sha256Hex(body),
+      servedAt: "/protocol.json",
       format: "json",
     });
   });

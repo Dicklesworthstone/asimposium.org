@@ -16,7 +16,12 @@ import { DOCUMENT_SOURCES, type DocumentSource } from "./registry.ts";
 import { describeFindings, scanServedText } from "./scan.ts";
 import { sha256Hex, utf8Bytes } from "./sha256.ts";
 import { countWords, estimateTokens, extractSection, normalizeServedText } from "./text.ts";
-import type { ProtocolDocument, ProtocolVersionPair, RulesMeasurement } from "./types.ts";
+import type {
+  ProtocolDocument,
+  ProtocolJsonFace,
+  ProtocolVersionPair,
+  RulesMeasurement,
+} from "./types.ts";
 
 export { ProtocolError, type ProtocolErrorCode, type ProtocolProblem } from "./errors.ts";
 export { DOCUMENT_IDS } from "./registry.ts";
@@ -33,6 +38,7 @@ export type {
   DocumentId,
   DocumentStatus,
   ProtocolDocument,
+  ProtocolJsonFace,
   ProtocolVersionPair,
   RulesMeasurement,
 } from "./types.ts";
@@ -55,6 +61,12 @@ export const INOCULATION_TOKEN_BUDGET = 800;
 
 /** The level-two heading whose body the word cap measures. */
 export const PROTOCOL_RULES_HEADING = "Rules";
+
+/** The level-two heading the JSON face serves as `preamble`, outside the rules cap. */
+export const PROTOCOL_PREAMBLE_HEADING = "Preamble";
+
+/** Schema id of the generated `/protocol.json` face. */
+export const PROTOCOL_JSON_SCHEMA = "asimposium.protocol.v1";
 
 function toDocument(source: DocumentSource): ProtocolDocument {
   const body = normalizeServedText(source.raw);
@@ -149,6 +161,56 @@ export function getProtocolRules(): RulesMeasurement {
   return measureRules(protocol.body, protocol.source_path);
 }
 
+/**
+ * The preamble of any protocol-shaped markdown. Exported so the JSON-face gate can fail against a
+ * fixture that dropped the heading, not only against the document that currently passes.
+ */
+export function extractProtocolPreamble(
+  markdown: string,
+  sourceLabel = "the protocol document",
+): string {
+  const text = extractSection(markdown, PROTOCOL_PREAMBLE_HEADING);
+  if (text === undefined || countWords(text) < 1) {
+    throw new ProtocolError({
+      code: "PREAMBLE_SECTION_MISSING",
+      title: "The protocol's preamble section could not be measured",
+      rule: "A8",
+      detail:
+        text === undefined
+          ? `No '## ${PROTOCOL_PREAMBLE_HEADING}' section in ${sourceLabel}.`
+          : `The '## ${PROTOCOL_PREAMBLE_HEADING}' section of ${sourceLabel} is empty.`,
+      fix_hint: `Keep the arriving-Fellow address under a level-two '## ${PROTOCOL_PREAMBLE_HEADING}' heading, outside the rules cap.`,
+    });
+  }
+  return text;
+}
+
+/** Structured object the JSON face serializes. One source: the Markdown protocol document. */
+export function protocolJsonFace(): ProtocolJsonFace {
+  const protocol = getDocument("protocol");
+  const rules = getProtocolRules();
+  return {
+    schema: PROTOCOL_JSON_SCHEMA,
+    id: "protocol",
+    version: protocol.version,
+    status: protocol.status,
+    digest: protocol.digest,
+    markdown_face: "/protocol.md",
+    json_face: "/protocol.json",
+    preamble: extractProtocolPreamble(protocol.body, protocol.source_path),
+    rules: {
+      text: rules.text,
+      words: rules.words,
+      cap: rules.cap,
+    },
+  };
+}
+
+/** Deterministic pretty JSON of `protocolJsonFace()`, including a trailing newline. */
+export function generateProtocolJsonDocument(): string {
+  return `${JSON.stringify(protocolJsonFace(), null, 2)}\n`;
+}
+
 /** ADR-24: the version pair a session records, plus one digest that pins both. */
 export function protocolVersionPair(): ProtocolVersionPair {
   const protocol = getDocument("protocol");
@@ -233,4 +295,8 @@ export function assertProtocolInvariants(): void {
       fix_hint: "Cut. The inoculation is reader armor, not a second protocol (Fable §2.5, ADR-17).",
     });
   }
+
+  // The JSON face is derived, not authored. Generating it here proves the preamble exists and the
+  // structured body is serializable before any Worker request tries to serve it.
+  generateProtocolJsonDocument();
 }
