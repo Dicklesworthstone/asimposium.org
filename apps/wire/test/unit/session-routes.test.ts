@@ -2504,6 +2504,11 @@ describe("session protocol routes", () => {
     });
     expect(promoted.status).toBe(201);
 
+    const emptyFormal = await call(`/v1/sessions/${session.session_id}/pack?profile=formal`);
+    expect(emptyFormal.status).toBe(200);
+    const emptyFormalPack = PackResponseSchema.parse(await emptyFormal.json());
+    expect(emptyFormalPack.items.some((item) => item.id === "SYS-proof-gaps-empty")).toBe(true);
+
     // A pin against a version that does not exist obligates nothing.
     const unknownTarget = await call(`/v1/sessions/${session.session_id}/gaps`, {
       method: "POST",
@@ -2604,6 +2609,27 @@ describe("session protocol routes", () => {
         )
         .first<{ count: number }>(),
     ).toEqual({ count: 2 });
+
+    const formal = await call(`/v1/sessions/${session.session_id}/pack?profile=formal`);
+    expect(formal.status).toBe(200);
+    const formalPack = PackResponseSchema.parse(await formal.json());
+    const gapItem = formalPack.items.find((item) => item.id === filedBody.gap_id);
+    expect(gapItem).toMatchObject({
+      kind: "gap",
+      scope: "ledger",
+      untrusted: true,
+    });
+    expect(gapItem?.body).toContain(`${filedBody.gap_id} (withdrawn) on C-1@1`);
+    expect(gapItem?.body).toContain("Step 4 assumes the covering is finite");
+    expect(formalPack.items.some((item) => item.id === "SYS-proof-gaps-empty")).toBe(false);
+    expect(formalPack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "proof-gaps",
+    });
+    expect(formalPack.omitted).toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "verification-records",
+    });
   });
 
   test("a gap closed-by a real claim records the discharging ref atomically", async () => {

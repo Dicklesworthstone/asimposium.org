@@ -1439,6 +1439,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let workshopHeadsTruncated = false;
     let killedHypothesesTruncated = false;
     let typedRelationsTruncated = false;
+    let proofGapsTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1780,6 +1781,67 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    // W5.5: formal packs serve filed proof gaps. The write path already lands
+    // in proof_gaps; omitting "proof-gaps" was a silent thin pack. Lean/formal
+    // verification records still do not exist, so that omission stays honest.
+    if (profile === "formal") {
+      const gaps = await db
+        .prepare(
+          `SELECT g.gap_id, g.obligation, g.closes_what, g.target_claim_id, g.target_version,
+                  g.status, g.closed_by, e.seq
+           FROM proof_gaps g
+           JOIN events e
+             ON e.problem_id = g.problem_id AND e.object_kind = 'gap'
+            AND e.object_id = g.gap_id AND e.type = 'gap.filed'
+           WHERE g.problem_id = ? AND e.seq <= ?
+           ORDER BY e.seq ASC LIMIT 11`,
+        )
+        .bind(session.problem_id, cursor)
+        .all<{
+          gap_id: string;
+          obligation: string;
+          closes_what: string;
+          target_claim_id: string | null;
+          target_version: number | null;
+          status: string;
+          closed_by: string | null;
+          seq: number;
+        }>();
+      const gapRows = gaps.results ?? [];
+      proofGapsTruncated = gapRows.length > 10;
+      const emittedGaps = gapRows.slice(0, 10);
+      if (emittedGaps.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-proof-gaps-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No proof gaps filed on this problem yet. Name the missing step; 'it follows' is not an obligation.",
+          why_included: "state the proof-gap baseline",
+          stable_prefix: 360,
+        });
+      } else {
+        for (const [index, gap] of emittedGaps.entries()) {
+          const pin =
+            gap.target_claim_id !== null && gap.target_version !== null
+              ? `${gap.target_claim_id}@${gap.target_version}`
+              : "unpinned";
+          const settled = gap.closed_by !== null ? ` closed_by=${gap.closed_by}` : "";
+          candidates.push({
+            kind: "gap",
+            id: gap.gap_id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${gap.gap_id} (${gap.status}) on ${pin}${settled}: ${gap.obligation}`,
+            why_included: "include a filed proof gap with its current lifecycle",
+            stable_prefix: 360 + index,
+          });
+        }
+      }
+    }
+
     // W4.2 / W5.6: the graveyard profile is the negative-knowledge register.
     // Ledger kills are problem-public and cursor-gated; workshop dead-ends stay
     // this Fellow's private record. Omitting "killed-hypotheses" while the kill
@@ -1916,7 +1978,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: ["claim-detail"],
       literature: ["citations"],
-      formal: ["proof-gaps", "verification-records"],
+      formal: ["verification-records"],
       "review-queue": ["eligible-reviews"],
       full: ["paginated-export"],
     };
@@ -2005,6 +2067,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : []),
         ...(profile === "claim-graph" && typedRelationsTruncated
           ? [{ reason: "candidate_limit", detail: "typed-relations" }]
+          : []),
+        ...(profile === "formal" && proofGapsTruncated
+          ? [{ reason: "candidate_limit", detail: "proof-gaps" }]
           : []),
         ...(profile === "digest"
           ? [
