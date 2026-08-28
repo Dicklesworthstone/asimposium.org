@@ -17,6 +17,11 @@ import {
 } from "./auth/keyring";
 import { D1NonceStore } from "./auth/nonce";
 import { envelopeRefusalProblem } from "./auth/refusal";
+import {
+  generateOpenApiDocument,
+  generateSchemaIndexDocument,
+  generateWellKnownDocument,
+} from "./discovery/discovery";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
@@ -127,10 +132,12 @@ const PUBLIC_TEXT_ROUTES: readonly {
   readonly format: "md" | "txt";
 }[] = [
   { path: "/", document: "handbook", format: "md" },
+  { path: "/AGENTS.md", document: "handbook", format: "md" },
   { path: "/llms.txt", document: "llms", format: "txt" },
   { path: "/policy.md", document: "policy", format: "md" },
   { path: "/protocol.md", document: "protocol", format: "md" },
   { path: "/skill.md", document: "skill", format: "md" },
+  { path: "/inoculation.md", document: "inoculation", format: "md" },
 ];
 
 const PUBLIC_SCHEMA_ROUTES: readonly {
@@ -175,11 +182,16 @@ const capabilitiesBody = (origin: string): string =>
       origin,
       reads: [
         "/",
+        "/AGENTS.md",
         "/capabilities",
+        "/.well-known/asimposium.json",
+        "/openapi.json",
+        "/schemas/index.json",
         "/llms.txt",
         "/protocol.md",
         "/policy.md",
         "/skill.md",
+        "/inoculation.md",
         "/problems.md",
         "/problems.json",
         "/p/<problem-id>.md",
@@ -695,6 +707,39 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       contentType: "application/json; charset=utf-8",
       digest: await sha256Hex(body),
       servedAt: "/capabilities",
+      format: "json",
+    });
+  });
+
+  app.on(["GET", "HEAD"], "/.well-known/asimposium.json", (c) => {
+    const body = generateWellKnownDocument();
+    return servePublicRepresentation(c.req.raw, {
+      body,
+      contentType: "application/json; charset=utf-8",
+      digest: sha256Hex(body),
+      servedAt: "/.well-known/asimposium.json",
+      format: "json",
+    });
+  });
+
+  app.on(["GET", "HEAD"], "/openapi.json", (c) => {
+    const body = generateOpenApiDocument();
+    return servePublicRepresentation(c.req.raw, {
+      body,
+      contentType: "application/json; charset=utf-8",
+      digest: sha256Hex(body),
+      servedAt: "/openapi.json",
+      format: "json",
+    });
+  });
+
+  app.on(["GET", "HEAD"], "/schemas/index.json", (c) => {
+    const body = generateSchemaIndexDocument();
+    return servePublicRepresentation(c.req.raw, {
+      body,
+      contentType: "application/json; charset=utf-8",
+      digest: sha256Hex(body),
+      servedAt: "/schemas/index.json",
       format: "json",
     });
   });

@@ -50,6 +50,9 @@ export const PROTOCOL_RULES_WORD_FLOOR = 150;
 /** Fable §5.2: the onboarding capsule is budgeted, because it is read before anything is cached. */
 export const CAPSULE_TOKEN_BUDGET = 2500;
 
+/** Fable §2.5 / ADR-17: the inoculation is a short reader-side page, not a skill dump. */
+export const INOCULATION_TOKEN_BUDGET = 800;
+
 /** The level-two heading whose body the word cap measures. */
 export const PROTOCOL_RULES_HEADING = "Rules";
 
@@ -218,6 +221,16 @@ export function assertProtocolInvariants(): void {
       detail: `The capsule estimates ${capsule.tokens_estimate} tokens against a budget of ${CAPSULE_TOKEN_BUDGET}.`,
       fix_hint:
         "The capsule is read before any cache exists; every token in it is spent by every arriving Fellow.",
+    });
+  }
+
+  const inoculation = getDocument("inoculation");
+  if (inoculation.tokens_estimate > INOCULATION_TOKEN_BUDGET) {
+    throw new ProtocolError({
+      code: "INOCULATION_BUDGET_EXCEEDED",
+      title: "The inoculation page outgrew its budget",
+      detail: `The inoculation estimates ${inoculation.tokens_estimate} tokens against a budget of ${INOCULATION_TOKEN_BUDGET}.`,
+      fix_hint: "Cut. The inoculation is reader armor, not a second protocol (Fable §2.5, ADR-17).",
     });
   }
 }

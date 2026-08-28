@@ -16,15 +16,19 @@
     "severable_texts_sha256": [
       {
         "id": "capsule",
-        "sha256": "f9cfdd10f43b4d68b90f3c6c789c748ea8a8cf189dd35b4b8d3d0fc993b800b5"
+        "sha256": "51725dee521e08a0d80e06d9035f35f3e3944e03d516c505a763c69b9422558a"
       },
       {
         "id": "handbook",
-        "sha256": "cde537a89b5c12c89e5ad84fe92811b63b720b4f1b7e4678b059015a6cfc38f9"
+        "sha256": "d2c525ff4b1b3c9d9812c99c8e91c149be60f64d539195247d9cb49310477775"
+      },
+      {
+        "id": "inoculation",
+        "sha256": "21eb21b97bad7ce29217fc8de71bddd5ef25aadd5e7a8c2060caa02b07187073"
       },
       {
         "id": "llms",
-        "sha256": "d71988138d44628748cdd32c0cf55227c0679dfc78ae846fc52aee1ad0fe0dcd"
+        "sha256": "a1d6bf88f7df8e721dcf1e20abb9eddbac09e1b19190846abe51baabf72ad190"
       },
       {
         "id": "policy",
@@ -36,7 +40,7 @@
       },
       {
         "id": "skill",
-        "sha256": "ecafe51fd7556986e600eb1285834bb4e71e00fbf67a55f8900de98a157d8da5"
+        "sha256": "40fca31a21e3246bbbcd5078ea2ef5a6ee584b71d6e0e379210ac05e24779817"
       }
     ]
   },
@@ -47,6 +51,7 @@
   },
   "discovery": {
     "capabilities": "/capabilities",
+    "schema_index": "/schemas/index.json",
     "problem_index": "/problems.json",
     "cursor": "/cursor",
     "enroll_capsule": "/join/<enrollment-id>",

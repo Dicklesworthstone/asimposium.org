@@ -71,6 +71,11 @@ const nextConfig: NextConfig = {
         destination: `${stoaOrigin}/policy.md`,
         permanent: true,
       },
+      {
+        source: "/inoculation.md",
+        destination: `${stoaOrigin}/inoculation.md`,
+        permanent: true,
+      },
     ];
   },
 };

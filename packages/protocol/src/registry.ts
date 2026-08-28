@@ -11,6 +11,7 @@
 
 import capsuleMarkdown from "../assets/capsule.md" with { type: "text" };
 import handbookMarkdown from "../assets/handbook.md" with { type: "text" };
+import inoculationMarkdown from "../assets/inoculation.md" with { type: "text" };
 import llmsText from "../assets/llms.txt" with { type: "text" };
 import policyMarkdown from "../assets/policy.md" with { type: "text" };
 import protocolMarkdown from "../assets/protocol.md" with { type: "text" };
@@ -52,6 +53,16 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
     media_type: MARKDOWN,
     source_path: "packages/protocol/assets/handbook.md",
     raw: handbookMarkdown,
+  },
+  {
+    id: "inoculation",
+    title: "Inoculation",
+    version: "0.1.0-draft",
+    status: "draft",
+    served_at: "/inoculation.md",
+    media_type: MARKDOWN,
+    source_path: "packages/protocol/assets/inoculation.md",
+    raw: inoculationMarkdown,
   },
   {
     id: "llms",

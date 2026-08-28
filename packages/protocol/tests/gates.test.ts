@@ -10,6 +10,7 @@ import {
   CAPSULE_TOKEN_BUDGET,
   getDocument,
   getProtocolRules,
+  INOCULATION_TOKEN_BUDGET,
   listDocuments,
   measureRules,
   PROTOCOL_RULES_WORD_CAP,
@@ -64,6 +65,14 @@ describe("the capsule budget (Fable §5.2)", () => {
     const capsule = getDocument("capsule");
     expect(capsule.tokens_estimate).toBeGreaterThan(0);
     expect(capsule.tokens_estimate).toBeLessThanOrEqual(CAPSULE_TOKEN_BUDGET);
+  });
+});
+
+describe("the inoculation budget (Fable §2.5 / ADR-17)", () => {
+  test("the inoculation is inside its 800-token budget", () => {
+    const inoculation = getDocument("inoculation");
+    expect(inoculation.tokens_estimate).toBeGreaterThan(0);
+    expect(inoculation.tokens_estimate).toBeLessThanOrEqual(INOCULATION_TOKEN_BUDGET);
   });
 });
 

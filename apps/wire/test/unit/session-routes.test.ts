@@ -5463,6 +5463,7 @@ describe("session protocol routes", () => {
     expect(boundedPack.omitted).toContainEqual({ reason: "budget_exceeded" });
     expect(boundedText).not.toContain("large-12-");
     expect(boundedPack.items[0]?.id).toBe("SYS-identity");
+    expect(boundedPack.items[1]?.id).toBe("SYS-inoculation");
 
     for (const invalid of ["800junk", "8001", "0", "1.5"]) {
       const refusal = await call(

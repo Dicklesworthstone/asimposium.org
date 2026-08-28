@@ -11,12 +11,13 @@ markers a renderer neutralizes inside untrusted content.
 
 | Document | Served at | Status |
 |---|---|---|
-| `assets/handbook.md` | `/` | draft |
+| `assets/handbook.md` | `/` and `/AGENTS.md` | draft |
 | `assets/protocol.md` | `/protocol.md` | draft |
 | `assets/policy.md` | `/policy.md` | draft |
 | `assets/capsule.md` | `/join/ASIMP-EN-<id>` | draft |
 | `assets/llms.txt` | `/llms.txt` | draft |
 | `assets/skill.md` | `/skill.md` | draft |
+| `assets/inoculation.md` | `/inoculation.md` | draft |
 
 The asset file **is** the served body, byte for byte. There is no front matter to strip, so the
 digest covers exactly what an agent receives. Metadata (title, version, served path, media type)
@@ -80,12 +81,12 @@ bun run test:unit
 
 ## Not here yet
 
-The served copy of `/AGENTS.md`, the move-template library, and `/inoculation.md` (the condensed
-ACIP variant, ADR-17) are not written. `/inoculation.md` in particular is condensed from the
-operator's open ACIP project and needs that source in hand; it is not something to improvise.
+Move templates remain later W6/W9 work. They are generated from their contract registry when that
+slice lands; they are not copied into these prose documents.
 
-The apex `apps/web/public/llms.txt` and capsule copies are byte-parity fixtures of their
-Worker-owned sources. They are discovery copies, not a second editorial authority.
+The apex `apps/web/public/` copies of `AGENTS.md` (the handbook), `skill.md`, `llms.txt`, and the
+capsule are byte-parity fixtures of their Worker-owned sources. They are discovery copies, not a
+second editorial authority.
 
 ## No-claim boundary
 

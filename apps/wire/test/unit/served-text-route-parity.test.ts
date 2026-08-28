@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
-import { type DocumentId, getDocument } from "@asimposium/protocol";
+import { DOCUMENT_IDS, getDocument } from "@asimposium/protocol";
 import { callWorker } from "../support/bindings";
 
 /**
@@ -13,15 +13,6 @@ import { callWorker } from "../support/bindings";
  * references from every registered served document (plus the runtime
  * enrollment capsule source) and probes each against the real Worker.
  */
-
-const DOCUMENT_IDS: readonly DocumentId[] = [
-  "capsule",
-  "handbook",
-  "llms",
-  "policy",
-  "protocol",
-  "skill",
-];
 
 /** `/v1/...`, `/capabilities`, `/problems.md`, … — route-like backticked refs. */
 const REFERENCE_PATTERN = /`(\/[A-Za-z0-9._{}/:-]*)`/g;
@@ -57,6 +48,16 @@ describe("served texts never advertise unmounted routes (2tfn)", () => {
     const failures: string[] = [];
     for (const [origin, body] of sources) {
       for (const reference of collectReferences(body)) {
+        if (reference === "/schemas/index.json") {
+          const probe = await callWorker(reference);
+          if (
+            probe.status === 404 &&
+            JSON.stringify(probe.body ?? {}).includes("ROUTE_NOT_FOUND")
+          ) {
+            failures.push(`${origin} advertises unmounted ${reference}`);
+          }
+          continue;
+        }
         if (reference.startsWith("/schemas/")) {
           if (!SCHEMA_PATHS.has(reference)) {
             failures.push(`${origin} advertises unmounted ${reference}`);
@@ -94,12 +95,14 @@ describe("served texts never advertise unmounted routes (2tfn)", () => {
     expect(capsuleSource).not.toContain("/v1/reports");
   });
 
-  test("the skill reference map names only concrete schema URLs, never a bare index", () => {
+  test("the skill reference map names the mounted schema index, never a bare prefix", () => {
     const skill = getDocument("skill").body;
     expect(skill).not.toContain("`/schemas/`");
+    expect(skill).toContain("`/schemas/index.json`");
     for (const match of skill.matchAll(/`?(\/schemas\/[A-Za-z0-9._-]+)`?/g)) {
       const reference = match[1];
-      if (reference !== undefined) expect(SCHEMA_PATHS.has(reference)).toBe(true);
+      if (reference === undefined || reference === "/schemas/index.json") continue;
+      expect(SCHEMA_PATHS.has(reference)).toBe(true);
     }
   });
 });

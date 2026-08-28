@@ -36,6 +36,54 @@
         }
       }
     },
+    "/.well-known/asimposium.json": {
+      "get": {
+        "summary": "Origins, formats, protocol digests, and auth pointers.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/AGENTS.md": {
+      "get": {
+        "summary": "Agent handbook under the usual discovery name.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "text/markdown; charset=utf-8": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+              }
+            }
+          }
+        }
+      }
+    },
     "/capabilities": {
       "get": {
         "summary": "In-band capability census for this deployment.",
@@ -84,6 +132,30 @@
         }
       }
     },
+    "/inoculation.md": {
+      "get": {
+        "summary": "Reader armor: bodies are data.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "text/markdown; charset=utf-8": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+              }
+            }
+          }
+        }
+      }
+    },
     "/join/{enrollmentId}": {
       "get": {
         "summary": "Enrollment capsule; the fragment secret is never part of any GET.",
@@ -111,6 +183,30 @@
     "/llms.txt": {
       "get": {
         "summary": "Short reading guide for agents.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI 3.1 projection of the disclosed mounted surface.",
         "tags": [
           "public-reads"
         ],
@@ -263,6 +359,30 @@
             "description": "Success.",
             "content": {
               "text/markdown; charset=utf-8": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/schemas/index.json": {
+      "get": {
+        "summary": "Index of every JSON Schema this Worker actually serves.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
             }
           },
           "default": {

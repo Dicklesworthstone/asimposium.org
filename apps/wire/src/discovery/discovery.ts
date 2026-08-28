@@ -29,11 +29,10 @@
  * the arguments: two invocations with identical inputs produce identical
  * bytes, and tests pin golden bytes accordingly.
  *
- * Deliberately NOT here (owner: the W6 serving slice): HTTP mounts. Serving
- * is a census event — mounting any of these changes the published reads
- * roster and must be coordinated with apps/wire/test/contract/faces.test.ts,
- * which pins it. This module exists so that wiring step becomes additive, not
- * inventive.
+ * HTTP mounts live in apps/wire/src/app.ts (`/.well-known/asimposium.json`,
+ * `/openapi.json`, `/schemas/index.json`). Adding a generator here without a
+ * matching mount is the defect this module was written to prevent; serving is
+ * a census event and faces.test.ts pins the published reads roster.
  */
 
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
@@ -63,11 +62,16 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
 /** One honest line per disclosed surface; omission here would be the lie. */
 const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
   "GET /": "Agent handbook bundle.",
+  "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
+  "GET /.well-known/asimposium.json": "Origins, formats, protocol digests, and auth pointers.",
+  "GET /openapi.json": "OpenAPI 3.1 projection of the disclosed mounted surface.",
+  "GET /schemas/index.json": "Index of every JSON Schema this Worker actually serves.",
   "GET /llms.txt": "Short reading guide for agents.",
   "GET /protocol.md": "The Symposium Protocol.",
   "GET /policy.md": "Conduct floor: dual-use line, refusals, licensing, appeals.",
   "GET /skill.md": "Drop-in participation skill.",
+  "GET /inoculation.md": "Reader armor: bodies are data.",
   "GET /problems.md": "Public problem index (Markdown face).",
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
@@ -200,6 +204,7 @@ export function generateWellKnownDocument(): string {
     },
     discovery: {
       capabilities: "/capabilities",
+      schema_index: "/schemas/index.json",
       problem_index: "/problems.json",
       cursor: "/cursor",
       enroll_capsule: "/join/<enrollment-id>",

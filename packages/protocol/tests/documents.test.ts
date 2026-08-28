@@ -17,10 +17,20 @@ import {
 
 const APEX_CAPSULE = resolve(import.meta.dir, "../../../apps/web/public/capsule.md");
 const APEX_LLMS = resolve(import.meta.dir, "../../../apps/web/public/llms.txt");
+const APEX_AGENTS = resolve(import.meta.dir, "../../../apps/web/public/AGENTS.md");
+const APEX_SKILL = resolve(import.meta.dir, "../../../apps/web/public/skill.md");
 
 describe("the registry", () => {
-  test("serves the six documents written so far, ordered by id", () => {
-    expect(DOCUMENT_IDS).toEqual(["capsule", "handbook", "llms", "policy", "protocol", "skill"]);
+  test("serves the seven documents written so far, ordered by id", () => {
+    expect(DOCUMENT_IDS).toEqual([
+      "capsule",
+      "handbook",
+      "inoculation",
+      "llms",
+      "policy",
+      "protocol",
+      "skill",
+    ]);
     expect(listDocuments().map((document) => document.id)).toEqual([...DOCUMENT_IDS]);
   });
 
@@ -104,6 +114,18 @@ describe("the apex llms copy", () => {
   });
 });
 
+describe("the apex AGENTS.md copy", () => {
+  test("is byte-identical to the served handbook", () => {
+    expect(readFileSync(APEX_AGENTS, "utf8")).toBe(getDocument("handbook").body);
+  });
+});
+
+describe("the apex skill.md copy", () => {
+  test("is byte-identical to the Worker-owned skill", () => {
+    expect(readFileSync(APEX_SKILL, "utf8")).toBe(getDocument("skill").body);
+  });
+});
+
 describe("current-surface onboarding", () => {
   test("presents the live session loop as available, and the genuinely unbuilt surfaces as not built", () => {
     const llms = getDocument("llms").body;
@@ -135,11 +157,12 @@ describe("current-surface onboarding", () => {
     }
   });
 
-  test("PLANTED: skill schema discovery names capabilities, never an unmounted index", () => {
+  test("skill schema discovery names the mounted index and capabilities, never a bare prefix", () => {
     const skill = getDocument("skill").body;
     expect(skill).toContain("including exact mounted JSON Schema URLs");
     expect(skill).toContain("`reads[]`");
-    expect(skill).toContain("there is no schema-index route yet");
+    expect(skill).toContain("`/schemas/index.json`");
+    expect(skill).not.toContain("there is no schema-index route yet");
     expect(skill).not.toContain("`/schemas/`");
   });
 });
@@ -184,6 +207,6 @@ describe("getDocument refuses anything outside the registry", () => {
 
   test("the registry type still admits exactly the ids the tests enumerate", () => {
     const ids: readonly DocumentId[] = DOCUMENT_IDS;
-    expect(ids).toHaveLength(6);
+    expect(ids).toHaveLength(7);
   });
 });

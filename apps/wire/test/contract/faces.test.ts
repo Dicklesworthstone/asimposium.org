@@ -18,6 +18,7 @@ import {
 } from "@asimposium/protocol";
 import * as ts from "typescript";
 import { createApp, protocolDocumentReaderAfterInvariantGate } from "../../src/app";
+import { generateSchemaIndexDocument } from "../../src/discovery/discovery";
 import type { Env } from "../../src/env";
 import wireEntrypoint from "../../src/index";
 import { eventEnvelopeRowDigest } from "../../src/krater/krater";
@@ -509,11 +510,16 @@ describe("face wire format", () => {
     const schemaReads = listPublicSchemas().map((document) => document.served_at);
     expect(body.reads).toEqual([
       "/",
+      "/AGENTS.md",
       "/capabilities",
+      "/.well-known/asimposium.json",
+      "/openapi.json",
+      "/schemas/index.json",
       "/llms.txt",
       "/protocol.md",
       "/policy.md",
       "/skill.md",
+      "/inoculation.md",
       "/problems.md",
       "/problems.json",
       "/p/<problem-id>.md",
@@ -528,7 +534,10 @@ describe("face wire format", () => {
     // advertised URL is then requested through the mounted Worker with no D1
     // binding, so an unmountable placeholder cannot survive as a copy-pasteable
     // next step.
-    const advertisedSchemaReads = body.reads.filter((path) => path.startsWith("/schemas/"));
+    expect(body.reads).toContain("/schemas/index.json");
+    const advertisedSchemaReads = body.reads.filter(
+      (path) => path.startsWith("/schemas/") && path !== "/schemas/index.json",
+    );
     expect(advertisedSchemaReads).toEqual(schemaReads);
     for (const advertised of advertisedSchemaReads) {
       expect(advertised, advertised).not.toContain("<");
@@ -1499,6 +1508,22 @@ describe("face wire format", () => {
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
     expect(cursor.status).not.toBe(404);
+  });
+
+  test("GET /AGENTS.md serves the handbook under the usual discovery name", async () => {
+    const handbook = getDocument("handbook");
+    const response = await callWorker("/AGENTS.md", {});
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe(handbook.media_type);
+    expect(response.bodyText).toBe(handbook.body);
+  });
+
+  test("GET /schemas/index.json serves the generated schema-index bytes without D1", async () => {
+    const body = generateSchemaIndexDocument();
+    const response = await callWorker("/schemas/index.json", {});
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe("application/json; charset=utf-8");
+    expect(response.bodyText).toBe(body);
   });
 
   test.each(PUBLIC_TEXT_DOCUMENTS)(

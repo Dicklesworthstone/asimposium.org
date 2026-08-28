@@ -880,7 +880,10 @@ describe("apex markdown redirect origin", () => {
       const redirects = await nextConfig.redirects();
       expect(
         redirects
-          .filter(({ source }) => source === "/protocol.md" || source === "/policy.md")
+          .filter(
+            ({ source }) =>
+              source === "/protocol.md" || source === "/policy.md" || source === "/inoculation.md",
+          )
           .map(({ destination, permanent, source }) => ({ destination, permanent, source })),
       ).toEqual([
         {
@@ -891,6 +894,11 @@ describe("apex markdown redirect origin", () => {
         {
           source: "/policy.md",
           destination: "https://a-staging.asimposium.org/policy.md",
+          permanent: true,
+        },
+        {
+          source: "/inoculation.md",
+          destination: "https://a-staging.asimposium.org/inoculation.md",
           permanent: true,
         },
       ]);
