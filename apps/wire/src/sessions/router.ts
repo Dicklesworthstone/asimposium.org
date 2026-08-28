@@ -413,6 +413,27 @@ interface PackRefutingEvidenceRow {
   readonly source_seq: number;
 }
 
+interface PackClaimVersionRow {
+  readonly claim_id: string;
+  readonly version: number;
+  readonly kind: string;
+}
+
+interface PackClaimDepRow {
+  readonly claim_id: string;
+  readonly depends_on_claim_id: string;
+}
+
+interface PackClaimEvidenceRow {
+  readonly evidence_id: string;
+  readonly claim_id: string;
+  readonly bears_on_version: number | null;
+  readonly direction: string;
+  readonly kind: string;
+  readonly computed_class: string;
+  readonly source_seq: number;
+}
+
 function groupPackRows<Row>(
   rows: readonly Row[],
   claimIdOf: (row: Row) => string,
@@ -425,6 +446,53 @@ function groupPackRows<Row>(
     else existing.push(row);
   }
   return grouped;
+}
+
+function foldPackClaimDisposition(
+  claimEvents: readonly PackClaimEventRow[],
+  reviewRows: readonly PackReviewRow[],
+  refutingEvidence: readonly PackRefutingEvidenceRow[],
+): string {
+  const fold = computeCurrentClaimDisposition([
+    ...claimEvents.flatMap((row) => {
+      if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
+      return [
+        {
+          kind:
+            row.type === "claim.created"
+              ? ("claim-created" as const)
+              : ("claim-revised" as const),
+          sequence: row.seq,
+          version: row.object_version,
+        },
+      ];
+    }),
+    ...reviewRows.map((review) => ({
+      kind: "review-created" as const,
+      sequence: review.source_seq,
+      targetVersion: review.target_version,
+      carriesWeight:
+        review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
+      verdict: review.verdict,
+      review: {
+        review_id: review.review_id,
+        reviewer_id: review.reviewer_fellow_id,
+        tier: review.tier,
+        cross_family: review.tier === "T2" || review.tier === "T3",
+        // The v1 review contract records the exercised rubric and
+        // basis, but has no explicit whole-write-up coverage claim.
+        // Never infer the stronger property from body length.
+        full_write_up: false,
+      },
+    })),
+    ...refutingEvidence.map((evidence) => ({
+      kind: "refuting-evidence" as const,
+      sequence: evidence.source_seq,
+      targetVersion: evidence.bears_on_version,
+      evidenceId: evidence.evidence_id,
+    })),
+  ]);
+  return displayClaimDisposition(fold.disposition, fold.context);
 }
 
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
@@ -1442,6 +1510,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let typedRelationsTruncated = false;
     let proofGapsTruncated = false;
     let eligibleReviewsTruncated = false;
+    let claimDepsTruncated = false;
+    let claimEvidenceTruncated = false;
+    let claimReviewsTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1505,7 +1576,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // Fable digest is "statement hash, cursor, counts, next move only" at 800
     // tokens. Loading claims/handback first dropped SYS-projection-staleness
     // on budget_exceeded — a silent thin pack for the profile's whole point.
-    if (profile !== "hello" && profile !== "digest" && profile !== "review-queue") {
+    // Claim skips this index too: its product is claim@version + deps/evidence/
+    // reviews, and sharing the 128-claim list would duplicate item ids.
+    if (
+      profile !== "hello" &&
+      profile !== "digest" &&
+      profile !== "review-queue" &&
+      profile !== "claim"
+    ) {
       const claims = await db
         .prepare(
           `SELECT id, statement, source_seq FROM claims
@@ -1610,49 +1688,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
 
         for (const [index, claim] of selectedClaims.entries()) {
-          const claimEvents = claimEventsById.get(claim.id) ?? [];
-          const reviewRows = reviewRowsById.get(claim.id) ?? [];
-          const refutingEvidence = refutingEvidenceById.get(claim.id) ?? [];
-          const fold = computeCurrentClaimDisposition([
-            ...claimEvents.flatMap((row) => {
-              if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
-              return [
-                {
-                  kind:
-                    row.type === "claim.created"
-                      ? ("claim-created" as const)
-                      : ("claim-revised" as const),
-                  sequence: row.seq,
-                  version: row.object_version,
-                },
-              ];
-            }),
-            ...reviewRows.map((review) => ({
-              kind: "review-created" as const,
-              sequence: review.source_seq,
-              targetVersion: review.target_version,
-              carriesWeight:
-                review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
-              verdict: review.verdict,
-              review: {
-                review_id: review.review_id,
-                reviewer_id: review.reviewer_fellow_id,
-                tier: review.tier,
-                cross_family: review.tier === "T2" || review.tier === "T3",
-                // The v1 review contract records the exercised rubric and
-                // basis, but has no explicit whole-write-up coverage claim.
-                // Never infer the stronger property from body length.
-                full_write_up: false,
-              },
-            })),
-            ...refutingEvidence.map((evidence) => ({
-              kind: "refuting-evidence" as const,
-              sequence: evidence.source_seq,
-              targetVersion: evidence.bears_on_version,
-              evidenceId: evidence.evidence_id,
-            })),
-          ]);
-          const disposition = displayClaimDisposition(fold.disposition, fold.context);
+          const disposition = foldPackClaimDisposition(
+            claimEventsById.get(claim.id) ?? [],
+            reviewRowsById.get(claim.id) ?? [],
+            refutingEvidenceById.get(claim.id) ?? [],
+          );
           candidates.push({
             kind: "claim",
             id: claim.id,
@@ -1700,6 +1740,228 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               requires: ["workshop:read"],
             },
       );
+    }
+
+    // W4.2: the claim pack is exact claim@version + deps + evidence + reviews,
+    // no author narrative. Those writes already land; omitting "claim-detail"
+    // while serving the 128-claim index would be a silent thin pack.
+    if (profile === "claim") {
+      const claims = await db
+        .prepare(
+          `SELECT id, statement, source_seq FROM claims
+           WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC
+           LIMIT 11`,
+        )
+        .bind(session.problem_id, cursor)
+        .all<{ id: string; statement: string; source_seq: number }>();
+      const claimRows = claims.results ?? [];
+      claimsTruncated = claimRows.length > 10;
+      const selectedClaims = claimRows.slice(0, 10);
+      if (selectedClaims.length === 0) {
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-claim-detail-empty",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: "No claims on this problem yet. The claim pack is claim@version plus deps, evidence, and reviews.",
+          why_included: "state the claim-detail baseline",
+          stable_prefix: 100,
+        });
+      } else {
+        const selectedClaimCte = `SELECT id FROM claims
+          WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?`;
+        const detailResults = await db.batch([
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT events.object_id AS claim_id, events.seq, events.type, events.object_version
+               FROM events JOIN selected_claims ON selected_claims.id = events.object_id
+               WHERE events.problem_id = ? AND events.object_kind = 'claim' AND events.seq <= ?
+               ORDER BY events.seq ASC`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
+                      reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
+                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq
+               FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
+               WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
+                 AND reviews.source_seq <= ?
+               ORDER BY reviews.source_seq ASC`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT evidence.bears_on_id AS claim_id, evidence.evidence_id,
+                      evidence.bears_on_version, evidence.source_seq
+               FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
+               WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
+                 AND evidence.direction = 'refutes' AND evidence.bears_on_version IS NOT NULL
+                 AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
+               ORDER BY evidence.source_seq ASC`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT v.claim_id, v.version, v.kind
+               FROM claim_versions v
+               JOIN selected_claims s ON s.id = v.claim_id
+               WHERE v.problem_id = ?
+                 AND v.version = (
+                   SELECT MAX(version) FROM claim_versions
+                   WHERE problem_id = v.problem_id AND claim_id = v.claim_id
+                 )`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id),
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT d.claim_id, d.depends_on_claim_id
+               FROM claim_deps d
+               JOIN selected_claims s ON s.id = d.claim_id
+               WHERE d.problem_id = ?
+               ORDER BY d.claim_id ASC, d.depends_on_claim_id ASC
+               LIMIT 11`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id),
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT evidence.evidence_id, evidence.bears_on_id AS claim_id,
+                      evidence.bears_on_version, evidence.direction, evidence.kind,
+                      evidence.computed_class, evidence.source_seq
+               FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
+               WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
+                 AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
+               ORDER BY evidence.source_seq ASC
+               LIMIT 11`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
+          db
+            .prepare(
+              `WITH selected_claims AS (${selectedClaimCte})
+               SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
+                      reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
+                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq
+               FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
+               WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
+                 AND reviews.source_seq <= ?
+               ORDER BY reviews.source_seq ASC
+               LIMIT 11`,
+            )
+            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
+        ]);
+        const [
+          claimEventsResult,
+          reviewRowsResult,
+          refutingEvidenceResult,
+          versionRowsResult,
+          depRowsResult,
+          evidenceRowsResult,
+          reviewDisplayResult,
+        ] = detailResults;
+        if (
+          claimEventsResult === undefined ||
+          reviewRowsResult === undefined ||
+          refutingEvidenceResult === undefined ||
+          versionRowsResult === undefined ||
+          depRowsResult === undefined ||
+          evidenceRowsResult === undefined ||
+          reviewDisplayResult === undefined
+        ) {
+          throw new Error("pack claim-detail batch returned an incomplete result set");
+        }
+        const claimEventsById = groupPackRows(
+          (claimEventsResult.results ?? []) as PackClaimEventRow[],
+          (row) => row.claim_id,
+        );
+        const reviewRowsById = groupPackRows(
+          (reviewRowsResult.results ?? []) as PackReviewRow[],
+          (row) => row.claim_id,
+        );
+        const refutingEvidenceById = groupPackRows(
+          (refutingEvidenceResult.results ?? []) as PackRefutingEvidenceRow[],
+          (row) => row.claim_id,
+        );
+        const versionById = new Map(
+          ((versionRowsResult.results ?? []) as PackClaimVersionRow[]).map((row) => [
+            row.claim_id,
+            row,
+          ]),
+        );
+        const depRows = (depRowsResult.results ?? []) as PackClaimDepRow[];
+        claimDepsTruncated = depRows.length > 10;
+        const evidenceRows = (evidenceRowsResult.results ?? []) as PackClaimEvidenceRow[];
+        claimEvidenceTruncated = evidenceRows.length > 10;
+        const reviewDisplayRows = (reviewDisplayResult.results ?? []) as PackReviewRow[];
+        claimReviewsTruncated = reviewDisplayRows.length > 10;
+
+        for (const [index, claim] of selectedClaims.entries()) {
+          const disposition = foldPackClaimDisposition(
+            claimEventsById.get(claim.id) ?? [],
+            reviewRowsById.get(claim.id) ?? [],
+            refutingEvidenceById.get(claim.id) ?? [],
+          );
+          const version = versionById.get(claim.id);
+          const pin = version === undefined ? claim.id : `${claim.id}@${version.version}`;
+          candidates.push({
+            kind: "claim",
+            id: claim.id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${pin} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}`,
+            why_included:
+              "pin the exact live claim version with its computed disposition (P9)",
+            stable_prefix: 100 + index,
+          });
+        }
+        for (const [index, dep] of depRows.slice(0, 10).entries()) {
+          candidates.push({
+            kind: "dep",
+            id: `${dep.claim_id}#${dep.depends_on_claim_id}`,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${dep.claim_id} depends_on ${dep.depends_on_claim_id}`,
+            why_included: "include a P10 dependency edge of a selected claim",
+            stable_prefix: 160 + index,
+          });
+        }
+        for (const [index, evidence] of evidenceRows.slice(0, 10).entries()) {
+          const pin =
+            evidence.bears_on_version === null
+              ? evidence.claim_id
+              : `${evidence.claim_id}@${evidence.bears_on_version}`;
+          candidates.push({
+            kind: "evidence",
+            id: evidence.evidence_id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${evidence.evidence_id} ${evidence.direction} ${pin} ${evidence.computed_class} (${evidence.kind})`,
+            why_included: "include evidence bearing on a selected claim, with its computed class",
+            stable_prefix: 180 + index,
+          });
+        }
+        for (const [index, review] of reviewDisplayRows.slice(0, 10).entries()) {
+          candidates.push({
+            kind: "review",
+            id: review.review_id,
+            scope: "ledger",
+            tokens: 1,
+            untrusted: true,
+            body: `${review.review_id} ${review.verdict} ${review.claim_id}@${review.target_version} ${review.tier}`,
+            why_included: "include a version-pinned review of a selected claim",
+            stable_prefix: 190 + index,
+          });
+        }
+      }
     }
 
     // W2.6: the digest profile surfaces the projection staleness line — how many
@@ -2050,7 +2312,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omitted[] rather than serving a silent thin pack (§7.3's mandatory
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
-      claim: ["claim-detail"],
       literature: ["citations"],
       formal: ["verification-records"],
       full: ["paginated-export"],
@@ -2153,8 +2414,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               { reason: "profile_excludes_handback", detail: "handback" },
             ]
           : []),
-        ...(profile === "review-queue"
+        ...(profile === "claim" || profile === "review-queue"
           ? [{ reason: "profile_excludes_handback", detail: "handback" }]
+          : []),
+        ...(profile === "claim" && claimDepsTruncated
+          ? [{ reason: "candidate_limit", detail: "deps" }]
+          : []),
+        ...(profile === "claim" && claimEvidenceTruncated
+          ? [{ reason: "candidate_limit", detail: "evidence" }]
+          : []),
+        ...(profile === "claim" && claimReviewsTruncated
+          ? [{ reason: "candidate_limit", detail: "reviews" }]
           : []),
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
