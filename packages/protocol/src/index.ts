@@ -12,11 +12,18 @@
  */
 
 import { ProtocolError } from "./errors.ts";
+import { parseProtocolMarkdown } from "./protocol-json.ts";
 import { DOCUMENT_SOURCES, type DocumentSource } from "./registry.ts";
 import { describeFindings, scanServedText } from "./scan.ts";
 import { sha256Hex, utf8Bytes } from "./sha256.ts";
 import { countWords, estimateTokens, extractSection, normalizeServedText } from "./text.ts";
-import type { ProtocolDocument, ProtocolVersionPair, RulesMeasurement } from "./types.ts";
+import type {
+  ProtocolDocument,
+  ProtocolHardRule,
+  ProtocolJson,
+  ProtocolVersionPair,
+  RulesMeasurement,
+} from "./types.ts";
 
 export { ProtocolError, type ProtocolErrorCode, type ProtocolProblem } from "./errors.ts";
 export { DOCUMENT_IDS } from "./registry.ts";
@@ -29,10 +36,13 @@ export {
 } from "./scan.ts";
 export { sha256Hex } from "./sha256.ts";
 export { countWords, estimateTokens, extractSection, normalizeServedText } from "./text.ts";
+export { parseProtocolMarkdown, generateProtocolJsonString } from "./protocol-json.ts";
 export type {
   DocumentId,
   DocumentStatus,
   ProtocolDocument,
+  ProtocolHardRule,
+  ProtocolJson,
   ProtocolVersionPair,
   RulesMeasurement,
 } from "./types.ts";
@@ -52,6 +62,10 @@ export const CAPSULE_TOKEN_BUDGET = 2500;
 
 /** Fable §2.5 / ADR-17: the inoculation is a short reader-side page, not a skill dump. */
 export const INOCULATION_TOKEN_BUDGET = 800;
+
+/** Rule A8 / R-12: the drop-in participation skill is budgeted to prevent process-porn growth. */
+export const SKILL_TOKEN_BUDGET = 2500;
+
 
 /** The level-two heading whose body the word cap measures. */
 export const PROTOCOL_RULES_HEADING = "Rules";
@@ -149,6 +163,12 @@ export function getProtocolRules(): RulesMeasurement {
   return measureRules(protocol.body, protocol.source_path);
 }
 
+/** Structured JSON representation of `/protocol.md` (bead asimposiumorg-3bq). */
+export function getProtocolJson(): ProtocolJson {
+  const protocol = getDocument("protocol");
+  return parseProtocolMarkdown(protocol.body, protocol.status);
+}
+
 /** ADR-24: the version pair a session records, plus one digest that pins both. */
 export function protocolVersionPair(): ProtocolVersionPair {
   const protocol = getDocument("protocol");
@@ -233,4 +253,15 @@ export function assertProtocolInvariants(): void {
       fix_hint: "Cut. The inoculation is reader armor, not a second protocol (Fable §2.5, ADR-17).",
     });
   }
+
+  const skill = getDocument("skill");
+  if (skill.tokens_estimate > SKILL_TOKEN_BUDGET) {
+    throw new ProtocolError({
+      code: "SKILL_BUDGET_EXCEEDED",
+      title: "The participation skill outgrew its budget",
+      detail: `The skill estimates ${skill.tokens_estimate} tokens against a budget of ${SKILL_TOKEN_BUDGET}.`,
+      fix_hint: "Cut. The skill is a drop-in participation skill, not a reference dump (Rule A8, R-12).",
+    });
+  }
 }
+

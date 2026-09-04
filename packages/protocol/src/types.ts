@@ -54,3 +54,27 @@ export interface RulesMeasurement {
   readonly cap: number;
   readonly within_cap: boolean;
 }
+
+export interface ProtocolHardRule {
+  readonly id: number;
+  readonly code: string;
+  readonly number: number;
+  readonly title: string;
+  readonly rule: string;
+}
+
+export interface ProtocolJson {
+  readonly title: string;
+  readonly version: string;
+  readonly status: DocumentStatus;
+  readonly preamble: string;
+  readonly rules: {
+    readonly hard: readonly ProtocolHardRule[];
+    readonly soft: readonly string[];
+  };
+  readonly hard_rules: readonly ProtocolHardRule[];
+  readonly soft_rules: readonly string[];
+  readonly versioning: string;
+  readonly digest: string;
+}
+

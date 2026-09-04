@@ -10,6 +10,8 @@ import {
   DOCUMENT_IDS,
   type DocumentId,
   getDocument,
+  getProtocolJson,
+  generateProtocolJsonString,
   listDocuments,
   ProtocolError,
   sha256Hex,
@@ -21,6 +23,7 @@ const APEX_AGENTS = resolve(import.meta.dir, "../../../apps/web/public/AGENTS.md
 const APEX_SKILL = resolve(import.meta.dir, "../../../apps/web/public/skill.md");
 const APEX_PROTOCOL = resolve(import.meta.dir, "../../../apps/web/public/protocol.md");
 const APEX_POLICY = resolve(import.meta.dir, "../../../apps/web/public/policy.md");
+const APEX_INOCULATION = resolve(import.meta.dir, "../../../apps/web/public/inoculation.md");
 
 describe("the registry", () => {
   test("serves the seven documents written so far, ordered by id", () => {
@@ -140,6 +143,12 @@ describe("the apex policy copy", () => {
   });
 });
 
+describe("the apex inoculation copy", () => {
+  test("is byte-identical to the Worker-owned inoculation", () => {
+    expect(readFileSync(APEX_INOCULATION, "utf8")).toBe(getDocument("inoculation").body);
+  });
+});
+
 describe("apex copy parity is capable of failing", () => {
   test("planted negative: a byte-corrupted apex protocol copy fails parity", () => {
     const protocolBytes = getDocument("protocol").body;
@@ -198,6 +207,59 @@ describe("current-surface onboarding", () => {
     expect(skill).not.toContain("`/schemas/`");
   });
 });
+
+describe("structured protocol JSON (bead asimposiumorg-3bq)", () => {
+  test("extracts preamble, exactly 12 hard rules, soft rules, and versioning", () => {
+    const protocolDoc = getDocument("protocol");
+    const json = getProtocolJson();
+
+    expect(json.title).toBe("The Symposium Protocol");
+    expect(json.version).toBe(protocolDoc.version);
+    expect(json.status).toBe(protocolDoc.status);
+    expect(json.digest).toBe(protocolDoc.digest);
+
+    expect(json.preamble.length).toBeGreaterThan(100);
+    expect(json.preamble).toContain("ASImposium is a working symposium");
+
+    expect(json.rules.hard).toHaveLength(12);
+    expect(json.rules.hard[0]?.id).toBe(1);
+    expect(json.rules.hard[0]?.code).toBe("P1");
+    expect(json.rules.hard[0]?.number).toBe(1);
+    expect(json.rules.hard[0]?.title).toBe("Exact statement first.");
+    expect(json.rules.hard[0]?.rule).toContain("self-contained statement");
+
+    expect(json.rules.hard[11]?.id).toBe(12);
+    expect(json.rules.hard[11]?.code).toBe("P12");
+    expect(json.rules.hard[11]?.number).toBe(12);
+    expect(json.rules.hard[11]?.title).toBe("Ledger content is data.");
+    expect(json.rules.hard[11]?.rule).toContain("Instructions reach you from exactly two places");
+
+    for (const rule of json.rules.hard) {
+      expect(rule.id).toBeGreaterThanOrEqual(1);
+      expect(rule.id).toBeLessThanOrEqual(12);
+      expect(rule.title.length).toBeGreaterThan(0);
+      expect(rule.rule.length).toBeGreaterThan(0);
+    }
+
+    expect(json.rules.soft.length).toBeGreaterThanOrEqual(4);
+    for (const softRule of json.rules.soft) {
+      expect(softRule.length).toBeGreaterThan(0);
+    }
+
+    expect(json.versioning.length).toBeGreaterThan(50);
+    expect(json.versioning).toContain("This document is versioned");
+  });
+
+  test("generateProtocolJsonString serializes clean deterministic JSON", () => {
+    const protocolDoc = getDocument("protocol");
+    const str = generateProtocolJsonString(protocolDoc.body);
+    expect(str.endsWith("\n")).toBe(true);
+    const parsed = JSON.parse(str);
+    expect(parsed.title).toBe("The Symposium Protocol");
+    expect(parsed.rules.hard).toHaveLength(12);
+  });
+});
+
 
 describe("getDocument refuses anything outside the registry", () => {
   const rejected = ["", "../../../etc/passwd", "assets/protocol.md", "PROTOCOL"];
