@@ -24,6 +24,7 @@
  * Run `bun run suite --help` for the full contract.
  */
 
+import { dlopen } from "bun:ffi";
 import { spawnSync } from "node:child_process";
 import { closeSync, openSync, readSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -835,6 +836,44 @@ function retainedByteLimit(value: number | undefined, fallback: number): number 
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
+function loadDup(): { symbols: { dup(fd: number): number } } | undefined {
+  const candidates =
+    process.platform === "darwin"
+      ? ["/usr/lib/libSystem.B.dylib", "libc.dylib"]
+      : process.platform === "linux"
+        ? ["libc.so.6", "libc.so"]
+        : [];
+  for (const candidate of candidates) {
+    try {
+      return dlopen(candidate, {
+        dup: {
+          args: ["i32"],
+          returns: "i32",
+        },
+      }) as unknown as { symbols: { dup(fd: number): number } };
+    } catch {
+      // Try next libc candidate
+    }
+  }
+  return undefined;
+}
+
+const DUP_LIBRARY = loadDup();
+
+function duplicateRawPipeFd(fd: number): number {
+  if (DUP_LIBRARY !== undefined) {
+    try {
+      const duplicated = DUP_LIBRARY.symbols.dup(fd);
+      if (Number.isSafeInteger(duplicated) && duplicated >= 0) {
+        return duplicated;
+      }
+    } catch {
+      // Fall through to filesystem duplicate open
+    }
+  }
+  return openSync(`/dev/fd/${Number(fd)}`, "r");
+}
+
 function rawPipeReadableStream(fd: number): ReadableStream<Uint8Array> {
   let cancelled = false;
   return new ReadableStream<Uint8Array>({
@@ -1604,7 +1643,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     // control transcript and product output readable through their required EOF
     // seals without racing Bun's child-resource cleanup.
     for (const candidate of rawPipeFdCandidates) {
-      ownedRawPipeFds.push(openSync(`/dev/fd/${Number(candidate)}`, "r"));
+      ownedRawPipeFds.push(duplicateRawPipeFd(Number(candidate)));
     }
   } catch {
     closeOwnershipLease();

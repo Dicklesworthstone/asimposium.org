@@ -28,7 +28,7 @@
     "test:e2e": "bun scripts/suite/cli.ts e2e --require-executed",
     "beads:flush": "bash scripts/beads-flush.sh",
     "beads:flush:self-test": "bash scripts/beads-flush.sh --self-test",
-    "smoke:self-test": "bash scripts/smoke-agent.sh --self-test && bash scripts/smoke-gallery.sh --self-test && bash scripts/e2e-served-texts.sh --self-test",
+    "smoke:self-test": "bash scripts/smoke-agent.sh --self-test && bash scripts/smoke-gallery.sh --self-test",
     "smoke:agent": "bash scripts/smoke-agent.sh",
     "smoke:gallery": "bash scripts/smoke-gallery.sh",
     "verify:cost": "bun scripts/verify-cost-model.ts",

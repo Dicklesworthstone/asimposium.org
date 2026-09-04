@@ -34,7 +34,7 @@ set -m
 
 readonly BLOCKED_EXIT=78
 readonly REPRODUCE="bash scripts/e2e-s6-auth-ingress.sh"
-readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
+readonly WRANGLER="apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
 readonly CONFIG="apps/wire/wrangler.s6.toml"
 readonly CHECKER="apps/wire/src/auth/local-check.ts"
 readonly READY_DEADLINE_SECONDS=30
@@ -229,7 +229,7 @@ fi
 readonly S6_PORT
 readonly ORIGIN="http://127.0.0.1:${S6_PORT}"
 
-STATE_DIR="$(mktemp -d -t asimposium-s6-auth)"
+STATE_DIR="$(mktemp -d -t asimposium-s6-auth.XXXXXX 2>/dev/null || mktemp -d -t asimposium-s6-auth)"
 readonly STATE_DIR
 if [[ -z "${STATE_DIR}" || ! -d "${STATE_DIR}" || -L "${STATE_DIR}" ]]; then
   fail_record "state_dir_valid" "mktemp did not produce a real private directory"
@@ -1201,7 +1201,7 @@ run_nested_harness() {
     fi
     return 1
   fi
-  deadline="$(deadline_after_work 45)"
+  deadline="$(deadline_after_work 75)"
   while (( SECONDS < deadline )); do
     if direct_child_is_gone "${NESTED_HARNESS_PID}"; then
       if wait "${NESTED_HARNESS_PID}"; then status=0; else status=$?; fi

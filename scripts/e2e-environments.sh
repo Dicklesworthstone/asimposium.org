@@ -94,8 +94,8 @@ self_test_remote_interface_gate() {
   # self-made one is retained and named in the record below.
   supplied="${ASIMPOSIUM_ENVIRONMENT_E2E_SCRATCH_DIR:-}"
   if [ -n "$supplied" ]; then
-    scratch_mode="$(/usr/bin/stat -f '%Lp' "$supplied" 2>/dev/null || /usr/bin/stat -c '%a' "$supplied" 2>/dev/null || printf '')"
-    scratch_owner="$(/usr/bin/stat -f '%u' "$supplied" 2>/dev/null || /usr/bin/stat -c '%u' "$supplied" 2>/dev/null || printf '')"
+    scratch_mode="$(/usr/bin/stat -c '%a' "$supplied" 2>/dev/null || /usr/bin/stat -f '%Lp' "$supplied" 2>/dev/null || printf '')"
+    scratch_owner="$(/usr/bin/stat -c '%u' "$supplied" 2>/dev/null || /usr/bin/stat -f '%u' "$supplied" 2>/dev/null || printf '')"
     case "$supplied" in
       /*) ;;
       *)
@@ -135,12 +135,12 @@ self_test_remote_interface_gate() {
 
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
   printf '%s\n' '#!/bin/sh' \
-    'printf "%s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
+    'printf "%s\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
     'case "$*" in' \
     '  "infra/validate-scaffold.mjs"|"infra/generate-wrangler.mjs --check"|"infra/generate-wrangler.test.mjs") exit 0 ;;' \
-    '  "infra/validate-environments.mjs") printf "{\\\"suite\\\":\\\"environment-topology-static\\\",\\\"status\\\":\\\"pass\\\",\\\"vercel\\\":{\\\"preview_environment\\\":\\\"staging\\\"},\\\"environments\\\":{\\\"staging\\\":{\\\"kind\\\":\\\"remote\\\",\\\"is_preview\\\":true,\\\"may_hold_production_keys\\\":false,\\\"worker_origin\\\":\\\"https://a-staging.asimposium.org\\\"}}}\\n"; exit 0 ;;' \
-    '  "infra/resolve-wrangler-deploy.mjs --env staging --write") if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ] || [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then printf "{\\\"suite\\\":\\\"staging-wrangler-deploy-resolution\\\",\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"mode\\\":\\\"write\\\",\\\"published\\\":true,\\\"idempotent\\\":false}\\n"; exit 0; fi; exit 93 ;;' \
-    '  infra/migrate.mjs\ --env\ staging\ --resolved-database-id\ *\ --apply) if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ] || [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then printf "{\\\"status\\\":\\\"pass\\\",\\\"environment\\\":\\\"staging\\\",\\\"phase\\\":\\\"apply\\\",\\\"second_plan_idempotent\\\":true,\\\"applied\\\":[],\\\"skipped\\\":[],\\\"head_before\\\":0}\\n"; exit 0; fi; exit 93 ;;' \
+    '  "infra/validate-environments.mjs") printf "{\"suite\":\"environment-topology-static\",\"status\":\"pass\",\"vercel\":{\"preview_environment\":\"staging\"},\"environments\":{\"staging\":{\"kind\":\"remote\",\"is_preview\":true,\"may_hold_production_keys\":false,\"worker_origin\":\"https://a-staging.asimposium.org\"}}}\n"; exit 0 ;;' \
+    '  "infra/resolve-wrangler-deploy.mjs --env staging --write") if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ] || [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then printf "{\"suite\":\"staging-wrangler-deploy-resolution\",\"status\":\"pass\",\"environment\":\"staging\",\"mode\":\"write\",\"published\":true,\"idempotent\":false}\n"; exit 0; fi; exit 93 ;;' \
+    '  infra/migrate.mjs\ --env\ staging\ --resolved-database-id\ *\ --apply) if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-write-failure" ] || [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then printf "{\"status\":\"pass\",\"environment\":\"staging\",\"phase\":\"apply\",\"second_plan_idempotent\":true,\"applied\":[],\"skipped\":[],\"head_before\":0}\n"; exit 0; fi; exit 93 ;;' \
     '  *) exit 93 ;;' \
     'esac' >"$fake_bun"
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
@@ -163,10 +163,10 @@ self_test_remote_interface_gate() {
     'esac' >"$fake_bunx"
   # shellcheck disable=SC2016 # The fake command must expand its own variables later.
   printf '%s\n' '#!/bin/sh' \
-    'printf "curl %s\\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
+    'printf "curl %s\n" "$*" >> "$E2E_ENVIRONMENTS_TEST_COMMAND_LOG"' \
     'case "$*" in' \
-    '  *"/internal/health"*) printf "{\\\"ok\\\":true}\\n"; exit 0 ;;' \
-    '  *"/capabilities"*) printf "{\\\"origin\\\":\\\"https://a-staging.asimposium.org\\\"}\\n"; exit 0 ;;' \
+    '  *"/internal/health"*) printf "{\"ok\":true}\n"; exit 0 ;;' \
+    '  *"/capabilities"*) printf "{\"origin\":\"https://a-staging.asimposium.org\"}\n"; exit 0 ;;' \
     '  *"https://artifacts-staging.asimposium.org/"*) if [ "${E2E_ENVIRONMENTS_TEST_SCENARIO:-}" = "r2-dev-url-enabled" ]; then printf "404"; exit 0; fi; exit 94 ;;' \
     '  *) exit 94 ;;' \
     'esac' >"$fake_curl"

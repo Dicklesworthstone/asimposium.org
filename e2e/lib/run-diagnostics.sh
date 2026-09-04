@@ -134,7 +134,7 @@ e2e_now_ms() {
   local candidate
   candidate="$(date +%s%3N 2>/dev/null || true)"
   if [[ "$candidate" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "$candidate"
+    printf '%s\n' "${candidate:0:13}"
     return 0
   fi
 

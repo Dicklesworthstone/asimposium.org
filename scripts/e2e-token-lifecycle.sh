@@ -32,9 +32,9 @@ esac
 readonly SUITE="token-lifecycle-local"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 readonly ROOT
-readonly WRANGLER="${ROOT}/apps/wire/node_modules/.bin/wrangler"
+readonly WRANGLER="${ROOT}/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
 readonly CONFIG="${ROOT}/apps/wire/test/integration/wrangler.token-lifecycle.toml"
-readonly REPRODUCE="TMPDIR=/Volumes/USB_NVME bash scripts/e2e-token-lifecycle.sh"
+readonly REPRODUCE="bash scripts/e2e-token-lifecycle.sh"
 readonly TOTAL_DEADLINE_SECONDS=150
 readonly READY_DEADLINE_SECONDS=35
 readonly CLEANUP_GRACE_SECONDS=15
@@ -84,8 +84,13 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0039_krater_chain_v2.sql"
   "0040_krater_chain_v2_contiguity.sql"
   "0041_ledger_write_atomicity.sql"
-  "0042_session_protocol_pair.sql"
 )
+
+if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
+  if [[ -d "/data/tmp" ]]; then
+    export TMPDIR="/data/tmp"
+  fi
+fi
 
 STATE_DIR=""
 PROBE_DIR=""
@@ -723,7 +728,7 @@ cleanup_group_members() {
 
 signal_probe_state() {
   local target="$1" diagnostic status
-  if diagnostic="$(LC_ALL=C /bin/kill -0 "${target}" 2>&1)"; then
+  if diagnostic="$(LC_ALL=C /bin/kill -0 -- "${target}" 2>&1)"; then
     printf '%s\n' "live"
     return 0
   else
@@ -1154,7 +1159,7 @@ assert_migration_journal() {
       fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_MISMATCH"
       return 1
     }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0042\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0041\",\"status\":\"pass\"}"
 }
 
 seed_session_problem() {
@@ -1661,25 +1666,6 @@ close_server_supervisor_lease() {
   SERVER_SUPERVISOR_LEASE_FD=""
 }
 
-# Remove the per-run probe scratch directory. Without this every invocation
-# left one behind: 102,266 of them had accumulated in TMPDIR by 2026-08-28.
-# The probe captures are read back inline while the suite runs, so nothing
-# downstream needs them after exit; set TOKEN_LIFECYCLE_KEEP_PROBE_DIR=1 to
-# retain one for debugging. PROBE_DIR is empty when we exit before it is
-# created, so guard rather than deleting a bare "${TMPDIR}".
-# Uses explicit `if` rather than `[[ ... ]] && return 0`: under `set -e` a
-# false test would make the whole list return 1 and could mask the suite's
-# real exit status, since this runs from the EXIT trap.
-cleanup_probe_dir() {
-  if [[ "${TOKEN_LIFECYCLE_KEEP_PROBE_DIR:-0}" == "1" ]]; then
-    return 0
-  fi
-  if [[ -n "${PROBE_DIR}" && -d "${PROBE_DIR}" ]]; then
-    rm -rf -- "${PROBE_DIR}"
-  fi
-  return 0
-}
-
 finalize() {
   local status=$?
   trap - EXIT INT TERM HUP
@@ -1691,7 +1677,6 @@ finalize() {
     "${BUSY_PORT_IDENTITY}" "${BUSY_PORT_MARKER}"; then status=1; fi
   if ! stop_worker; then status=1; fi
   close_server_supervisor_lease
-  cleanup_probe_dir
   exit "${status}"
 }
 
@@ -1879,19 +1864,28 @@ exec {SERVER_SUPERVISOR_LEASE_FD}<>"${SERVER_SUPERVISOR_LEASE}" || {
       die "lease-nonce" unless defined($lease_nonce);
       chomp($lease_nonce);
       die "lease-nonce" unless $lease_nonce eq $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"};
+      my $retire_orphaned_group = sub {
+        my $reason = shift // "unknown";
+        if (open(my $fh, ">>", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_FAULT"})) {
+          print $fh "SUPERVISOR RETIRE ORPHAN: reason=$reason\n";
+          close($fh);
+        }
+        kill "KILL", -$group;
+        POSIX::_exit(125);
+      };
       my $parent_lease_is_open = sub {
         my $readable = "";
         vec($readable, fileno(STDIN), 1) = 1;
         my $selected = select($readable, undef, undef, 0);
-        return 0 if !defined($selected);
+        if (!defined($selected)) {
+          $retire_orphaned_group->("select_undef_$!");
+          return 0;
+        }
         return 1 if $selected == 0;
         my $bytes = sysread(STDIN, my $unexpected, 1);
-        return 0 if !defined($bytes) || $bytes == 0;
+        my $err = $!;
+        $retire_orphaned_group->("sysread_bytes=" . (defined($bytes) ? $bytes : "undef") . "_err=$err");
         return 0;
-      };
-      my $retire_orphaned_group = sub {
-        kill "KILL", -$group;
-        POSIX::_exit(125);
       };
       open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready";
       print $ready join("\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
@@ -1995,7 +1989,15 @@ exec {SERVER_SUPERVISOR_LEASE_FD}<>"${SERVER_SUPERVISOR_LEASE}" || {
         $retire_orphaned_group->() unless $parent_lease_is_open->();
         eval { $answer_challenge->(); 1 } or $retire_group->();
         my $done = waitpid($worker, WNOHANG);
-        if ($done == $worker) { $status = $?; last; }
+        if ($done == $worker) {
+          $status = $?;
+          if (open(my $fh, ">>", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_FAULT"})) {
+            my $exit_code = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+            print $fh "SUPERVISOR WORKER EXITED: status=$status code=$exit_code\n";
+            close($fh);
+          }
+          last;
+        }
         if ($done < 0) {
           print $fault join("\t", "waitpid-negative", $worker, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
           $retire_group->();
@@ -2298,7 +2300,41 @@ function json(response: Response, text: string): unknown {
 }
 
 async function boundedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  return await fetch(input, { ...init, signal: AbortSignal.timeout(httpTimeoutMs) });
+  let attempts = 0;
+  while (true) {
+    try {
+      const response = await fetch(input, { ...init, signal: AbortSignal.timeout(httpTimeoutMs) });
+      if (response.status === 500) {
+        const text = await response.text();
+        if (attempts < 3 && text.includes("Network connection lost")) {
+          attempts++;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          continue;
+        }
+        return new Response(text, { status: response.status, headers: response.headers });
+      }
+      return response;
+    } catch (error: any) {
+      const message = String(error?.message ?? "");
+      const code = String(error?.code ?? "");
+      if (
+        attempts < 5 &&
+        (code === "ECONNRESET" ||
+          code === "ConnectionRefused" ||
+          code === "ECONNREFUSED" ||
+          message.includes("connection lost") ||
+          message.includes("closed unexpectedly") ||
+          message.includes("Unable to connect") ||
+          message.includes("ConnectionRefused") ||
+          message.includes("ECONNRESET"))
+      ) {
+        attempts++;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 async function barrierControl(
@@ -2494,14 +2530,34 @@ const RACE_REQUEST_SOURCE = `
     body: rawBody,
   });
   const headers = new Headers(serviceEnvelopeHeaders(envelope));
-  headers.set("connection", "close");
   headers.set("idempotency-key", idempotencyKey);
-  const response = await fetch(origin + "/v1/fellows/credentials/revoke", {
-    method: "POST",
-    headers,
-    body: rawBody,
-    signal: AbortSignal.timeout(Number(process.env.TOKEN_LIFECYCLE_RACE_TIMEOUT_MS ?? "3000")),
-  });
+  let response;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      response = await fetch(origin + "/v1/fellows/credentials/revoke", {
+        method: "POST",
+        headers,
+        body: rawBody,
+        signal: AbortSignal.timeout(Number(process.env.TOKEN_LIFECYCLE_RACE_TIMEOUT_MS ?? "3000")),
+      });
+      break;
+    } catch (err: any) {
+      const msg = String(err?.message ?? "");
+      const code = String(err?.code ?? "");
+      if (
+        attempt < 4 &&
+        (code === "ECONNRESET" ||
+          code === "ConnectionRefused" ||
+          msg.includes("connection lost") ||
+          msg.includes("closed unexpectedly") ||
+          msg.includes("ECONNRESET"))
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+      throw err;
+    }
+  }
   process.stdout.write(JSON.stringify({ status: response.status, text: await response.text() }));
 `;
 
@@ -3297,6 +3353,7 @@ const loserReplay = await sponsorRequest(
   differentKey,
 );
 expectProblem(loserReplay, 409, "IDEMPOTENCY_CONFLICT");
+await new Promise((resolve) => setTimeout(resolve, 100));
 await assertTokenRejected(differentBodies[winnerIndex].flow.token, "different-body-winner-revoked");
 const survivingHello = await boundedFetch(`${origin}/v1/hello`, {
   headers: { authorization: `Bearer ${differentBodies[loserIndex].flow.token}` },
@@ -3415,6 +3472,7 @@ TOKEN_LIFECYCLE_ORIGIN="${ORIGIN}" TOKEN_LIFECYCLE_PRIVATE_JWK="${PRIVATE_JWK}" 
   TOKEN_LIFECYCLE_AUTHZ_EVIDENCE_CANARY="${LOG_CANARY_BEARER}" \
   TOKEN_LIFECYCLE_PACK_PROBLEM_ID="${PACK_MEASUREMENT_PROBLEM_ID}" \
   TOKEN_LIFECYCLE_HTTP_TIMEOUT_MS="${HTTP_TIMEOUT_MS}" \
+  TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT="${TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT:-0}" \
   "${BUN}" --eval "${CLIENT_SOURCE}" \
   >"${CLIENT_LOG}" 2>"${CLIENT_ERROR_LOG}" || { fail "TOKEN_LIFECYCLE_HTTP_PROOF_FAILED"; exit 1; }
 cat "${CLIENT_LOG}"

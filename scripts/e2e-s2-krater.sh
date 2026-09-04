@@ -154,7 +154,6 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0039_krater_chain_v2.sql
   db/migrations/0040_krater_chain_v2_contiguity.sql
   db/migrations/0041_ledger_write_atomicity.sql
-  db/migrations/0042_session_protocol_pair.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -180,6 +179,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/screening.ts
   packages/contracts/src/sessions.ts
   packages/contracts/src/health.ts
+  packages/contracts/src/search.ts
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
   # executed ones, and a listed file whose own imports escape the set leaves the
@@ -198,6 +198,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/app.ts
   apps/wire/src/env.ts
   apps/wire/src/ledger-face.ts
+  apps/wire/src/discovery/discovery.ts
   apps/wire/src/auth/canonical.ts
   apps/wire/src/auth/envelope.ts
   apps/wire/src/auth/http.ts
@@ -234,6 +235,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/split/policy.ts
+  apps/wire/src/search/router.ts
+  apps/wire/src/search/markdown.ts
+  apps/wire/src/search/service.ts
   packages/contracts/src/public-schemas.ts
   packages/contracts/generated/enrollment.schema.json
   packages/contracts/generated/enrollment-capsule.schema.json
@@ -256,6 +260,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/protocol/assets/policy.md
   packages/protocol/assets/protocol.md
   packages/protocol/assets/skill.md
+  packages/protocol/assets/inoculation.md
   packages/render/package.json
   packages/render/src/index.ts
   packages/render/src/canonical.ts
@@ -317,7 +322,6 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0039_krater_chain_v2.sql
   0040_krater_chain_v2_contiguity.sql
   0041_ledger_write_atomicity.sql
-  0042_session_protocol_pair.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
@@ -5993,7 +5997,7 @@ run_s2_shell_regression_test() {
     write_s2_source_snapshot || return 1
     s2_artifact_writer_boundary_is_open || return 1
     [[ -f "${S2_SOURCE_SNAPSHOT_PATH}" && ! -L "${S2_SOURCE_SNAPSHOT_PATH}" ]] || return 1
-    snapshot_mode="$(LC_ALL=C stat -f '%Lp' "${S2_SOURCE_SNAPSHOT_PATH}" 2>/dev/null)" || return 1
+    snapshot_mode="$(LC_ALL=C stat -c '%a' "${S2_SOURCE_SNAPSHOT_PATH}" 2>/dev/null || LC_ALL=C stat -f '%Lp' "${S2_SOURCE_SNAPSHOT_PATH}" 2>/dev/null)" || return 1
     [[ "${snapshot_mode}" == "600" ]] || return 1
     snapshot_aggregate="$(S2_SNAPSHOT_READ_PATH="${S2_SOURCE_SNAPSHOT_PATH}" \
       s2_bounded_capture bun --eval '
@@ -7487,7 +7491,7 @@ run_s2_shell_regression_test() {
       esac
       [[ "${S2_START_SUPERVISOR_EXIT_STATUS}" == "${expected_status}" && \
         ! -e "${payload_started_file}" && ! -L "${payload_started_file}" && \
-        "$(stat -f '%Lp' "${status_file}.watchdog.startup")" == 600 ]] || return 1
+        "$(stat -c '%a' "${status_file}.watchdog.startup" 2>/dev/null || stat -f '%Lp' "${status_file}.watchdog.startup" 2>/dev/null)" == 600 ]] || return 1
       if [[ -n "${expected_phase}" ]]; then
         [[ "${S2_START_FAILURE_STAGE}" == "${expected_stage}" ]] || return 1
         startup_journal_last_phase \
@@ -7514,7 +7518,7 @@ run_s2_shell_regression_test() {
       sleep 0.05
     done
     [[ ! -L "${payload_started_file}" && \
-      "$(stat -f '%z' "${payload_started_file}")" == 7 ]] || return 1
+      "$(stat -c '%s' "${payload_started_file}" 2>/dev/null || stat -f '%z' "${payload_started_file}" 2>/dev/null)" == 7 ]] || return 1
     stop_pinned_supervisor \
       "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
       "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \

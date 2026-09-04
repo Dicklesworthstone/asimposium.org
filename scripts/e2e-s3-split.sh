@@ -1659,8 +1659,8 @@ readonly CONTROLLER_PGID
 read_server_resource_port() {
   local mode size port extra
   [[ -f "${SERVER_RESOURCE_PORT_FILE}" && ! -L "${SERVER_RESOURCE_PORT_FILE}" ]] || return 1
-  mode="$(stat -f '%Lp' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
-  size="$(stat -f '%z' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  mode="$(stat -c '%a' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null || stat -f '%Lp' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  size="$(stat -c '%s' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null || stat -f '%z' "${SERVER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
   [[ "${mode}" == "600" && "${size}" =~ ^[0-9]+$ ]] || return 1
   {
     IFS= read -r port || return 1
@@ -1830,8 +1830,8 @@ run_kill_dispatch_signal_window_self_test() {
 read_checker_resource_port() {
   local mode size port extra
   [[ -f "${CHECKER_RESOURCE_PORT_FILE}" && ! -L "${CHECKER_RESOURCE_PORT_FILE}" ]] || return 1
-  mode="$(stat -f '%Lp' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
-  size="$(stat -f '%z' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  mode="$(stat -c '%a' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null || stat -f '%Lp' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
+  size="$(stat -c '%s' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null || stat -f '%z' "${CHECKER_RESOURCE_PORT_FILE}" 2>/dev/null)" || return 1
   [[ "${mode}" == "600" && "${size}" =~ ^[0-9]+$ ]] || return 1
   {
     IFS= read -r port || return 1

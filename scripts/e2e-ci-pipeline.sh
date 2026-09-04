@@ -579,15 +579,17 @@ def finish_after_group(status: int) -> None:
 
 def group_absent() -> bool:
     try:
-        # Reap an exited group leader before probing the process group. A live
-        # ignoring descendant keeps the group addressable after that reap.
+        # Reap an exited group leader and any adopted children before probing
+        # the process group. Dead descendants adopted by the subreaper remain
+        # addressable as zombies in the process group until reaped.
         child.poll()
+        reap_exited_children()
         os.killpg(child.pid, 0)
+        return False
     except ProcessLookupError:
         return True
     except OSError:
         return False
-    return False
 
 def wait_for_group_absence() -> bool:
     deadline = time.monotonic() + termination_grace_seconds

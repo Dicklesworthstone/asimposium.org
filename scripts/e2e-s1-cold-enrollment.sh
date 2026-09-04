@@ -2485,7 +2485,6 @@ if (!first || typeof first !== "object" || Array.isArray(first) || first.action 
 const allowed = [
   new URL("/protocol.md", base).href,
   new URL("/skill.md", base).href,
-  new URL("/inoculation.md", base).href,
 ];
 if (!allowed.includes(first.url)) process.exit(3);
 process.stdout.write(first.url);
@@ -3073,7 +3072,8 @@ self_test_cleanup_terminal_order() {
 # A state directory for the self-test modes. Retained like every other one.
 lifecycle_state_dir() {
   local suffix="$1"
-  STATE_DIR="$(mktemp -d -t "asimposium-s1-${suffix}")"
+  # Trailing X's are required by GNU mktemp; BSD mktemp accepts them too.
+  STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-s1-${suffix}.XXXXXXXX")"
   [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || failed "LIFECYCLE_STATE_DIR_INVALID"
   PHASE_LOG="$STATE_DIR/phases.log"
   FAULT_ONCE_MARKER="$STATE_DIR/fault-once-consumed"
@@ -4255,7 +4255,8 @@ run_local_d1() {
   # ends the run here — before mktemp, before migrations, before any child.
   resolve_port
   local_port="$RESOLVED_PORT"
-  STATE_DIR="$(mktemp -d -t asimposium-s1-enrollment)"
+  # Trailing X's are required by GNU mktemp; BSD mktemp accepts them too.
+  STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-s1-enrollment.XXXXXXXX")"
   # The state directory is intentionally retained on every exit path. It holds
   # local workerd state and phase logs; AGENTS.md forbids cleanup-by-deletion.
   [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || failed "LOCAL_PERSIST_DIR_INVALID"

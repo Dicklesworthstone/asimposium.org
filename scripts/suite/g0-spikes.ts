@@ -399,28 +399,29 @@ if [ "$3" = "pid-namespace" ]; then
   # a fail-closed record rather than an unobserved run.
   [ "$$" -eq 1 ] || exit 125
   namespace_scan=unknown
-  namespace_survivors=$(
-    count=0
-    saw_init=0
-    for process_dir in /proc/[0-9]*; do
-      [ -d "$process_dir" ] || continue
-      process_pid=\${process_dir##*/}
-      process_state=
-      while IFS=$'\\t' read -r key value; do
-        [ "$key" = "State:" ] && process_state=\${value%% *}
-      done < "$process_dir/status" || exit 1
-      [ -n "$process_state" ] || exit 1
-      if [ "$process_pid" = 1 ]; then
-        saw_init=1
-        continue
-      fi
-      case "$process_state" in Z*) continue ;; esac
-      count=$((count + 1))
-    done
-    [ "$saw_init" = 1 ] || exit 1
-    printf '%s' "$count"
-  ) || namespace_survivors=
-  if [ -n "$namespace_survivors" ]; then namespace_scan=ok; fi
+  namespace_survivors=
+  count=0
+  saw_init=0
+  for process_dir in /proc/[0-9]*; do
+    [ -d "$process_dir" ] || continue
+    process_pid=\${process_dir##*/}
+    [ -f "$process_dir/status" ] || continue
+    process_state=
+    while IFS=$'\\t' read -r key value; do
+      [ "$key" = "State:" ] && process_state=\${value%% *}
+    done < "$process_dir/status"
+    [ -n "$process_state" ] || continue
+    if [ "$process_pid" = "$$" ]; then
+      saw_init=1
+      continue
+    fi
+    case "$process_state" in Z*) continue ;; esac
+    count=$((count + 1))
+  done
+  if [ "$saw_init" = 1 ]; then
+    namespace_scan=ok
+    namespace_survivors="$count"
+  fi
 fi
 printf 'G0SUP status=%s signal=%s namespace_scan=%s namespace_survivors=%s\\n' \\
   "$status" "$signal" "$namespace_scan" "$namespace_survivors" >&3
@@ -588,8 +589,7 @@ while IFS=$'\\t' read -r key value; do
   [ "$key" = "State:" ] && probe_state=\${value%% *}
 done < /proc/1/status
 [ -n "$probe_state" ]
-probe_cmdline=
-IFS= read -r -d '' probe_cmdline < /proc/1/cmdline || true
+probe_cmdline="$(tr '\\0' ' ' < /proc/1/cmdline)"
 case "$probe_cmdline" in *g0-containment-probe*) ;; *) exit 1 ;; esac
 sleep 5 &
 probe_target=$!
