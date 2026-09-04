@@ -815,7 +815,14 @@ function settleCost(
 
 function isRetryableChainConflict(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /KRATER_CHAIN_HEAD_MISMATCH|SQLITE_BUSY|database is locked/i.test(message);
+  return (
+    /KRATER_CHAIN_HEAD_MISMATCH|SQLITE_BUSY|database is locked/i.test(message) ||
+    /UNIQUE constraint failed: (?:claims|events|claim_projections|integrity_checkpoints)\./i.test(
+      message,
+    ) ||
+    (/SQLITE_CONSTRAINT/i.test(message) &&
+      /(?:claims|events|claim_projections|integrity_checkpoints)/i.test(message))
+  );
 }
 
 async function readProblemHead(
@@ -1176,6 +1183,11 @@ export async function backfillKraterIntegrity(
     );
   }
   const publicSeq = requireStoredSequence(rawHead.public_seq, "problem cursor", true);
+  if (publicSeq >= Number.MAX_SAFE_INTEGER) {
+    throw new KraterSequenceExhaustedError(
+      "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+    );
+  }
   const storedBackfill = await readIntegrityBackfill(db, problemId, cost);
   const emptyHeadHasExactGenesis =
     publicSeq !== 0 || rawHead.chain_digest === (await genesisChainDigest(problemId));
@@ -1736,7 +1748,11 @@ export async function writeClaim(
       // but retrying can never make that loser own the replay row. True event
       // chain races surface one of the explicit retryable SQLite/trigger
       // errors; only those should consume the bounded retry budget here.
-      if (retryCount < MAX_CHAIN_RETRIES && isRetryableChainConflict(error)) {
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (
+        retryCount < MAX_CHAIN_RETRIES &&
+        (isRetryableChainConflict(error) || latestHead.chain_digest !== before.chain_digest)
+      ) {
         retryCount += 1;
         continue;
       }
@@ -2579,7 +2595,11 @@ export async function writeLedgerEvent(
         ),
       ]);
     } catch (error) {
-      if (retryCount < MAX_CHAIN_RETRIES && isRetryableChainConflict(error)) {
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (
+        retryCount < MAX_CHAIN_RETRIES &&
+        (isRetryableChainConflict(error) || latestHead.chain_digest !== before.chain_digest)
+      ) {
         retryCount += 1;
         continue;
       }
@@ -3406,7 +3426,14 @@ export async function readIntegrityState(
       ).first<CheckpointRow>(),
     ]);
     if (head.public_seq > 0 && checkpoint === null) {
-      backfillRequired("a nonempty v2 chain must have a current-version checkpoint.");
+      const hasEvents = await statement(
+        db,
+        "SELECT 1 FROM events WHERE problem_id = ? LIMIT 1",
+        problemId,
+      ).first();
+      if (hasEvents !== null) {
+        backfillRequired("a nonempty v2 chain must have a current-version checkpoint.");
+      }
     }
     const validatedCheckpoint =
       checkpoint === null

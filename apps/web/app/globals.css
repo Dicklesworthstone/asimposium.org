@@ -918,7 +918,7 @@
   margin: 1rem 0 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(11rem, 100%), 1fr));
   gap: 0.6rem;
 }
 
@@ -1132,7 +1132,7 @@
 /* ── Discovery, Areas & Fellow Cards (W8.2) ───────────── */
 .areas-taxonomy-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr));
   gap: 1rem;
   margin: 1.2rem 0;
 }
@@ -1221,7 +1221,7 @@
 /* ── Fellow Card & Calibration (Fable §9.5) ───────────── */
 .fellow-info-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
   gap: 0.8rem;
   margin: 1rem 0;
 }
@@ -1259,7 +1259,7 @@
 
 .calibration-stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(11rem, 100%), 1fr));
   gap: 0.8rem;
   margin: 1.2rem 0;
 }
@@ -1348,6 +1348,31 @@
   background: var(--color-paper);
   border-radius: 2px;
   font-family: ui-monospace, monospace;
+}
+
+.event-type-badge.event-claim-promoted {
+  border-color: var(--color-clay);
+  color: var(--color-clay);
+}
+
+.event-type-badge.event-review-published {
+  border-color: var(--color-muted);
+  color: var(--color-ink);
+}
+
+.event-type-badge.event-dead-end-recorded {
+  border-color: var(--color-line);
+  color: var(--color-muted);
+}
+
+.event-type-badge.event-hypothesis-killed {
+  border-color: var(--color-clay);
+  color: var(--color-clay);
+}
+
+.event-type-badge.event-evidence-filed {
+  border-color: var(--color-line);
+  color: var(--color-ink2);
 }
 
 @media print {

@@ -257,6 +257,16 @@ const LEGACY_PLANT_MAX_EVENTS = 2_048;
 const LEGACY_PLANT_CHUNK_ROWS = 10;
 
 const CHAIN_HEAD_TRIGGER = "events_chain_head_before_insert";
+const CHAIN_V2_BEFORE_TRIGGER = "events_chain_v2_before_insert";
+const CHAIN_V2_AFTER_TRIGGER = "events_chain_v2_after_insert";
+
+async function readOptionalTriggerSql(db: D1Database, name: string): Promise<string | null> {
+  const row = await db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+    .bind(name)
+    .first<{ sql: string | null }>();
+  return typeof row?.sql === "string" && row.sql.length > 0 ? row.sql : null;
+}
 
 /**
  * The trigger's own definition, read back from the schema rather than copied.
@@ -307,6 +317,8 @@ async function plantLegacyProblemForHarness(
 
   // Read before dropping: the restore below uses the schema's own text, never a copy.
   const triggerSql = await chainHeadTriggerSql(db);
+  const v2BeforeSql = await readOptionalTriggerSql(db, CHAIN_V2_BEFORE_TRIGGER);
+  const v2AfterSql = await readOptionalTriggerSql(db, CHAIN_V2_AFTER_TRIGGER);
 
   // Appending starts after the log that is already there, so seq stays contiguous.
   let base = 0;
@@ -333,6 +345,12 @@ async function plantLegacyProblemForHarness(
   }
 
   const statements: D1PreparedStatement[] = [db.prepare(`DROP TRIGGER ${CHAIN_HEAD_TRIGGER}`)];
+  if (v2BeforeSql !== null) {
+    statements.push(db.prepare(`DROP TRIGGER ${CHAIN_V2_BEFORE_TRIGGER}`));
+  }
+  if (v2AfterSql !== null) {
+    statements.push(db.prepare(`DROP TRIGGER ${CHAIN_V2_AFTER_TRIGGER}`));
+  }
   statements.push(
     append
       ? db
@@ -387,12 +405,34 @@ async function plantLegacyProblemForHarness(
       .bind(problemId, base + eventCount),
     db.prepare(triggerSql),
   );
+  if (v2BeforeSql !== null) {
+    statements.push(db.prepare(v2BeforeSql));
+  }
+  if (v2AfterSql !== null) {
+    statements.push(db.prepare(v2AfterSql));
+  }
 
   await db.batch(statements);
 
   // The guard must be back before this route answers: a fixture that leaves the schema
   // unprotected would make every later scenario in the run meaningless.
   await chainHeadTriggerSql(db);
+  if (v2BeforeSql !== null) {
+    const check = await readOptionalTriggerSql(db, CHAIN_V2_BEFORE_TRIGGER);
+    if (check === null) {
+      throw new KraterValidationError(
+        `${CHAIN_V2_BEFORE_TRIGGER} is absent after legacy plant restore.`,
+      );
+    }
+  }
+  if (v2AfterSql !== null) {
+    const check = await readOptionalTriggerSql(db, CHAIN_V2_AFTER_TRIGGER);
+    if (check === null) {
+      throw new KraterValidationError(
+        `${CHAIN_V2_AFTER_TRIGGER} is absent after legacy plant restore.`,
+      );
+    }
+  }
   return { planted: eventCount, statements: statements.length };
 }
 
@@ -558,24 +598,49 @@ async function seedUnsafePersistedSequenceForHarness(
   const eventId = `E-${problemId}-unsafe-sequence`;
   const claimId = `C-${problemId}-unsafe-sequence`;
   const chainDigest = "f".repeat(64);
-  const results = await db.batch([
-    db
+  await db.prepare("DROP TRIGGER IF EXISTS event_chain_v2_contiguous_before_insert").run();
+  try {
+    const results = await db.batch([
+      db
+        .prepare(
+          `UPDATE problems SET public_seq = ${UNSAFE_D1_SEQUENCE_LITERAL}, chain_digest = ? WHERE id = ?`,
+        )
+        .bind(chainDigest, problemId),
+      db
+        .prepare(
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+              row_digest, chain_digest, created_at)
+           SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?
+           FROM problems p WHERE p.id = ?`,
+        )
+        .bind(eventId, claimId, "e".repeat(64), "d".repeat(64), chainDigest, createdAt, problemId),
+    ]);
+    if (
+      results[0]?.meta.changes !== 1 ||
+      (results[1]?.meta.changes !== 1 && results[1]?.meta.changes !== 2)
+    ) {
+      throw new KraterValidationError(
+        "unsafe sequence fixture could not persist its exact D1 rows.",
+      );
+    }
+  } finally {
+    await db
       .prepare(
-        `UPDATE problems SET public_seq = ${UNSAFE_D1_SEQUENCE_LITERAL}, chain_digest = ? WHERE id = ?`,
+        `CREATE TRIGGER IF NOT EXISTS event_chain_v2_contiguous_before_insert
+         BEFORE INSERT ON event_chain_v2
+         WHEN NEW.seq > 1
+           AND NOT EXISTS (
+             SELECT 1 FROM event_chain_v2 prior
+             WHERE prior.problem_id = NEW.problem_id
+               AND prior.seq = NEW.seq - 1
+               AND prior.chain_version = 2
+           )
+         BEGIN
+           SELECT RAISE(ABORT, 'KRATER_CHAIN_V2_PREDECESSOR_MISSING');
+         END;`,
       )
-      .bind(chainDigest, problemId),
-    db
-      .prepare(
-        `INSERT INTO events
-           (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
-            row_digest, chain_digest, created_at)
-         SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?
-         FROM problems p WHERE p.id = ?`,
-      )
-      .bind(eventId, claimId, "e".repeat(64), "d".repeat(64), chainDigest, createdAt, problemId),
-  ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
-    throw new KraterValidationError("unsafe sequence fixture could not persist its exact D1 rows.");
+      .run();
   }
 }
 

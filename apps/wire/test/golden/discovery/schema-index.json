@@ -27,10 +27,22 @@
       "body_bytes": 9696
     },
     {
+      "id": "moves",
+      "url": "https://a.asimposium.org/schemas/moves.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 3621
+    },
+    {
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
       "body_bytes": 35818
+    },
+    {
+      "id": "rubrics",
+      "url": "https://a.asimposium.org/schemas/rubrics.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 2694
     },
     {
       "id": "screening",
