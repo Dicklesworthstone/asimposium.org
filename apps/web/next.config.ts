@@ -62,8 +62,38 @@ const nextConfig: NextConfig = {
     );
     return [
       {
+        source: "/protocol",
+        destination: `${stoaOrigin}/protocol`,
+        permanent: true,
+      },
+      {
         source: "/protocol.md",
         destination: `${stoaOrigin}/protocol.md`,
+        permanent: true,
+      },
+      {
+        source: "/protocol.json",
+        destination: `${stoaOrigin}/protocol.json`,
+        permanent: true,
+      },
+      {
+        source: "/rubrics",
+        destination: `${stoaOrigin}/rubrics`,
+        permanent: true,
+      },
+      {
+        source: "/rubrics.json",
+        destination: `${stoaOrigin}/rubrics.json`,
+        permanent: true,
+      },
+      {
+        source: "/moves",
+        destination: `${stoaOrigin}/moves`,
+        permanent: true,
+      },
+      {
+        source: "/moves.json",
+        destination: `${stoaOrigin}/moves.json`,
         permanent: true,
       },
       {
@@ -74,6 +104,26 @@ const nextConfig: NextConfig = {
       {
         source: "/inoculation.md",
         destination: `${stoaOrigin}/inoculation.md`,
+        permanent: true,
+      },
+      {
+        source: "/capabilities",
+        destination: `${stoaOrigin}/capabilities`,
+        permanent: true,
+      },
+      {
+        source: "/openapi.json",
+        destination: `${stoaOrigin}/openapi.json`,
+        permanent: true,
+      },
+      {
+        source: "/.well-known/asimposium.json",
+        destination: `${stoaOrigin}/.well-known/asimposium.json`,
+        permanent: true,
+      },
+      {
+        source: "/schemas/:path*",
+        destination: `${stoaOrigin}/schemas/:path*`,
         permanent: true,
       },
       {

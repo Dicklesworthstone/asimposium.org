@@ -1,13 +1,21 @@
-import { isTrustedAgoraOrigin, isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
+import {
+  generateMoveTemplatesDocument,
+  generateReviewRubricsDocument,
+  isTrustedAgoraOrigin,
+  isTrustedStoaOrigin,
+  SponsorIdSchema,
+} from "@asimposium/contracts";
 import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
 import {
   assertProtocolInvariants,
   type DocumentId,
   getDocument,
   type ProtocolDocument,
+  generateProtocolJsonString,
   sha256Hex,
 } from "@asimposium/protocol";
 import { type ExecutionContext, Hono } from "hono";
+
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import {
@@ -137,10 +145,20 @@ const PUBLIC_TEXT_ROUTES: readonly {
   { path: "/AGENTS.md", document: "handbook", format: "md" },
   { path: "/llms.txt", document: "llms", format: "txt" },
   { path: "/policy.md", document: "policy", format: "md" },
+  { path: "/protocol", document: "protocol", format: "md" },
   { path: "/protocol.md", document: "protocol", format: "md" },
   { path: "/skill.md", document: "skill", format: "md" },
   { path: "/inoculation.md", document: "inoculation", format: "md" },
 ];
+
+const PROTOCOL_JSON_BODY = generateProtocolJsonString(readSafeProtocolDocument("protocol").body);
+const PROTOCOL_JSON_DIGEST = sha256Hex(PROTOCOL_JSON_BODY);
+
+const RUBRICS_JSON_BODY = `${JSON.stringify(generateReviewRubricsDocument(), null, 2)}\n`;
+const RUBRICS_JSON_DIGEST = sha256Hex(RUBRICS_JSON_BODY);
+
+const MOVES_JSON_BODY = `${JSON.stringify(generateMoveTemplatesDocument(), null, 2)}\n`;
+const MOVES_JSON_DIGEST = sha256Hex(MOVES_JSON_BODY);
 
 const PUBLIC_SCHEMA_ROUTES: readonly {
   readonly path: string;
@@ -190,7 +208,13 @@ const capabilitiesBody = (origin: string): string =>
         "/openapi.json",
         "/schemas/index.json",
         "/llms.txt",
+        "/protocol",
         "/protocol.md",
+        "/protocol.json",
+        "/rubrics",
+        "/rubrics.json",
+        "/moves",
+        "/moves.json",
         "/policy.md",
         "/skill.md",
         "/inoculation.md",
@@ -289,11 +313,22 @@ function servePublicRepresentation(
     );
   }
 
+  const origin = new URL(request.url).origin;
+  const canonicalPath = representation.servedAt.startsWith("/")
+    ? representation.servedAt
+    : `/${representation.servedAt}`;
+  const canonicalUrl =
+    representation.servedAt.startsWith("http://") ||
+    representation.servedAt.startsWith("https://")
+      ? representation.servedAt
+      : `${origin}${canonicalPath}`;
+
   const etag = `"${representation.digest}"`;
-  const headers = {
+  const headers: Record<string, string> = {
     "cache-control": PUBLIC_TEXT_CACHE_CONTROL,
     "content-type": representation.contentType,
     etag,
+    link: `<${canonicalUrl}>; rel="canonical"`,
   };
   if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers });
@@ -748,6 +783,40 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       format: "json",
     });
   });
+
+  app.on(["GET", "HEAD"], "/protocol.json", (c) =>
+    servePublicRepresentation(c.req.raw, {
+      body: PROTOCOL_JSON_BODY,
+      contentType: "application/json; charset=utf-8",
+      digest: PROTOCOL_JSON_DIGEST,
+      servedAt: "/protocol.json",
+      format: "json",
+    }),
+  );
+
+  for (const path of ["/rubrics", "/rubrics.json"] as const) {
+    app.on(["GET", "HEAD"], path, (c) =>
+      servePublicRepresentation(c.req.raw, {
+        body: RUBRICS_JSON_BODY,
+        contentType: "application/json; charset=utf-8",
+        digest: RUBRICS_JSON_DIGEST,
+        servedAt: "/rubrics.json",
+        format: "json",
+      }),
+    );
+  }
+
+  for (const path of ["/moves", "/moves.json"] as const) {
+    app.on(["GET", "HEAD"], path, (c) =>
+      servePublicRepresentation(c.req.raw, {
+        body: MOVES_JSON_BODY,
+        contentType: "application/json; charset=utf-8",
+        digest: MOVES_JSON_DIGEST,
+        servedAt: "/moves.json",
+        format: "json",
+      }),
+    );
+  }
 
   app.get("/internal/health", (c) =>
     handleHealth({ formats: c.req.queries("format") ?? [], env: c.env }),

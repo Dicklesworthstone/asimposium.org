@@ -2,14 +2,17 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  MoveTemplatesDocSchema,
   ProblemDocumentSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
   ProblemsIndexResponseSchema,
+  ReviewRubricsDocSchema,
 } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import {
   assertServedTextSafe,
+  generateProtocolJsonString,
   getDocument,
   listDocuments,
   type ProtocolDocument,
@@ -516,7 +519,13 @@ describe("face wire format", () => {
       "/openapi.json",
       "/schemas/index.json",
       "/llms.txt",
+      "/protocol",
       "/protocol.md",
+      "/protocol.json",
+      "/rubrics",
+      "/rubrics.json",
+      "/moves",
+      "/moves.json",
       "/policy.md",
       "/skill.md",
       "/inoculation.md",
@@ -1529,6 +1538,87 @@ describe("face wire format", () => {
     expect(response.bodyText).toBe(body);
   });
 
+  test("GET /protocol serves the canonical protocol GFM alias with canonical link", async () => {
+    const protocol = getDocument("protocol");
+    const response = await callWorker("/protocol", {});
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe(protocol.media_type);
+    expect(response.headers.get("etag")).toBe(`"${protocol.digest}"`);
+    expect(response.headers.get("link")).toBe("<https://a.asimposium.org/protocol.md>; rel=\"canonical\"");
+    expect(response.bodyText).toBe(protocol.body);
+
+    const formatted = await callWorker("/protocol?format=md", {});
+    expect(formatted.status).toBe(200);
+    expect(formatted.bodyText).toBe(protocol.body);
+
+    const typo = await callWorker("/protocol?format=json", {});
+    expect(typo.status).toBe(400);
+    expect(typo.body).toMatchObject({ code: "UNKNOWN_FORMAT", allowed: ["md"] });
+  });
+
+  test("GET /protocol.json serves the versioned rule and preamble structure as JSON", async () => {
+    const protocol = getDocument("protocol");
+    const expectedJson = generateProtocolJsonString(protocol.body);
+    const response = await callWorker("/protocol.json", {});
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe("application/json; charset=utf-8");
+    expect(response.headers.get("etag")).toBe(`"${sha256Hex(expectedJson)}"`);
+    expect(response.headers.get("link")).toBe("<https://a.asimposium.org/protocol.json>; rel=\"canonical\"");
+    expect(response.bodyText).toBe(expectedJson);
+
+    const parsed = JSON.parse(response.bodyText);
+    expect(parsed.version).toBe("0.1.0-draft");
+    expect(parsed.preamble.length).toBeGreaterThan(50);
+    expect(parsed.rules.hard).toHaveLength(12);
+    expect(parsed.rules.hard[0].id).toBe(1);
+    expect(parsed.rules.soft.length).toBeGreaterThan(0);
+
+    const typo = await callWorker("/protocol.json?format=md", {});
+    expect(typo.status).toBe(400);
+    expect(typo.body).toMatchObject({ code: "UNKNOWN_FORMAT", allowed: ["json"] });
+  });
+
+  test("GET /rubrics and /rubrics.json serve the review rubric library as JSON", async () => {
+    for (const path of ["/rubrics", "/rubrics.json"] as const) {
+      const response = await callWorker(path, {});
+      expect(response.status).toBe(200);
+      expect(response.contentType).toBe("application/json; charset=utf-8");
+      expect(response.headers.get("link")).toBe("<https://a.asimposium.org/rubrics.json>; rel=\"canonical\"");
+      const parsed = JSON.parse(response.bodyText);
+      const validated = ReviewRubricsDocSchema.safeParse(parsed);
+      expect(validated.success).toBe(true);
+      expect(Object.keys(parsed.domains).sort()).toEqual([
+        "computational",
+        "literature",
+        "math-proof",
+        "physics",
+      ]);
+    }
+
+    const typo = await callWorker("/rubrics.json?format=yaml", {});
+    expect(typo.status).toBe(400);
+    expect(typo.body).toMatchObject({ code: "UNKNOWN_FORMAT", allowed: ["json"] });
+  });
+
+  test("GET /moves and /moves.json serve all 18 move templates as JSON", async () => {
+    for (const path of ["/moves", "/moves.json"] as const) {
+      const response = await callWorker(path, {});
+      expect(response.status).toBe(200);
+      expect(response.contentType).toBe("application/json; charset=utf-8");
+      expect(response.headers.get("link")).toBe("<https://a.asimposium.org/moves.json>; rel=\"canonical\"");
+      const parsed = JSON.parse(response.bodyText);
+      const validated = MoveTemplatesDocSchema.safeParse(parsed);
+      expect(validated.success).toBe(true);
+      expect(Object.keys(parsed.moves)).toHaveLength(18);
+      expect(parsed.moves["state-claim"]).toBeDefined();
+      expect(parsed.moves["idle-close"]).toBeDefined();
+    }
+
+    const typo = await callWorker("/moves.json?format=txt", {});
+    expect(typo.status).toBe(400);
+    expect(typo.body).toMatchObject({ code: "UNKNOWN_FORMAT", allowed: ["json"] });
+  });
+
   test.each(PUBLIC_TEXT_DOCUMENTS)(
     "GET $served_at serves the exact registered $id bytes without D1",
     async (document) => {
@@ -1543,6 +1633,9 @@ describe("face wire format", () => {
         expect(response.contentType).toBe(document.media_type);
         expect(response.headers.get("etag")).toBe(`"${document.digest}"`);
         expect(response.headers.get("cache-control")).toContain("max-age=60");
+        expect(response.headers.get("link")).toBe(
+          `<https://a.asimposium.org${document.served_at}>; rel="canonical"`,
+        );
         expect(response.bodyText).toBe(document.body);
       }
     },
@@ -1555,6 +1648,9 @@ describe("face wire format", () => {
       expect(res.status).toBe(200);
       expect(res.contentType).toBe(document.media_type);
       expect(res.headers.get("etag")).toBe(`"${sha256Hex(document.body)}"`);
+      expect(res.headers.get("link")).toBe(
+        `<https://a.asimposium.org${document.served_at}>; rel="canonical"`,
+      );
       expect(res.bodyText).toBe(document.body);
     },
   );
