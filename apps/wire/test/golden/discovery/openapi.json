@@ -22,7 +22,7 @@
           "200": {
             "description": "Success.",
             "content": {
-              "text/markdown; charset=utf-8": {}
+              "application/json": {}
             }
           },
           "default": {
@@ -190,7 +190,7 @@
           "200": {
             "description": "Success.",
             "content": {
-              "text/plain; charset=utf-8": {}
+              "application/json": {}
             }
           },
           "default": {
@@ -335,54 +335,6 @@
             "description": "Success.",
             "content": {
               "text/markdown; charset=utf-8": {}
-            }
-          },
-          "default": {
-            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
-            "content": {
-              "application/problem+json": {
-                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
-              }
-            }
-          }
-        }
-      }
-    },
-    "/protocol": {
-      "get": {
-        "summary": "The Symposium Protocol (Markdown face without suffix).",
-        "tags": [
-          "public-reads"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success.",
-            "content": {
-              "text/markdown; charset=utf-8": {}
-            }
-          },
-          "default": {
-            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
-            "content": {
-              "application/problem+json": {
-                "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
-              }
-            }
-          }
-        }
-      }
-    },
-    "/protocol.json": {
-      "get": {
-        "summary": "The Symposium Protocol as versioned preamble and rules JSON.",
-        "tags": [
-          "public-reads"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success.",
-            "content": {
-              "application/json": {}
             }
           },
           "default": {

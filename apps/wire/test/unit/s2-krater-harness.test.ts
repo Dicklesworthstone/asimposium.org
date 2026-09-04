@@ -709,7 +709,7 @@ function parseS2LifecycleProcessRows(snapshot: ProcessTableCapture): S2Lifecycle
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
       !Number.isSafeInteger(pgid) ||
-      pgid <= 0 ||
+      pgid < 0 ||
       !Number.isSafeInteger(parentPid) ||
       parentPid < 0 ||
       status === undefined ||

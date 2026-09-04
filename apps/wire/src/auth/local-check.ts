@@ -121,21 +121,40 @@ const origin = validatedOrigin === undefined ? undefined : validatedOrigin.origi
  * caused it.
  */
 export async function localFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  return await fetch(url, {
-    ...init,
-    // Both of these are set *after* the spread so a caller cannot override
-    // them, deliberately or by copying an init object around.
-    //
-    // `redirect: "manual"` is a proof-integrity control, not a nicety. The
-    // default is "follow", so a Worker answering 302 would make this checker
-    // re-send a *signed service envelope* to whatever Location named — a second
-    // origin, off loopback, carrying real credentials — and the run would still
-    // report the assertion as passing against a response it never validated the
-    // provenance of. Manual redirects keep every request on the origin this
-    // harness validated.
-    redirect: "manual",
-    signal: AbortSignal.timeout(LOCAL_FETCH_TIMEOUT_MS),
-  });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      return await fetch(url, {
+        ...init,
+        // Both of these are set *after* the spread so a caller cannot override
+        // them, deliberately or by copying an init object around.
+        //
+        // `redirect: "manual"` is a proof-integrity control, not a nicety. The
+        // default is "follow", so a Worker answering 302 would make this checker
+        // re-send a *signed service envelope* to whatever Location named — a second
+        // origin, off loopback, carrying real credentials — and the run would still
+        // report the assertion as passing against a response it never validated the
+        // provenance of. Manual redirects keep every request on the origin this
+        // harness validated.
+        redirect: "manual",
+        signal: AbortSignal.timeout(LOCAL_FETCH_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: string })?.code;
+      if (
+        code === "ECONNRESET" ||
+        message.includes("closed unexpectedly") ||
+        message.includes("connection lost")
+      ) {
+        await Bun.sleep(25 * (attempt + 1));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -616,6 +635,7 @@ async function main(): Promise<void> {
       ACTION,
     );
     finish();
+    await Bun.sleep(250);
     return;
   }
 

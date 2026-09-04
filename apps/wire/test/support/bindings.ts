@@ -1,4 +1,4 @@
-import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
+import type { D1Database, ExecutionContext, R2Bucket } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env";
 import worker from "../../src/index";
 import type { KraterOutboxNamespace } from "../../src/krater/outbox-do";
@@ -68,14 +68,12 @@ export function boundEnv(overrides: Partial<Record<keyof Env, unknown>> = {}): E
 }
 
 /** An `ExecutionContext` stand-in; the scaffold schedules no deferred work. */
-export function executionContext(): {
-  waitUntil: (p: Promise<unknown>) => void;
-  passThroughOnException: () => void;
-} {
+export function executionContext(): ExecutionContext {
   return {
     waitUntil: () => undefined,
     passThroughOnException: () => undefined,
-  };
+    props: {},
+  } as unknown as ExecutionContext;
 }
 
 export interface WorkerCall {

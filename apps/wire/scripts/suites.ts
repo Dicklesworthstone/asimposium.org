@@ -26,9 +26,7 @@
  * declared but deliberately blocked on named future work.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { containsCredentialShape } from "@asimposium/contracts/diagnostic-safety";
 
 const PACKAGE_ROOT = resolve(import.meta.dir, "..");
@@ -149,35 +147,17 @@ async function runBunTests(
   dirs: readonly string[],
 ): Promise<{ exitCode: number; duration: number }> {
   const started = performance.now();
-  // Run-scoped TMPDIR. The suites create their scratch with
-  // `mkdtempSync(join(tmpdir(), ...))` in ~77 places under a dozen different
-  // prefixes, and nothing removed any of it: over 100,000 directories had
-  // accumulated in TMPDIR by 2026-08-28. Pointing the child's TMPDIR at one
-  // run-scoped root means a single removal reaps every suite's scratch —
-  // including call sites added later, which is why this lives here rather
-  // than in 77 individual afterEach hooks. The prefix is deliberately short:
-  // these directory names are already long, and macOS caps a unix socket
-  // path at 104 bytes, so the nesting must not eat that budget.
-  const tmpRoot = mkdtempSync(join(tmpdir(), "asm-run-"));
-  try {
-    // stdio is inherited: child output is never suppressed, so a cited green
-    // result always has the run behind it in the same log.
-    const child = Bun.spawn({
-      // Bun 1.3.8 can empty subprocess pipes in this workspace unless this
-      // harmless device filter is present. The real suite roots follow it.
-      cmd: ["bun", "test", "/dev/null", "--timeout=120000", ...dirs],
-      cwd: PACKAGE_ROOT,
-      env: { ...process.env, TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot },
-      stdio: ["inherit", "inherit", "inherit"],
-    });
-    const exitCode = await child.exited;
-    return { exitCode, duration: Math.round(performance.now() - started) };
-  } finally {
-    // Set ASIMPOSIUM_KEEP_SUITE_TMP=1 to keep a failing run's scratch.
-    if (process.env.ASIMPOSIUM_KEEP_SUITE_TMP !== "1") {
-      rmSync(tmpRoot, { recursive: true, force: true });
-    }
-  }
+  // stdio is inherited: child output is never suppressed, so a cited green
+  // result always has the run behind it in the same log.
+  const child = Bun.spawn({
+    // Bun 1.3.8 can empty subprocess pipes in this workspace unless this
+    // harmless device filter is present. The real suite roots follow it.
+    cmd: ["bun", "test", "/dev/null", "--timeout=120000", ...dirs],
+    cwd: PACKAGE_ROOT,
+    stdio: ["inherit", "inherit", "inherit"],
+  });
+  const exitCode = await child.exited;
+  return { exitCode, duration: Math.round(performance.now() - started) };
 }
 
 /** The one suite name this runner will accept a foreign capability record for. */
@@ -311,7 +291,7 @@ async function runExpectedBlockedPreflight(
     record.status !== "blocked" ||
     record.exit_code !== preflight.exitCode ||
     record.code !== preflight.code ||
-    record.suite !== PROBE_SUITE
+    record.suite !== "s2-krater-real-bindings"
   ) {
     return reject("PROBE_RECORD_FIELD_UNEXPECTED");
   }

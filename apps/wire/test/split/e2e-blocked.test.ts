@@ -3603,7 +3603,8 @@ test(
 	sysopen(my $decoy, "target-fd-decoy", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 93;
 	print {$decoy} "decoy" or exit 94;
 	my @decoy = stat($decoy);
-	open(my $fds, "-|", "/usr/sbin/lsof", "-n", "-P", "-FfDi", "-p", "$$") or exit 95;
+	my $lsof = -x "/usr/bin/lsof" ? "/usr/bin/lsof" : (-x "/usr/sbin/lsof" ? "/usr/sbin/lsof" : "lsof");
+	open(my $fds, "-|", $lsof, "-n", "-P", "-FfDi", "-p", "$$") or exit 95;
 	my ($decoy_seen, $bootstrap_seen, $result_seen) = (0, 0, 0);
 	my ($device, $inode);
 	my $finish = sub {

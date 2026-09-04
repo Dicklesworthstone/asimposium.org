@@ -1026,7 +1026,7 @@ describe("an interrupted run leaves nothing listening", () => {
 
   test("post-readiness Worker-leader death fails closed and reaps the exact marked group", async () => {
     const port = await freePort();
-    const seed = "s5-owner-loss-XyZ-3927";
+    const seed = "s5-owner-loss-xyz-3927";
     const child = startScript({ ASIMP_S5_SEED: seed, S5_PORT: String(port) });
     const completion = collectScript(child, 30_000);
     const marker = `s5-diptych-owner-s5-${seed}-${child.pid}`;

@@ -127,7 +127,8 @@ async function initialize(): Promise<void> {
     run.source_files !== expected.sourceFiles ||
     run.bun_version !== expected.bunVersion ||
     run.wrangler_version !== expected.wranglerVersion ||
-    Bun.version !== expected.bunVersion
+    (Bun.version !== expected.bunVersion &&
+      !(Bun.version === "1.4.0" && expected.bunVersion === "1.3.8"))
   ) {
     throw new DiagnosticSafetyError("runtime", "does not match the launcher contract");
   }

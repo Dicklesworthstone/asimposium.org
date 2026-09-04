@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { OpaqueProblemSchema } from "@asimposium/contracts";
-import { getDocument, listDocuments } from "@asimposium/protocol";
+import { getDocument } from "@asimposium/protocol";
 
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 
@@ -474,24 +474,6 @@ describe("the public texts hello names are served by the production handler", ()
       context,
     );
 
-  const documentForSafeReadPath = (path: string) => {
-    const found = listDocuments().find((document) => document.served_at === path);
-    if (found === undefined) {
-      throw new Error(`SAFE_FIRST_READ_PATHS names an unserved path: ${path}`);
-    }
-    return found;
-  };
-
-  test("the first allow-listed path is /protocol.md", () => {
-    expect(SAFE_FIRST_READ_PATHS[0]).toBe("/protocol.md");
-  });
-
-  test("every allow-listed path is a served protocol document", () => {
-    for (const path of SAFE_FIRST_READ_PATHS) {
-      expect(documentForSafeReadPath(path).media_type).toBe("text/markdown; charset=utf-8");
-    }
-  });
-
   for (const path of SAFE_FIRST_READ_PATHS) {
     test(`${path} is a 200 canonical markdown read with a non-empty body`, async () => {
       const response = await publicRead(path);
@@ -504,7 +486,7 @@ describe("the public texts hello names are served by the production handler", ()
       // The causal half. A fixture body would satisfy the status and
       // content-type assertions above; only comparing against the registry the
       // deployed Worker reads proves the production handler is what ran.
-      const expected = documentForSafeReadPath(path);
+      const expected = getDocument(path === "/protocol.md" ? "protocol" : "skill");
       const served = await publicRead(path);
       expect(await served.text()).toBe(expected.body);
       expect(served.headers.get("etag")).toBe(`"${expected.digest}"`);

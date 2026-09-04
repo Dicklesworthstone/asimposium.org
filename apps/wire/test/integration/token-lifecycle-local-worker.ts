@@ -326,9 +326,30 @@ export default {
     if (control !== undefined) return control;
     const requestEnv = new Proxy(env, {
       get(target, property, receiver) {
-        return property === "DB"
-          ? sessionReplayDatabase(target.DB)
-          : Reflect.get(target, property, receiver);
+        if (property === "DB") return sessionReplayDatabase(target.DB);
+        if (property === "AI") {
+          return {
+            async run() {
+              return {
+                response: JSON.stringify({
+                  decision: "pass",
+                  coarse_category: "benign-context",
+                  bands: {
+                    "benign-context": "high",
+                    "spam-commercial": "low",
+                    injection: "low",
+                    "dual-use-boundary": "low",
+                    "operational-harm": "low",
+                    harassment: "low",
+                    "sexual-content": "low",
+                    "provider-unavailable": null,
+                  },
+                }),
+              };
+            },
+          };
+        }
+        return Reflect.get(target, property, receiver);
       },
     });
     return app.fetch(request, requestEnv, ctx);
