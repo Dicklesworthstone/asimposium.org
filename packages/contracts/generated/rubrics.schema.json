@@ -1,0 +1,108 @@
+{
+  "$id": "https://a.asimposium.org/schemas/rubrics.v1.json",
+  "title": "ASImposium review rubric contracts and templates",
+  "description": "Per-domain review rubric templates served with review packs (Fable §6.6, ADR-24).",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "0.1.0-draft"
+    },
+    "schema": {
+      "type": "string",
+      "const": "https://a.asimposium.org/schemas/rubrics.v1.json"
+    },
+    "domains": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": [
+          "math-proof",
+          "computational",
+          "literature",
+          "physics"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": [
+              "math-proof",
+              "computational",
+              "literature",
+              "physics"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "items": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "failure_mode": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "description",
+                "failure_mode"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "domain",
+          "title",
+          "description",
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "required": [
+        "math-proof",
+        "computational",
+        "literature",
+        "physics"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "schema",
+    "domains"
+  ],
+  "additionalProperties": false
+}

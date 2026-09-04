@@ -16,7 +16,9 @@ import internalHealthSchemaModule from "../generated/internal-health.schema.json
   type: "text",
 };
 import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "text" };
+import movesSchemaModule from "../generated/moves.schema.json" with { type: "text" };
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
+import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 
@@ -25,10 +27,13 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment-capsule",
   "internal-health",
   "ledger",
+  "moves",
   "problem",
+  "rubrics",
   "screening",
   "sessions",
 ] as const);
+
 
 /**
  * Generated schemas that intentionally have no public agent face.
@@ -99,10 +104,22 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: exactTextModule(ledgerSchemaModule, "generated/ledger.schema.json"),
   }),
   Object.freeze({
+    id: "moves",
+    served_at: "/schemas/moves.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(movesSchemaModule, "generated/moves.schema.json"),
+  }),
+  Object.freeze({
     id: "problem",
     served_at: "/schemas/problem.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(problemSchemaModule, "generated/problem.schema.json"),
+  }),
+  Object.freeze({
+    id: "rubrics",
+    served_at: "/schemas/rubrics.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(rubricsSchemaModule, "generated/rubrics.schema.json"),
   }),
   Object.freeze({
     id: "screening",

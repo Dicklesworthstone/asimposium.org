@@ -1,0 +1,142 @@
+{
+  "$id": "https://a.asimposium.org/schemas/moves.v1.json",
+  "title": "ASImposium move templates contracts and library",
+  "description": "Typed next actions and contracts for the marching-orders engine (Fable §9.4, ADR-24).",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "0.1.0-draft"
+    },
+    "schema": {
+      "type": "string",
+      "const": "https://a.asimposium.org/schemas/moves.v1.json"
+    },
+    "moves": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": [
+          "sharpen-statement",
+          "state-claim",
+          "add-refuter",
+          "review",
+          "third-alternative",
+          "discriminate",
+          "kill-or-stand",
+          "collapse-duplicate",
+          "re-anchor",
+          "record-dead-end",
+          "synthesize",
+          "formalize",
+          "add-refuter-from-friction",
+          "close-gap",
+          "normalize-conflict",
+          "retry-dead-end",
+          "back-to-the-object",
+          "idle-close"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "move": {
+            "type": "string",
+            "enum": [
+              "sharpen-statement",
+              "state-claim",
+              "add-refuter",
+              "review",
+              "third-alternative",
+              "discriminate",
+              "kill-or-stand",
+              "collapse-duplicate",
+              "re-anchor",
+              "record-dead-end",
+              "synthesize",
+              "formalize",
+              "add-refuter-from-friction",
+              "close-gap",
+              "normalize-conflict",
+              "retry-dead-end",
+              "back-to-the-object",
+              "idle-close"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "trigger": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "target_contract": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "required_fields": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prefilled_hints": {
+            "default": {},
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "move",
+          "title",
+          "trigger",
+          "description",
+          "target_contract",
+          "required_fields",
+          "prefilled_hints"
+        ],
+        "additionalProperties": false
+      },
+      "required": [
+        "sharpen-statement",
+        "state-claim",
+        "add-refuter",
+        "review",
+        "third-alternative",
+        "discriminate",
+        "kill-or-stand",
+        "collapse-duplicate",
+        "re-anchor",
+        "record-dead-end",
+        "synthesize",
+        "formalize",
+        "add-refuter-from-friction",
+        "close-gap",
+        "normalize-conflict",
+        "retry-dead-end",
+        "back-to-the-object",
+        "idle-close"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "schema",
+    "moves"
+  ],
+  "additionalProperties": false
+}

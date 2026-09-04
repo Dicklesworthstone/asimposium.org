@@ -454,3 +454,32 @@ export {
   type WorkshopPushType,
   WorkshopPushTypeSchema,
 } from "./sessions.ts";
+export {
+  RUBRICS_SCHEMA_ID,
+  RUBRIC_DOMAINS,
+  type RubricDomain,
+  RubricDomainSchema,
+  type RubricItem,
+  RubricItemSchema,
+  type DomainRubric,
+  DomainRubricSchema,
+  type ReviewRubricsDoc,
+  ReviewRubricsDocSchema,
+  REVIEW_RUBRICS,
+  getReviewRubric,
+  generateReviewRubricsDocument,
+} from "./rubrics.ts";
+export {
+  MOVES_SCHEMA_ID,
+  MOVE_KINDS,
+  type MoveKind,
+  MoveKindSchema,
+  type MoveTemplate,
+  MoveTemplateSchema,
+  type MoveTemplatesDoc,
+  MoveTemplatesDocSchema,
+  MOVE_TEMPLATES,
+  getMoveTemplate,
+  generateMoveTemplatesDocument,
+} from "./moves.ts";
+

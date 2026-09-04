@@ -129,6 +129,22 @@ import {
   type WorkshopPushResponse,
   type WorkshopPushType,
 } from "./sessions.ts";
+import {
+  RUBRICS_SCHEMA_ID,
+  ReviewRubricsDocSchema,
+  type DomainRubric,
+  type ReviewRubricsDoc,
+  type RubricDomain,
+  type RubricItem,
+} from "./rubrics.ts";
+import {
+  MOVES_SCHEMA_ID,
+  MoveTemplatesDocSchema,
+  type MoveKind,
+  type MoveTemplate,
+  type MoveTemplatesDoc,
+} from "./moves.ts";
+
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -169,6 +185,11 @@ const SESSIONS_SCHEMA_ID = "https://a.asimposium.org/schemas/sessions.v1.json";
 const BATCH_TYPES_ARTIFACT = "generated/batch.types.ts";
 const BATCH_JSON_SCHEMA_ARTIFACT = "generated/batch.schema.json";
 const BATCH_SCHEMA_ID = "https://a.asimposium.org/schemas/batch.v1.json";
+const RUBRICS_TYPES_ARTIFACT = "generated/rubrics.types.ts";
+const RUBRICS_JSON_SCHEMA_ARTIFACT = "generated/rubrics.schema.json";
+const MOVES_TYPES_ARTIFACT = "generated/moves.types.ts";
+const MOVES_JSON_SCHEMA_ARTIFACT = "generated/moves.schema.json";
+
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -643,6 +664,64 @@ function generatedBatchTypes(): string {
   ].join("\n");
 }
 
+function generatedRubricsJsonSchema(): string {
+  const document = {
+    $id: RUBRICS_SCHEMA_ID,
+    title: "ASImposium review rubric contracts and templates",
+    description:
+      "Per-domain review rubric templates served with review packs (Fable §6.6, ADR-24).",
+    ...z.toJSONSchema(ReviewRubricsDocSchema),
+  };
+  return formatJson(document);
+}
+
+function generatedRubricsTypes(): string {
+  const typeNames = [
+    "DomainRubric",
+    "ReviewRubricsDoc",
+    "RubricDomain",
+    "RubricItem",
+  ] as const satisfies readonly (keyof {
+    DomainRubric: DomainRubric;
+    ReviewRubricsDoc: ReviewRubricsDoc;
+    RubricDomain: RubricDomain;
+    RubricItem: RubricItem;
+  })[];
+  return [
+    "// Generated from src/rubrics.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/rubrics.ts";`,
+    "",
+  ].join("\n");
+}
+
+function generatedMovesJsonSchema(): string {
+  const document = {
+    $id: MOVES_SCHEMA_ID,
+    title: "ASImposium move templates contracts and library",
+    description:
+      "Typed next actions and contracts for the marching-orders engine (Fable §9.4, ADR-24).",
+    ...z.toJSONSchema(MoveTemplatesDocSchema),
+  };
+  return formatJson(document);
+}
+
+function generatedMovesTypes(): string {
+  const typeNames = [
+    "MoveKind",
+    "MoveTemplate",
+    "MoveTemplatesDoc",
+  ] as const satisfies readonly (keyof {
+    MoveKind: MoveKind;
+    MoveTemplate: MoveTemplate;
+    MoveTemplatesDoc: MoveTemplatesDoc;
+  })[];
+  return [
+    "// Generated from src/moves.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/moves.ts";`,
+    "",
+  ].join("\n");
+}
+
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
@@ -673,9 +752,14 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
       content: generatedS2CostReceiptJsonSchema(),
     },
     { relativePath: S2_COST_RECEIPT_TYPES_ARTIFACT, content: generatedS2CostReceiptTypes() },
+    { relativePath: RUBRICS_JSON_SCHEMA_ARTIFACT, content: generatedRubricsJsonSchema() },
+    { relativePath: RUBRICS_TYPES_ARTIFACT, content: generatedRubricsTypes() },
+    { relativePath: MOVES_JSON_SCHEMA_ARTIFACT, content: generatedMovesJsonSchema() },
+    { relativePath: MOVES_TYPES_ARTIFACT, content: generatedMovesTypes() },
     { relativePath: EXAMPLES_INDEX_ARTIFACT, content: generatedExamplesIndex() },
   ];
 }
+
 
 /** Served URL per kind's schema document (ids are the canonical constants). */
 const EXAMPLES_SERVED_URL_BY_KIND: Readonly<Record<string, string>> = Object.freeze({

@@ -17,10 +17,13 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "enrollment-capsule",
   "internal-health",
   "ledger",
+  "moves",
   "problem",
+  "rubrics",
   "screening",
   "sessions",
 ] as const;
+
 
 const EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS = [
   {
