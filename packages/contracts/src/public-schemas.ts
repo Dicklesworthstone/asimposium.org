@@ -34,7 +34,6 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "sessions",
 ] as const);
 
-
 /**
  * Generated schemas that intentionally have no public agent face.
  *

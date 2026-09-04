@@ -3,18 +3,13 @@ import {
   generateReviewRubricsDocument,
   getReviewRubric,
   REVIEW_RUBRICS,
-  RUBRIC_DOMAINS,
   ReviewRubricsDocSchema,
+  RUBRIC_DOMAINS,
 } from "../../src/rubrics.ts";
 
 describe("Review Rubrics registry", () => {
   test("defines all four required domains from Fable §6.6", () => {
-    expect(RUBRIC_DOMAINS).toEqual([
-      "math-proof",
-      "computational",
-      "literature",
-      "physics",
-    ]);
+    expect(RUBRIC_DOMAINS).toEqual(["math-proof", "computational", "literature", "physics"]);
   });
 
   test("generates a document conforming to ReviewRubricsDocSchema", () => {

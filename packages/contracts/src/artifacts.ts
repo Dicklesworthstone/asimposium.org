@@ -69,6 +69,13 @@ import {
   type PublicLedgerProblemId,
 } from "./ledger.ts";
 import {
+  MOVES_SCHEMA_ID,
+  type MoveKind,
+  type MoveTemplate,
+  type MoveTemplatesDoc,
+  MoveTemplatesDocSchema,
+} from "./moves.ts";
+import {
   type ContractProblem,
   type OpaqueProblem,
   type ProblemCode,
@@ -76,6 +83,14 @@ import {
   type ProblemDocument,
   type ProblemRule,
 } from "./problem.ts";
+import {
+  type DomainRubric,
+  type ReviewRubricsDoc,
+  ReviewRubricsDocSchema,
+  RUBRICS_SCHEMA_ID,
+  type RubricDomain,
+  type RubricItem,
+} from "./rubrics.ts";
 import {
   type S2CostEvidenceManifest,
   S2CostEvidenceManifestSchema,
@@ -129,22 +144,6 @@ import {
   type WorkshopPushResponse,
   type WorkshopPushType,
 } from "./sessions.ts";
-import {
-  RUBRICS_SCHEMA_ID,
-  ReviewRubricsDocSchema,
-  type DomainRubric,
-  type ReviewRubricsDoc,
-  type RubricDomain,
-  type RubricItem,
-} from "./rubrics.ts";
-import {
-  MOVES_SCHEMA_ID,
-  MoveTemplatesDocSchema,
-  type MoveKind,
-  type MoveTemplate,
-  type MoveTemplatesDoc,
-} from "./moves.ts";
-
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -189,7 +188,6 @@ const RUBRICS_TYPES_ARTIFACT = "generated/rubrics.types.ts";
 const RUBRICS_JSON_SCHEMA_ARTIFACT = "generated/rubrics.schema.json";
 const MOVES_TYPES_ARTIFACT = "generated/moves.types.ts";
 const MOVES_JSON_SCHEMA_ARTIFACT = "generated/moves.schema.json";
-
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -759,7 +757,6 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: EXAMPLES_INDEX_ARTIFACT, content: generatedExamplesIndex() },
   ];
 }
-
 
 /** Served URL per kind's schema document (ids are the canonical constants). */
 const EXAMPLES_SERVED_URL_BY_KIND: Readonly<Record<string, string>> = Object.freeze({

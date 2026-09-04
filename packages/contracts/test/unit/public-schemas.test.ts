@@ -24,7 +24,6 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "sessions",
 ] as const;
 
-
 const EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS = [
   {
     id: "batch",

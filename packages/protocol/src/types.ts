@@ -77,4 +77,3 @@ export interface ProtocolJson {
   readonly versioning: string;
   readonly digest: string;
 }
-

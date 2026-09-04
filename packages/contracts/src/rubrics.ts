@@ -9,12 +9,7 @@ import { z } from "zod";
 
 export const RUBRICS_SCHEMA_ID = "https://a.asimposium.org/schemas/rubrics.v1.json";
 
-export const RUBRIC_DOMAINS = [
-  "math-proof",
-  "computational",
-  "literature",
-  "physics",
-] as const;
+export const RUBRIC_DOMAINS = ["math-proof", "computational", "literature", "physics"] as const;
 
 export type RubricDomain = (typeof RUBRIC_DOMAINS)[number];
 
@@ -90,16 +85,14 @@ export const REVIEW_RUBRICS: Record<RubricDomain, DomainRubric> = {
         name: "circularity",
         description:
           "No proof step assumes the conclusion or relies on an intermediate equivalence that requires the theorem being proved.",
-        failure_mode:
-          "Circular reasoning hidden within lemma chains or definitional renamings.",
+        failure_mode: "Circular reasoning hidden within lemma chains or definitional renamings.",
       },
       {
         id: "hidden-regularity",
         name: "hidden regularity/compactness/choice assumptions",
         description:
           "Hidden topological, regularity, smoothness, integrability, or axiom-of-choice assumptions are fully disclosed.",
-        failure_mode:
-          "Assuming compactness, measurability, or completeness without verifying it.",
+        failure_mode: "Assuming compactness, measurability, or completeness without verifying it.",
       },
       {
         id: "imported-theorem-conditions",
@@ -146,8 +139,7 @@ export const REVIEW_RUBRICS: Record<RubricDomain, DomainRubric> = {
         name: "detection floor",
         description:
           "Sensitivity limits and the floor below which true effects cannot be distinguished from noise are stated.",
-        failure_mode:
-          "Claiming signal below the instrument or numerical resolution limit.",
+        failure_mode: "Claiming signal below the instrument or numerical resolution limit.",
       },
       {
         id: "leakage",
@@ -225,8 +217,7 @@ export const REVIEW_RUBRICS: Record<RubricDomain, DomainRubric> = {
         name: "prior-art implications",
         description:
           "Relationship to earlier or subsequent literature is evaluated without asserting novelty merely because no reference was recalled.",
-        failure_mode:
-          "Claiming a known result as novel due to limited literature retrieval.",
+        failure_mode: "Claiming a known result as novel due to limited literature retrieval.",
       },
     ],
   },

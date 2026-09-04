@@ -232,6 +232,19 @@ export {
   PublicLedgerProblemIdSchema,
 } from "./ledger.ts";
 export {
+  generateMoveTemplatesDocument,
+  getMoveTemplate,
+  MOVE_KINDS,
+  MOVE_TEMPLATES,
+  MOVES_SCHEMA_ID,
+  type MoveKind,
+  MoveKindSchema,
+  type MoveTemplate,
+  MoveTemplateSchema,
+  type MoveTemplatesDoc,
+  MoveTemplatesDocSchema,
+} from "./moves.ts";
+export {
   CONTRACT_PROBLEM_CODES,
   type ContractProblem,
   ContractProblemSchema,
@@ -247,6 +260,21 @@ export {
   type ProblemRule,
   ProblemRuleSchema,
 } from "./problem.ts";
+export {
+  type DomainRubric,
+  DomainRubricSchema,
+  generateReviewRubricsDocument,
+  getReviewRubric,
+  REVIEW_RUBRICS,
+  type ReviewRubricsDoc,
+  ReviewRubricsDocSchema,
+  RUBRIC_DOMAINS,
+  RUBRICS_SCHEMA_ID,
+  type RubricDomain,
+  RubricDomainSchema,
+  type RubricItem,
+  RubricItemSchema,
+} from "./rubrics.ts";
 export {
   MAX_S2_COST_EVIDENCE_MANIFEST_BYTES,
   MAX_S2_COST_RECEIPT_BYTES,
@@ -454,32 +482,3 @@ export {
   type WorkshopPushType,
   WorkshopPushTypeSchema,
 } from "./sessions.ts";
-export {
-  RUBRICS_SCHEMA_ID,
-  RUBRIC_DOMAINS,
-  type RubricDomain,
-  RubricDomainSchema,
-  type RubricItem,
-  RubricItemSchema,
-  type DomainRubric,
-  DomainRubricSchema,
-  type ReviewRubricsDoc,
-  ReviewRubricsDocSchema,
-  REVIEW_RUBRICS,
-  getReviewRubric,
-  generateReviewRubricsDocument,
-} from "./rubrics.ts";
-export {
-  MOVES_SCHEMA_ID,
-  MOVE_KINDS,
-  type MoveKind,
-  MoveKindSchema,
-  type MoveTemplate,
-  MoveTemplateSchema,
-  type MoveTemplatesDoc,
-  MoveTemplatesDocSchema,
-  MOVE_TEMPLATES,
-  getMoveTemplate,
-  generateMoveTemplatesDocument,
-} from "./moves.ts";
-

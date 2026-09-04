@@ -19,7 +19,6 @@ export function parseProtocolMarkdown(
   const versionMatch = /version\s+([0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9]+)?)/.exec(normalized);
   const version = versionMatch ? (versionMatch[1] ?? "0.1.0-draft") : "0.1.0-draft";
 
-
   // Parse hard and soft rules from the rules section
   const lines = rulesSection.split("\n");
   const hardRules: ProtocolHardRule[] = [];
@@ -27,7 +26,13 @@ export function parseProtocolMarkdown(
 
   let inHard = false;
   let inSoft = false;
-  let currentHardRule: { id: number; code: string; number: number; title: string; ruleLines: string[] } | null = null;
+  let currentHardRule: {
+    id: number;
+    code: string;
+    number: number;
+    title: string;
+    ruleLines: string[];
+  } | null = null;
   let currentSoftLines: string[] | null = null;
 
   for (const line of lines) {
@@ -73,7 +78,7 @@ export function parseProtocolMarkdown(
 
     if (inHard) {
       const match = /^(\d+)\.\s+\*\*(.*?)\*\*\s*(.*)$/.exec(line);
-      if (match && match[1] && match[2]) {
+      if (match?.[1] && match[2]) {
         if (currentHardRule) {
           hardRules.push({
             id: currentHardRule.id,
@@ -96,7 +101,7 @@ export function parseProtocolMarkdown(
       }
     } else if (inSoft) {
       const match = /^-\s+(.*)$/.exec(line);
-      if (match && match[1]) {
+      if (match?.[1]) {
         if (currentSoftLines) {
           softRules.push(currentSoftLines.join(" ").trim());
         }

@@ -117,8 +117,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
   discriminate: {
     move: "discriminate",
     title: "Strong Inference Discrimination",
-    trigger:
-      "Several live hypotheses fit all current evidence and no pending test separates them.",
+    trigger: "Several live hypotheses fit all current evidence and no pending test separates them.",
     description:
       "Propose or run a discriminating test whose predicted outcomes diverge across surviving hypotheses.",
     target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
@@ -139,8 +138,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     move: "collapse-duplicate",
     title: "Collapse Duplicate",
     trigger: "Near-duplicate claims flagged by embedding search or P11 rule.",
-    description:
-      "Link or merge duplicate claims to unify review effort and prevent fragmentation.",
+    description: "Link or merge duplicate claims to unify review effort and prevent fragmentation.",
     target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
     required_fields: ["source_claim_id", "target_claim_id", "relation_kind"],
     prefilled_hints: { relation_kind: "equivalent-to" },
@@ -149,8 +147,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     move: "re-anchor",
     title: "Re-anchor Claim",
     trigger: "Statement revision minted S@n+1, drifting from older claim versions.",
-    description:
-      "Update a claim to bind to the revised active problem statement version.",
+    description: "Update a claim to bind to the revised active problem statement version.",
     target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
     required_fields: ["claim_id", "target_statement_version", "adaptations"],
     prefilled_hints: {},
@@ -190,8 +187,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     move: "add-refuter-from-friction",
     title: "Refute from Formalization Friction",
     trigger: "Friction report contains counterexample-scent or statement-too-strong.",
-    description:
-      "Construct a concrete counterexample seeded by reported formalization friction.",
+    description: "Construct a concrete counterexample seeded by reported formalization friction.",
     target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
     required_fields: ["claim_id", "friction_event_id", "counterexample_md"],
     prefilled_hints: { direction: "refutes" },
@@ -200,8 +196,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     move: "close-gap",
     title: "Close Proof Gap",
     trigger: "An open proof gap G-n has no active lease or owner.",
-    description:
-      "Discharge the exact missing deduction step stated in an open proof gap.",
+    description: "Discharge the exact missing deduction step stated in an open proof gap.",
     target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
     required_fields: ["gap_id", "discharging_claim_id", "proof_md"],
     prefilled_hints: {},

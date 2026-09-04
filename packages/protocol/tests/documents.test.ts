@@ -9,9 +9,9 @@ import { resolve } from "node:path";
 import {
   DOCUMENT_IDS,
   type DocumentId,
+  generateProtocolJsonString,
   getDocument,
   getProtocolJson,
-  generateProtocolJsonString,
   listDocuments,
   ProtocolError,
   sha256Hex,
@@ -259,7 +259,6 @@ describe("structured protocol JSON (bead asimposiumorg-3bq)", () => {
     expect(parsed.rules.hard).toHaveLength(12);
   });
 });
-
 
 describe("getDocument refuses anything outside the registry", () => {
   const rejected = ["", "../../../etc/passwd", "assets/protocol.md", "PROTOCOL"];

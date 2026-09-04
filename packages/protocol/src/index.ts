@@ -19,13 +19,13 @@ import { sha256Hex, utf8Bytes } from "./sha256.ts";
 import { countWords, estimateTokens, extractSection, normalizeServedText } from "./text.ts";
 import type {
   ProtocolDocument,
-  ProtocolHardRule,
   ProtocolJson,
   ProtocolVersionPair,
   RulesMeasurement,
 } from "./types.ts";
 
 export { ProtocolError, type ProtocolErrorCode, type ProtocolProblem } from "./errors.ts";
+export { generateProtocolJsonString, parseProtocolMarkdown } from "./protocol-json.ts";
 export { DOCUMENT_IDS } from "./registry.ts";
 export {
   ANCESTOR_SKILL_SLUGS,
@@ -36,7 +36,6 @@ export {
 } from "./scan.ts";
 export { sha256Hex } from "./sha256.ts";
 export { countWords, estimateTokens, extractSection, normalizeServedText } from "./text.ts";
-export { parseProtocolMarkdown, generateProtocolJsonString } from "./protocol-json.ts";
 export type {
   DocumentId,
   DocumentStatus,
@@ -65,7 +64,6 @@ export const INOCULATION_TOKEN_BUDGET = 800;
 
 /** Rule A8 / R-12: the drop-in participation skill is budgeted to prevent process-porn growth. */
 export const SKILL_TOKEN_BUDGET = 2500;
-
 
 /** The level-two heading whose body the word cap measures. */
 export const PROTOCOL_RULES_HEADING = "Rules";
@@ -260,8 +258,8 @@ export function assertProtocolInvariants(): void {
       code: "SKILL_BUDGET_EXCEEDED",
       title: "The participation skill outgrew its budget",
       detail: `The skill estimates ${skill.tokens_estimate} tokens against a budget of ${SKILL_TOKEN_BUDGET}.`,
-      fix_hint: "Cut. The skill is a drop-in participation skill, not a reference dump (Rule A8, R-12).",
+      fix_hint:
+        "Cut. The skill is a drop-in participation skill, not a reference dump (Rule A8, R-12).",
     });
   }
 }
-

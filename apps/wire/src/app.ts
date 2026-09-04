@@ -9,13 +9,12 @@ import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contra
 import {
   assertProtocolInvariants,
   type DocumentId,
+  generateProtocolJsonString,
   getDocument,
   type ProtocolDocument,
-  generateProtocolJsonString,
   sha256Hex,
 } from "@asimposium/protocol";
 import { type ExecutionContext, Hono } from "hono";
-
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import {
@@ -318,8 +317,7 @@ function servePublicRepresentation(
     ? representation.servedAt
     : `/${representation.servedAt}`;
   const canonicalUrl =
-    representation.servedAt.startsWith("http://") ||
-    representation.servedAt.startsWith("https://")
+    representation.servedAt.startsWith("http://") || representation.servedAt.startsWith("https://")
       ? representation.servedAt
       : `${origin}${canonicalPath}`;
 

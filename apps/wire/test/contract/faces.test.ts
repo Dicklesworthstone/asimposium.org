@@ -394,8 +394,8 @@ describe("the production protocol cold-path gate", () => {
 
     const withListDocumentsImport = replaceExactlyOnce(
       appSource,
-      "  type DocumentId,\n  getDocument,\n  type ProtocolDocument,",
-      "  type DocumentId,\n  getDocument,\n  listDocuments,\n  type ProtocolDocument,",
+      "  type DocumentId,\n  generateProtocolJsonString,\n  getDocument,\n  type ProtocolDocument,",
+      "  type DocumentId,\n  generateProtocolJsonString,\n  getDocument,\n  listDocuments,\n  type ProtocolDocument,",
     );
 
     // A type-valid dead gate still leaves the bare imports and a real gate call
@@ -1576,7 +1576,9 @@ describe("face wire format", () => {
     expect(response.status).toBe(200);
     expect(response.contentType).toBe(protocol.media_type);
     expect(response.headers.get("etag")).toBe(`"${protocol.digest}"`);
-    expect(response.headers.get("link")).toBe("<https://a.asimposium.org/protocol.md>; rel=\"canonical\"");
+    expect(response.headers.get("link")).toBe(
+      '<https://a.asimposium.org/protocol.md>; rel="canonical"',
+    );
     expect(response.bodyText).toBe(protocol.body);
 
     const formatted = await callWorker("/protocol?format=md", {});
@@ -1595,7 +1597,9 @@ describe("face wire format", () => {
     expect(response.status).toBe(200);
     expect(response.contentType).toBe("application/json; charset=utf-8");
     expect(response.headers.get("etag")).toBe(`"${sha256Hex(expectedJson)}"`);
-    expect(response.headers.get("link")).toBe("<https://a.asimposium.org/protocol.json>; rel=\"canonical\"");
+    expect(response.headers.get("link")).toBe(
+      '<https://a.asimposium.org/protocol.json>; rel="canonical"',
+    );
     expect(response.bodyText).toBe(expectedJson);
 
     const parsed = JSON.parse(response.bodyText);
@@ -1615,7 +1619,9 @@ describe("face wire format", () => {
       const response = await callWorker(path, {});
       expect(response.status).toBe(200);
       expect(response.contentType).toBe("application/json; charset=utf-8");
-      expect(response.headers.get("link")).toBe("<https://a.asimposium.org/rubrics.json>; rel=\"canonical\"");
+      expect(response.headers.get("link")).toBe(
+        '<https://a.asimposium.org/rubrics.json>; rel="canonical"',
+      );
       const parsed = JSON.parse(response.bodyText);
       const validated = ReviewRubricsDocSchema.safeParse(parsed);
       expect(validated.success).toBe(true);
@@ -1637,7 +1643,9 @@ describe("face wire format", () => {
       const response = await callWorker(path, {});
       expect(response.status).toBe(200);
       expect(response.contentType).toBe("application/json; charset=utf-8");
-      expect(response.headers.get("link")).toBe("<https://a.asimposium.org/moves.json>; rel=\"canonical\"");
+      expect(response.headers.get("link")).toBe(
+        '<https://a.asimposium.org/moves.json>; rel="canonical"',
+      );
       const parsed = JSON.parse(response.bodyText);
       const validated = MoveTemplatesDocSchema.safeParse(parsed);
       expect(validated.success).toBe(true);
