@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { ThemeToggle } from "./theme-toggle";
+
 /**
  * Root render-failure face. `error.tsx` covers segment failures while the
  * root layout still stands; this boundary catches the case where that layout
@@ -21,12 +23,19 @@ export default function GlobalError({
         <a className="skip" href="#content">
           Skip to content
         </a>
+        <div className="meander" aria-hidden="true" />
         <main className="landing col" id="content">
           <header className="masthead console-head">
+            <p className="greek-sub" lang="el" aria-hidden="true">
+              συμπόσιον · σφάλμα
+            </p>
             <h1 className="console-title">This page failed to render</h1>
             <p className="tagline">
               This view failed before it could confirm the record&apos;s current state.
             </p>
+            <div className="theme-toggle-row">
+              <ThemeToggle />
+            </div>
           </header>
           <p>
             Something went wrong while composing this page, including its frame. You can retry the
@@ -46,6 +55,7 @@ export default function GlobalError({
             </Link>
           </div>
         </main>
+        <div className="meander flip" aria-hidden="true" />
       </body>
     </html>
   );
