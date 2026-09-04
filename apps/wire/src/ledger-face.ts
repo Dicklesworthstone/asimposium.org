@@ -307,6 +307,13 @@ function problemNotFound(method: string): Response {
     : response;
 }
 
+function canonicalizeIndexTimestamp(ts: string): string {
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(ts)) {
+    return `${ts.slice(0, -1)}.000Z`;
+  }
+  return ts;
+}
+
 async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   // Deterministic interim order: `id ASC`. It is neither of the two tempting
   // recency proxies, because neither is honest here. `public_seq` is a
@@ -326,8 +333,13 @@ async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   const omitted = truncated
     ? [...OMITTED, "results beyond the first 200 in canonical problem-id order"]
     : OMITTED;
+  const problems = rows.results.slice(0, 200).map((row) => ({
+    ...row,
+    created_at: canonicalizeIndexTimestamp(row.created_at),
+    updated_at: canonicalizeIndexTimestamp(row.updated_at),
+  }));
   return ProblemsIndexResponseSchema.parse({
-    problems: rows.results.slice(0, 200),
+    problems,
     omitted,
   });
 }

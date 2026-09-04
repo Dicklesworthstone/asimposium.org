@@ -1133,6 +1133,38 @@ describe("face wire format", () => {
     }
   });
 
+  test("the mounted problem index canonicalizes legacy second-precision timestamps to millisecond precision", async () => {
+    const legacyRow = {
+      id: "P-4DSP",
+      public_seq: 3,
+      created_at: "2026-08-18T18:31:21Z",
+      updated_at: "2026-08-22T00:35:08.124Z",
+    };
+    const routes = createLedgerFaceRoutes();
+    const env = {
+      DB: {
+        prepare: () => ({ all: async () => ({ results: [legacyRow] }) }),
+      } as unknown as Env["DB"],
+    } as Env;
+
+    const jsonResponse = await routes.fetch(
+      new Request("https://a.asimposium.org/problems.json"),
+      env,
+    );
+    expect(jsonResponse.status).toBe(200);
+    const index = ProblemsIndexResponseSchema.parse(await jsonResponse.json());
+    expect(index.problems[0]?.created_at).toBe("2026-08-18T18:31:21.000Z");
+    expect(index.problems[0]?.updated_at).toBe("2026-08-22T00:35:08.124Z");
+
+    const markdownResponse = await routes.fetch(
+      new Request("https://a.asimposium.org/problems.md"),
+      env,
+    );
+    expect(markdownResponse.status).toBe(200);
+    const markdown = await markdownResponse.text();
+    expect(markdown).toContain("opened 2026-08-18T18:31:21.000Z");
+  });
+
   test("PLANTED: mounted problem-index ETags bind an updated_at-only mutation", async () => {
     const before = {
       id: "P-DIPTYCH-ETAG",

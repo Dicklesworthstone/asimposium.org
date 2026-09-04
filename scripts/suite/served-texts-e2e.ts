@@ -1,19 +1,12 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  MoveTemplatesDocSchema,
-  ReviewRubricsDocSchema,
-} from "@asimposium/contracts";
+import { MoveTemplatesDocSchema, ReviewRubricsDocSchema } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
-import {
-  DOCUMENT_IDS,
-  getDocument,
-  sha256Hex,
-} from "../../packages/protocol/src/index.ts";
-import { parseProtocolMarkdown } from "../../packages/protocol/src/protocol-json.ts";
+import nextConfig from "../../apps/web/next.config.ts";
 import { createApp } from "../../apps/wire/src/app.ts";
 import type { Env } from "../../apps/wire/src/env.ts";
-import nextConfig from "../../apps/web/next.config.ts";
+import { getDocument } from "../../packages/protocol/src/index.ts";
+import { parseProtocolMarkdown } from "../../packages/protocol/src/protocol-json.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const APEX_PUBLIC = resolve(REPO_ROOT, "apps/web/public");
@@ -76,9 +69,7 @@ async function verifyEndpoint(
   const link = res.headers.get("link") ?? "";
   const expectedLink = `<https://a.asimposium.org${expectedCanonicalPath}>; rel="canonical"`;
   if (link !== expectedLink) {
-    throw new Error(
-      `GET ${path} link header mismatch: expected ${expectedLink}, got ${link}`,
-    );
+    throw new Error(`GET ${path} link header mismatch: expected ${expectedLink}, got ${link}`);
   }
 
   const body = await res.text();
@@ -114,13 +105,19 @@ async function verifyEndpoint(
   const badFormatReq = new Request(`https://a.asimposium.org${path}?format=invalid_mime`);
   const badFormatRes = await ctx.app.fetch(badFormatReq, ctx.env);
   if (badFormatRes.status !== 400) {
-    throw new Error(
-      `GET ${path}?format=invalid_mime expected 400, got ${badFormatRes.status}`,
-    );
+    throw new Error(`GET ${path}?format=invalid_mime expected 400, got ${badFormatRes.status}`);
   }
-  const badProblem = await badFormatRes.json();
+  const badProblem = (await badFormatRes.json()) as {
+    code?: string;
+    allowed?: string[];
+  };
   if (badProblem.code !== "UNKNOWN_FORMAT") {
     throw new Error(`GET ${path}?format=invalid_mime expected code UNKNOWN_FORMAT`);
+  }
+  if (!badProblem.allowed?.includes(expectedFormat)) {
+    throw new Error(
+      `GET ${path}?format=invalid_mime allowed list does not include ${expectedFormat}`,
+    );
   }
 
   ctx.verifications.push({
@@ -136,7 +133,7 @@ async function verifyEndpoint(
 }
 
 export async function runServedTextsE2e(): Promise<void> {
-  console.log("=== Running Served Texts E2E Verification (W6.5, bead asimposiumorg-3bq) ===");
+  console.log("--- Running Served Texts E2E Verification (W6.5, bead asimposiumorg-3bq) ---");
   const ctx = createE2eContext();
 
   // A. Public Text Routes
@@ -187,7 +184,9 @@ export async function runServedTextsE2e(): Promise<void> {
   const rubricsDoc = JSON.parse(rubricsText);
   ReviewRubricsDocSchema.parse(rubricsDoc);
   if (Object.keys(rubricsDoc.domains).length !== 4) {
-    throw new Error(`rubrics doc expected 4 domains, got ${Object.keys(rubricsDoc.domains).length}`);
+    throw new Error(
+      `rubrics doc expected 4 domains, got ${Object.keys(rubricsDoc.domains).length}`,
+    );
   }
 
   const { body: movesText } = await verifyEndpoint(
@@ -216,13 +215,7 @@ export async function runServedTextsE2e(): Promise<void> {
   // C. Public Schema Routes
   console.log("\n3. Verifying public schemas...");
   for (const schema of listPublicSchemas()) {
-    await verifyEndpoint(
-      ctx,
-      schema.served_at,
-      schema.media_type,
-      "json",
-      schema.served_at,
-    );
+    await verifyEndpoint(ctx, schema.served_at, schema.media_type, "json", schema.served_at);
   }
 
   // D. Discovery routes
@@ -234,13 +227,7 @@ export async function runServedTextsE2e(): Promise<void> {
     "json",
     "/.well-known/asimposium.json",
   );
-  await verifyEndpoint(
-    ctx,
-    "/openapi.json",
-    "application/json",
-    "json",
-    "/openapi.json",
-  );
+  await verifyEndpoint(ctx, "/openapi.json", "application/json", "json", "/openapi.json");
   await verifyEndpoint(
     ctx,
     "/schemas/index.json",
@@ -248,13 +235,7 @@ export async function runServedTextsE2e(): Promise<void> {
     "json",
     "/schemas/index.json",
   );
-  await verifyEndpoint(
-    ctx,
-    "/capabilities",
-    "application/json",
-    "json",
-    "/capabilities",
-  );
+  await verifyEndpoint(ctx, "/capabilities", "application/json", "json", "/capabilities");
 
   // E. Semantic Parity Checks
   console.log("\n5. Verifying semantic parity between GFM and JSON representations...");
@@ -267,7 +248,8 @@ export async function runServedTextsE2e(): Promise<void> {
     throw new Error("protocol.json hard rules count mismatch");
   }
   for (let i = 0; i < protoJson.rules.hard.length; i++) {
-    if (protoJson.rules.hard[i].title !== protocolJsonDirect.rules.hard[i].title) {
+    const directRule = protocolJsonDirect.rules.hard[i];
+    if (!directRule || protoJson.rules.hard[i].title !== directRule.title) {
       throw new Error(`protocol.json hard rule ${i} title mismatch`);
     }
   }
@@ -332,8 +314,8 @@ export async function runServedTextsE2e(): Promise<void> {
     if (!redirectMap.has(source)) {
       throw new Error(`Missing apex redirect for source: ${source}`);
     }
-    const dest = redirectMap.get(source)!;
-    if (!dest.startsWith("https://a.asimposium.org") && !dest.startsWith("http")) {
+    const dest = redirectMap.get(source);
+    if (!dest || (!dest.startsWith("https://a.asimposium.org") && !dest.startsWith("http"))) {
       throw new Error(`Redirect for ${source} does not point to Stoa: ${dest}`);
     }
   }
@@ -354,7 +336,9 @@ export async function runServedTextsE2e(): Promise<void> {
     );
   }
 
-  console.log(`\n=== All ${ctx.verifications.length} endpoints and parity checks passed successfully! ===`);
+  console.log(
+    `\n--- All ${ctx.verifications.length} endpoints and parity checks passed successfully! ---`,
+  );
 }
 
 if (import.meta.main) {

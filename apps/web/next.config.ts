@@ -1,5 +1,11 @@
 import { isTrustedStoaOrigin, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
-import type { NextConfig } from "next";
+export interface AgoraNextConfig {
+  reactStrictMode?: boolean;
+  poweredByHeader?: boolean;
+  headers?: () => Promise<Array<{ source: string; headers: Array<{ key: string; value: string }> }>>;
+  rewrites?: () => Promise<Array<{ source: string; destination: string }>>;
+  redirects?: () => Promise<Array<{ source: string; destination: string; permanent: boolean }>>;
+}
 
 export function configuredRedirectStoaOrigin(
   value: string | undefined,
@@ -24,7 +30,7 @@ export function configuredRedirectStoaOrigin(
  * apex source 308-redirects protocol.md and policy.md to its validated Stoa
  * origin (§13.2); capsule.md and llms.txt remain static discovery copies.
  */
-const nextConfig: NextConfig = {
+const nextConfig: AgoraNextConfig = {
   reactStrictMode: true,
   // §14.3: do not advertise the framework.
   poweredByHeader: false,
