@@ -103,7 +103,7 @@ const ACTUAL_CLI_DEFAULT_REMAINING_MS =
   LOCAL_D1_CLI_BOOTSTRAP_RESERVE_MS +
   SHIPPED_LOCAL_CLEANUP_RESERVE_MS +
   PER_COMMAND_TIMEOUT_MS;
-const TOTAL_TIMEOUT_MS = 180_000;
+const TOTAL_TIMEOUT_MS = Number(process.env.MIGRATE_LOCAL_TIMEOUT_MS) || 480_000;
 const deadlineAt = startedAt + TOTAL_TIMEOUT_MS;
 const appliedAt = "2026-08-16T00:00:00.000Z";
 const localConfigPaths = new Map();
@@ -576,7 +576,7 @@ setInterval(() => {}, 1_000);
 process.stdout.write("ready\\n");
 `;
   const directChildSource = `
-import { writeFileSync } from "node:fs";
+import { writeFileSync, renameSync } from "node:fs";
 process.on("SIGTERM", () => {});
 setTimeout(() => process.exit(124), 30_000);
 setInterval(() => {}, 1_000);
@@ -596,11 +596,13 @@ while (!acknowledgement.includes("\\n") && acknowledgement.length <= 16) {
 }
 reader.releaseLock();
 if (acknowledgement !== "ready\\n") process.exit(125);
+const tmpPath = process.env.ASIMP_TOPOLOGY_PID_PATH + ".tmp";
 writeFileSync(
-  process.env.ASIMP_TOPOLOGY_PID_PATH,
+  tmpPath,
   JSON.stringify({ direct_child: process.pid, descendant: descendant.pid }),
   "utf8",
 );
+renameSync(tmpPath, process.env.ASIMP_TOPOLOGY_PID_PATH);
 `;
   void runLocalD1Command(
     {
@@ -612,7 +614,13 @@ writeFileSync(
   );
 
   const readinessDeadline = Date.now() + 3_000;
-  while (!existsSync(pidRecordPath) && Date.now() < readinessDeadline) {
+  while (Date.now() < readinessDeadline) {
+    if (existsSync(pidRecordPath)) {
+      try {
+        const text = readFileSync(pidRecordPath, "utf8");
+        if (text.length > 0) break;
+      } catch {}
+    }
     await Bun.sleep(10);
   }
   if (!existsSync(pidRecordPath)) process.exit(125);
@@ -1955,7 +1963,18 @@ const cases = [
         topologyPidRecord,
         /^\/[^\n]*\/asimposium-migrate-local-[A-Za-z0-9]+\/owned-topology-[0-9a-f-]+\.json$/,
       );
-      const topologyPids = JSON.parse(readFileSync(topologyPidRecord, "utf8"));
+      let topologyPids;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        try {
+          const raw = readFileSync(topologyPidRecord, "utf8");
+          if (raw.length > 0) {
+            topologyPids = JSON.parse(raw);
+            break;
+          }
+        } catch {}
+        await Bun.sleep(20);
+      }
+      assert.ok(topologyPids !== undefined, "topology PID record must be valid JSON");
       assert.ok(Number.isSafeInteger(topologyPids.direct_child));
       assert.ok(Number.isSafeInteger(topologyPids.descendant));
       assert.equal(

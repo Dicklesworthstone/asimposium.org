@@ -3576,7 +3576,7 @@ async function applyLocalMigration(
   await localD1(
     root,
     databaseName,
-    ["--command", migrationCommandSql(migration, appliedAt)],
+    [`--command=${migrationCommandSql(migration, appliedAt)}`],
     localPersistTo,
     localDeadlineAtMs,
     localOwnerLease,

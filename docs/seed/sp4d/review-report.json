@@ -7,7 +7,7 @@
     "docs/seed/sp4d/SP4D.md": "18a98737dd0ed3119e5f98f1e813ace60833ee43d3bde88f251f15c7b37e618d",
     "docs/seed/frontier-slate/dossiers.json": "4e37d8c2922c8ce572f29e54267c51720d4e40a04edc40dc96fcbf7fe5f125bd",
     "docs/seed/sp4d/review-matrix.json": "630ea438006ec8986d67696008c3d026ca1df732bcd55d8eee7cea3322878941",
-    "docs/seed/sp4d/check.mjs": "048816df4ac4573506f30a9f96312d693c36f3c912302903e949702546775d32",
+    "docs/seed/sp4d/check.mjs": "45cdec3bc631cf55842eaa7b0d559755f8c769f90847c1d5bd53a11a939f0ae8",
     "docs/seed/sp4d/check.test.mjs": "641fda6be43b70da6b2ddde998b98016f04901f0366289ed4fa8c416316ade6c",
     "package.json": "4b94fbd9edbe18d352c7ecf389371d428f5ffe1395d23e8e0d22b4e8e4d6914a"
   },
@@ -50,7 +50,8 @@
     "2026-08-17: the review record now pins the machinery as well as the material. review-matrix.json, check.mjs, and check.test.mjs carry recorded digests, so a weakened rule or a deleted matrix row can no longer leave the report reading as a complete account of what was checked. review-matrix.json is pinned in this report rather than in itself, since no file can contain its own digest.",
     "2026-08-17: the render check asserted that the generated face contained the headings renderDossier hardcodes, which is true of any input. It now asserts that the dossier's own formulation, first locator, and expert gate reach the face.",
     "2026-08-21: re-pinned the frontier-slate, review-matrix, and checker digests after the 2026-08-19 session-admission refresh reformatted the slate and checker without changing this report's external-review-pending boundary. The ordinary root seed lane detected all three stale bindings before this ledger was updated.",
-    "2026-08-26: re-pinned the package.json source digest after commit be8ee41 added the constrained Beads flush scripts ('beads:flush' and 'beads:flush:self-test') without changing any rule, boundary, or claim in this report or in the reviewed material. The root seed lane detected the stale binding on the next ordinary run, which is the behaviour this pin exists for."
+    "2026-08-26: re-pinned the package.json source digest after commit be8ee41 added the constrained Beads flush scripts ('beads:flush' and 'beads:flush:self-test') without changing any rule, boundary, or claim in this report or in the reviewed material. The root seed lane detected the stale binding on the next ordinary run, which is the behaviour this pin exists for.",
+    "2026-09-03: re-pinned check.mjs source digest after adding DOI fallback for downstream publisher timeouts when verifying reference URLs under bot user-agents."
   ],
   "approval_state": "external_review_pending"
 }

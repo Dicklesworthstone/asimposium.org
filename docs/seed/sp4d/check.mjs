@@ -591,6 +591,23 @@ async function verifyLinks(dossiers, fetchImpl) {
                 `${reference.id}: HTTP ${response.status}`,
               );
         } catch (error) {
+          if (error?.name === "TimeoutError" && reference.url.startsWith("https://doi.org/")) {
+            try {
+              const headResponse = await fetchImpl(reference.url, {
+                method: "HEAD",
+                headers: {
+                  "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+                },
+                signal: AbortSignal.timeout(5_000),
+                redirect: "manual",
+              });
+              if (headResponse.status >= 300 && headResponse.status < 400) {
+                return null;
+              }
+            } catch {
+              // fall through to diagnostic
+            }
+          }
           return diagnostic(
             "SOURCE_LINK_UNAVAILABLE",
             dossier.id,
