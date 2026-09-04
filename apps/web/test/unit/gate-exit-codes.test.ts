@@ -43,9 +43,7 @@ interface GateRun {
 }
 
 function parseGateRecord(stdout: string): GateRecord | undefined {
-  const lines = stdout
-    .split("\n")
-    .filter((entry) => entry.startsWith(`${GATE_PREFIX} `));
+  const lines = stdout.split("\n").filter((entry) => entry.startsWith(`${GATE_PREFIX} `));
   if (lines.length > 1) {
     throw new Error(`gate emitted ${lines.length} ${GATE_PREFIX} records; expected at most one`);
   }
@@ -118,8 +116,7 @@ describe("blocked gates are distinguishable from failures", () => {
     const run = await runGate("typecheck");
     expect(run.exitCode).toBe(0);
     expect(run.record?.status).toBe("pass");
-  }, // This launches the real compiler. Five seconds is below its observed
-  // clean-run latency on a contended CI or swarm host and made the test kill
+  }, // clean-run latency on a contended CI or swarm host and made the test kill // This launches the real compiler. Five seconds is below its observed
   // a healthy child before it could emit the gate record.
   30_000);
 

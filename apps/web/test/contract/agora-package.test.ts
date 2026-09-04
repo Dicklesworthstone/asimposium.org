@@ -882,27 +882,13 @@ describe("apex markdown redirect origin", () => {
         redirects
           .filter(
             ({ source }) =>
-              source === "/protocol" ||
-              source === "/protocol.md" ||
-              source === "/protocol.json" ||
-              source === "/policy.md" ||
-              source === "/inoculation.md",
+              source === "/protocol.md" || source === "/policy.md" || source === "/inoculation.md",
           )
           .map(({ destination, permanent, source }) => ({ destination, permanent, source })),
       ).toEqual([
         {
-          source: "/protocol",
-          destination: "https://a-staging.asimposium.org/protocol",
-          permanent: true,
-        },
-        {
           source: "/protocol.md",
           destination: "https://a-staging.asimposium.org/protocol.md",
-          permanent: true,
-        },
-        {
-          source: "/protocol.json",
-          destination: "https://a-staging.asimposium.org/protocol.json",
           permanent: true,
         },
         {

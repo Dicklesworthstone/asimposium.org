@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { ThemeToggle } from "@/app/theme-toggle";
 import { SITE } from "@/lib/site";
 
 /**
@@ -23,6 +24,9 @@ export default function NotFound() {
           <p className="tagline">
             <Link href="/">← {SITE.name}</Link>
           </p>
+          <div className="theme-toggle-row">
+            <ThemeToggle />
+          </div>
         </header>
         <p>
           The path you requested does not exist on this plane. Discovery paths are{" "}

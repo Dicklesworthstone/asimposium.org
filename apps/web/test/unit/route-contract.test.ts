@@ -4,10 +4,10 @@ import { dirname, join } from "node:path";
 import {
   formatViolations,
   readExportSurface,
-  validateAgoraPackage,
-  WRITE_PATH_EXEMPTIONS,
   type Violation,
   type ViolationCode,
+  validateAgoraPackage,
+  WRITE_PATH_EXEMPTIONS,
 } from "../../scripts/route-contract.ts";
 
 const FIXTURES = join(dirname(import.meta.dir), "fixtures");

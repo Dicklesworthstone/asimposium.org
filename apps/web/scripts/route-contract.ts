@@ -19,7 +19,7 @@
  * `@slot` beyond skipping them where they would produce false positives. It is
  * a floor, not a proof that a tree builds.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix, sep } from "node:path";
 
 import ts from "typescript";

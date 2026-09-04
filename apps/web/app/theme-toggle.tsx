@@ -11,11 +11,9 @@ const THEME_COLORS: Record<ThemeChoice, string> = {
 
 /** Browser chrome follows the page palette: every theme-color meta, one value. */
 function reconcileThemeColorMetas(color: string): void {
-  document
-    .querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')
-    .forEach((meta) => {
-      meta.content = color;
-    });
+  document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach((meta) => {
+    meta.content = color;
+  });
 }
 
 /**
@@ -46,10 +44,23 @@ function subscribe(onStoreChange: () => void): () => void {
     // re-read decides, so notifying unconditionally is harmless.
     onStoreChange();
   };
+  const onStorageChange = (event: StorageEvent): void => {
+    if (event.key === STORAGE_KEY) {
+      if (event.newValue === "light" || event.newValue === "dark") {
+        document.documentElement.dataset.theme = event.newValue;
+        reconcileThemeColorMetas(THEME_COLORS[event.newValue]);
+      } else if (event.newValue === null) {
+        delete document.documentElement.dataset.theme;
+      }
+      onStoreChange();
+    }
+  };
   media.addEventListener("change", onOsChange);
+  window.addEventListener("storage", onStorageChange);
   return () => {
     listeners.delete(onStoreChange);
     media.removeEventListener("change", onOsChange);
+    window.removeEventListener("storage", onStorageChange);
   };
 }
 

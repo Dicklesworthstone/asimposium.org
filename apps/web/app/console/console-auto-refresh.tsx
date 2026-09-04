@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useEffect } from "react";
 
 const MIN_INTERVAL_MS = 10_000;
 const MAX_INTERVAL_MS = 300_000;
@@ -21,7 +21,11 @@ const DEFAULT_INTERVAL_MS = 20_000;
  * pushed updates; until then one re-render per interval, gated on the tab
  * being visible, keeps the wait passive at trivial cost (Rule A7: reads).
  */
-export function ConsoleAutoRefresh({ intervalMs = DEFAULT_INTERVAL_MS }: { readonly intervalMs?: number }) {
+export function ConsoleAutoRefresh({
+  intervalMs = DEFAULT_INTERVAL_MS,
+}: {
+  readonly intervalMs?: number;
+}) {
   const router = useRouter();
 
   useEffect(() => {

@@ -94,8 +94,7 @@ const GATES: Record<string, GateSpec> = {
   security: {
     kind: "not_implemented",
     tool: "none",
-    blockedOn:
-      "asimposiumorg-fjp (W8.3), asimposiumorg-3zn (W10.8), and asimposiumorg-mbp (W8.1)",
+    blockedOn: "asimposiumorg-fjp (W8.3), asimposiumorg-3zn (W10.8), and asimposiumorg-mbp (W8.1)",
     note: "The rendered problem page, paired-principal cache-leak E2E, and browser-facing CSP/XSS corpus are not implemented yet.",
   },
 };

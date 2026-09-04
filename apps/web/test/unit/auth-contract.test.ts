@@ -324,7 +324,10 @@ describe("the executable-call surface is an allowlist over the whole file", () =
       baseline.replace("return token;", "const leaked = profile?.email; return token;"),
       baseline.replace("return token;", 'const picked = profile?.["email"]; return token;'),
       baseline.replace("return token;", "const grab = () => profile?.sub; return token;"),
-      baseline.replace("return token;", "const packed = { contact: profile?.email }; return token;"),
+      baseline.replace(
+        "return token;",
+        "const packed = { contact: profile?.email }; return token;",
+      ),
       baseline.replace("return token;", "const rawIdToken = account.id_token; return token;"),
       baseline.replace("return token;", "const wrapped = [account]; return token;"),
       baseline.replace("return token;", "token.contact = profile?.email; return token;"),
@@ -436,9 +439,12 @@ describe("the sponsor principal is derived and projected through canonical bindi
         projection,
         "if (isCanonicalSponsorId(token.sub)) session.user.id = token.email;",
       ),
-      baseline.replace(projection, `if (isCanonicalSponsorId(token.sub)) {
+      baseline.replace(
+        projection,
+        `if (isCanonicalSponsorId(token.sub)) {
         const deferredProjection = () => { session.user.id = token.sub; };
-      }`),
+      }`,
+      ),
       baseline.replace(projection, `return session; ${projection}`),
       baseline.replace(cleanup, ""),
       baseline.replace(cleanup, 'else Reflect.deleteProperty(session.user, "email");'),
@@ -515,10 +521,7 @@ describe("the sponsor principal is derived and projected through canonical bindi
         "return session;",
         "registerPrincipalAccessor`leaked:${session.user}`; return session;",
       ),
-      baseline.replace(
-        "return session;",
-        "new PrincipalAccessor(session.user); return session;",
-      ),
+      baseline.replace("return session;", "new PrincipalAccessor(session.user); return session;"),
       baseline.replace(
         "return session;",
         "[session.user].forEach((leaked) => registerPrincipalAccessor(leaked)); return session;",
@@ -692,14 +695,14 @@ describe("recent-auth is stable across ordinary session reads", () => {
 
   test("PLANTED: even locally validated userinfo profile auth_time is not recent-auth evidence", () => {
     const source = baselineSource().replace(
-        "token.authTime = authTimeFromIdToken(account.id_token);",
-        `token.authTime =
+      "token.authTime = authTimeFromIdToken(account.id_token);",
+      `token.authTime =
           typeof profile?.auth_time === "number" &&
           Number.isSafeInteger(profile.auth_time) &&
           profile.auth_time >= 0
             ? profile.auth_time
             : undefined;`,
-      );
+    );
     expect(readAuthSurface(source).recentAuth.safeJwtStampCount).toBe(0);
     expect(codesOf(validateAuthConfig(source))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
   });
@@ -740,10 +743,7 @@ describe("recent-auth is stable across ordinary session reads", () => {
         "return session;",
         'Reflect.deleteProperty(session, "authIssuedAt"); return session;',
       ),
-      baseline.replace(
-        "return session;",
-        'session["auth" + "IssuedAt"] = 0; return session;',
-      ),
+      baseline.replace("return session;", 'session["auth" + "IssuedAt"] = 0; return session;'),
       baseline.replace(
         "return session;",
         '(session as typeof session)["auth" + "IssuedAt"] = 0; return session;',

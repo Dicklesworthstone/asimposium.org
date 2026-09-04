@@ -10,7 +10,7 @@ export default function Loading() {
         Skip to content
       </a>
       <div className="meander" aria-hidden="true" />
-      <main className="landing col console" id="content">
+      <main className="landing col console" id="content" role="status" aria-live="polite">
         <header className="masthead console-head">
           <h1 className="console-title">Composing this page</h1>
           <p className="tagline">

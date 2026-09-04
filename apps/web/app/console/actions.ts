@@ -36,11 +36,11 @@ import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   deviceLookupRefusalMessage,
+  operatorPrincipalIsAllowed,
   stoaDecideProposal,
   stoaDeviceLookup,
   stoaEnrollmentRecoveryOwner,
   stoaMintEnrollment,
-  operatorPrincipalIsAllowed,
   stoaOperatorFellowCapState,
   stoaOperatorOverrideFellowCap,
   stoaPanicSponsor,

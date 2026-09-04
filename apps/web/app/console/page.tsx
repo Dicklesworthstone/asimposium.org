@@ -16,8 +16,8 @@ import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   configuredStoaOrigin,
-  sponsorWorkshopRefusalNotice,
   type SponsorWorkshopObject,
+  sponsorWorkshopRefusalNotice,
   stoaBootstrapSponsor,
   stoaConfigured,
   stoaEnrollmentRecoveryOwner,
@@ -29,13 +29,9 @@ import {
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
-import { ConsoleAutoRefresh } from "./console-auto-refresh";
-import {
-  LifecycleManager,
-  MintCard,
-  ProposalManager,
-} from "./cards";
 import { ThemeToggle } from "../theme-toggle";
+import { LifecycleManager, MintCard, ProposalManager } from "./cards";
+import { ConsoleAutoRefresh } from "./console-auto-refresh";
 
 export const metadata = {
   title: "Console",
@@ -94,9 +90,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <p className="tagline">
               <Link href="/">← {SITE.name}</Link>
             </p>
-          <p className="theme-toggle-row">
-            <ThemeToggle />
-          </p>
+            <p className="theme-toggle-row">
+              <ThemeToggle />
+            </p>
           </header>
 
           <section className="card" aria-labelledby="sign-in-title">
@@ -169,9 +165,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     readonly objects: readonly SponsorWorkshopObject[];
   }
   const workshopViews: WorkshopViewEntry[] = [];
-  const workshopRefusalNotices: Array<
-    NonNullable<ReturnType<typeof sponsorWorkshopRefusalNotice>>
-  > = [];
+  type WorkshopRefusalItem = NonNullable<ReturnType<typeof sponsorWorkshopRefusalNotice>> & {
+    readonly fellowId: string;
+  };
+  const workshopRefusalNotices: WorkshopRefusalItem[] = [];
   let omittedWorkshopPreviewCount = 0;
   let unavailableWorkshopPreviewCount = 0;
   if (configured && sponsorId !== undefined) {
@@ -191,7 +188,12 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     for (const { candidate, value: view } of loaded.loaded) {
       if (!view.ok) {
         const refusalNotice = sponsorWorkshopRefusalNotice(view);
-        if (refusalNotice !== undefined) workshopRefusalNotices.push(refusalNotice);
+        if (refusalNotice !== undefined) {
+          workshopRefusalNotices.push({
+            ...refusalNotice,
+            fellowId: candidate.fellow.fellow_id,
+          });
+        }
         unavailableWorkshopPreviewCount += 1;
         continue;
       }
@@ -259,11 +261,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <form
             action={async () => {
               "use server";
-              await signIn(
-                "google",
-                { redirectTo: "/console" },
-                { prompt: "select_account" },
-              );
+              await signIn("google", { redirectTo: "/console" }, { prompt: "select_account" });
             }}
           >
             <button className="btn-quiet" type="submit">
@@ -383,8 +381,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           )}
           {workshopRefusalNotices.length === 0 ? null : (
             <ul className="quiet">
-              {workshopRefusalNotices.map((notice, index) => (
-                <li key={`${notice.problemCode}:${notice.title}:${index}`}>
+              {workshopRefusalNotices.map((notice) => (
+                <li key={`${notice.fellowId}:${notice.problemCode}`}>
                   <code>{notice.problemCode}</code>: {notice.title}
                 </li>
               ))}
@@ -426,7 +424,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               — the texts your agent will be held to.
             </li>
             <li>
-              <a href="/design">The design in full</a> and <a href="/llms.txt">llms.txt</a>.
+              <Link href="/design">The design in full</Link> and <a href="/llms.txt">llms.txt</a>.
             </li>
             <li>
               <a href="/api/health">Plane status as JSON</a>. An HTTP 200 means only that Agora

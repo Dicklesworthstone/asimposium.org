@@ -301,14 +301,14 @@ export function MintCard({
           <button
             className="btn-quiet"
             type="button"
-            onClick={() => {
-              void navigator.clipboard.writeText(pasteBlock).then(
-                () => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1_500);
-                },
-                () => setError("Clipboard access was refused. Select and copy the block manually."),
-              );
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(pasteBlock);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1_500);
+              } catch {
+                setError("Clipboard access was refused. Select and copy the block manually.");
+              }
             }}
           >
             {copied ? "Copied" : "Copy the block"}
@@ -350,7 +350,7 @@ export function MintCard({
           </button>
         </div>
         {expiresAt !== null && (
-          <p className="quiet">
+          <p className="quiet" suppressHydrationWarning>
             The URL expires {new Date(expiresAt).toLocaleString()}
             {measuredNow === null
               ? "."
@@ -489,9 +489,10 @@ export function MintCard({
             if (joinLifetimeMinutes === undefined) {
               throw new Error("Join URL lifetime is required.");
             }
+            const requestedScopeSet = new Set(requestedScopes);
             request = {
               requested_scopes: MINT_SCOPES.map(({ scope }) => scope).filter((scope) =>
-                requestedScopes.includes(scope),
+                requestedScopeSet.has(scope),
               ),
               expires_in_ms: joinLifetimeMinutes * 60_000,
               ...(problemBinding.trim() === ""
@@ -915,9 +916,12 @@ export function ProposalManager({
     browserStorageReady,
   );
   const liveEnrollmentIds = new Set(cards.map((card) => card.enrollment_id));
-  const orphanedRecoveryCards = decisionDraftsForOwner(recoveryOwner)
-    .filter((draft) => !liveEnrollmentIds.has(draft.enrollmentId))
-    .map((draft) => draft.card);
+  const orphanedRecoveryCards: EnrollmentApprovalCard[] = [];
+  for (const draft of decisionDraftsForOwner(recoveryOwner)) {
+    if (!liveEnrollmentIds.has(draft.enrollmentId)) {
+      orphanedRecoveryCards.push(draft.card);
+    }
+  }
   const visibleCards = [...cards, ...orphanedRecoveryCards];
   const transientFingerprints = new Set(
     decisionDraftsForOwner(recoveryOwner).map((draft) => draft.fingerprint),
@@ -1017,6 +1021,13 @@ export function ProposalManager({
     </>
   );
 }
+
+const PROPOSAL_SCOPE_PLAIN: Record<string, string> = {
+  promote: "Publish finished work to the public ledger",
+  review: "Submit reviews of other work",
+  "propose-problems": "Draft new problems (nothing publishes without you)",
+  "upload-artifacts": "Upload supporting files (datasets, code archives)",
+};
 
 export function ProposalCard({
   card,
@@ -1206,7 +1217,8 @@ export function ProposalCard({
   const reduce = () => {
     setError(null);
     const reduction: EnrollmentGrantReduction = {};
-    const kept = card.requested_scopes.filter((scope) => keptScopes.includes(scope));
+    const keptScopeSet = new Set(keptScopes);
+    const kept = card.requested_scopes.filter((scope) => keptScopeSet.has(scope));
     if (kept.length !== card.requested_scopes.length) {
       if (kept.length === 0) {
         setError("A reduction must keep at least one scope.");
@@ -1292,13 +1304,9 @@ export function ProposalCard({
 
   const resources = card.requested_resources;
 
-  const SCOPE_PLAIN: Record<string, string> = {
-    promote: "Publish finished work to the public ledger",
-    review: "Submit reviews of other work",
-    "propose-problems": "Draft new problems (nothing publishes without you)",
-    "upload-artifacts": "Upload supporting files (datasets, code archives)",
-  };
-  const scopeDescriptions = card.requested_scopes.map((scope) => SCOPE_PLAIN[scope] ?? scope);
+  const scopeDescriptions = card.requested_scopes.map(
+    (scope) => PROPOSAL_SCOPE_PLAIN[scope] ?? scope,
+  );
 
   return (
     <li className="proposal">
@@ -1339,13 +1347,13 @@ export function ProposalCard({
             : `${resources.artifact_budget_bytes.toLocaleString()} bytes`}
         </dd>
         <dt>Fellow grant expires</dt>
-        <dd>
+        <dd suppressHydrationWarning>
           {resources.fellow_grant_expires_at === undefined
             ? "No grant expiry (you can revoke it anytime from the console)"
             : new Date(resources.fellow_grant_expires_at).toLocaleString()}
         </dd>
         <dt>Proposal expires</dt>
-        <dd>
+        <dd suppressHydrationWarning>
           {Number.isFinite(new Date(card.proposal_expires_at).getTime())
             ? new Date(card.proposal_expires_at).toLocaleString()
             : String(card.proposal_expires_at ?? "unspecified")}
@@ -1449,107 +1457,111 @@ export function ProposalCard({
         </fieldset>
       )}
 
-      {reduceOpen && (
-        <div className="reduce-panel" id={`reduce-${card.proposal_id}`}>
-          <fieldset>
-            <legend className="quiet">Keep scopes</legend>
-            {card.requested_scopes.map((scope) => (
-              <label key={scope} className="check">
-                <input
-                  type="checkbox"
-                  checked={keptScopes.includes(scope)}
-                  onChange={(event) =>
-                    setKeptScopes(
-                      event.target.checked
-                        ? [...keptScopes, scope]
-                        : keptScopes.filter((kept) => kept !== scope),
-                    )
-                  }
-                />
-                {scope}
-              </label>
-            ))}
-          </fieldset>
-          {resources.problem_binding !== undefined && (
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={dropProblem}
-                onChange={(event) => setDropProblem(event.target.checked)}
-              />
-              Remove the problem assignment
-            </label>
-          )}
-          {resources.first_directive !== undefined && (
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={dropDirective}
-                onChange={(event) => setDropDirective(event.target.checked)}
-              />
-              Remove the first directive
-            </label>
-          )}
-          <div className="reduce-grid">
-            <label>
-              <span className="quiet">Event budget</span>
-              <input
-                type="number"
-                min={1}
-                max={
-                  resources.event_budget === undefined
-                    ? 10_000
-                    : Math.max(0, resources.event_budget - 1)
-                }
-                disabled={resources.event_budget !== undefined && resources.event_budget <= 1}
-                value={eventBudget}
-                placeholder={String(resources.event_budget ?? "")}
-                onChange={(event) => setEventBudget(event.target.value)}
-              />
-            </label>
-            <label>
-              <span className="quiet">Artifact bytes</span>
-              <input
-                type="number"
-                min={0}
-                max={
-                  resources.artifact_budget_bytes === undefined
-                    ? 1_073_741_824
-                    : Math.max(0, resources.artifact_budget_bytes - 1)
-                }
-                disabled={resources.artifact_budget_bytes === 0}
-                value={artifactBudget}
-                placeholder={String(resources.artifact_budget_bytes ?? "")}
-                onChange={(event) => setArtifactBudget(event.target.value)}
-              />
-            </label>
-            <label>
-              <span className="quiet">Grant lifetime from decision (seconds)</span>
-              <input
-                type="number"
-                min={0.001}
-                max={31_536_000}
-                step={0.001}
-                value={grantSeconds}
-                placeholder={
-                  resources.fellow_grant_expires_at === undefined
-                    ? "Up to 31,536,000"
-                    : "Shorter than the current remaining lifetime"
-                }
-                onChange={(event) => setGrantSeconds(event.target.value)}
-              />
-            </label>
-          </div>
-          <button
-            className="btn-quiet"
-            type="button"
-            disabled={pending || otherRecoveryPending || decisionWarning}
-            onClick={reduce}
-          >
-            {pending ? "Sending…" : "Approve with these reductions"}
-          </button>
-        </div>
-      )}
+      {reduceOpen &&
+        (() => {
+          const keptScopeSet = new Set(keptScopes);
+          return (
+            <div className="reduce-panel" id={`reduce-${card.proposal_id}`}>
+              <fieldset>
+                <legend className="quiet">Keep scopes</legend>
+                {card.requested_scopes.map((scope) => (
+                  <label key={scope} className="check">
+                    <input
+                      type="checkbox"
+                      checked={keptScopeSet.has(scope)}
+                      onChange={(event) =>
+                        setKeptScopes(
+                          event.target.checked
+                            ? [...keptScopes, scope]
+                            : keptScopes.filter((kept) => kept !== scope),
+                        )
+                      }
+                    />
+                    {scope}
+                  </label>
+                ))}
+              </fieldset>
+              {resources.problem_binding !== undefined && (
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={dropProblem}
+                    onChange={(event) => setDropProblem(event.target.checked)}
+                  />
+                  Remove the problem assignment
+                </label>
+              )}
+              {resources.first_directive !== undefined && (
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={dropDirective}
+                    onChange={(event) => setDropDirective(event.target.checked)}
+                  />
+                  Remove the first directive
+                </label>
+              )}
+              <div className="reduce-grid">
+                <label>
+                  <span className="quiet">Event budget</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={
+                      resources.event_budget === undefined
+                        ? 10_000
+                        : Math.max(0, resources.event_budget - 1)
+                    }
+                    disabled={resources.event_budget !== undefined && resources.event_budget <= 1}
+                    value={eventBudget}
+                    placeholder={String(resources.event_budget ?? "")}
+                    onChange={(event) => setEventBudget(event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span className="quiet">Artifact bytes</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={
+                      resources.artifact_budget_bytes === undefined
+                        ? 1_073_741_824
+                        : Math.max(0, resources.artifact_budget_bytes - 1)
+                    }
+                    disabled={resources.artifact_budget_bytes === 0}
+                    value={artifactBudget}
+                    placeholder={String(resources.artifact_budget_bytes ?? "")}
+                    onChange={(event) => setArtifactBudget(event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span className="quiet">Grant lifetime from decision (seconds)</span>
+                  <input
+                    type="number"
+                    min={0.001}
+                    max={31_536_000}
+                    step={0.001}
+                    value={grantSeconds}
+                    placeholder={
+                      resources.fellow_grant_expires_at === undefined
+                        ? "Up to 31,536,000"
+                        : "Shorter than the current remaining lifetime"
+                    }
+                    onChange={(event) => setGrantSeconds(event.target.value)}
+                  />
+                </label>
+              </div>
+              <button
+                className="btn-quiet"
+                type="button"
+                disabled={pending || otherRecoveryPending || decisionWarning}
+                onClick={reduce}
+              >
+                {pending ? "Sending…" : "Approve with these reductions"}
+              </button>
+            </div>
+          );
+        })()}
 
       {error !== null && (
         <p className="quiet" role="alert">
@@ -1608,7 +1620,7 @@ function LifecycleReceiptView({ receipt }: { readonly receipt: LifecycleReceipt 
         <dt>Sponsor sequence</dt>
         <dd>{receipt.sponsorSeq}</dd>
         <dt>Effective</dt>
-        <dd>{new Date(receipt.effectiveAt).toLocaleString()}</dd>
+        <dd suppressHydrationWarning>{new Date(receipt.effectiveAt).toLocaleString()}</dd>
       </dl>
     </div>
   );
@@ -1867,7 +1879,9 @@ export function LifecycleManager({
                     {fellow.credentials.map((credential) => (
                       <span key={credential.credential_id}>
                         {credential.profile} issued{" "}
-                        {new Date(credential.issued_at).toLocaleDateString()}
+                        <span suppressHydrationWarning>
+                          {new Date(credential.issued_at).toLocaleDateString()}
+                        </span>
                         {credential.active ? " · active" : " · inactive"}
                         {credential.active ? (
                           <button
@@ -1906,7 +1920,7 @@ export function LifecycleManager({
                   </span>
                 ) : null}
               </span>
-              <span className="state">
+              <span className="state" suppressHydrationWarning>
                 since {new Date(fellow.granted_at).toLocaleDateString()}
                 {LIFECYCLE_TARGETS[fellow.status].map((status) => {
                   const confirmationKey = `fellow-lifecycle:${fellow.fellow_id}:${status}`;
@@ -1951,19 +1965,29 @@ export function LifecycleManager({
           credential secret in this console.
         </p>
         {confirming === "sponsor-panic" ? (
-          <button
-            ref={confirmControlRef}
-            className="btn-quiet btn-confirm"
-            type="button"
-            disabled={controlsDisabled}
-            onClick={() =>
-              prepareAndDispatch("sponsor-panic", {
-                confirm: "revoke-all-fellow-credentials",
-              })
-            }
-          >
-            Confirm sponsor panic
-          </button>
+          <div className="btn-row">
+            <button
+              ref={confirmControlRef}
+              className="btn-quiet btn-confirm"
+              type="button"
+              disabled={controlsDisabled}
+              onClick={() =>
+                prepareAndDispatch("sponsor-panic", {
+                  confirm: "revoke-all-fellow-credentials",
+                })
+              }
+            >
+              Confirm sponsor panic
+            </button>
+            <button
+              className="btn-quiet"
+              type="button"
+              disabled={controlsDisabled}
+              onClick={() => setConfirming(null)}
+            >
+              Cancel
+            </button>
+          </div>
         ) : (
           <button
             className="btn-quiet"

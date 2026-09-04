@@ -117,6 +117,7 @@ export function DeviceApprovalForm({
           </p>
           <ul className="proposal-list" aria-label="Device proposal">
             <ProposalCard
+              key={card.enrollment_id}
               card={card}
               writesConfigured={writesConfigured}
               recoveryOwner={recoveryOwner}
@@ -145,8 +146,7 @@ export function DeviceApprovalForm({
         </div>
       ) : (
         <form
-          onSubmit={(event) => {
-            event.preventDefault();
+          action={() => {
             setError(null);
             const userCode = normalizeDeviceCode(code);
             startTransition(async () => {

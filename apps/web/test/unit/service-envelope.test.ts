@@ -1,4 +1,4 @@
-import { describe, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -2101,37 +2101,66 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
       headers: { "content-type": "application/problem+json" },
     });
 
-  // Isolate exactly the client/context surfaces; keep the projection real. bun's
-  // mock.module keys by resolved module path, so `@/app/console/cards` intercepts
-  // the page's own `./cards` import (same file), and likewise for the sentinel.
-  mock.module("@/auth", () => ({
-    auth: async () => ({ user: { name: "Test Sponsor", id: SPONSOR_ID } }),
-    signIn: async () => undefined,
-  }));
-  mock.module("@/lib/plane-status", () => ({
-    consolePlaneStatusRows: () => [],
-    planeStatusFreshnessCopy: () => "Plane status pending.",
-    resolveCachedPlaneStatus: async () => undefined,
-  }));
-  mock.module("@/app/console/cards", () => ({
-    MintCard: () => null,
-    ProposalManager: () => null,
-    LifecycleManager: () => null,
-  }));
-  mock.module("@/app/enrollment-recovery-sentinel", () => ({
-    EnrollmentRecoveryFence: (props: { children?: ReactNode }) => props.children ?? null,
-  }));
-  mock.module("@/app/console/console-auto-refresh", () => ({
-    ConsoleAutoRefresh: () => null,
-  }));
-  mock.module("next/link", () => ({
-    default: (props: { href?: unknown; children?: ReactNode }) =>
-      createElement(
-        "a",
-        { href: typeof props.href === "string" ? props.href : String(props.href) },
-        props.children,
-      ),
-  }));
+  let realAuth: typeof import("../../auth.ts");
+  let realPlaneStatus: typeof import("../../lib/plane-status.ts");
+  let realCards: typeof import("../../app/console/cards.tsx");
+  let realSentinel: typeof import("../../app/enrollment-recovery-sentinel.tsx");
+  let realRefresh: typeof import("../../app/console/console-auto-refresh.tsx");
+  let realLink: typeof import("next/link");
+
+  beforeAll(async () => {
+    realAuth = { ...(await import("../../auth.ts")) };
+    realPlaneStatus = { ...(await import("../../lib/plane-status.ts")) };
+    realCards = { ...(await import("../../app/console/cards.tsx")) };
+    realSentinel = { ...(await import("../../app/enrollment-recovery-sentinel.tsx")) };
+    realRefresh = { ...(await import("../../app/console/console-auto-refresh.tsx")) };
+    realLink = { ...(await import("next/link")) };
+
+    // Isolate exactly the client/context surfaces; keep the projection real. bun's
+    // mock.module keys by resolved module path, so `@/app/console/cards` intercepts
+    // the page's own `./cards` import (same file), and likewise for the sentinel.
+    mock.module("@/auth", () => ({
+      ...realAuth,
+      auth: async () => ({ user: { name: "Test Sponsor", id: SPONSOR_ID } }),
+      signIn: async () => undefined,
+    }));
+    mock.module("@/lib/plane-status", () => ({
+      consolePlaneStatusRows: () => [],
+      planeStatusFreshnessCopy: () => "Plane status pending.",
+      resolveCachedPlaneStatus: async () => undefined,
+    }));
+    mock.module("@/app/console/cards", () => ({
+      ...realCards,
+      MintCard: () => null,
+      ProposalManager: () => null,
+      LifecycleManager: () => null,
+    }));
+    mock.module("@/app/enrollment-recovery-sentinel", () => ({
+      ...realSentinel,
+      EnrollmentRecoveryFence: (props: { children?: ReactNode }) => props.children ?? null,
+    }));
+    mock.module("@/app/console/console-auto-refresh", () => ({
+      ...realRefresh,
+      ConsoleAutoRefresh: () => null,
+    }));
+    mock.module("next/link", () => ({
+      default: (props: { href?: unknown; children?: ReactNode }) =>
+        createElement(
+          "a",
+          { href: typeof props.href === "string" ? props.href : String(props.href) },
+          props.children,
+        ),
+    }));
+  });
+
+  afterAll(() => {
+    mock.module("@/auth", () => realAuth);
+    mock.module("@/lib/plane-status", () => realPlaneStatus);
+    mock.module("@/app/console/cards", () => realCards);
+    mock.module("@/app/enrollment-recovery-sentinel", () => realSentinel);
+    mock.module("@/app/console/console-auto-refresh", () => realRefresh);
+    mock.module("next/link", () => realLink);
+  });
 
   // Route the isolated network: real stoaFellows must succeed so the workshop
   // prefix has candidates; each workshop read is answered per SIGNED fellow_id
@@ -2172,8 +2201,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     const contractDetailCanary = "private-contract-refusal-detail-canary";
     const contractFixHintCanary = "private-contract-refusal-fix-hint-canary";
     const contractExampleCanary = "private-contract-refusal-example-canary";
-    const contractSchemaCanary =
-      "https://a.asimposium.org/schemas/private-schema-canary.v1.json";
+    const contractSchemaCanary = "https://a.asimposium.org/schemas/private-schema-canary.v1.json";
     const opaqueDetailCanary = "private-opaque-refusal-detail-canary";
     const fetchSpy = routeStoa((fellowId) =>
       fellowId === "fellow-01JXYZ"

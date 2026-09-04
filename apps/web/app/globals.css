@@ -507,7 +507,8 @@
   color: var(--color-ink2);
 }
 .console .join-url {
-  word-break: break-all;
+  word-break: normal;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   user-select: all;
 }
@@ -816,12 +817,16 @@
 /* ── touch: comfortable targets, no iOS focus zoom ─────── */
 @media (pointer: coarse) {
   .btn-google,
-  .btn-quiet {
+  .btn-quiet,
+  .btn-console,
+  .search-page .search-btn {
     padding-block: 0.55rem;
   }
   .console .mint-grid input,
   .console .mint-grid textarea,
-  .console .reduce-grid input {
+  .console .reduce-grid input,
+  .search-page .search-input,
+  .search-page .search-select {
     font-size: 1rem;
   }
   .console .check input {
@@ -849,6 +854,279 @@
     white-space: normal;
     overflow-x: visible;
   }
+}
+
+/* ── Explore & Problem public ledger pages ─────────────── */
+.explore-page,
+.problem-page {
+  max-width: var(--measure, 44rem);
+  margin: 0 auto;
+}
+
+.explore-page .problems-list,
+.problem-page .claims-list {
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.explore-page .problem-card,
+.problem-page .claim-card {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 1.05rem 1.25rem;
+  transition: border-color 0.15s ease;
+}
+
+.explore-page .problem-card:hover,
+.problem-page .claim-card:hover {
+  border-color: var(--color-clay);
+}
+
+.explore-page .problem-card header,
+.problem-page .claim-card-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.explore-page .problem-link {
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--color-clay);
+  text-decoration: none;
+}
+
+.explore-page .problem-link:hover {
+  text-decoration: underline;
+}
+
+.explore-page .empty-state {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 1.25rem;
+  margin: 1.2rem 0;
+}
+
+.explore-page .areas-grid {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.6rem;
+}
+
+.explore-page .area-chip {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 0.45rem 0.75rem;
+  border-radius: 2px;
+  text-align: center;
+  font-size: 0.88rem;
+}
+
+.explore-page .area-chip code {
+  color: var(--color-ink);
+  font-family: inherit;
+}
+
+.problem-page .problem-title {
+  font-size: clamp(1.4rem, 1.1rem + 2.5vw, 2.4rem);
+  margin: 0.5rem 0 0.8rem;
+  line-height: 1.2;
+}
+
+.problem-page .problem-id-chip {
+  display: inline-block;
+  border: 1px solid var(--color-line);
+  background: var(--color-paper);
+  padding: 0.2rem 0.6rem;
+  border-radius: 2px;
+  font-size: 0.85rem;
+}
+
+.problem-page .claim-card pre {
+  margin: 0.6rem 0;
+  padding: 0.8rem;
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  overflow-x: auto;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.problem-page .claim-card-footer {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--color-line);
+  padding-top: 0.4rem;
+}
+
+.problem-page .footer-meander,
+.explore-page .footer-meander,
+.search-page .footer-meander {
+  margin-top: 2.5rem;
+}
+
+/* ── Search public ledger page ─────────────────────────── */
+.search-page {
+  max-width: var(--measure, 44rem);
+  margin: 0 auto;
+}
+
+.search-page .search-form-section {
+  padding: 1.25rem;
+  margin: 1.2rem 0;
+}
+
+.search-page .search-form {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.search-page .search-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 2px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.search-page .search-input:focus-visible {
+  outline: 2px solid var(--color-clay);
+  outline-offset: 1px;
+}
+
+.search-page .search-select {
+  padding: 0.6rem 0.8rem;
+  border-radius: 2px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.search-page .search-btn {
+  padding: 0.6rem 1.4rem;
+  background: var(--color-clay);
+  color: var(--color-paper);
+  border: 1px solid var(--color-clay);
+  font: inherit;
+  font-size: 0.92rem;
+  font-variant: small-caps;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.search-page .search-btn:hover {
+  opacity: 0.88;
+}
+
+.search-page .diptych-note {
+  margin: 1rem 0;
+}
+
+.search-page .results-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.search-page .result-card {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 1.25rem;
+  transition: border-color 0.15s ease;
+}
+
+.search-page .result-card:hover {
+  border-color: var(--color-clay);
+}
+
+.search-page .result-meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.search-page .kind-badge {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 2px;
+  border: 1px solid var(--color-rule);
+  color: var(--color-muted);
+}
+
+.search-page .exact-match-badge {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 2px;
+  background: var(--color-clay);
+  color: var(--color-paper);
+  font-weight: 600;
+}
+
+.search-page .result-link {
+  font-weight: 600;
+  color: var(--color-clay);
+  text-decoration: none;
+}
+
+.search-page .result-link:hover {
+  text-decoration: underline;
+}
+
+.search-page .result-snippet {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--color-ink2);
+}
+
+.search-page .empty-search-card {
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  padding: 2rem;
+  text-align: center;
+}
+
+.search-page .empty-search-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 1.2rem;
+}
+
+.search-page .omissions-footer {
+  margin-top: 2rem;
+  border-top: 1px solid var(--color-line);
+  padding-top: 1rem;
 }
 
 @media print {

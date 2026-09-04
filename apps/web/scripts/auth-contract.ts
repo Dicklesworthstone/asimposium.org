@@ -504,11 +504,7 @@ export function sessionCookieOptions(sourceFile: ts.SourceFile): SessionCookieOp
   return { present: true, keys, unresolvable };
 }
 
-type CallbackFunction = (
-  | ts.MethodDeclaration
-  | ts.ArrowFunction
-  | ts.FunctionExpression
-) & {
+type CallbackFunction = (ts.MethodDeclaration | ts.ArrowFunction | ts.FunctionExpression) & {
   readonly body: ts.ConciseBody;
 };
 
@@ -526,8 +522,7 @@ function callbackFunction(
     if (literalPropertyName(element) !== key) continue;
     if (ts.isMethodDeclaration(element) && element.body !== undefined) {
       fn = element as CallbackFunction;
-    }
-    else if (
+    } else if (
       ts.isPropertyAssignment(element) &&
       (ts.isArrowFunction(element.initializer) || ts.isFunctionExpression(element.initializer))
     ) {
@@ -696,8 +691,7 @@ function assignmentTargetContains(
   }
   if (ts.isArrayLiteralExpression(current)) {
     return current.elements.some(
-      (element) =>
-        !ts.isOmittedExpression(element) && assignmentTargetContains(element, matches),
+      (element) => !ts.isOmittedExpression(element) && assignmentTargetContains(element, matches),
     );
   }
   if (ts.isObjectLiteralExpression(current)) {
@@ -947,8 +941,7 @@ function hasFieldMutationOtherThan(
         target = node.left;
         source = node.right;
       }
-      const sourceBinding =
-        source === undefined ? undefined : directIdentifierName(source);
+      const sourceBinding = source === undefined ? undefined : directIdentifierName(source);
       if (
         target !== undefined &&
         sourceBinding !== undefined &&
@@ -1003,8 +996,7 @@ function hasFieldMutationOtherThan(
     if (ts.isCallExpression(node)) {
       const target = node.arguments[0];
       const namedProperty = node.arguments[1];
-      const directTarget =
-        target !== undefined && aliases.has(directIdentifierName(target) ?? "");
+      const directTarget = target !== undefined && aliases.has(directIdentifierName(target) ?? "");
       if (directTarget && propertyAccess(node.expression, "Object", "assign")) {
         found = true;
         return;
@@ -1138,8 +1130,7 @@ function hasSponsorSessionMutationOtherThan(
     if (access === undefined) return false;
     if (sessionAliases.has(access.root)) {
       if (access.path === undefined) return true;
-      return access.path[0] === "user" &&
-        (access.path.length === 1 || access.path[1] === "id");
+      return access.path[0] === "user" && (access.path.length === 1 || access.path[1] === "id");
     }
     if (userAliases.has(access.root)) {
       if (access.path === undefined) return true;
@@ -1153,8 +1144,7 @@ function hasSponsorSessionMutationOtherThan(
     if (access === undefined) return false;
     if (sessionAliases.has(access.root)) {
       if (access.path === undefined || access.path.length === 0) return true;
-      return access.path[0] === "user" &&
-        (access.path.length === 1 || access.path[1] === "id");
+      return access.path[0] === "user" && (access.path.length === 1 || access.path[1] === "id");
     }
     if (userAliases.has(access.root)) {
       return access.path === undefined || access.path.length === 0 || access.path[0] === "id";
@@ -1170,9 +1160,7 @@ function hasSponsorSessionMutationOtherThan(
       const visitExposure = (child: ts.Node): void => {
         if (exposesPrincipal || (child !== body && ts.isFunctionLike(child))) return;
         const exposedExpression =
-          ts.isReturnStatement(child) || ts.isYieldExpression(child)
-            ? child.expression
-            : undefined;
+          ts.isReturnStatement(child) || ts.isYieldExpression(child) ? child.expression : undefined;
         if (
           exposedExpression !== undefined &&
           expressionContainsPrincipalObject(exposedExpression)
@@ -1212,8 +1200,7 @@ function hasSponsorSessionMutationOtherThan(
     if (ts.isSpreadElement(current)) return expressionContainsPrincipalObject(current.expression);
     if (ts.isArrayLiteralExpression(current)) {
       return current.elements.some(
-        (element) =>
-          !ts.isOmittedExpression(element) && expressionContainsPrincipalObject(element),
+        (element) => !ts.isOmittedExpression(element) && expressionContainsPrincipalObject(element),
       );
     }
     if (ts.isObjectLiteralExpression(current)) {
@@ -1342,7 +1329,11 @@ function hasSponsorSessionMutationOtherThan(
       found = true;
       return;
     }
-    if (!allowed.has(node) && ts.isDeleteExpression(node) && mutationTargetsPrincipal(node.expression)) {
+    if (
+      !allowed.has(node) &&
+      ts.isDeleteExpression(node) &&
+      mutationTargetsPrincipal(node.expression)
+    ) {
       found = true;
       return;
     }
@@ -1477,10 +1468,7 @@ function hasExactTrailingBindingReturn(
   return returns === 1;
 }
 
-function directGuardingIf(
-  node: ts.Node,
-  callback: CallbackFunction,
-): ts.IfStatement | undefined {
+function directGuardingIf(node: ts.Node, callback: CallbackFunction): ts.IfStatement | undefined {
   const statement = node.parent;
   if (statement === undefined || !ts.isExpressionStatement(statement)) return undefined;
   const parent = statement.parent;
@@ -1982,16 +1970,9 @@ export function executableCallSurface(sourceFile: ts.SourceFile): string[] {
 
   const found: string[] = [];
   const visit = (node: ts.Node): void => {
-    if (
-      ts.isNewExpression(node) ||
-      ts.isTaggedTemplateExpression(node) ||
-      ts.isDecorator(node)
-    ) {
+    if (ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node) || ts.isDecorator(node)) {
       found.push(node.getText(sourceFile));
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind !== ts.SyntaxKind.ImportKeyword
-    ) {
+    } else if (ts.isCallExpression(node) && node.expression.kind !== ts.SyntaxKind.ImportKeyword) {
       const callee = unwrapTransparentExpression(node.expression);
       const allowed =
         (ts.isIdentifier(callee) && callableImport(callee.text)) ||

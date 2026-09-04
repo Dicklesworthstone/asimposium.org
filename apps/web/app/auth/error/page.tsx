@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { ThemeToggle } from "@/app/theme-toggle";
 import { SITE } from "@/lib/site";
 
 export const metadata = {
@@ -66,13 +67,16 @@ export default async function AuthErrorPage({
       <div className="meander" aria-hidden="true" />
       <main className="landing col console" id="content">
         <header className="masthead console-head">
-          <p className="greek-sub" aria-hidden="true">
+          <p className="greek-sub" lang="el" aria-hidden="true">
             προπύλαιον
           </p>
           <h1 className="console-title">{heading}</h1>
           <p className="tagline">
             <Link href="/">← {SITE.name}</Link>
           </p>
+          <div className="theme-toggle-row">
+            <ThemeToggle />
+          </div>
         </header>
         <p>{body}</p>
         {errorCode !== undefined && errorCode !== "" && (

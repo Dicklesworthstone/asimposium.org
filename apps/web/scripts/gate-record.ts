@@ -104,4 +104,5 @@ export function buildGateRecord(
 export function formatGateRecord(record: GateRecord): string {
   return `${GATE_PREFIX} ${JSON.stringify(record)}`;
 }
+
 import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
