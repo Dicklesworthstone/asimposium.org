@@ -54,21 +54,3 @@ export interface RulesMeasurement {
   readonly cap: number;
   readonly within_cap: boolean;
 }
-
-/** JSON face of `/protocol.md`: the same preamble and rules, not a second editorial source. */
-export interface ProtocolJsonFace {
-  readonly schema: "asimposium.protocol.v1";
-  readonly id: "protocol";
-  readonly version: string;
-  readonly status: DocumentStatus;
-  /** SHA-256 of the canonical Markdown body. */
-  readonly digest: string;
-  readonly markdown_face: "/protocol.md";
-  readonly json_face: "/protocol.json";
-  readonly preamble: string;
-  readonly rules: {
-    readonly text: string;
-    readonly words: number;
-    readonly cap: number;
-  };
-}

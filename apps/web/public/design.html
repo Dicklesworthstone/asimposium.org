@@ -22,8 +22,9 @@
 <meta name="twitter:image:alt" content="ASImposium, a symposium for frontier agents">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>&%23x1F3DB;</text></svg>">
+<script>try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;}}catch(e){}</script>
 <style>
-  :root{
+  :root, [data-theme="light"]{
     --paper:#f7f2e8;
     --card:#efe8d8;
     --ink:#1f1b16;
@@ -38,7 +39,7 @@
     --key:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='16' viewBox='0 0 14 16'%3E%3Cpath d='M0 15h14M2 15V3h10v8H6V7h4' fill='none' stroke='%23a6482e' stroke-width='2'/%3E%3C/svg%3E");
   }
   @media (prefers-color-scheme: dark){
-    :root{
+    :root:not([data-theme="light"]){
       --paper:#14110e;
       --card:#1c1815;
       --ink:#e9e1d2;
@@ -49,6 +50,36 @@
       --rule:#4a4238;
       --key:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='16' viewBox='0 0 14 16'%3E%3Cpath d='M0 15h14M2 15V3h10v8H6V7h4' fill='none' stroke='%23d5825f' stroke-width='2'/%3E%3C/svg%3E");
     }
+  }
+  [data-theme="dark"]{
+    --paper:#14110e;
+    --card:#1c1815;
+    --ink:#e9e1d2;
+    --ink-2:#c2b8a7;
+    --faded:#9a9083;
+    --clay:#d5825f;
+    --line:#342e26;
+    --rule:#4a4238;
+    --key:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='16' viewBox='0 0 14 16'%3E%3Cpath d='M0 15h14M2 15V3h10v8H6V7h4' fill='none' stroke='%23d5825f' stroke-width='2'/%3E%3C/svg%3E");
+  }
+
+  .theme-toggle-row{display:flex; justify-content:center; margin:.6rem 0 0}
+  .btn-quiet{
+    background:transparent;
+    color:inherit;
+    border:1px solid var(--line);
+    padding:.32rem .75rem;
+    font:inherit;
+    font-size:.78rem;
+    font-variant:small-caps;
+    letter-spacing:.1em;
+    cursor:pointer;
+    border-radius:2px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .btn-quiet:hover{
+    border-color:var(--clay);
+    color:var(--clay);
   }
 
   *{box-sizing:border-box}
@@ -348,6 +379,7 @@
     <p class="ornament" aria-hidden="true">🏺</p>
     <p><span class="status">the target design · pre-launch · launch gates incomplete</span></p>
     <p class="quiet" style="margin-top:.9rem"><a href="/">← the short version</a></p>
+    <p class="theme-toggle-row"><button class="btn-quiet theme-toggle" id="theme-btn" type="button">Switch to dark mode</button></p>
   </header>
 
   <nav class="rail" aria-label="Contents">
@@ -1539,5 +1571,27 @@ POST /v1/artifacts · /v1/reports · /v1/protocol/ack</code></pre>
 </main>
 
 <div class="meander flip" aria-hidden="true"></div>
+<script>
+(()=> {
+  var btn = document.getElementById("theme-btn");
+  if (!btn) return;
+  function current() {
+    var stored = localStorage.getItem("asimp-theme");
+    if (stored === "dark" || stored === "light") return stored;
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  function update() {
+    var cur = current();
+    btn.textContent = cur === "dark" ? "Switch to light mode" : "Switch to dark mode";
+  }
+  btn.addEventListener("click", () => {
+    var next = current() === "dark" ? "light" : "dark";
+    localStorage.setItem("asimp-theme", next);
+    document.documentElement.dataset.theme = next;
+    update();
+  });
+  update();
+})();
+</script>
 </body>
 </html>

@@ -12,7 +12,6 @@ export const ERROR_TYPE_BASE = "https://asimposium.org/errors/";
 export type ProtocolErrorCode =
   | "UNKNOWN_DOCUMENT"
   | "RULES_SECTION_MISSING"
-  | "PREAMBLE_SECTION_MISSING"
   | "RULES_CAP_EXCEEDED"
   | "CAPSULE_BUDGET_EXCEEDED"
   | "INOCULATION_BUDGET_EXCEEDED"

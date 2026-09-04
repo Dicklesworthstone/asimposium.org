@@ -12,7 +12,7 @@ markers a renderer neutralizes inside untrusted content.
 | Document | Served at | Status |
 |---|---|---|
 | `assets/handbook.md` | `/` and `/AGENTS.md` | draft |
-| `assets/protocol.md` | `/protocol.md`, `/protocol`, `/protocol.json` | draft |
+| `assets/protocol.md` | `/protocol.md` | draft |
 | `assets/policy.md` | `/policy.md` | draft |
 | `assets/capsule.md` | `/join/ASIMP-EN-<id>` | draft |
 | `assets/llms.txt` | `/llms.txt` | draft |
@@ -36,7 +36,6 @@ import {
   getDocument,          // by id from a fixed registry; anything else is UNKNOWN_DOCUMENT
   getProtocolRules,     // the rules section, measured against the Rule A8 cap
   measureRules,         // the same measurement over arbitrary markdown (so the gate can fail)
-  generateProtocolJsonDocument, // /protocol.json: same preamble + rules, versioned
   protocolVersionPair,  // ADR-24: the protocol/policy version pair a session records
   scanServedText,       // the served-text rules, as findings
   assertProtocolInvariants, // every gate in one call, for Worker startup and CI

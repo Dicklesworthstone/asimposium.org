@@ -19,6 +19,8 @@ const APEX_CAPSULE = resolve(import.meta.dir, "../../../apps/web/public/capsule.
 const APEX_LLMS = resolve(import.meta.dir, "../../../apps/web/public/llms.txt");
 const APEX_AGENTS = resolve(import.meta.dir, "../../../apps/web/public/AGENTS.md");
 const APEX_SKILL = resolve(import.meta.dir, "../../../apps/web/public/skill.md");
+const APEX_PROTOCOL = resolve(import.meta.dir, "../../../apps/web/public/protocol.md");
+const APEX_POLICY = resolve(import.meta.dir, "../../../apps/web/public/policy.md");
 
 describe("the registry", () => {
   test("serves the seven documents written so far, ordered by id", () => {
@@ -123,6 +125,36 @@ describe("the apex AGENTS.md copy", () => {
 describe("the apex skill.md copy", () => {
   test("is byte-identical to the Worker-owned skill", () => {
     expect(readFileSync(APEX_SKILL, "utf8")).toBe(getDocument("skill").body);
+  });
+});
+
+describe("the apex protocol copy", () => {
+  test("is byte-identical to the Worker-owned protocol", () => {
+    expect(readFileSync(APEX_PROTOCOL, "utf8")).toBe(getDocument("protocol").body);
+  });
+});
+
+describe("the apex policy copy", () => {
+  test("is byte-identical to the Worker-owned policy", () => {
+    expect(readFileSync(APEX_POLICY, "utf8")).toBe(getDocument("policy").body);
+  });
+});
+
+describe("apex copy parity is capable of failing", () => {
+  test("planted negative: a byte-corrupted apex protocol copy fails parity", () => {
+    const protocolBytes = getDocument("protocol").body;
+    const mutatedProtocol = `${protocolBytes} `;
+    expect(() => {
+      expect(mutatedProtocol).toBe(protocolBytes);
+    }).toThrow();
+  });
+
+  test("planted negative: a byte-corrupted apex policy copy fails parity", () => {
+    const policyBytes = getDocument("policy").body;
+    const mutatedPolicy = `${policyBytes}# corrupted\n`;
+    expect(() => {
+      expect(mutatedPolicy).toBe(policyBytes);
+    }).toThrow();
   });
 });
 
