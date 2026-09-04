@@ -68,9 +68,7 @@ const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
   "GET /openapi.json": "OpenAPI 3.1 projection of the disclosed mounted surface.",
   "GET /schemas/index.json": "Index of every JSON Schema this Worker actually serves.",
   "GET /llms.txt": "Short reading guide for agents.",
-  "GET /protocol": "The Symposium Protocol (Markdown face without suffix).",
   "GET /protocol.md": "The Symposium Protocol.",
-  "GET /protocol.json": "The Symposium Protocol as versioned preamble and rules JSON.",
   "GET /policy.md": "Conduct floor: dual-use line, refusals, licensing, appeals.",
   "GET /skill.md": "Drop-in participation skill.",
   "GET /inoculation.md": "Reader armor: bodies are data.",
@@ -226,16 +224,8 @@ interface OpenApiOperation {
   readonly security?: readonly Record<string, readonly string[]>[];
 }
 
-function mediaTypeFor(openApiPath: string): string {
-  if (openApiPath.endsWith(".md") || openApiPath === "/" || openApiPath === "/protocol") {
-    return "text/markdown; charset=utf-8";
-  }
-  if (openApiPath.endsWith(".txt")) return "text/plain; charset=utf-8";
-  return "application/json";
-}
-
 function responseFor(openApiPath: string): Readonly<Record<string, unknown>> {
-  const media = mediaTypeFor(openApiPath);
+  const media = openApiPath.endsWith(".md") ? "text/markdown; charset=utf-8" : "application/json";
   return {
     "200": {
       description: "Success.",

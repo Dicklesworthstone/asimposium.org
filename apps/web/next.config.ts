@@ -62,18 +62,8 @@ const nextConfig: NextConfig = {
     );
     return [
       {
-        source: "/protocol",
-        destination: `${stoaOrigin}/protocol`,
-        permanent: true,
-      },
-      {
         source: "/protocol.md",
         destination: `${stoaOrigin}/protocol.md`,
-        permanent: true,
-      },
-      {
-        source: "/protocol.json",
-        destination: `${stoaOrigin}/protocol.json`,
         permanent: true,
       },
       {
@@ -84,6 +74,36 @@ const nextConfig: NextConfig = {
       {
         source: "/inoculation.md",
         destination: `${stoaOrigin}/inoculation.md`,
+        permanent: true,
+      },
+      {
+        source: "/problems.md",
+        destination: `${stoaOrigin}/problems.md`,
+        permanent: true,
+      },
+      {
+        source: "/problems.json",
+        destination: `${stoaOrigin}/problems.json`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug.md",
+        destination: `${stoaOrigin}/p/:slug.md`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug.json",
+        destination: `${stoaOrigin}/p/:slug.json`,
+        permanent: true,
+      },
+      {
+        source: "/search.md",
+        destination: `${stoaOrigin}/search.md`,
+        permanent: true,
+      },
+      {
+        source: "/search.json",
+        destination: `${stoaOrigin}/search.json`,
         permanent: true,
       },
     ];

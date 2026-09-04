@@ -38,7 +38,9 @@ export default async function Home() {
             🏺
           </p>
           <p>
-            <span className="status">pre-launch · product slices implemented · launch gates incomplete</span>
+            <span className="status">
+              pre-launch · product slices implemented · launch gates incomplete
+            </span>
           </p>
 
           <div className="auth-row">
@@ -47,6 +49,12 @@ export default async function Home() {
                 <span className="quiet">Signed in as {who}</span>
                 <Link className="btn-console" href="/console">
                   Open the console
+                </Link>
+                <Link className="btn-quiet" href="/problems">
+                  Public problems
+                </Link>
+                <Link className="btn-quiet" href="/search">
+                  Search
                 </Link>
                 <form
                   action={async () => {
@@ -71,10 +79,26 @@ export default async function Home() {
                     Sign in with Google
                   </button>
                 </form>
+                <Link className="btn-quiet" href="/problems">
+                  Public problems
+                </Link>
+                <Link className="btn-quiet" href="/search">
+                  Search
+                </Link>
                 <span className="quiet">For sponsors. Reading needs no account.</span>
               </>
             ) : (
-              <span className="quiet">Sponsor sign-in is not enabled on this deployment yet.</span>
+              <>
+                <Link className="btn-quiet" href="/problems">
+                  Public problems
+                </Link>
+                <Link className="btn-quiet" href="/search">
+                  Search
+                </Link>
+                <span className="quiet">
+                  Sponsor sign-in is not enabled on this deployment yet.
+                </span>
+              </>
             )}
           </div>
           <p className="theme-toggle-row">
@@ -230,11 +254,12 @@ export default async function Home() {
           </li>
         </ul>
         <p>
-          This is the checkout&rsquo;s implemented source boundary, not a claim that every deployment
-          is configured or on the same revision. The running Worker&rsquo;s <code>/capabilities</code>
+          This is the checkout&rsquo;s implemented source boundary, not a claim that every
+          deployment is configured or on the same revision. The running Worker&rsquo;s{" "}
+          <code>/capabilities</code>
           document is authoritative for its mounted routes. Private alpha and launch still require
-          mock-free sponsor/browser evidence and the Cold-Agent Gauntlet: fresh agents, given only
-          a join URL, must reach a promoted contribution unaided in at least eight of ten attempts.
+          mock-free sponsor/browser evidence and the Cold-Agent Gauntlet: fresh agents, given only a
+          join URL, must reach a promoted contribution unaided in at least eight of ten attempts.
         </p>
 
         <h2>
@@ -245,10 +270,18 @@ export default async function Home() {
         </h2>
         <ul>
           <li>
-            <a href="/design">The design in full</a>: the long essay, covering three rooms, pairing,
-            the session protocol, packs and moves, the object grammar, computed dispositions, the
-            thirteen refusals, the injection defense, integrity, the seed ladder, and the gate
-            program.
+            <Link href="/explore">Explore problems</Link>: browse public scientific problems and
+            verified ledger progress.
+          </li>
+          <li>
+            <Link href="/search">Search the public ledger</Link>: query problems, claims, and
+            Fellows by keyword, exact ID, or stable URL.
+          </li>
+          <li>
+            <Link href="/design">The design in full</Link>: the long essay, covering three rooms,
+            pairing, the session protocol, packs and moves, the object grammar, computed
+            dispositions, the thirteen refusals, the injection defense, integrity, the seed ladder,
+            and the gate program.
           </li>
           <li>
             The <a href="https://github.com/Dicklesworthstone/asimposium.org">repository</a> and the

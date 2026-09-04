@@ -3,7 +3,6 @@ import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contra
 import {
   assertProtocolInvariants,
   type DocumentId,
-  generateProtocolJsonDocument,
   getDocument,
   type ProtocolDocument,
   sha256Hex,
@@ -33,11 +32,12 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "./enrollment/service";
 import type { Env } from "./env";
-import { problem } from "./http/envelope";
+import { validatedProblem as problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
+import { createSearchRoutes } from "./search/router";
 import { createSessionRouter } from "./sessions/router";
 
 /**
@@ -136,7 +136,6 @@ const PUBLIC_TEXT_ROUTES: readonly {
   { path: "/AGENTS.md", document: "handbook", format: "md" },
   { path: "/llms.txt", document: "llms", format: "txt" },
   { path: "/policy.md", document: "policy", format: "md" },
-  { path: "/protocol", document: "protocol", format: "md" },
   { path: "/protocol.md", document: "protocol", format: "md" },
   { path: "/skill.md", document: "skill", format: "md" },
   { path: "/inoculation.md", document: "inoculation", format: "md" },
@@ -190,9 +189,7 @@ const capabilitiesBody = (origin: string): string =>
         "/openapi.json",
         "/schemas/index.json",
         "/llms.txt",
-        "/protocol",
         "/protocol.md",
-        "/protocol.json",
         "/policy.md",
         "/skill.md",
         "/inoculation.md",
@@ -200,6 +197,9 @@ const capabilitiesBody = (origin: string): string =>
         "/problems.json",
         "/p/<problem-id>.md",
         "/p/<problem-id>.json",
+        "/search",
+        "/search.md",
+        "/search.json",
         "/cursor",
         "/join/<enrollment-id>",
         // Concrete mounted paths from the same registry that mounts them, so
@@ -293,8 +293,6 @@ function servePublicRepresentation(
     "cache-control": PUBLIC_TEXT_CACHE_CONTROL,
     "content-type": representation.contentType,
     etag,
-    // Path-only: never derived from Host / forwarded headers (ADR-2 origin law).
-    link: `<${representation.servedAt}>; rel="canonical"`,
   };
   if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers });
@@ -750,17 +748,6 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     });
   });
 
-  app.on(["GET", "HEAD"], "/protocol.json", (c) => {
-    const body = generateProtocolJsonDocument();
-    return servePublicRepresentation(c.req.raw, {
-      body,
-      contentType: "application/json; charset=utf-8",
-      digest: sha256Hex(body),
-      servedAt: "/protocol.json",
-      format: "json",
-    });
-  });
-
   app.get("/internal/health", (c) =>
     handleHealth({ formats: c.req.queries("format") ?? [], env: c.env }),
   );
@@ -793,6 +780,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // The contracted public ledger faces (no auth, ever). The event-tail guard
   // above remains first so the nested W6.4 route stays explicitly unavailable.
   app.route("/", createLedgerFaceRoutes());
+  app.route("/", createSearchRoutes());
 
   // The session protocol (Fable §7) and the public cursor. The session router
   // shares the enrollment stack's service and replay protector so fellow
