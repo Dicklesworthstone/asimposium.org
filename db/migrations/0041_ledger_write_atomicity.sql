@@ -1,3 +1,4 @@
+-- asimposium:allow-destructive
 -- W5 correctness: the review, hypothesis, hypothesis-kill, and evidence
 -- routes now use the same 24-hour sealed replay and Krater event transaction
 -- as claims, gaps, and relations. Existing replay ciphertext is copied byte

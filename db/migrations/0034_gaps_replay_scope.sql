@@ -1,3 +1,4 @@
+-- asimposium:allow-destructive
 -- W5.5 (asimposiumorg-zlm): widen the sealed exact-response replay scopes
 -- with 'gaps' (file + settle share one key space; request digests distinguish
 -- them). Same forward-only table rebuild as 0031 — rows copied verbatim, no

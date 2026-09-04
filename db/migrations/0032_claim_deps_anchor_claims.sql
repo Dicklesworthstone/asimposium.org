@@ -1,3 +1,4 @@
+-- asimposium:allow-destructive
 -- W5.3 correction (asimposiumorg-6w1): 0030 made the FK parent pair
 -- claim_versions(claim_id, problem_id) unique — but that pair is shared by
 -- EVERY version of one claim, so the index blocks any revision from minting

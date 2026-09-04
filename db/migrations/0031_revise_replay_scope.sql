@@ -1,3 +1,4 @@
+-- asimposium:allow-destructive
 -- W5.3 revision route (asimposiumorg-6w1): widen the sealed exact-response
 -- replay scopes with 'revise'. SQLite cannot ALTER a CHECK constraint, so the
 -- table is rebuilt and every existing row copied verbatim — a replay cache

@@ -1,3 +1,4 @@
+-- asimposium:allow-destructive
 -- W5.5 (asimposiumorg-zlm): widen the sealed exact-response replay scopes
 -- with 'relations' (edge assertions share the forward-only rebuild pattern of
 -- 0031/0034; rows copied verbatim, no ciphertext changes).

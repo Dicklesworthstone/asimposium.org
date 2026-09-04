@@ -1,3 +1,4 @@
+-- asimposium:allow-destructive
 -- W5.5 (asimposiumorg-zlm): refit proof_gaps to the Fable §6.1 shape and give
 -- problems a per-problem gap counter.
 --
