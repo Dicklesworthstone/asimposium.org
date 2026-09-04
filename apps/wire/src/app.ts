@@ -46,7 +46,7 @@ import { redactPathname } from "./http/redact";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSearchRoutes } from "./search/router";
-import { createSessionRouter } from "./sessions/router";
+import { createSessionRouter, type PromotionScreener } from "./sessions/router";
 
 /**
  * The Stoa application.
@@ -81,6 +81,7 @@ export interface CreateAppOptions {
   readonly createEnrollmentStore?: EnrollmentStoreFactory;
   /** App-local clock seam for mounted lifecycle proofs; production uses the system clock. */
   readonly enrollmentClock?: EnrollmentClock;
+  readonly screenPromotion?: PromotionScreener;
 }
 
 interface CachedEnrollmentStack {
@@ -89,6 +90,7 @@ interface CachedEnrollmentStack {
   readonly credentialKey: string;
   readonly storeFactory: EnrollmentStoreFactory | undefined;
   readonly enrollmentClock: EnrollmentClock | undefined;
+  readonly screenPromotion: PromotionScreener | undefined;
   readonly stack: EnrollmentStack;
 }
 
@@ -571,7 +573,8 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     cached.db === env.DB &&
     cached.credentialKey === credentialKey &&
     cached.storeFactory === options.createEnrollmentStore &&
-    cached.enrollmentClock === options.enrollmentClock
+    cached.enrollmentClock === options.enrollmentClock &&
+    cached.screenPromotion === options.screenPromotion
   ) {
     return cached.stack;
   }
@@ -700,13 +703,19 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   );
   const stack: EnrollmentStack = {
     router,
-    sessionRouter: createSessionRouter({ service, replayProtector, verifiedSponsor }),
+    sessionRouter: createSessionRouter({
+      service,
+      replayProtector,
+      verifiedSponsor,
+      screenPromotion: options.screenPromotion,
+    }),
   };
   cached = {
     db: env.DB,
     credentialKey,
     storeFactory: options.createEnrollmentStore,
     enrollmentClock: options.enrollmentClock,
+    screenPromotion: options.screenPromotion,
     stack,
   };
   return stack;

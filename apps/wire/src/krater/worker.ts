@@ -86,7 +86,13 @@ interface KraterHarnessEnv extends KraterOutboxEnv {
  * KraterOutboxDrainer DO. It is never the deployed entrypoint — `apps/wire/src/
  * index.ts` is — and the fall-through is gated on the local-only capability.
  */
-const productionApp = createApp();
+const productionApp = createApp({
+  screenPromotion: async () => ({
+    decision: "pass",
+    coarse_category: "benign-context",
+    provider_status: "ok",
+  }),
+});
 
 const S2_LOCAL_HARNESS_CAPABILITY = "enabled";
 const HARNESS_PATH_PREFIX = "/__s2/";
