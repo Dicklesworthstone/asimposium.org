@@ -172,7 +172,9 @@ readonly -a S2_SOURCE_PATHS=(
   # that touches the contracts entry point. The mechanical closure walk found
   # them; the hand-maintained list had covered the barrel and stopped there.
   packages/contracts/src/batch.ts
+  packages/contracts/src/discovery.ts
   packages/contracts/src/enrollment.ts
+  packages/contracts/src/fellow-card.ts
   packages/contracts/src/ledger.ts
   packages/contracts/src/problem.ts
   packages/contracts/src/schema.ts
@@ -199,6 +201,11 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/env.ts
   apps/wire/src/ledger-face.ts
   apps/wire/src/discovery/discovery.ts
+  apps/wire/src/discovery/router.ts
+  apps/wire/src/discovery/areas-service.ts
+  apps/wire/src/discovery/fellow-service.ts
+  apps/wire/src/discovery/now-service.ts
+  apps/wire/src/discovery/markdown.ts
   apps/wire/src/auth/canonical.ts
   apps/wire/src/auth/envelope.ts
   apps/wire/src/auth/http.ts

@@ -152,6 +152,20 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
     "POST /v1/sessions/<id>/evidence":
       "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
+    "GET /areas": "discovery taxonomy read; enumeration awaits the capabilities v0.2 revision",
+    "GET /areas.json":
+      "discovery taxonomy JSON face; enumeration awaits the capabilities v0.2 revision",
+    "GET /areas.md":
+      "discovery taxonomy Markdown face; enumeration awaits the capabilities v0.2 revision",
+    "GET /area/<slug>":
+      "discovery area problem list; enumeration awaits the capabilities v0.2 revision",
+    "GET /now": "now strip stream read; enumeration awaits the capabilities v0.2 revision",
+    "GET /now.json": "now strip JSON face; enumeration awaits the capabilities v0.2 revision",
+    "GET /now.md": "now strip Markdown face; enumeration awaits the capabilities v0.2 revision",
+    "GET /a/<name>":
+      "Fellow card projection face; enumeration awaits the capabilities v0.2 revision",
+    "GET /fellows/<id>":
+      "Fellow card canonical resolver; enumeration awaits the capabilities v0.2 revision",
   };
 
   function mountedCensus(): {

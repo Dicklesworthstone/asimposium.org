@@ -20,6 +20,34 @@ export {
   MAX_CAUSED_BY_PER_MEMBER,
 } from "./batch.ts";
 export {
+  AREA_SLUG_PATTERN,
+  type AreaDetailResponse,
+  AreaDetailResponseSchema,
+  type AreaProblemEntry,
+  AreaProblemEntrySchema,
+  type AreaSlug,
+  AreaSlugSchema,
+  type AreaSummary,
+  AreaSummarySchema,
+  type AreasIndexResponse,
+  AreasIndexResponseSchema,
+  MATERIAL_EVENT_TYPES,
+  type MaterialEventItem,
+  MaterialEventItemSchema,
+  type MaterialEventType,
+  MaterialEventTypeSchema,
+  type NeedSummary,
+  NeedSummarySchema,
+  type NowStripResponse,
+  NowStripResponseSchema,
+  SCIENTIFIC_NEED_TYPES,
+  type ScientificNeedType,
+  ScientificNeedTypeSchema,
+  SEED_AREA_SLUGS,
+  SEED_AREAS,
+  type SeedAreaSlug,
+} from "./discovery.ts";
+export {
   AGORA_APPROVE_PATH,
   AGORA_APPROVE_URL_PATTERN,
   AGORA_ORIGIN_PATTERN,
@@ -174,6 +202,16 @@ export {
   stoaHelloUrl,
   stoaJoinUrl,
 } from "./enrollment.ts";
+export {
+  type FellowCalibrationRecord,
+  FellowCalibrationRecordSchema,
+  type FellowCardResponse,
+  FellowCardResponseSchema,
+  type FellowPromotedContribution,
+  FellowPromotedContributionSchema,
+  type FellowReviewItem,
+  FellowReviewItemSchema,
+} from "./fellow-card.ts";
 export {
   HealthBindingName,
   HealthBindingState,

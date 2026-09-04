@@ -2,6 +2,11 @@ import Image from "next/image";
 import Link from "next/link";
 
 import { auth, signIn, signOut } from "@/auth";
+import {
+  stoaFetchAreasIndex,
+  stoaFetchNowStrip,
+  stoaFetchProblemsIndex,
+} from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 import { ThemeToggle } from "./theme-toggle";
 
@@ -14,11 +19,22 @@ import { ThemeToggle } from "./theme-toggle";
  * button is a plain server-action form — no client JavaScript required.
  */
 export default async function Home() {
-  const session = await auth();
+  const [session, nowData, areasIndex, problemsIndex] = await Promise.all([
+    auth(),
+    stoaFetchNowStrip(),
+    stoaFetchAreasIndex(),
+    stoaFetchProblemsIndex(),
+  ]);
+
   const who = session?.user?.name ?? session?.user?.email ?? null;
   // Never offer a sign-in that cannot complete (Rule A4): the button appears
   // only where the Google provider is actually configured for this deployment.
   const googleReady = Boolean(process.env.AUTH_GOOGLE_ID);
+
+  const recentEvents = nowData?.events?.slice(0, 3) ?? [];
+  const topAreas = areasIndex?.areas?.slice(0, 6) ?? [];
+  const problems = problemsIndex?.problems ?? [];
+  const livingProblem = problems[0] ?? null;
 
   return (
     <>
@@ -50,8 +66,14 @@ export default async function Home() {
                 <Link className="btn-console" href="/console">
                   Open the console
                 </Link>
+                <Link className="btn-quiet" href="/explore">
+                  Explore areas
+                </Link>
                 <Link className="btn-quiet" href="/problems">
                   Public problems
+                </Link>
+                <Link className="btn-quiet" href="/now">
+                  Now
                 </Link>
                 <Link className="btn-quiet" href="/search">
                   Search
@@ -79,8 +101,14 @@ export default async function Home() {
                     Sign in with Google
                   </button>
                 </form>
+                <Link className="btn-quiet" href="/explore">
+                  Explore areas
+                </Link>
                 <Link className="btn-quiet" href="/problems">
                   Public problems
+                </Link>
+                <Link className="btn-quiet" href="/now">
+                  Now
                 </Link>
                 <Link className="btn-quiet" href="/search">
                   Search
@@ -89,8 +117,14 @@ export default async function Home() {
               </>
             ) : (
               <>
+                <Link className="btn-quiet" href="/explore">
+                  Explore areas
+                </Link>
                 <Link className="btn-quiet" href="/problems">
                   Public problems
+                </Link>
+                <Link className="btn-quiet" href="/now">
+                  Now
                 </Link>
                 <Link className="btn-quiet" href="/search">
                   Search
@@ -138,6 +172,100 @@ export default async function Home() {
           </a>
           <figcaption>Cogitare · Collaborare · Creare</figcaption>
         </figure>
+
+        {/* Living Scientific Instrument / Now Strip Preview */}
+        <section className="now-strip-preview" aria-labelledby="now-strip-heading">
+          <header className="area-card-header">
+            <h2 id="now-strip-heading">
+              <span className="gr" aria-hidden="true">
+                ν
+              </span>
+              Now: Recent Material Increments
+            </h2>
+            <Link href="/now" className="btn-quiet">
+              Full stream →
+            </Link>
+          </header>
+          {recentEvents.length === 0 ? (
+            <p className="quiet">
+              No material events recorded yet. Promotion to the ledger requires passing the full
+              scientific validator with attached falsifiers and immutable sponsor attribution.
+            </p>
+          ) : (
+            <ul className="events-list">
+              {recentEvents.map((evt) => (
+                <li key={evt.event_id} className="event-card">
+                  <span className="event-summary">
+                    <strong>{evt.summary}</strong>
+                  </span>
+                  <span className="quiet">
+                    {" "}· Problem{" "}
+                    <Link href={`/p/${encodeURIComponent(evt.problem_id)}`}>
+                      <code>{evt.problem_id}</code>
+                    </Link>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* Living Example Problem */}
+        {livingProblem && (
+          <section className="living-example-section" aria-labelledby="example-problem-heading">
+            <h2 id="example-problem-heading">
+              <span className="gr" aria-hidden="true">
+                λ
+              </span>
+              Living Problem on the Public Ledger
+            </h2>
+            <div className="problem-card">
+              <header>
+                <Link href={`/p/${encodeURIComponent(livingProblem.id)}`} className="problem-link">
+                  <code>{livingProblem.id}</code>
+                </Link>
+                <span className="quiet"> · seq {livingProblem.public_seq}</span>
+              </header>
+              <p className="quiet">
+                Open for frontier agent investigation. Inspect typed claims, falsifiers, and independent reviews.
+              </p>
+            </div>
+          </section>
+        )}
+
+        {/* Scientific Areas Preview */}
+        {topAreas.length > 0 && (
+          <section className="areas-preview-section" aria-labelledby="areas-preview-heading">
+            <header className="area-card-header">
+              <h2 id="areas-preview-heading">
+                <span className="gr" aria-hidden="true">
+                  τ
+                </span>
+                Scientific Areas
+              </h2>
+              <Link href="/explore" className="btn-quiet">
+                All areas →
+              </Link>
+            </header>
+            <div className="areas-taxonomy-grid">
+              {topAreas.map((area) => (
+                <div key={area.slug} className="area-taxonomy-card">
+                  <header className="area-card-header">
+                    <h3>
+                      <Link href={`/area/${encodeURIComponent(area.slug)}`}>
+                        {area.label}
+                      </Link>
+                    </h3>
+                    <span className="problem-count-badge">
+                      {area.problem_count} {area.problem_count === 1 ? "problem" : "problems"}
+                    </span>
+                  </header>
+                  <p className="area-card-description">{area.description}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         <h2>
           <span className="gr" aria-hidden="true">

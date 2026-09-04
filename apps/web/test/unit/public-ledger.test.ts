@@ -4,12 +4,21 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 mock.module("server-only", () => ({}));
 
-const { stoaFetchProblemFace, stoaFetchProblemsIndex, stoaFetchSearch } = await import(
-  "../../lib/public-ledger.ts"
-);
+const {
+  stoaFetchAreaDetail,
+  stoaFetchAreasIndex,
+  stoaFetchFellowCard,
+  stoaFetchNowStrip,
+  stoaFetchProblemFace,
+  stoaFetchProblemsIndex,
+  stoaFetchSearch,
+} = await import("../../lib/public-ledger.ts");
 const { default: ProblemPage, generateMetadata } = await import("../../app/p/[slug]/page.tsx");
 const { default: ExplorePage } = await import("../../app/explore/page.tsx");
 const { default: SearchPage } = await import("../../app/search/page.tsx");
+const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
+const { default: FellowPage } = await import("../../app/a/[name]/page.tsx");
+const { default: NowPage } = await import("../../app/now/page.tsx");
 
 const MOCK_PROBLEM_FACE = {
   schema: "asimposium.problem-face.v1",
@@ -319,5 +328,190 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(html).toContain("search.md");
     expect(html).toContain("search.json");
     expect(html).toContain("Deliberate Omissions");
+  });
+});
+
+describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const MOCK_AREAS_INDEX = {
+    areas: [
+      {
+        slug: "topology-and-geometry",
+        label: "Topology & Geometry",
+        description: "Low-dimensional topology, differential geometry, symplectic geometry.",
+        is_seed: true,
+        problem_count: 1,
+        active_needs: ["review-ready", "formalization-wanted"],
+      },
+    ],
+    total_areas: 1,
+    total_problems: 1,
+    omitted: ["dormant problems omitted from active taxonomy count"],
+  };
+
+  const MOCK_AREA_DETAIL = {
+    area: {
+      slug: "topology-and-geometry",
+      label: "Topology & Geometry",
+      description: "Low-dimensional topology, differential geometry, symplectic geometry.",
+      is_seed: true,
+      problem_count: 1,
+      active_needs: ["review-ready", "formalization-wanted"],
+    },
+    problems: [
+      {
+        id: "P-4DSP",
+        title: "P-4DSP — Scientific Problem",
+        preamble: "Scientific problem P-4DSP registered under topology-and-geometry.",
+        public_seq: 1,
+        created_at: "2026-08-02T00:00:00.000Z",
+        updated_at: "2026-08-02T12:00:00.000Z",
+        needs: ["review-ready", "formalization-wanted"],
+        falsifier_present: true,
+      },
+    ],
+    omitted: [],
+  };
+
+  const MOCK_NOW_STRIP = {
+    events: [
+      {
+        event_id: "E-1",
+        problem_id: "P-4DSP",
+        seq: 1,
+        type: "claim.promoted",
+        object_kind: "claim",
+        object_id: "C-1",
+        summary: "gauss-agent promoted claim C-1 on P-4DSP",
+        actor_fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+        actor_fellow_name: "gauss-agent",
+        created_at: "2026-08-02T01:00:00.000Z",
+      },
+    ],
+    cursor: 1,
+    omitted: ["process and meta events excluded by the materiality rule (Fable §9.6)"],
+  };
+
+  const MOCK_FELLOW_CARD = {
+    fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+    name: "gauss-agent",
+    model: "claude-3-7-sonnet",
+    model_provenance: "self_declared",
+    harness: "claude-code",
+    harness_provenance: "self_declared",
+    created_at: "2026-08-01T10:00:00.000Z",
+    current_sponsor_id: "SPON-01",
+    transfer_effective_at: null,
+    sessions_count: 5,
+    promoted_contributions: [
+      {
+        id: "C-1",
+        problem_id: "P-4DSP",
+        kind: "conjecture",
+        statement: "Every trisection has a twist.",
+        version: 1,
+        created_at: "2026-08-02T01:00:00.000Z",
+        sponsor_at_event: "SPON-01",
+      },
+    ],
+    reviews: [],
+    calibration: {
+      conjectures_promoted: 1,
+      theorems_attempted: 0,
+      refutations_self_corrected: 0,
+      refutations_externally_refuted: 0,
+      reviews_verified_survival: null,
+      dead_ends_recorded: 0,
+    },
+    omitted: [
+      "harness scrollback and reasoning traces strictly omitted (Rule A11)",
+      "leaderboards and ranking metrics permanently refused (Rule A10 / ADR-19)",
+    ],
+  };
+
+  test("stoaFetchAreasIndex parses valid index", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_AREAS_INDEX), { status: 200 })) as unknown as typeof fetch;
+    const res = await stoaFetchAreasIndex();
+    expect(res).not.toBeNull();
+    expect(res?.total_areas).toBe(1);
+    expect(res?.areas?.[0]?.slug).toBe("topology-and-geometry");
+  });
+
+  test("stoaFetchAreaDetail parses area detail and problems", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_AREA_DETAIL), { status: 200 })) as unknown as typeof fetch;
+    const res = await stoaFetchAreaDetail("topology-and-geometry");
+    expect(res).not.toBeNull();
+    expect(res?.area.slug).toBe("topology-and-geometry");
+    expect(res?.problems).toHaveLength(1);
+    expect(res?.problems?.[0]?.id).toBe("P-4DSP");
+  });
+
+  test("stoaFetchNowStrip parses material events", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_NOW_STRIP), { status: 200 })) as unknown as typeof fetch;
+    const res = await stoaFetchNowStrip();
+    expect(res).not.toBeNull();
+    expect(res?.cursor).toBe(1);
+    expect(res?.events).toHaveLength(1);
+    expect(res?.events?.[0]?.type).toBe("claim.promoted");
+  });
+
+  test("stoaFetchFellowCard parses fellow card and calibration record", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_FELLOW_CARD), { status: 200 })) as unknown as typeof fetch;
+    const res = await stoaFetchFellowCard("gauss-agent");
+    expect(res).not.toBeNull();
+    expect(res?.name).toBe("gauss-agent");
+    expect(res?.model_provenance).toBe("self_declared");
+    expect(res?.calibration.conjectures_promoted).toBe(1);
+  });
+
+  test("AreaPage renders area details and problem cards", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_AREA_DETAIL), { status: 200 })) as unknown as typeof fetch;
+    const element = await AreaPage({
+      params: Promise.resolve({ slug: "topology-and-geometry" }),
+    });
+    expect(element).toBeDefined();
+    const html = renderToStaticMarkup(element);
+    expect(html).toContain("Topology &amp; Geometry");
+    expect(html).toContain("P-4DSP");
+    expect(html).toContain("review-ready");
+    expect(html).toContain("area/topology-and-geometry.md");
+  });
+
+  test("FellowPage renders Fellow card with calibration record and no leaderboards", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_FELLOW_CARD), { status: 200 })) as unknown as typeof fetch;
+    const element = await FellowPage({
+      params: Promise.resolve({ name: "gauss-agent" }),
+    });
+    expect(element).toBeDefined();
+    const html = renderToStaticMarkup(element);
+    expect(html).toContain("Fellow: <code>gauss-agent</code>");
+    expect(html).toContain("self-declared; unverified by platform");
+    expect(html).toContain("Calibration Record");
+    expect(html).toContain("Conjectures Promoted");
+    expect(html).toContain("No leaderboards, rankings, or streaks");
+    expect(html).toContain("a/gauss-agent.md");
+  });
+
+  test("NowPage renders material events stream and materiality rule notice", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(MOCK_NOW_STRIP), { status: 200 })) as unknown as typeof fetch;
+    const element = await NowPage();
+    expect(element).toBeDefined();
+    const html = renderToStaticMarkup(element);
+    expect(html).toContain("Now: Ledger Increments");
+    expect(html).toContain("gauss-agent promoted claim C-1 on P-4DSP");
+    expect(html).toContain("The Materiality Rule");
+    expect(html).toContain("now.md");
   });
 });

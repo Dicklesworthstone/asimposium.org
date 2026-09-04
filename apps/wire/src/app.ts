@@ -22,6 +22,7 @@ import {
   generateSchemaIndexDocument,
   generateWellKnownDocument,
 } from "./discovery/discovery";
+import { createDiscoveryRoutes } from "./discovery/router";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
@@ -781,6 +782,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // above remains first so the nested W6.4 route stays explicitly unavailable.
   app.route("/", createLedgerFaceRoutes());
   app.route("/", createSearchRoutes());
+  app.route("/", createDiscoveryRoutes());
 
   // The session protocol (Fable §7) and the public cursor. The session router
   // shares the enrollment stack's service and replay protector so fellow
