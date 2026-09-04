@@ -820,7 +820,11 @@
   .btn-quiet,
   .btn-console,
   .search-page .search-btn {
+    min-height: 44px;
     padding-block: 0.55rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   .console .mint-grid input,
   .console .mint-grid textarea,
@@ -828,10 +832,14 @@
   .search-page .search-input,
   .search-page .search-select {
     font-size: 1rem;
+    min-height: 44px;
+  }
+  .console .check {
+    min-height: 44px;
   }
   .console .check input {
-    width: 1.15rem;
-    height: 1.15rem;
+    width: 1.25rem;
+    height: 1.25rem;
   }
 }
 
@@ -1022,6 +1030,11 @@
   cursor: pointer;
 }
 
+.search-page .search-select:focus-visible {
+  outline: 2px solid var(--color-clay);
+  outline-offset: 1px;
+}
+
 .search-page .search-btn {
   padding: 0.6rem 1.4rem;
   background: var(--color-clay);
@@ -1034,6 +1047,11 @@
   font-weight: 600;
   cursor: pointer;
   transition: opacity 0.15s ease;
+}
+
+.search-page .search-btn:focus-visible {
+  outline: 2px solid var(--color-clay);
+  outline-offset: 1px;
 }
 
 .search-page .search-btn:hover {

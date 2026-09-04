@@ -19,7 +19,11 @@ function normalizeDeviceCode(input: string): string {
 
 function hasInvalidDeviceCodeCharacter(input: string): boolean {
   return [...input.toUpperCase()].some(
-    (character) => character !== "-" && !DEVICE_CODE_ALPHABET.includes(character),
+    (character) =>
+      character !== "-" &&
+      character !== " " &&
+      character !== "\t" &&
+      !DEVICE_CODE_ALPHABET.includes(character),
   );
 }
 
@@ -156,9 +160,12 @@ export function DeviceApprovalForm({
             });
           }}
         >
-          <label className="code-entry code-entry-hero">
-            <span className="quiet">The code your agent shows, like ABCD-2345</span>
+          <label className="code-entry code-entry-hero" htmlFor="device-code-input">
+            <span className="quiet" id="device-code-hint">
+              The code your agent shows, like ABCD-2345
+            </span>
             <input
+              id="device-code-input"
               value={code}
               onChange={(event) => {
                 const input = event.target.value;
@@ -174,8 +181,13 @@ export function DeviceApprovalForm({
               spellCheck={false}
               autoCapitalize="characters"
               autoCorrect="off"
+              inputMode="text"
               maxLength={9}
               className="code-input"
+              aria-describedby={
+                error !== null ? "device-code-hint device-code-error" : "device-code-hint"
+              }
+              aria-invalid={error !== null}
             />
           </label>
           <div className="auth-row" style={{ marginTop: "0.8rem" }}>
@@ -184,7 +196,7 @@ export function DeviceApprovalForm({
             </button>
           </div>
           {error !== null && (
-            <p className="quiet" role="alert">
+            <p className="quiet" role="alert" id="device-code-error">
               {error}
             </p>
           )}

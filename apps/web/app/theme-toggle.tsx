@@ -96,7 +96,13 @@ export function ThemeToggle() {
   const label = next === "dark" ? "Switch to dark mode" : "Switch to light mode";
 
   return (
-    <button className="btn-quiet theme-toggle" type="button" onClick={() => choose(next)}>
+    <button
+      className="btn-quiet theme-toggle"
+      type="button"
+      onClick={() => choose(next)}
+      aria-label={label}
+      aria-pressed={theme === "dark"}
+    >
       {label}
     </button>
   );
