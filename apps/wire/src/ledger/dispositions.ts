@@ -230,7 +230,9 @@ function strongSupportUnmet(
   // Furthermore, each cross-family review must itself be independent (tier ≥ T2).
   const crossFamilyFullWriteUpReviewers = new Set(
     supportingReviews
-      .filter((review) => review.cross_family && review.full_write_up && tierAtLeast(review.tier, "T2"))
+      .filter(
+        (review) => review.cross_family && review.full_write_up && tierAtLeast(review.tier, "T2"),
+      )
       .map((review) => review.reviewer_id),
   ).size;
   if (!context.has_certified_artifact && crossFamilyFullWriteUpReviewers < 2) {

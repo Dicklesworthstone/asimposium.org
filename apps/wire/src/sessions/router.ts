@@ -2160,8 +2160,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         status: 422,
         code: "MISSING_FALSIFIER",
         title: "Conjecture-class claims require a falsifier",
-        detail:
-          `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
+        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
         fixHint:
           "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
         rule: "P3",
@@ -2738,8 +2737,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         status: 422,
         code: "MISSING_FALSIFIER",
         title: "Conjecture-class claims require a falsifier",
-        detail:
-          `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
+        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
         fixHint:
           "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
         rule: "P3",
