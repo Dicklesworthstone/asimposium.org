@@ -131,6 +131,16 @@ const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
 /** One extra row distinguishes a complete candidate set from a bounded prefix. */
 const PACK_CLAIM_CANDIDATE_LIMIT = 128;
 
+/**
+ * §6.1 / §8: Conjecture-class kinds require a falsifier under rule P3.
+ */
+const CONJECTURE_CLASS_KINDS = new Set([
+  "conjecture",
+  "theorem-attempt",
+  "counterexample-claim",
+  "bound",
+]);
+
 export interface SessionRouterOptions {
   readonly service: EnrollmentService;
   readonly replayProtector: {
@@ -2145,13 +2155,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (parsed.data.kind === "conjecture" && parsed.data.falsifier === undefined) {
+    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
       return validatedProblem({
         status: 422,
         code: "MISSING_FALSIFIER",
         title: "Conjecture-class claims require a falsifier",
         detail:
-          "claim kind 'conjecture' requires payload.falsifier: what observation or construction would refute this statement?",
+          `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
         fixHint:
           "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
         rule: "P3",
@@ -2159,7 +2169,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
             workshop_id: parsed.data.workshop_id,
-            kind: "conjecture",
+            kind: parsed.data.kind,
             statement: parsed.data.statement,
             falsifier: "<what would refute this>",
             relates_to: parsed.data.relates_to,
@@ -2723,13 +2733,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    if (parsed.data.kind === "conjecture" && parsed.data.falsifier === undefined) {
+    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
       return validatedProblem({
         status: 422,
         code: "MISSING_FALSIFIER",
         title: "Conjecture-class claims require a falsifier",
         detail:
-          "claim kind 'conjecture' requires payload.falsifier: what observation or construction would refute this revised statement?",
+          `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
         fixHint:
           "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
         rule: "P3",

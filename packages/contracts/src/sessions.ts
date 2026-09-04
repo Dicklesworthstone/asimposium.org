@@ -336,10 +336,19 @@ export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
 
 /** §6.1/§7.2: the promoted object kinds the validator accepts in v1. */
 export const ClaimKindSchema = z.enum([
-  "conjecture",
-  "theorem",
-  "lemma",
   "definition",
+  "assumption",
+  "lemma",
+  "conjecture",
+  "theorem-attempt",
+  "counterexample-claim",
+  "reduction",
+  "obstruction",
+  "method",
+  "bound",
+  "literature-claim",
+  "novelty-claim",
+  "theorem",
   "computation",
   "counterexample",
   "observation",

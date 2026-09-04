@@ -178,7 +178,7 @@ export async function loadFellowCard(
   for (const c of contributions) {
     if (c.kind === "conjecture") {
       conjecturesPromoted += 1;
-    } else if (c.kind === "theorem" || c.kind === "lemma") {
+    } else if (c.kind === "theorem" || c.kind === "theorem-attempt" || c.kind === "lemma") {
       theoremsAttempted += 1;
     }
   }
