@@ -227,9 +227,10 @@ function strongSupportUnmet(
   const supportingReviews = distinctSupportingReviews(reviews);
   // Independent corroboration is supplied by people/agents, not by rows: one
   // reviewer cannot satisfy the two-review leg by filing multiple review ids.
+  // Furthermore, each cross-family review must itself be independent (tier ≥ T2).
   const crossFamilyFullWriteUpReviewers = new Set(
     supportingReviews
-      .filter((review) => review.cross_family && review.full_write_up)
+      .filter((review) => review.cross_family && review.full_write_up && tierAtLeast(review.tier, "T2"))
       .map((review) => review.reviewer_id),
   ).size;
   if (!context.has_certified_artifact && crossFamilyFullWriteUpReviewers < 2) {
@@ -326,9 +327,9 @@ export function evaluateClaimTransition(
 
     case "refutation-attempt-recorded": {
       // Recording an attempt never moves a disposition by itself; it satisfies
-      // a precondition the next corroborating review checks. From open this is
-      // a legal no-op on disposition — the claim stays open.
-      if (current === "open") return allow("open");
+      // a precondition the next corroborating review checks. From any live state
+      // this is a legal no-op on disposition — the claim stays in its current state.
+      if (LIVE_STATES.includes(current)) return allow(current);
       return refuse(`recording a refutation attempt is not legal from ${current}`);
     }
 

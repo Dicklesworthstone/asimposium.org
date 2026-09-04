@@ -248,12 +248,34 @@ describe("claim machine: the full legal transition table", () => {
         EMPTY_CLAIM_CONTEXT,
         "disputed",
       ],
-      // a refutation attempt recorded against an open claim leaves it open.
+      // a refutation attempt recorded against live claims leaves them in their state.
       [
         "open",
         { kind: "refutation-attempt-recorded", attempt_id: "RA-1" },
         EMPTY_CLAIM_CONTEXT,
         "open",
+      ],
+      [
+        "corroborated",
+        { kind: "refutation-attempt-recorded", attempt_id: "RA-2" },
+        context({ verified_reviews: [T2_REVIEW], recorded_refutation_attempts: 1 }),
+        "corroborated",
+      ],
+      [
+        "strongly-supported",
+        { kind: "refutation-attempt-recorded", attempt_id: "RA-3" },
+        context({
+          verified_reviews: [T2_REVIEW],
+          recorded_refutation_attempts: 1,
+          has_certified_artifact: true,
+        }),
+        "strongly-supported",
+      ],
+      [
+        "disputed",
+        { kind: "refutation-attempt-recorded", attempt_id: "RA-4" },
+        EMPTY_CLAIM_CONTEXT,
+        "disputed",
       ],
       // P9 (Fable section 6.3): a revision mints @n+1 and RESETS the
       // disposition to open — the head version is fresh, unreviewed content.
@@ -421,6 +443,36 @@ describe("claim machine: illegal transitions refuse with exact unmet conditions"
       }),
       [
         "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
+      ],
+    ],
+    [
+      "same-sponsor reviews cannot satisfy the cross-family leg of strong support even if marked cross-family",
+      "corroborated",
+      {
+        kind: "review-verified",
+        review: review({
+          review_id: "R-SAME-SPONSOR-B",
+          reviewer_id: "F-SAME-SPONSOR-B",
+          tier: "T0",
+          cross_family: true,
+          full_write_up: true,
+        }),
+      },
+      context({
+        recorded_refutation_attempts: 1,
+        verified_reviews: [
+          review({
+            review_id: "R-SAME-SPONSOR-A",
+            reviewer_id: "F-SAME-SPONSOR-A",
+            tier: "T0",
+            cross_family: true,
+            full_write_up: true,
+          }),
+        ],
+      }),
+      [
+        "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
+        "requires independence tier ≥ T2, got T0",
       ],
     ],
     [
