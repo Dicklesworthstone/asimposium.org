@@ -42,7 +42,6 @@ import {
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
-import { protocolVersionPair } from "@asimposium/protocol";
 import {
   composedPackToProjection,
   composePack,
@@ -60,7 +59,7 @@ import type {
 } from "../enrollment/service";
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
-import { problem, validatedProblem } from "../http/envelope";
+import { validatedProblem } from "../http/envelope";
 import { storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
@@ -82,7 +81,6 @@ import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
-import { independenceTier } from "../ledger/review-independence";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import {
   duplicateClaimRefusal,
@@ -132,14 +130,6 @@ const DEFAULT_PACK_TOKENS: Readonly<Record<PackProfile, number>> = {
 };
 /** One extra row distinguishes a complete candidate set from a bounded prefix. */
 const PACK_CLAIM_CANDIDATE_LIMIT = 128;
-/** Fable §9.6 object-level events: these feed the orient Now strip. */
-const MATERIAL_EVENT_TYPES = [
-  "claim.created",
-  "evidence.created",
-  "review.created",
-  "hypothesis.killed",
-] as const;
-const MATERIAL_EVENT_SQL_LIST = MATERIAL_EVENT_TYPES.map((type) => `'${type}'`).join(", ");
 
 export interface SessionRouterOptions {
   readonly service: EnrollmentService;
@@ -233,7 +223,7 @@ function idempotencyKeyOrRefusal(request: Request, path: string): string | Respo
   const key = request.headers.get("idempotency-key");
   if (key === null || !/^[A-Za-z0-9._-]{1,160}$/.test(key)) {
     cancelUnconsumedRequestBody(request);
-    return problem({
+    return validatedProblem({
       status: 400,
       code: "IDEMPOTENCY_KEY_INVALID",
       title: "Idempotency-Key is required and must be valid",
@@ -421,27 +411,6 @@ interface PackRefutingEvidenceRow {
   readonly source_seq: number;
 }
 
-interface PackClaimVersionRow {
-  readonly claim_id: string;
-  readonly version: number;
-  readonly kind: string;
-}
-
-interface PackClaimDepRow {
-  readonly claim_id: string;
-  readonly depends_on_claim_id: string;
-}
-
-interface PackClaimEvidenceRow {
-  readonly evidence_id: string;
-  readonly claim_id: string;
-  readonly bears_on_version: number | null;
-  readonly direction: string;
-  readonly kind: string;
-  readonly computed_class: string;
-  readonly source_seq: number;
-}
-
 function groupPackRows<Row>(
   rows: readonly Row[],
   claimIdOf: (row: Row) => string,
@@ -454,53 +423,6 @@ function groupPackRows<Row>(
     else existing.push(row);
   }
   return grouped;
-}
-
-function foldPackClaimDisposition(
-  claimEvents: readonly PackClaimEventRow[],
-  reviewRows: readonly PackReviewRow[],
-  refutingEvidence: readonly PackRefutingEvidenceRow[],
-): string {
-  const fold = computeCurrentClaimDisposition([
-    ...claimEvents.flatMap((row) => {
-      if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
-      return [
-        {
-          kind:
-            row.type === "claim.created"
-              ? ("claim-created" as const)
-              : ("claim-revised" as const),
-          sequence: row.seq,
-          version: row.object_version,
-        },
-      ];
-    }),
-    ...reviewRows.map((review) => ({
-      kind: "review-created" as const,
-      sequence: review.source_seq,
-      targetVersion: review.target_version,
-      carriesWeight:
-        review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
-      verdict: review.verdict,
-      review: {
-        review_id: review.review_id,
-        reviewer_id: review.reviewer_fellow_id,
-        tier: review.tier,
-        cross_family: review.tier === "T2" || review.tier === "T3",
-        // The v1 review contract records the exercised rubric and
-        // basis, but has no explicit whole-write-up coverage claim.
-        // Never infer the stronger property from body length.
-        full_write_up: false,
-      },
-    })),
-    ...refutingEvidence.map((evidence) => ({
-      kind: "refuting-evidence" as const,
-      sequence: evidence.source_seq,
-      targetVersion: evidence.bears_on_version,
-      evidenceId: evidence.evidence_id,
-    })),
-  ]);
-  return displayClaimDisposition(fold.disposition, fold.context);
 }
 
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
@@ -935,7 +857,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     error instanceof Error && error.message.includes("EVENT_BUDGET_EXHAUSTED");
 
   const fellowTokenInvalidProblem = (): Response =>
-    problem({
+    validatedProblem({
       status: 401,
       code: "FELLOW_TOKEN_INVALID",
       title: "Fellow bearer token is not accepted",
@@ -1233,14 +1155,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const sessionId = mintId("S");
           const openedAt = now.toISOString();
           const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
-          const protocolPair = protocolVersionPair();
           const value = SessionOpenResponseSchema.parse({
             session_id: sessionId,
             problem_id: parsed.data.problem_id,
             intent: parsed.data.intent ?? null,
             opened_at: openedAt,
             idle_close_at: idleCloseAt,
-            protocol_pair: protocolPair,
           });
           return {
             value,
@@ -1279,10 +1199,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 .prepare(
                   `INSERT INTO sessions
                      (session_id, fellow_id, problem_id, intent, opened_at,
-                      last_heartbeat_at, idle_close_at,
-                      protocol_version, protocol_digest, policy_version, policy_digest,
-                      protocol_pair_digest)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                      last_heartbeat_at, idle_close_at)
+                   SELECT ?, ?, ?, ?, ?, ?, ?
                    FROM session_write_replays
                    WHERE scope = 'session_open' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -1295,11 +1213,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   openedAt,
                   openedAt,
                   idleCloseAt,
-                  protocolPair.protocol.version,
-                  protocolPair.protocol.digest,
-                  protocolPair.policy.version,
-                  protocolPair.policy.digest,
-                  protocolPair.pair_digest,
                   auth.binding.fellowId,
                   key,
                   digest,
@@ -1514,17 +1427,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
     let workshopHeadsTruncated = false;
-    let killedHypothesesTruncated = false;
-    let typedRelationsTruncated = false;
-    let proofGapsTruncated = false;
-    let eligibleReviewsTruncated = false;
-    let claimDepsTruncated = false;
-    let claimEvidenceTruncated = false;
-    let claimReviewsTruncated = false;
-    let rosterTruncated = false;
-    let presenceTruncated = false;
-    let materialEventsTruncated = false;
-    let deadEndHeadlinesTruncated = false;
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1547,276 +1449,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       why_included: "bind the reader hierarchy before any untrusted ledger bytes",
       stable_prefix: 1,
     });
-    const protocolPair = protocolVersionPair();
-    candidates.push({
-      kind: "identity",
-      id: "SYS-protocol",
-      scope: "system",
-      tokens: 1,
-      untrusted: false,
-      body: `protocol=${protocolPair.protocol.version} digest=${protocolPair.protocol.digest} policy=${protocolPair.policy.version} digest=${protocolPair.policy.digest} pair=${protocolPair.pair_digest}`,
-      why_included: "pin the protocol/policy pair this session opened under (ADR-24)",
-      stable_prefix: 2,
-    });
-    if (profile === "review") {
-      // No generated rubric registry exists yet. The served protocol already
-      // names the review bar; omitting "rubric" while workshop isolation is
-      // already enforced would be a silent thin pack with a lying omitted[].
-      candidates.push({
-        kind: "standing-context",
-        id: "SYS-review-check",
-        scope: "system",
-        tokens: 1,
-        untrusted: false,
-        body: "Hard rule 11: a review names what you checked and what result would have produced a negative verdict. Send capable_of_failure. GET /protocol.md.",
-        why_included: "name the review bar before a generated rubric registry exists",
-        stable_prefix: 3,
-      });
-      candidates.push({
-        kind: "standing-context",
-        id: "SYS-author-isolation",
-        scope: "system",
-        tokens: 1,
-        untrusted: false,
-        body: "This pack excludes workshop. Hard rule 3: you cannot review, verify, or settle an object you authored.",
-        why_included:
-          "state the author isolation this profile already enforces by omitting workshop",
-        stable_prefix: 4,
-      });
-    }
 
-    // W4.2: orient is statement/roster/counts/events/handback, not the 128-claim
-    // index. Those writes that exist are composed here; missing statement,
-    // motivation, and leases stay in omitted[]. Working inherits this prefix
-    // (Fable: working = orient + claims + workshop + move).
-    if (profile === "orient" || profile === "working") {
-      const orientBatch = await db.batch([
-        db
-          .prepare(
-            `SELECT
-               (SELECT COUNT(*) FROM claims
-                WHERE problem_id = ? AND source_seq <= ?) AS claim_count,
-               (SELECT COUNT(*) FROM hypotheses
-                WHERE problem_id = ? AND status = 'open'
-                  AND source_seq IS NOT NULL AND source_seq <= ?) AS hypothesis_count`,
-          )
-          .bind(session.problem_id, cursor, session.problem_id, cursor),
-        db
-          .prepare(
-            `SELECT synthesis_id, covers_through FROM syntheses
-             WHERE problem_id = ?
-             ORDER BY covers_through DESC, created_at DESC, synthesis_id DESC
-             LIMIT 1`,
-          )
-          .bind(session.problem_id),
-        db
-          .prepare(
-            `SELECT f.name, m.role
-             FROM problem_memberships m
-             JOIN enrollment_fellows f ON f.fellow_id = m.fellow_id
-             WHERE m.problem_id = ?
-             ORDER BY m.joined_at ASC, m.fellow_id ASC
-             LIMIT 11`,
-          )
-          .bind(session.problem_id),
-        db
-          .prepare(
-            `SELECT f.name, s.last_heartbeat_at
-             FROM sessions s
-             JOIN enrollment_fellows f ON f.fellow_id = s.fellow_id
-             WHERE s.problem_id = ? AND s.closed_at IS NULL
-             ORDER BY s.last_heartbeat_at DESC, s.session_id DESC
-             LIMIT 11`,
-          )
-          .bind(session.problem_id),
-        db
-          .prepare(
-            `SELECT id, seq, type, object_kind, object_id, object_version
-             FROM events
-             WHERE problem_id = ? AND seq <= ?
-               AND type IN (${MATERIAL_EVENT_SQL_LIST})
-             ORDER BY seq DESC
-             LIMIT 6`,
-          )
-          .bind(session.problem_id, cursor),
-        db
-          .prepare(
-            `SELECT workshop_id, title FROM workshop_objects
-             WHERE problem_id = ? AND fellow_id = ? AND type = 'dead-end'
-             ORDER BY workshop_seq DESC
-             LIMIT 11`,
-          )
-          .bind(session.problem_id, auth.binding.fellowId),
-      ]);
-      const [
-        countsResult,
-        synthesisResult,
-        rosterResult,
-        presenceResult,
-        eventsResult,
-        deadEndResult,
-      ] = orientBatch;
-      if (
-        countsResult === undefined ||
-        synthesisResult === undefined ||
-        rosterResult === undefined ||
-        presenceResult === undefined ||
-        eventsResult === undefined ||
-        deadEndResult === undefined
-      ) {
-        throw new Error("pack orient batch returned an incomplete result set");
-      }
-      const counts = ((countsResult.results ?? [])[0] ?? {
-        claim_count: 0,
-        hypothesis_count: 0,
-      }) as { claim_count: number; hypothesis_count: number };
-      candidates.push({
-        kind: "standing-context",
-        id: "SYS-live-counts",
-        scope: "system",
-        tokens: 1,
-        untrusted: false,
-        body: `claims=${counts.claim_count} open_hypotheses=${counts.hypothesis_count}`,
-        why_included: "state live hypothesis and claim counts without ranking actors",
-        stable_prefix: 3,
-      });
-      const synthesis = ((synthesisResult.results ?? [])[0] ?? null) as {
-        synthesis_id: string;
-        covers_through: number;
-      } | null;
-      candidates.push({
-        kind: "standing-context",
-        id: "SYS-synthesis-staleness",
-        scope: "system",
-        tokens: 1,
-        untrusted: false,
-        body:
-          synthesis === null
-            ? `No synthesis on this problem yet (cursor #${cursor}).`
-            : `Synthesis covers through #${synthesis.covers_through} — lag ${Math.max(0, cursor - synthesis.covers_through)} at cursor #${cursor}.`,
-        why_included: "surface synthesis coverage against the public cursor",
-        stable_prefix: 4,
-      });
-      const rosterRows = (rosterResult.results ?? []) as { name: string; role: string }[];
-      rosterTruncated = rosterRows.length > 10;
-      const rosterBody =
-        rosterRows.length === 0
-          ? "No members on this problem."
-          : `members: ${rosterRows
-              .slice(0, 10)
-              .map((row) => `${row.name} (${row.role})`)
-              .join(", ")}`;
-      candidates.push({
-        kind: "roster",
-        id: "ROSTER",
-        scope: "ledger",
-        tokens: 1,
-        untrusted: true,
-        body: rosterBody,
-        why_included: "name the Fellows currently on this problem",
-        stable_prefix: 5,
-      });
-      const presenceRows = (presenceResult.results ?? []) as {
-        name: string;
-        last_heartbeat_at: string;
-      }[];
-      presenceTruncated = presenceRows.length > 10;
-      const presenceBody =
-        presenceRows.length === 0
-          ? "No open sessions on this problem."
-          : `present: ${presenceRows
-              .slice(0, 10)
-              .map((row) => `${row.name} @ ${row.last_heartbeat_at}`)
-              .join(", ")}`;
-      candidates.push({
-        kind: "presence",
-        id: "PRESENCE",
-        scope: "ledger",
-        tokens: 1,
-        untrusted: true,
-        body: presenceBody,
-        why_included: "show open-session heartbeats on this problem",
-        stable_prefix: 6,
-      });
-      const eventRows = (eventsResult.results ?? []) as {
-        id: string;
-        seq: number;
-        type: string;
-        object_kind: string;
-        object_id: string;
-        object_version: number;
-      }[];
-      materialEventsTruncated = eventRows.length > 5;
-      const emittedEvents = eventRows.slice(0, 5).reverse();
-      if (emittedEvents.length === 0) {
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-material-events-empty",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: "No object-level ledger events on this problem yet.",
-          why_included: "state the Now-strip baseline (Fable §9.6 materiality)",
-          stable_prefix: 10,
-        });
-      } else {
-        for (const [index, event] of emittedEvents.entries()) {
-          candidates.push({
-            kind: "event",
-            id: event.id,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `#${event.seq} ${event.type} ${event.object_kind} ${event.object_id}@${event.object_version}`,
-            why_included: "include a recent object-level ledger event (Now strip)",
-            stable_prefix: 10 + index,
-          });
-        }
-      }
-      const deadEndRows = (deadEndResult.results ?? []) as { workshop_id: string; title: string }[];
-      deadEndHeadlinesTruncated = deadEndRows.length > 10;
-      const emittedDeadEnds = deadEndRows.slice(0, 10);
-      if (emittedDeadEnds.length === 0) {
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-dead-end-headlines-empty",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: "No dead-end headlines in your workshop.",
-          why_included: "state the negative-knowledge headline baseline",
-          stable_prefix: 220,
-        });
-      } else {
-        for (const [index, deadEnd] of emittedDeadEnds.entries()) {
-          candidates.push({
-            kind: "dead-end",
-            id: `DEH-${deadEnd.workshop_id}`,
-            scope: "workshop",
-            tokens: 1,
-            untrusted: true,
-            body: deadEnd.title,
-            why_included: "headline a recorded dead end before starting a route",
-            stable_prefix: 220 + index,
-            requires: ["workshop:read"],
-          });
-        }
-      }
-    }
-
-    // Fable digest is "statement hash, cursor, counts, next move only" at 800
-    // tokens. Loading claims/handback first dropped SYS-projection-staleness
-    // on budget_exceeded — a silent thin pack for the profile's whole point.
-    // Claim skips this index too: its product is claim@version + deps/evidence/
-    // reviews, and sharing the 128-claim list would duplicate item ids.
-    // Orient skips the claims table (Fable §7.3); it still takes the handback.
-    if (
-      profile !== "hello" &&
-      profile !== "digest" &&
-      profile !== "review-queue" &&
-      profile !== "claim" &&
-      profile !== "orient"
-    ) {
+    if (profile !== "hello") {
       const claims = await db
         .prepare(
           `SELECT id, statement, source_seq FROM claims
@@ -1921,11 +1555,49 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
 
         for (const [index, claim] of selectedClaims.entries()) {
-          const disposition = foldPackClaimDisposition(
-            claimEventsById.get(claim.id) ?? [],
-            reviewRowsById.get(claim.id) ?? [],
-            refutingEvidenceById.get(claim.id) ?? [],
-          );
+          const claimEvents = claimEventsById.get(claim.id) ?? [];
+          const reviewRows = reviewRowsById.get(claim.id) ?? [];
+          const refutingEvidence = refutingEvidenceById.get(claim.id) ?? [];
+          const fold = computeCurrentClaimDisposition([
+            ...claimEvents.flatMap((row) => {
+              if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
+              return [
+                {
+                  kind:
+                    row.type === "claim.created"
+                      ? ("claim-created" as const)
+                      : ("claim-revised" as const),
+                  sequence: row.seq,
+                  version: row.object_version,
+                },
+              ];
+            }),
+            ...reviewRows.map((review) => ({
+              kind: "review-created" as const,
+              sequence: review.source_seq,
+              targetVersion: review.target_version,
+              carriesWeight:
+                review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
+              verdict: review.verdict,
+              review: {
+                review_id: review.review_id,
+                reviewer_id: review.reviewer_fellow_id,
+                tier: review.tier,
+                cross_family: review.tier === "T2" || review.tier === "T3",
+                // The v1 review contract records the exercised rubric and
+                // basis, but has no explicit whole-write-up coverage claim.
+                // Never infer the stronger property from body length.
+                full_write_up: false,
+              },
+            })),
+            ...refutingEvidence.map((evidence) => ({
+              kind: "refuting-evidence" as const,
+              sequence: evidence.source_seq,
+              targetVersion: evidence.bears_on_version,
+              evidenceId: evidence.evidence_id,
+            })),
+          ]);
+          const disposition = displayClaimDisposition(fold.disposition, fold.context);
           candidates.push({
             kind: "claim",
             id: claim.id,
@@ -1939,14 +1611,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           });
         }
       }
-    }
 
-    if (
-      profile !== "hello" &&
-      profile !== "digest" &&
-      profile !== "review-queue" &&
-      profile !== "claim"
-    ) {
       const handback = await db
         .prepare(
           `SELECT session_id, handback FROM sessions
@@ -1982,228 +1647,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
-    // W4.2: the claim pack is exact claim@version + deps + evidence + reviews,
-    // no author narrative. Those writes already land; omitting "claim-detail"
-    // while serving the 128-claim index would be a silent thin pack.
-    if (profile === "claim") {
-      const claims = await db
-        .prepare(
-          `SELECT id, statement, source_seq FROM claims
-           WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC
-           LIMIT 11`,
-        )
-        .bind(session.problem_id, cursor)
-        .all<{ id: string; statement: string; source_seq: number }>();
-      const claimRows = claims.results ?? [];
-      claimsTruncated = claimRows.length > 10;
-      const selectedClaims = claimRows.slice(0, 10);
-      if (selectedClaims.length === 0) {
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-claim-detail-empty",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: "No claims on this problem yet. The claim pack is claim@version plus deps, evidence, and reviews.",
-          why_included: "state the claim-detail baseline",
-          stable_prefix: 100,
-        });
-      } else {
-        const selectedClaimCte = `SELECT id FROM claims
-          WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?`;
-        const detailResults = await db.batch([
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT events.object_id AS claim_id, events.seq, events.type, events.object_version
-               FROM events JOIN selected_claims ON selected_claims.id = events.object_id
-               WHERE events.problem_id = ? AND events.object_kind = 'claim' AND events.seq <= ?
-               ORDER BY events.seq ASC`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
-                      reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
-                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq
-               FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
-               WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
-                 AND reviews.source_seq <= ?
-               ORDER BY reviews.source_seq ASC`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT evidence.bears_on_id AS claim_id, evidence.evidence_id,
-                      evidence.bears_on_version, evidence.source_seq
-               FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
-               WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
-                 AND evidence.direction = 'refutes' AND evidence.bears_on_version IS NOT NULL
-                 AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
-               ORDER BY evidence.source_seq ASC`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT v.claim_id, v.version, v.kind
-               FROM claim_versions v
-               JOIN selected_claims s ON s.id = v.claim_id
-               WHERE v.problem_id = ?
-                 AND v.version = (
-                   SELECT MAX(version) FROM claim_versions
-                   WHERE problem_id = v.problem_id AND claim_id = v.claim_id
-                 )`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT d.claim_id, d.depends_on_claim_id
-               FROM claim_deps d
-               JOIN selected_claims s ON s.id = d.claim_id
-               WHERE d.problem_id = ?
-               ORDER BY d.claim_id ASC, d.depends_on_claim_id ASC
-               LIMIT 11`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT evidence.evidence_id, evidence.bears_on_id AS claim_id,
-                      evidence.bears_on_version, evidence.direction, evidence.kind,
-                      evidence.computed_class, evidence.source_seq
-               FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
-               WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
-                 AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
-               ORDER BY evidence.source_seq ASC
-               LIMIT 11`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
-                      reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
-                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq
-               FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
-               WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
-                 AND reviews.source_seq <= ?
-               ORDER BY reviews.source_seq ASC
-               LIMIT 11`,
-            )
-            .bind(session.problem_id, cursor, 10, session.problem_id, cursor),
-        ]);
-        const [
-          claimEventsResult,
-          reviewRowsResult,
-          refutingEvidenceResult,
-          versionRowsResult,
-          depRowsResult,
-          evidenceRowsResult,
-          reviewDisplayResult,
-        ] = detailResults;
-        if (
-          claimEventsResult === undefined ||
-          reviewRowsResult === undefined ||
-          refutingEvidenceResult === undefined ||
-          versionRowsResult === undefined ||
-          depRowsResult === undefined ||
-          evidenceRowsResult === undefined ||
-          reviewDisplayResult === undefined
-        ) {
-          throw new Error("pack claim-detail batch returned an incomplete result set");
-        }
-        const claimEventsById = groupPackRows(
-          (claimEventsResult.results ?? []) as PackClaimEventRow[],
-          (row) => row.claim_id,
-        );
-        const reviewRowsById = groupPackRows(
-          (reviewRowsResult.results ?? []) as PackReviewRow[],
-          (row) => row.claim_id,
-        );
-        const refutingEvidenceById = groupPackRows(
-          (refutingEvidenceResult.results ?? []) as PackRefutingEvidenceRow[],
-          (row) => row.claim_id,
-        );
-        const versionById = new Map(
-          ((versionRowsResult.results ?? []) as PackClaimVersionRow[]).map((row) => [
-            row.claim_id,
-            row,
-          ]),
-        );
-        const depRows = (depRowsResult.results ?? []) as PackClaimDepRow[];
-        claimDepsTruncated = depRows.length > 10;
-        const evidenceRows = (evidenceRowsResult.results ?? []) as PackClaimEvidenceRow[];
-        claimEvidenceTruncated = evidenceRows.length > 10;
-        const reviewDisplayRows = (reviewDisplayResult.results ?? []) as PackReviewRow[];
-        claimReviewsTruncated = reviewDisplayRows.length > 10;
-
-        for (const [index, claim] of selectedClaims.entries()) {
-          const disposition = foldPackClaimDisposition(
-            claimEventsById.get(claim.id) ?? [],
-            reviewRowsById.get(claim.id) ?? [],
-            refutingEvidenceById.get(claim.id) ?? [],
-          );
-          const version = versionById.get(claim.id);
-          const pin = version === undefined ? claim.id : `${claim.id}@${version.version}`;
-          candidates.push({
-            kind: "claim",
-            id: claim.id,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${pin} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}`,
-            why_included:
-              "pin the exact live claim version with its computed disposition (P9)",
-            stable_prefix: 100 + index,
-          });
-        }
-        for (const [index, dep] of depRows.slice(0, 10).entries()) {
-          candidates.push({
-            kind: "dep",
-            id: `${dep.claim_id}#${dep.depends_on_claim_id}`,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${dep.claim_id} depends_on ${dep.depends_on_claim_id}`,
-            why_included: "include a P10 dependency edge of a selected claim",
-            stable_prefix: 160 + index,
-          });
-        }
-        for (const [index, evidence] of evidenceRows.slice(0, 10).entries()) {
-          const pin =
-            evidence.bears_on_version === null
-              ? evidence.claim_id
-              : `${evidence.claim_id}@${evidence.bears_on_version}`;
-          candidates.push({
-            kind: "evidence",
-            id: evidence.evidence_id,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${evidence.evidence_id} ${evidence.direction} ${pin} ${evidence.computed_class} (${evidence.kind})`,
-            why_included: "include evidence bearing on a selected claim, with its computed class",
-            stable_prefix: 180 + index,
-          });
-        }
-        for (const [index, review] of reviewDisplayRows.slice(0, 10).entries()) {
-          candidates.push({
-            kind: "review",
-            id: review.review_id,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${review.review_id} ${review.verdict} ${review.claim_id}@${review.target_version} ${review.tier}`,
-            why_included: "include a version-pinned review of a selected claim",
-            stable_prefix: 190 + index,
-          });
-        }
-      }
-    }
-
     // W2.6: the digest profile surfaces the projection staleness line — how many
     // of this problem's claim projections are flagged stale (drifted from the
     // log). A stale projection is served WITH the warning, never as fabricated
@@ -2230,232 +1673,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? `Projection health: ${total} claim projection(s) current, none stale.`
             : `Projection health: ${staleCount} of ${total} claim projection(s) are STALE (drifted from the log; the log wins and a rebuild is owed).`,
         why_included: "surface projection staleness honestly in the digest",
-        stable_prefix: 3,
+        stable_prefix: 400,
       });
     }
 
-    // W5.5: claim-graph is the typed-relation board. The assert write already
-    // lands in claim_relations; omitting "typed-relations" was a silent thin pack.
-    if (profile === "claim-graph") {
-      const relations = await db
-        .prepare(
-          `SELECT r.kind, r.source_claim_id, r.source_version, r.target_ref,
-                  r.asserted_by_event, e.seq
-           FROM claim_relations r
-           JOIN events e ON e.id = r.asserted_by_event AND e.problem_id = r.problem_id
-           WHERE r.problem_id = ? AND e.seq <= ?
-           ORDER BY e.seq ASC LIMIT 11`,
-        )
-        .bind(session.problem_id, cursor)
-        .all<{
-          kind: string;
-          source_claim_id: string;
-          source_version: number;
-          target_ref: string;
-          asserted_by_event: string;
-          seq: number;
-        }>();
-      const relationRows = relations.results ?? [];
-      typedRelationsTruncated = relationRows.length > 10;
-      const emittedRelations = relationRows.slice(0, 10);
-      if (emittedRelations.length === 0) {
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-claim-graph-empty",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: "No typed claim relations asserted on this problem yet.",
-          why_included: "state the claim-graph baseline",
-          stable_prefix: 350,
-        });
-      } else {
-        for (const [index, edge] of emittedRelations.entries()) {
-          candidates.push({
-            kind: "relation",
-            id: edge.asserted_by_event,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${edge.source_claim_id}@${edge.source_version} ${edge.kind} ${edge.target_ref} (#${edge.seq})`,
-            why_included: "include a typed, version-pinned claim relation (ADR-21)",
-            stable_prefix: 350 + index,
-          });
-        }
-      }
-    }
-
-    // W5.5: formal packs serve filed proof gaps. The write path already lands
-    // in proof_gaps; omitting "proof-gaps" was a silent thin pack. Lean/formal
-    // verification records still do not exist, so that omission stays honest.
-    if (profile === "formal") {
-      const gaps = await db
-        .prepare(
-          `SELECT g.gap_id, g.obligation, g.closes_what, g.target_claim_id, g.target_version,
-                  g.status, g.closed_by, e.seq
-           FROM proof_gaps g
-           JOIN events e
-             ON e.problem_id = g.problem_id AND e.object_kind = 'gap'
-            AND e.object_id = g.gap_id AND e.type = 'gap.filed'
-           WHERE g.problem_id = ? AND e.seq <= ?
-           ORDER BY e.seq ASC LIMIT 11`,
-        )
-        .bind(session.problem_id, cursor)
-        .all<{
-          gap_id: string;
-          obligation: string;
-          closes_what: string;
-          target_claim_id: string | null;
-          target_version: number | null;
-          status: string;
-          closed_by: string | null;
-          seq: number;
-        }>();
-      const gapRows = gaps.results ?? [];
-      proofGapsTruncated = gapRows.length > 10;
-      const emittedGaps = gapRows.slice(0, 10);
-      if (emittedGaps.length === 0) {
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-proof-gaps-empty",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: "No proof gaps filed on this problem yet. Name the missing step; 'it follows' is not an obligation.",
-          why_included: "state the proof-gap baseline",
-          stable_prefix: 360,
-        });
-      } else {
-        for (const [index, gap] of emittedGaps.entries()) {
-          const pin =
-            gap.target_claim_id !== null && gap.target_version !== null
-              ? `${gap.target_claim_id}@${gap.target_version}`
-              : "unpinned";
-          const settled = gap.closed_by !== null ? ` closed_by=${gap.closed_by}` : "";
-          candidates.push({
-            kind: "gap",
-            id: gap.gap_id,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${gap.gap_id} (${gap.status}) on ${pin}${settled}: ${gap.obligation}`,
-            why_included: "include a filed proof gap with its current lifecycle",
-            stable_prefix: 360 + index,
-          });
-        }
-      }
-    }
-
-    // Fable review-queue: reviewable objects this Fellow is eligible to review
-    // (non-author, with the computed independence tier). P1 already refuses
-    // self-review at the write gate; omitting "eligible-reviews" while that
-    // predicate is computable from claim.created attribution would be a silent
-    // thin pack.
-    if (profile === "review-queue") {
-      const eligible = await db
-        .prepare(
-          `SELECT c.id, c.statement, c.source_seq,
-                  e.actor_sponsor_id, e.model_string_self_declared, e.harness
-           FROM claims c
-           JOIN events e
-             ON e.problem_id = c.problem_id AND e.type = 'claim.created'
-            AND e.object_kind = 'claim' AND e.object_id = c.id AND e.object_version = 1
-           WHERE c.problem_id = ? AND c.source_seq <= ?
-             AND e.actor_fellow_id IS NOT NULL AND e.actor_fellow_id != ?
-             AND e.actor_sponsor_id IS NOT NULL
-             AND e.model_string_self_declared IS NOT NULL AND e.harness IS NOT NULL
-           ORDER BY c.source_seq ASC LIMIT 11`,
-        )
-        .bind(session.problem_id, cursor, auth.binding.fellowId)
-        .all<{
-          id: string;
-          statement: string;
-          source_seq: number;
-          actor_sponsor_id: string;
-          model_string_self_declared: string;
-          harness: string;
-        }>();
-      const eligibleRows = eligible.results ?? [];
-      eligibleReviewsTruncated = eligibleRows.length > 10;
-      const emittedEligible = eligibleRows.slice(0, 10);
-      if (emittedEligible.length === 0) {
-        candidates.push({
-          kind: "standing-context",
-          id: "SYS-review-queue-empty",
-          scope: "system",
-          tokens: 1,
-          untrusted: false,
-          body: "No claims on this problem you are eligible to review. Hard rule 3: you cannot review an object you authored.",
-          why_included: "state the review-queue baseline (P1 non-author eligibility)",
-          stable_prefix: 370,
-        });
-      } else {
-        for (const [index, claim] of emittedEligible.entries()) {
-          const tier = independenceTier(
-            {
-              sponsorId: claim.actor_sponsor_id,
-              modelFamily: claim.model_string_self_declared,
-              methodBasis: claim.harness,
-            },
-            {
-              sponsorId: auth.binding.sponsorId,
-              modelFamily: auth.binding.model,
-              methodBasis: auth.binding.harness,
-            },
-          );
-          candidates.push({
-            kind: "claim",
-            id: claim.id,
-            scope: "ledger",
-            tokens: 1,
-            untrusted: true,
-            body: `${claim.id} eligible at ${tier}: ${claim.statement}`,
-            why_included:
-              "match a live claim to this Fellow's P1 eligibility and independence tier",
-            stable_prefix: 370 + index,
-          });
-        }
-      }
-    }
-
-    // W4.2 / W5.6: the graveyard profile is the negative-knowledge register.
-    // Ledger kills are problem-public and cursor-gated; workshop dead-ends stay
-    // this Fellow's private record. Omitting "killed-hypotheses" while the kill
-    // write already exists would be a silent thin pack with a lying omitted[].
+    // W4.2: the graveyard profile preserves the Fellow's dead ends — the
+    // negative results that must never be author-erased (P6). These are the
+    // Fellow's own workshop dead-end objects, newest first.
     if (profile === "graveyard") {
-      const killed = await db
-        .prepare(
-          `SELECT hypothesis_id, route, kill_reason, killed_by_evidence_id, kill_source_seq
-           FROM hypotheses
-           WHERE problem_id = ? AND status = 'killed'
-             AND kill_source_seq IS NOT NULL AND kill_source_seq <= ?
-           ORDER BY kill_source_seq ASC LIMIT 11`,
-        )
-        .bind(session.problem_id, cursor)
-        .all<{
-          hypothesis_id: string;
-          route: string;
-          kill_reason: string | null;
-          killed_by_evidence_id: string | null;
-          kill_source_seq: number;
-        }>();
-      const killedRows = killed.results ?? [];
-      // One extra row decides disclosure, matching workshop-heads (j9hw).
-      killedHypothesesTruncated = killedRows.length > 10;
-      const emittedKilled = killedRows.slice(0, 10);
-      for (const [index, hypothesis] of emittedKilled.entries()) {
-        candidates.push({
-          kind: "hypothesis",
-          id: hypothesis.hypothesis_id,
-          scope: "ledger",
-          tokens: 1,
-          untrusted: true,
-          body: `${hypothesis.hypothesis_id} killed by ${hypothesis.killed_by_evidence_id ?? "unrecorded-evidence"}: ${hypothesis.route}. ${hypothesis.kill_reason ?? ""}`.trim(),
-          why_included: "preserve a killed attack route (negative knowledge is first-class, P6)",
-          stable_prefix: 450 + index,
-        });
-      }
-
       const deadEnds = await db
         .prepare(
           `SELECT workshop_id, title, body_md, workshop_seq, created_at FROM workshop_objects
@@ -2471,15 +1696,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           created_at: string;
         }>();
       const deadEndRows = deadEnds.results ?? [];
-      if (deadEndRows.length === 0 && emittedKilled.length === 0) {
+      if (deadEndRows.length === 0) {
         candidates.push({
           kind: "standing-context",
           id: "SYS-graveyard-empty",
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: "No dead ends or killed hypotheses recorded on this problem yet. Negative results are first-class — record them as you find them.",
-          why_included: "state the negative-knowledge baseline",
+          body: "No dead ends recorded on this problem yet. Negative results are first-class — record them as you find them.",
+          why_included: "state the dead-end baseline",
           stable_prefix: 500,
         });
       } else {
@@ -2552,10 +1777,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omitted[] rather than serving a silent thin pack (§7.3's mandatory
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
-      orient: ["problem-statement", "motivation", "leases"],
-      working: ["problem-statement", "motivation", "leases", "move-contract"],
+      claim: ["claim-detail"],
+      review: ["rubric", "author-isolation-proof"],
+      graveyard: ["killed-hypotheses"],
       literature: ["citations"],
-      formal: ["verification-records"],
+      formal: ["proof-gaps", "verification-records"],
+      "review-queue": ["eligible-reviews"],
+      "claim-graph": ["typed-relations"],
       full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
@@ -2638,51 +1866,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
           : []),
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
-        ...(profile === "graveyard" && killedHypothesesTruncated
-          ? [{ reason: "candidate_limit", detail: "killed-hypotheses" }]
-          : []),
-        ...(profile === "claim-graph" && typedRelationsTruncated
-          ? [{ reason: "candidate_limit", detail: "typed-relations" }]
-          : []),
-        ...(profile === "formal" && proofGapsTruncated
-          ? [{ reason: "candidate_limit", detail: "proof-gaps" }]
-          : []),
-        ...(profile === "review-queue" && eligibleReviewsTruncated
-          ? [{ reason: "candidate_limit", detail: "eligible-reviews" }]
-          : []),
-        ...(profile === "digest"
-          ? [
-              { reason: "profile_excludes_claims", detail: "claims" },
-              { reason: "profile_excludes_handback", detail: "handback" },
-            ]
-          : []),
-        ...(profile === "orient"
-          ? [{ reason: "profile_excludes_claims", detail: "claims" }]
-          : []),
-        ...(profile === "claim" || profile === "review-queue"
-          ? [{ reason: "profile_excludes_handback", detail: "handback" }]
-          : []),
-        ...((profile === "orient" || profile === "working") && rosterTruncated
-          ? [{ reason: "candidate_limit", detail: "roster" }]
-          : []),
-        ...((profile === "orient" || profile === "working") && presenceTruncated
-          ? [{ reason: "candidate_limit", detail: "presence" }]
-          : []),
-        ...((profile === "orient" || profile === "working") && materialEventsTruncated
-          ? [{ reason: "candidate_limit", detail: "material-events" }]
-          : []),
-        ...((profile === "orient" || profile === "working") && deadEndHeadlinesTruncated
-          ? [{ reason: "candidate_limit", detail: "dead-end-headlines" }]
-          : []),
-        ...(profile === "claim" && claimDepsTruncated
-          ? [{ reason: "candidate_limit", detail: "deps" }]
-          : []),
-        ...(profile === "claim" && claimEvidenceTruncated
-          ? [{ reason: "candidate_limit", detail: "evidence" }]
-          : []),
-        ...(profile === "claim" && claimReviewsTruncated
-          ? [{ reason: "candidate_limit", detail: "reviews" }]
-          : []),
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
           : []),
@@ -4861,7 +4044,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(parsed.data.target_claim_id, session.problem_id, parsed.data.target_version)
       .first<{ claim_id: string }>();
     if (claim === null || claim === undefined) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "CLAIM_NOT_FOUND",
         title: "No such claim",
@@ -4932,13 +4115,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
     });
     if (!gate.ok) {
-      return problem({
+      return validatedProblem({
         status: 422,
-        code: gate.code,
+        code: gate.code as "REVIEWER_IS_AUTHOR",
         title: "The review is not acceptable",
         detail: "The review fails a validator hard rule.",
         fixHint: gate.fixHint,
-        rule: gate.rule,
+        rule: gate.rule as "P1",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
@@ -5355,7 +4538,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(hypothesisId, session.problem_id)
       .first<{ hypothesis_id: string; status: string }>();
     if (hypothesis === null || hypothesis === undefined) {
-      return problem({
+      return validatedProblem({
         status: 404,
         code: "HYPOTHESIS_NOT_FOUND",
         title: "No such hypothesis",
@@ -5373,7 +4556,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     if (hypothesis.status === "killed") {
-      return problem({
+      return validatedProblem({
         status: 422,
         code: "HYPOTHESIS_ALREADY_KILLED",
         title: "The hypothesis is already killed",
@@ -5526,7 +4709,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       if (error instanceof KraterLedgerPreconditionError) {
-        return problem({
+        return validatedProblem({
           status: 422,
           code: "HYPOTHESIS_ALREADY_KILLED",
           title: "The hypothesis is already killed",

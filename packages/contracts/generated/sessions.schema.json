@@ -65,59 +65,6 @@
           "type": "string",
           "format": "date-time",
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-        },
-        "protocol_pair": {
-          "type": "object",
-          "properties": {
-            "protocol": {
-              "type": "object",
-              "properties": {
-                "version": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "digest": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$"
-                }
-              },
-              "required": [
-                "version",
-                "digest"
-              ],
-              "additionalProperties": false
-            },
-            "policy": {
-              "type": "object",
-              "properties": {
-                "version": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "digest": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$"
-                }
-              },
-              "required": [
-                "version",
-                "digest"
-              ],
-              "additionalProperties": false
-            },
-            "pair_digest": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            }
-          },
-          "required": [
-            "protocol",
-            "policy",
-            "pair_digest"
-          ],
-          "additionalProperties": false
         }
       },
       "required": [
@@ -125,8 +72,7 @@
         "problem_id",
         "intent",
         "opened_at",
-        "idle_close_at",
-        "protocol_pair"
+        "idle_close_at"
       ],
       "additionalProperties": false
     },

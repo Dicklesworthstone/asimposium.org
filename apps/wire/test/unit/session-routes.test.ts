@@ -15,7 +15,6 @@ import {
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
-import { protocolVersionPair } from "@asimposium/protocol";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
@@ -86,15 +85,12 @@ interface LocalD1Options {
 
 /** A D1 shim over bun:sqlite, following the enrollment-atomicity lane's pattern. */
 function localD1(sqlite: Database, options: LocalD1Options = {}) {
-  const isSelect = (query: string): boolean =>
-    /^\s*SELECT\b/i.test(query) ||
-    (/^\s*WITH\b/i.test(query) && !/\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query));
   const prepare = (query: string) => {
     const methods = (...values: LocalBinding[]) => ({
       async run() {
         await options.beforeRead?.({ kind: "run", sql: query, bindings: values });
         const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
-        if (isSelect(query)) {
+        if (/^\s*SELECT\b/i.test(query)) {
           const rows = statement.all(...values);
           await options.afterRead?.({ kind: "run", sql: query, bindings: values });
           return {
@@ -2168,332 +2164,6 @@ describe("session protocol routes", () => {
     ).toEqual({ depends_on_claim_id: "C-1" });
   });
 
-  test("the claim pack states an empty board instead of omitting claim-detail", async () => {
-    const { call } = await fixture();
-    const opened = await call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-empty-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=claim`);
-    expect(pack.status).toBe(200);
-    const body = PackResponseSchema.parse(await pack.json());
-    expect(body.profile).toBe("claim");
-    expect(body.budget_tokens).toBe(2500);
-    const empty = body.items.find((item) => item.id === "SYS-claim-detail-empty");
-    expect(empty).toMatchObject({ scope: "system", untrusted: false });
-    expect(empty?.body).toContain("claim@version");
-    expect(body.items.some((item) => item.id === "SYS-handback-empty")).toBe(false);
-    expect(body.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "claim-detail",
-    });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_excludes_handback",
-      detail: "handback",
-    });
-  });
-
-  test("the claim pack composes claim@version plus deps, evidence, and reviews", async () => {
-    const base = await fixture();
-    const { call } = base;
-    const opened = await call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-    const push = async (key: string, title: string) => {
-      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
-      });
-      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
-    };
-    const baseClaim = await call(`/v1/sessions/${session.session_id}/promote`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-base" },
-      body: JSON.stringify({
-        workshop_id: await push("claim-detail-push-base", "Base lemma"),
-        kind: "lemma",
-        statement: "The base lemma holds.",
-        relates_to: [],
-      }),
-    });
-    expect(baseClaim.status).toBe(201);
-    const { claim_id: baseId } = PromoteResponseSchema.parse(await baseClaim.json());
-    const dependent = await call(`/v1/sessions/${session.session_id}/promote`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-dep" },
-      body: JSON.stringify({
-        workshop_id: await push("claim-detail-push-dep", "Dependent lemma"),
-        kind: "lemma",
-        statement: "The dependent lemma reduces to the base.",
-        depends_on: [baseId],
-        relates_to: [],
-      }),
-    });
-    expect(dependent.status).toBe(201);
-    const { claim_id: dependentId } = PromoteResponseSchema.parse(await dependent.json());
-
-    const evidence = await call(`/v1/sessions/${session.session_id}/evidence`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-evidence" },
-      body: JSON.stringify({
-        bears_on_kind: "claim",
-        bears_on_id: baseId,
-        bears_on_version: 1,
-        direction: "supports",
-        kind: "argument",
-        source: { kind: "model_memory" },
-        mode: "confirmatory",
-        body_md: "The covering argument supports this exact version.",
-      }),
-    });
-    expect(evidence.status, await evidence.clone().text()).toBe(201);
-    const { evidence_id: evidenceId } = (await evidence.json()) as { evidence_id: string };
-
-    const reviewer = await addApprovedFellow(base, {
-      suffix: "claim-detail-reviewer",
-      scopes: ["review"],
-    });
-    const reviewerOpened = await reviewer.call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-rev-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
-    });
-    expect(reviewerOpened.status).toBe(201);
-    const reviewerSession = SessionOpenResponseSchema.parse(await reviewerOpened.json());
-    const reviewed = await reviewer.call(`/v1/sessions/${reviewerSession.session_id}/review`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "claim-detail-review" },
-      body: JSON.stringify({
-        target_claim_id: baseId,
-        target_version: 1,
-        verdict: "confirm",
-        basis: "I checked the exact published statement.",
-        capable_of_failure: "A counterexample to the base lemma.",
-        body_md: "The quantifier scope holds for this version.",
-      }),
-    });
-    expect(reviewed.status, await reviewed.clone().text()).toBe(201);
-    const { review_id: reviewId } = (await reviewed.json()) as { review_id: string };
-
-    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=claim`);
-    expect(pack.status).toBe(200);
-    const text = await pack.text();
-    const body = PackResponseSchema.parse(JSON.parse(text));
-    expect(body.items.some((item) => item.id === "SYS-claim-detail-empty")).toBe(false);
-    const baseItem = body.items.find((item) => item.id === baseId);
-    expect(baseItem).toMatchObject({ kind: "claim", scope: "ledger", untrusted: true });
-    expect(baseItem?.body).toContain(`${baseId}@1`);
-    expect(baseItem?.body).toContain("The base lemma holds.");
-    const dependentItem = body.items.find((item) => item.id === dependentId);
-    expect(dependentItem?.body).toContain(`${dependentId}@1`);
-    const depItem = body.items.find((item) => item.id === `${dependentId}#${baseId}`);
-    expect(depItem).toMatchObject({ kind: "dep", scope: "ledger", untrusted: true });
-    expect(depItem?.body).toBe(`${dependentId} depends_on ${baseId}`);
-    const evidenceItem = body.items.find((item) => item.id === evidenceId);
-    expect(evidenceItem).toMatchObject({ kind: "evidence", scope: "ledger", untrusted: true });
-    expect(evidenceItem?.body).toContain(`${evidenceId} supports ${baseId}@1`);
-    expect(evidenceItem?.body).toContain("assertion");
-    expect(text).not.toContain("The covering argument supports this exact version.");
-    const reviewItem = body.items.find((item) => item.id === reviewId);
-    expect(reviewItem).toMatchObject({ kind: "review", scope: "ledger", untrusted: true });
-    expect(reviewItem?.body).toContain(`${reviewId} confirm ${baseId}@1`);
-    expect(text).not.toContain("The quantifier scope holds for this version.");
-    expect(body.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "claim-detail",
-    });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_excludes_handback",
-      detail: "handback",
-    });
-    expect(body.items.some((item) => item.scope === "workshop")).toBe(false);
-  });
-
-  test("the orient pack composes counts, roster, presence, and omits missing writes", async () => {
-    const { call, binding } = await fixture();
-    const opened = await call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "orient-empty-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-    const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=orient`);
-    expect(pack.status).toBe(200);
-    const text = await pack.text();
-    const body = PackResponseSchema.parse(JSON.parse(text));
-    expect(body.profile).toBe("orient");
-    expect(body.budget_tokens).toBe(1500);
-    expect(body.items.map((item) => item.id).slice(0, 3)).toEqual([
-      "SYS-identity",
-      "SYS-inoculation",
-      "SYS-protocol",
-    ]);
-    const counts = body.items.find((item) => item.id === "SYS-live-counts");
-    expect(counts).toMatchObject({ scope: "system", untrusted: false });
-    expect(counts?.body).toBe("claims=0 open_hypotheses=0");
-    const synthesis = body.items.find((item) => item.id === "SYS-synthesis-staleness");
-    expect(synthesis?.body).toContain("No synthesis");
-    expect(synthesis?.body).toContain("cursor #0");
-    const roster = body.items.find((item) => item.id === "ROSTER");
-    expect(roster).toMatchObject({ kind: "roster", scope: "ledger", untrusted: true });
-    expect(roster?.body).toContain(binding.name);
-    expect(roster?.body).toContain("contributor");
-    const presence = body.items.find((item) => item.id === "PRESENCE");
-    expect(presence).toMatchObject({ kind: "presence", scope: "ledger", untrusted: true });
-    expect(presence?.body).toContain(binding.name);
-    expect(body.items.some((item) => item.id === "SYS-material-events-empty")).toBe(true);
-    expect(body.items.some((item) => item.id === "SYS-handback-empty")).toBe(true);
-    expect(body.items.some((item) => item.id === "SYS-dead-end-headlines-empty")).toBe(true);
-    expect(body.items.some((item) => item.kind === "claim")).toBe(false);
-    expect(body.items.some((item) => item.kind === "workshop-head")).toBe(false);
-    expect(body.omitted).not.toContainEqual({ reason: "budget_exceeded" });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_excludes_claims",
-      detail: "claims",
-    });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_excludes_workshop",
-      detail: "workshop-heads",
-    });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "problem-statement",
-    });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "motivation",
-    });
-    expect(body.omitted).toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "leases",
-    });
-    expect(text).not.toContain("FOREIGN-HANDBACK-MUST-NOT-LEAK");
-  });
-
-  test("orient and working inherit live counts, material events, and dead-end headlines", async () => {
-    const { call } = await fixture();
-    const opened = await call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "orient-live-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-    const push = async (key: string, type: "draft" | "dead-end", title: string, bodyMd: string) => {
-      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type, title, body_md: bodyMd, relates_to: [] }),
-      });
-      return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
-    };
-    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "orient-live-promote" },
-      body: JSON.stringify({
-        workshop_id: await push("orient-live-draft", "draft", "Base lemma", "A lemma draft."),
-        kind: "lemma",
-        statement: "The base lemma holds.",
-        relates_to: [],
-      }),
-    });
-    expect(promoted.status).toBe(201);
-    const { claim_id: claimId } = PromoteResponseSchema.parse(await promoted.json());
-    const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "orient-live-hyp" },
-      body: JSON.stringify({
-        route: "induction on path length",
-        mechanism: "the toggle preserves the count",
-        falsifier: "a path where the toggle changes the count",
-        origin: "proposed",
-        body_md: "Proposing induction.",
-      }),
-    });
-    expect(proposed.status).toBe(201);
-    const { hypothesis_id: hypothesisId } = (await proposed.json()) as { hypothesis_id: string };
-    const deadEndBody = "must-not-appear-in-orient-headline";
-    await push("orient-live-dead", "dead-end", "Greedy cycles", deadEndBody);
-
-    const orient = PackResponseSchema.parse(
-      await (
-        await call(`/v1/sessions/${session.session_id}/pack?profile=orient`)
-      ).json(),
-    );
-    const orientText = JSON.stringify(orient);
-    expect(orient.items.find((item) => item.id === "SYS-live-counts")?.body).toBe(
-      "claims=1 open_hypotheses=1",
-    );
-    const eventItem = orient.items.find((item) => item.kind === "event");
-    expect(eventItem?.body).toContain("claim.created");
-    expect(eventItem?.body).toContain(`${claimId}@1`);
-    expect(orient.items.some((item) => item.kind === "claim")).toBe(false);
-    const headline = orient.items.find((item) => item.id.startsWith("DEH-"));
-    expect(headline).toMatchObject({ kind: "dead-end", scope: "workshop", untrusted: true });
-    expect(headline?.body).toBe("Greedy cycles");
-    expect(orientText).not.toContain(deadEndBody);
-    expect(orient.omitted).not.toContainEqual({ reason: "budget_exceeded" });
-
-    const working = PackResponseSchema.parse(
-      await (
-        await call(`/v1/sessions/${session.session_id}/pack?profile=working`)
-      ).json(),
-    );
-    expect(working.items.find((item) => item.id === "SYS-live-counts")?.body).toBe(
-      "claims=1 open_hypotheses=1",
-    );
-    expect(working.items.some((item) => item.id === claimId && item.kind === "claim")).toBe(true);
-    expect(working.items.some((item) => item.kind === "workshop-head")).toBe(true);
-    expect(working.omitted).toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "move-contract",
-    });
-
-    const evidence = await call(`/v1/sessions/${session.session_id}/evidence`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "orient-live-ev" },
-      body: JSON.stringify({
-        bears_on_kind: "hypothesis",
-        bears_on_id: hypothesisId,
-        direction: "refutes",
-        kind: "argument",
-        source: { kind: "model_memory" },
-        mode: "confirmatory",
-        body_md: "The four-path changes the count.",
-      }),
-    });
-    expect(evidence.status).toBe(201);
-    const { evidence_id: evidenceId } = (await evidence.json()) as { evidence_id: string };
-    const killed = await call(`/v1/sessions/${session.session_id}/hypotheses/${hypothesisId}/kill`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "orient-live-kill" },
-      body: JSON.stringify({
-        hypothesis_id: hypothesisId,
-        killed_by_evidence_id: evidenceId,
-        reason: "The four-path kills induction.",
-      }),
-    });
-    expect(killed.status, await killed.clone().text()).toBe(200);
-    const afterKill = PackResponseSchema.parse(
-      await (
-        await call(`/v1/sessions/${session.session_id}/pack?profile=orient`)
-      ).json(),
-    );
-    expect(afterKill.items.find((item) => item.id === "SYS-live-counts")?.body).toBe(
-      "claims=1 open_hypotheses=0",
-    );
-    expect(afterKill.items.some((item) => item.body.includes("hypothesis.killed"))).toBe(true);
-  });
-
   test("a concurrent identical promotion loses its whole batch and names the winner", async () => {
     // Deterministic interleave: once armed, the first writer's batch suspends
     // before BEGIN until released. The second writer then commits in full, so
@@ -2833,11 +2503,6 @@ describe("session protocol routes", () => {
     });
     expect(promoted.status).toBe(201);
 
-    const emptyFormal = await call(`/v1/sessions/${session.session_id}/pack?profile=formal`);
-    expect(emptyFormal.status).toBe(200);
-    const emptyFormalPack = PackResponseSchema.parse(await emptyFormal.json());
-    expect(emptyFormalPack.items.some((item) => item.id === "SYS-proof-gaps-empty")).toBe(true);
-
     // A pin against a version that does not exist obligates nothing.
     const unknownTarget = await call(`/v1/sessions/${session.session_id}/gaps`, {
       method: "POST",
@@ -2938,27 +2603,6 @@ describe("session protocol routes", () => {
         )
         .first<{ count: number }>(),
     ).toEqual({ count: 2 });
-
-    const formal = await call(`/v1/sessions/${session.session_id}/pack?profile=formal`);
-    expect(formal.status).toBe(200);
-    const formalPack = PackResponseSchema.parse(await formal.json());
-    const gapItem = formalPack.items.find((item) => item.id === filedBody.gap_id);
-    expect(gapItem).toMatchObject({
-      kind: "gap",
-      scope: "ledger",
-      untrusted: true,
-    });
-    expect(gapItem?.body).toContain(`${filedBody.gap_id} (withdrawn) on C-1@1`);
-    expect(gapItem?.body).toContain("Step 4 assumes the covering is finite");
-    expect(formalPack.items.some((item) => item.id === "SYS-proof-gaps-empty")).toBe(false);
-    expect(formalPack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "proof-gaps",
-    });
-    expect(formalPack.omitted).toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "verification-records",
-    });
   });
 
   test("a gap closed-by a real claim records the discharging ref atomically", async () => {
@@ -3112,22 +2756,6 @@ describe("session protocol routes", () => {
     expect(
       await db.prepare("SELECT COUNT(*) AS count FROM claim_relations").first<{ count: number }>(),
     ).toEqual({ count: 1 });
-
-    const graph = await call(`/v1/sessions/${session.session_id}/pack?profile=claim-graph`);
-    expect(graph.status).toBe(200);
-    const graphPack = PackResponseSchema.parse(await graph.json());
-    const relationItem = graphPack.items.find((item) => item.kind === "relation");
-    expect(relationItem).toMatchObject({
-      scope: "ledger",
-      untrusted: true,
-    });
-    expect(relationItem?.body).toContain("C-1@1 implies C-2@1");
-    expect(relationItem?.body).toContain("#3");
-    expect(graphPack.items.some((item) => item.id === "SYS-claim-graph-empty")).toBe(false);
-    expect(graphPack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "typed-relations",
-    });
   });
 
   test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
@@ -3499,8 +3127,7 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
     });
     expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-    expect(session.protocol_pair).toEqual(protocolVersionPair());
+    const session = (await opened.json()) as { session_id: string };
 
     // A second open against the same problem is SESSION_EXISTS.
     const duplicate = await call("/v1/sessions", {
@@ -4362,104 +3989,6 @@ describe("session protocol routes", () => {
     expect(pack.status).toBe(200);
     const body = await pack.text();
     expect(body).toContain("The greedy approach fails");
-    const graveyard = PackResponseSchema.parse(JSON.parse(body));
-    expect(graveyard.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "killed-hypotheses",
-    });
-    expect(graveyard.items.some((item) => item.kind === "dead-end")).toBe(true);
-  });
-
-  test("the graveyard pack serves killed hypotheses and leaves open routes out", async () => {
-    const { call } = await fixture();
-    const opened = await call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-    const route = "induction on the path length";
-    const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill-propose" },
-      body: JSON.stringify({
-        route,
-        mechanism: "the toggle preserves the count, so induction on length closes it",
-        falsifier: "a path where the toggle changes the count",
-        origin: "proposed",
-        body_md: "Proposing induction on the path length.",
-      }),
-    });
-    expect(proposed.status).toBe(201);
-    const hypothesis = (await proposed.json()) as { hypothesis_id: string };
-    expect(hypothesis.hypothesis_id.startsWith("H-")).toBe(true);
-
-    const beforeKill = await call(`/v1/sessions/${session.session_id}/pack?profile=graveyard`);
-    expect(beforeKill.status).toBe(200);
-    const beforeText = await beforeKill.text();
-    expect(beforeText).not.toContain(hypothesis.hypothesis_id);
-    expect(beforeText).not.toContain(route);
-    const beforePack = PackResponseSchema.parse(JSON.parse(beforeText));
-    expect(beforePack.items.some((item) => item.id === "SYS-graveyard-empty")).toBe(true);
-    expect(beforePack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "killed-hypotheses",
-    });
-
-    const refutation = await call(`/v1/sessions/${session.session_id}/evidence`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill-evidence" },
-      body: JSON.stringify({
-        bears_on_kind: "hypothesis",
-        bears_on_id: hypothesis.hypothesis_id,
-        direction: "refutes",
-        kind: "argument",
-        source: { kind: "model_memory" },
-        mode: "confirmatory",
-        body_md: "The four-path changes the count and refutes this exact route.",
-      }),
-    });
-    expect(refutation.status, await refutation.clone().text()).toBe(201);
-    const evidence = (await refutation.json()) as { evidence_id: string };
-    const killReason = "The recorded four-path counterexample kills the induction route.";
-    const killed = await call(
-      `/v1/sessions/${session.session_id}/hypotheses/${hypothesis.hypothesis_id}/kill`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "graveyard-kill" },
-        body: JSON.stringify({
-          hypothesis_id: hypothesis.hypothesis_id,
-          killed_by_evidence_id: evidence.evidence_id,
-          reason: killReason,
-        }),
-      },
-    );
-    expect(killed.status, await killed.clone().text()).toBe(200);
-
-    const afterKill = await call(`/v1/sessions/${session.session_id}/pack?profile=graveyard`);
-    expect(afterKill.status).toBe(200);
-    const afterText = await afterKill.text();
-    const afterPack = PackResponseSchema.parse(JSON.parse(afterText));
-    const killedItem = afterPack.items.find((item) => item.id === hypothesis.hypothesis_id);
-    expect(killedItem).toMatchObject({
-      kind: "hypothesis",
-      scope: "ledger",
-      untrusted: true,
-    });
-    expect(killedItem?.body).toContain(hypothesis.hypothesis_id);
-    expect(killedItem?.body).toContain(`killed by ${evidence.evidence_id}`);
-    expect(killedItem?.body).toContain(route);
-    expect(killedItem?.body).toContain(killReason);
-    expect(afterPack.items.some((item) => item.id === "SYS-graveyard-empty")).toBe(false);
-    expect(afterPack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "killed-hypotheses",
-    });
-    expect(afterPack.omitted).not.toContainEqual({
-      reason: "candidate_limit",
-      detail: "killed-hypotheses",
-    });
   });
 
   test("the digest pack surfaces projection staleness honestly (W2.6)", async () => {
@@ -4487,26 +4016,6 @@ describe("session protocol routes", () => {
     // The staleness line names the stale projection — never fabricated-fresh state.
     expect(body).toContain("STALE");
     expect(body).toContain("1 of 2");
-    const digest = PackResponseSchema.parse(JSON.parse(body));
-    expect(digest.budget_tokens).toBe(800);
-    expect(digest.items.map((item) => item.id)).toEqual(
-      expect.arrayContaining([
-        "SYS-identity",
-        "SYS-inoculation",
-        "SYS-protocol",
-        "SYS-projection-staleness",
-      ]),
-    );
-    const staleness = digest.items.find((item) => item.id === "SYS-projection-staleness");
-    expect(staleness).toMatchObject({ scope: "system", untrusted: false });
-    expect(digest.omitted).not.toContainEqual({ reason: "budget_exceeded" });
-    expect(digest.omitted).toContainEqual({ reason: "profile_excludes_claims", detail: "claims" });
-    expect(digest.omitted).toContainEqual({
-      reason: "profile_excludes_handback",
-      detail: "handback",
-    });
-    expect(digest.items.some((item) => item.kind === "claim")).toBe(false);
-    expect(digest.items.some((item) => item.id === "SYS-handback-empty")).toBe(false);
   });
 
   test("a Fellow cannot review their own claim (P1), and the review contract validates", async () => {
@@ -4544,16 +4053,6 @@ describe("session protocol routes", () => {
     expect(promoted.status).toBe(201);
     const { claim_id } = (await promoted.json()) as { claim_id: string };
 
-    const authorQueue = await call(`/v1/sessions/${session.session_id}/pack?profile=review-queue`);
-    expect(authorQueue.status).toBe(200);
-    const authorQueuePack = PackResponseSchema.parse(await authorQueue.json());
-    expect(authorQueuePack.items.some((item) => item.id === claim_id)).toBe(false);
-    expect(authorQueuePack.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(true);
-    expect(authorQueuePack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "eligible-reviews",
-    });
-
     // The author reviewing their own claim is refused with P1.
     const selfReview = await call(`/v1/sessions/${session.session_id}/review`, {
       method: "POST",
@@ -4582,25 +4081,6 @@ describe("session protocol routes", () => {
     });
     expect(reviewerOpened.status).toBe(201);
     const reviewerSession = (await reviewerOpened.json()) as { session_id: string };
-    const reviewerQueue = await reviewer.call(
-      `/v1/sessions/${reviewerSession.session_id}/pack?profile=review-queue`,
-    );
-    expect(reviewerQueue.status).toBe(200);
-    const reviewerQueuePack = PackResponseSchema.parse(await reviewerQueue.json());
-    const eligibleItem = reviewerQueuePack.items.find((item) => item.id === claim_id);
-    expect(eligibleItem).toMatchObject({
-      kind: "claim",
-      scope: "ledger",
-      untrusted: true,
-    });
-    expect(eligibleItem?.body).toContain(`${claim_id} eligible at T0:`);
-    expect(reviewerQueuePack.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(
-      false,
-    );
-    expect(reviewerQueuePack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "eligible-reviews",
-    });
     const reviewRequest = {
       target_claim_id: claim_id,
       target_version: 1,
@@ -5984,8 +5464,6 @@ describe("session protocol routes", () => {
     expect(boundedText).not.toContain("large-12-");
     expect(boundedPack.items[0]?.id).toBe("SYS-identity");
     expect(boundedPack.items[1]?.id).toBe("SYS-inoculation");
-    expect(boundedPack.items[2]?.id).toBe("SYS-protocol");
-    expect(boundedPack.items[2]?.body).toContain(`pair=${protocolVersionPair().pair_digest}`);
 
     for (const invalid of ["800junk", "8001", "0", "1.5"]) {
       const refusal = await call(
@@ -6135,17 +5613,11 @@ describe("session protocol routes", () => {
     );
     expect(atCapResponse.status).toBe(200);
     const atCap = PackResponseSchema.parse(await atCapResponse.json());
-    const atCapIds = atCap.items.filter((item) => item.kind === "claim").map((item) => item.id);
+    const atCapIds = atCap.items.filter((item) => item.scope === "ledger").map((item) => item.id);
     expect(atCapIds.length).toBeGreaterThan(0);
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
-    expect(atCap.omitted).toEqual([
-      { reason: "profile_section_not_composed", detail: "leases" },
-      { reason: "profile_section_not_composed", detail: "motivation" },
-      { reason: "profile_section_not_composed", detail: "move-contract" },
-      { reason: "profile_section_not_composed", detail: "problem-statement" },
-      { reason: "budget_exceeded" },
-    ]);
+    expect(atCap.omitted).toEqual([{ reason: "budget_exceeded" }]);
 
     // One past the cap: the same ordered budgeted prefix, with the additional
     // candidate_limit omission proving that the 129th row reached and crossed
@@ -6165,7 +5637,7 @@ describe("session protocol routes", () => {
     expect(overCapResponse.status).toBe(200);
     const overCap = PackResponseSchema.parse(await overCapResponse.json());
     const overCapIds = overCap.items
-      .filter((item) => item.kind === "claim")
+      .filter((item) => item.scope === "ledger")
       .map((item) => item.id);
     // The additional mandatory candidate_limit marker consumes envelope
     // budget, so the finalized over-cap prefix may be shorter by one or more
@@ -6177,10 +5649,6 @@ describe("session protocol routes", () => {
     expect(overCapIds).not.toContain("C-129");
     expect(overCap.omitted).toEqual([
       { reason: "candidate_limit", detail: "claims" },
-      { reason: "profile_section_not_composed", detail: "leases" },
-      { reason: "profile_section_not_composed", detail: "motivation" },
-      { reason: "profile_section_not_composed", detail: "move-contract" },
-      { reason: "profile_section_not_composed", detail: "problem-statement" },
       { reason: "budget_exceeded" },
     ]);
     // The 128-claim seed plus two full pack compositions sit close enough to
@@ -6832,77 +6300,6 @@ describe("session protocol routes", () => {
     expect(ProblemDocumentSchema.parse(JSON.parse(hostileText))).toMatchObject({
       code: "UNKNOWN_PROFILE",
       detail: "The ?profile= value is not one this route serves.",
-    });
-  });
-
-  test("a review pack names the review bar and author isolation instead of omitting them", async () => {
-    const { call } = await fixture();
-    const opened = await call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "review-pack-open" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
-    });
-    expect(opened.status).toBe(201);
-    const session = SessionOpenResponseSchema.parse(await opened.json());
-
-    const workshopMarker = "must-not-appear-in-review-pack";
-    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "review-pack-workshop" },
-      body: JSON.stringify({
-        type: "draft",
-        title: "Private draft",
-        body_md: workshopMarker,
-        relates_to: [],
-      }),
-    });
-    expect(pushed.status).toBe(201);
-
-    const response = await call(`/v1/sessions/${session.session_id}/pack?profile=review`);
-    expect(response.status).toBe(200);
-    const text = await response.text();
-    expect(text).not.toContain(workshopMarker);
-    const pack = PackResponseSchema.parse(JSON.parse(text));
-    expect(pack.profile).toBe("review");
-    expect(pack.items.map((item) => item.id)).toEqual(
-      expect.arrayContaining([
-        "SYS-identity",
-        "SYS-inoculation",
-        "SYS-protocol",
-        "SYS-review-check",
-        "SYS-author-isolation",
-      ]),
-    );
-    expect(pack.items[0]?.id).toBe("SYS-identity");
-    expect(pack.items[1]?.id).toBe("SYS-inoculation");
-    expect(pack.items[2]?.id).toBe("SYS-protocol");
-    const reviewCheck = pack.items.find((item) => item.id === "SYS-review-check");
-    expect(reviewCheck).toMatchObject({
-      scope: "system",
-      untrusted: false,
-    });
-    expect(reviewCheck?.body).toContain("Hard rule 11");
-    expect(reviewCheck?.body).toContain("capable_of_failure");
-    expect(reviewCheck?.body).toContain("/protocol.md");
-    const isolation = pack.items.find((item) => item.id === "SYS-author-isolation");
-    expect(isolation).toMatchObject({
-      scope: "system",
-      untrusted: false,
-    });
-    expect(isolation?.body).toContain("excludes workshop");
-    expect(isolation?.body).toContain("Hard rule 3");
-    expect(pack.items.some((item) => item.scope === "workshop")).toBe(false);
-    expect(pack.omitted).toContainEqual({
-      reason: "profile_excludes_workshop",
-      detail: "workshop-heads",
-    });
-    expect(pack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "rubric",
-    });
-    expect(pack.omitted).not.toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "author-isolation-proof",
     });
   });
 
