@@ -87,8 +87,36 @@ if [[ "$WANT_FULL" == 0 && "$WANT_WIRE" == 1 ]]; then
   phase "wire unit gate (real workerd)" bun run --filter @asimposium/wire test:unit
 fi
 
+run_cargo_tests() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)\n' >&2
+    exit 78
+  fi
+
+  local out_file err_file status
+  out_file="$(mktemp "${TMPDIR:-/tmp}/asimp-cargo-stdout-XXXXXX")"
+  err_file="$(mktemp "${TMPDIR:-/tmp}/asimp-cargo-stderr-XXXXXX")"
+
+  set +e
+  (cd cli && cargo test >"$out_file" 2>"$err_file")
+  status=$?
+  set -e
+
+  cat "$out_file"
+  cat "$err_file" >&2
+
+  if [[ $status -ne 0 ]] && grep -qE '\[RCH\].*refusing local fallback' "$err_file"; then
+    rm -f "$out_file" "$err_file"
+    printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)\n' >&2
+    exit 78
+  fi
+
+  rm -f "$out_file" "$err_file"
+  return "$status"
+}
+
 if [[ "$WANT_CLI" == 1 ]]; then
-  phase "asimp cargo tests" bash -c 'cd cli && cargo test'
+  phase "asimp cargo tests" run_cargo_tests
 fi
 
 echo ""

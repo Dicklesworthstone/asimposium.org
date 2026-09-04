@@ -44,6 +44,26 @@ fi
 if [ '${name}' = 'bun' ] && [ "\${1:-}" = 'run' ] && [ "\${2:-}" = 'check' ]; then
   exit "\${ASIMPOSIUM_GATES_TEST_CHECK_STATUS:-0}"
 fi
+if [ '${name}' = 'cargo' ]; then
+  case "\${ASIMPOSIUM_GATES_TEST_CARGO_MODE:-pass}" in
+    rch-refusal)
+      printf '[RCH] remote required; refusing local fallback (all workers failed preflight checks) — retryable\\n' >&2
+      exit 103
+      ;;
+    stdout-echo-fail)
+      printf '[RCH] remote required; refusing local fallback (all workers failed preflight checks) — retryable\\n'
+      printf 'test result: FAILED. 1 failed; 0 passed\\n' >&2
+      exit 1
+      ;;
+    fail)
+      printf 'error: test failure in cli crate\\n' >&2
+      exit 1
+      ;;
+    pass|*)
+      exit "\${ASIMPOSIUM_GATES_TEST_CARGO_STATUS:-0}"
+      ;;
+  esac
+fi
 exit 0
 `;
   writeFileSync(path, body, { mode: 0o700 });
@@ -61,21 +81,38 @@ interface GateRun {
   readonly commands: readonly string[];
 }
 
-function runAll(checkStatus: number): GateRun {
+const PATH_WITHOUT_CARGO = (process.env.PATH ?? "")
+  .split(delimiter)
+  .filter((segment) => !segment.includes(".cargo") && !segment.includes(".rch") && segment !== BIN)
+  .join(delimiter);
+
+function runGate(
+  args: readonly string[],
+  options: {
+    checkStatus?: number;
+    cargoMode?: string;
+    cargoStatus?: number;
+    customPath?: string;
+  } = {},
+): GateRun {
   closeSync(openSync(LOG, "w", 0o600));
-  const resultPath = join(SCRATCH, `run-${checkStatus}.json`);
+  const runId = Math.random().toString(36).slice(2);
+  const resultPath = join(SCRATCH, `run-${runId}.json`);
   closeSync(openSync(resultPath, "w", 0o600));
+  const envVars: Record<string, string> = {
+    ...process.env,
+    PATH: options.customPath ?? `${BIN}${delimiter}${process.env.PATH ?? ""}`,
+    ASIMPOSIUM_GATES_TEST_LOG: LOG,
+    ASIMPOSIUM_GATES_TEST_CHECK_STATUS: String(options.checkStatus ?? 0),
+    ASIMPOSIUM_GATES_TEST_CARGO_MODE: options.cargoMode ?? "pass",
+    ASIMPOSIUM_GATES_TEST_CARGO_STATUS: String(options.cargoStatus ?? 0),
+  };
   const helperSource = `
     import { spawnSync } from "node:child_process";
     import { writeFileSync } from "node:fs";
-    const child = spawnSync("bash", [${JSON.stringify(GATES)}, "--all"], {
+    const child = spawnSync("bash", [${JSON.stringify(GATES)}, ...${JSON.stringify(args)}], {
       cwd: ${JSON.stringify(REPO_ROOT)},
-      env: {
-        ...process.env,
-        PATH: ${JSON.stringify(`${BIN}${delimiter}${process.env.PATH ?? ""}`)},
-        ASIMPOSIUM_GATES_TEST_LOG: ${JSON.stringify(LOG)},
-        ASIMPOSIUM_GATES_TEST_CHECK_STATUS: ${JSON.stringify(String(checkStatus))},
-      },
+      env: ${JSON.stringify(envVars)},
       encoding: "utf8",
       timeout: 30000,
       maxBuffer: 4 * 1024 * 1024,
@@ -105,6 +142,10 @@ function runAll(checkStatus: number): GateRun {
     stderr: parsed.stderr,
     commands: readFileSync(LOG, "utf8").trimEnd().split("\n").filter(Boolean),
   };
+}
+
+function runAll(checkStatus: number): GateRun {
+  return runGate(["--all"], { checkStatus });
 }
 
 describe("provider-neutral full gate", () => {
@@ -140,4 +181,58 @@ describe("provider-neutral full gate", () => {
     },
     60_000,
   );
+});
+
+describe("cargo gate classification", () => {
+  test("shim exit 0: cargo gate passes", () => {
+    const run = runGate(["--cli"], { cargoMode: "pass", cargoStatus: 0 });
+
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.commands).toEqual(["cargo\ttest"]);
+    expect(run.stdout).toContain("=== gate: asimp cargo tests ===");
+    expect(run.stdout).toContain("=== all selected gates passed ===");
+  });
+
+  test("shim exit 1 with failing output: gate fails nonzero (not 78)", () => {
+    const run = runGate(["--cli"], { cargoMode: "fail" });
+
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("error: test failure in cli crate");
+    expect(run.stderr).not.toContain("CARGO_GATE_UNAVAILABLE");
+    expect(run.stdout).not.toContain("=== all selected gates passed ===");
+  });
+
+  test("shim printing RCH banner + nonzero: gate exits 78 with CARGO_GATE_UNAVAILABLE", () => {
+    const run = runGate(["--cli"], { cargoMode: "rch-refusal" });
+
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(78);
+    expect(run.stderr).toContain("[RCH] remote required; refusing local fallback");
+    expect(run.stderr).toContain("blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)");
+    expect(run.stdout).not.toContain("=== all selected gates passed ===");
+  });
+
+  test("PATH without cargo: gate exits 78 with CARGO_GATE_UNAVAILABLE", () => {
+    const run = runGate(["--cli"], { customPath: PATH_WITHOUT_CARGO });
+
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(78);
+    expect(run.stderr).toContain("blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)");
+    expect(run.commands).not.toContain("cargo\ttest");
+    expect(run.stdout).not.toContain("=== all selected gates passed ===");
+  });
+
+  test("negative: a cargo failure that merely echoes the banner in stdout still classifies as failure (nonzero, not 78)", () => {
+    const run = runGate(["--cli"], { cargoMode: "stdout-echo-fail" });
+
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain("[RCH] remote required; refusing local fallback");
+    expect(run.stderr).toContain("test result: FAILED");
+    expect(run.stderr).not.toContain("CARGO_GATE_UNAVAILABLE");
+    expect(run.stdout).not.toContain("=== all selected gates passed ===");
+  });
 });
