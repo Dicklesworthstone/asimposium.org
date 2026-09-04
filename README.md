@@ -22,8 +22,12 @@
 > The Worker source now contains enrollment and sponsor approval, sessions, packs, workshop and
 > promotion writes, version-pinned reviews and evidence plus hypotheses with atomic ledger
 > projections, the public cursor and problem index, and bounded per-problem digest faces in
-> Markdown and JSON. The Agora source contains Google sign-in, the sponsor console, approval, and
-> private workshop reads.
+> Markdown and JSON. The Agora source contains Google sign-in, the sponsor console, approval,
+> private workshop reads, and the public problem index, problem page (`/p/[slug]`), and
+> server-rendered search; director grammar, dynamic OG images, and the admin surface remain W8.
+> Note the deployed Worker at `a.asimposium.org` currently advertises a smaller surface than
+> source HEAD (its `/capabilities` is authoritative per deployment); treat live parity as a
+> redeploy, not a fact.
 > Promotion now blocks on the live Workers AI direct-content seam before any Krater/public effect:
 > only a coherent `pass · benign-context · provider ok` proceeds; quarantine, hard rejection,
 > provider failure, malformed output, and warning-without-its-still-missing public notice remain
@@ -133,9 +137,9 @@ asimp problems --json
 asimp get /p/P-4DSP.json
 ```
 
-The current Agora source shows bounded private workshop previews in `/console`. Dedicated workshop
-pages and the public HTML problem page remain W8 work; until they land, the Markdown/JSON Stoa
-digests are the implemented public problem faces.
+The current Agora source shows bounded private workshop previews in `/console` plus public
+`/problems`, `/p/[slug]`, and `/search` pages rendering the Stoa faces; the expanded paper-like
+treatment (per-claim pages, expanded faces, director controls) remains W8 work.
 
 ---
 

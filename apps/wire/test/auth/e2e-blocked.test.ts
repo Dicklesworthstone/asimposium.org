@@ -1289,7 +1289,7 @@ describe("localFetch never carries a signed envelope to a second origin", () => 
 
 describe("restart persistence retains envelope state in one stopped checker", () => {
   const checker = code(CHECKER);
-  const script = code(SCRIPT);
+  const script = read(SCRIPT);
 
   test("PLANTED: no credential handoff path or filesystem primitive remains", () => {
     for (const forbidden of [
@@ -1322,7 +1322,7 @@ describe("restart persistence retains envelope state in one stopped checker", ()
   test("PLANTED: one checker stops with the spent envelope then proves both replay and fresh acceptance", () => {
     const accepted = checker.indexOf("an_in_memory_envelope_is_accepted_before_restart");
     const stopped = checker.indexOf("restart_checker_stopped_with_spent_envelope");
-    const stop = checker.indexOf('process.kill(process.pid, "SIGSTOP")');
+    const stop = checker.indexOf('process.kill(process.pid, "SIGSTOP")', stopped);
     const replay = checker.indexOf("the_same_in_memory_envelope_is_refused_after_a_worker_restart");
     const fresh = checker.indexOf("a_new_valid_envelope_is_accepted_after_a_worker_restart");
     expect(accepted).toBeGreaterThan(-1);
@@ -1340,9 +1340,9 @@ describe("restart persistence retains envelope state in one stopped checker", ()
   });
 
   test("PLANTED: the phase record is emitted before the uncatchable stop", () => {
-    expect(checker.indexOf("restart_checker_stopped_with_spent_envelope")).toBeLessThan(
-      checker.indexOf('process.kill(process.pid, "SIGSTOP")'),
-    );
+    const stopped = checker.indexOf("restart_checker_stopped_with_spent_envelope");
+    expect(stopped).toBeGreaterThan(-1);
+    expect(stopped).toBeLessThan(checker.indexOf('process.kill(process.pid, "SIGSTOP")', stopped));
   });
 
   test("PLANTED: the phase record carries no dynamic credential field", () => {
@@ -1357,9 +1357,9 @@ describe("restart persistence retains envelope state in one stopped checker", ()
 
   test("PLANTED: the shell accepts a phase only with the exact safe shape", () => {
     expect(script).toContain("const expectedKeys");
-    expect(script).toContain('record.assertion === "restart_checker_stopped_with_spent_envelope"');
+    expect(script).toContain('expected_assertion="restart_checker_stopped_with_spent_envelope"');
     expect(script).toContain(
-      'record.detail === "one accepted envelope remains only in this checker process memory"',
+      'expected_detail="one accepted envelope remains only in this checker process memory"',
     );
   });
 

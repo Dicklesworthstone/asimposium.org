@@ -271,16 +271,23 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
-Five of the six spikes are **closed**. Only two still gate G0, and G0 gates all of W1-W12:
+As of the 2026-09-03 reality check, only **S-5 and S-6 are closed**. The spike ledger
+(per `br`, the authority — run `br stats` for live counts):
 
+- **S-1 Capsule** (`asimposiumorg-mn7`, blocked) — source implemented; re-run blocked on staging
+- **S-2 Krater** (`asimposiumorg-doa`, blocked) — `EDGE_CACHE_ENVIRONMENT_ABSENT`; needs the
+  provisioned staging environment and must publish the retained S-2 cost receipt that
+  `scripts/verify-cost-model.ts` consumes
+- **S-3 Split** (`asimposiumorg-ict`, in_progress) — `scripts/smoke-gallery.sh` still ends in
+  exit 70 `GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED`
 - **S-4 Screening + OAuth** (`asimposiumorg-xeg`, in_progress)
-- **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`, `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
+- **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`,
+  `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
 
-Everything else in the backlog is dependency-blocked behind them: at last count **128 open
-issues and exactly 1 ready**. If you are looking for work, it is S-4 or S-7. Prefer their
-locally-verifiable acceptance (shell unit/table tests, seeded-defect negatives, logger
-redaction, run-id and artifact containment, cost-model arithmetic) — none of that needs
-staging credentials.
+The backlog is wide (≈130 open, most dependency-blocked) but nearly starved at the tip: the
+staging environment (OPS.3 chain) is the common unblocker for S-1/S-2 re-runs, S-4's staging
+probe, and S-7's preview runs. Locally-verifiable work without credentials exists and is
+tracked (see `br ready`).
 
 **S-6 is CLOSED (`asimposiumorg-vw3`, 2026-08-24).** `scripts/e2e-s6-cross-plane-auth.sh`
 is a finished spike's self-test: **do not keep polishing it.** In the 171 commits after that
@@ -291,6 +298,13 @@ editing any spike script** (`br show <id>`).
 
 Local gates you can run now, with no credentials:
 `bun run smoke:self-test` · `bun run verify:cost` · `bun run toolchain:typecheck`
+
+`verify:cost` deliberately ends **blocked (exit 78, `S2_COST_MEASUREMENT_UNAVAILABLE`)** until
+the retained S-2 measurement receipt exists — blocked is its honest state, not a pass and not a
+regression. Also note two environment-blocked gates on this workstation: e2e/gauntlet `lint`
+needs `shellcheck`, and the cli cargo gate is refused by the machine's RCH cargo shim
+(tracked as `asimposiumorg-gate-unavailable-not-fail-63gs` so the dispatcher reports blocked
+instead of fail).
 
 Then, per Fable §17.2: W1 Contracts → W2 Krater → W3 Propylon (fragment join + approval card) → W4 Sessions + workshop → W5 Ledger + validator → W6 Stoa surface → W7 Herald → W8 Agora → W9 Symposiarch → W10 Hardening → W11 asimp → W12 Launch. Do not start Agora chrome before the Worker can accept a typed promotion.
 
