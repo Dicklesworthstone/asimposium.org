@@ -182,6 +182,9 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/sessions.ts
   packages/contracts/src/health.ts
   packages/contracts/src/search.ts
+  packages/contracts/src/rubrics.ts
+  packages/contracts/src/moves.ts
+
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
   # executed ones, and a listed file whose own imports escape the set leaves the
@@ -253,6 +256,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/generated/screening.schema.json
   packages/contracts/generated/sessions.schema.json
   packages/contracts/generated/internal-health.schema.json
+  packages/contracts/generated/rubrics.schema.json
+  packages/contracts/generated/moves.schema.json
   packages/protocol/package.json
   packages/protocol/src/index.ts
   packages/protocol/src/errors.ts
@@ -261,6 +266,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/protocol/src/sha256.ts
   packages/protocol/src/text.ts
   packages/protocol/src/types.ts
+  packages/protocol/src/protocol-json.ts
+
   packages/protocol/assets/capsule.md
   packages/protocol/assets/handbook.md
   packages/protocol/assets/llms.txt
