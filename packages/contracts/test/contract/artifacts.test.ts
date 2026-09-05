@@ -362,6 +362,20 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validator = ajv.compile(schema as object);
+  for (const [directory, expected] of [
+    ["valid", true],
+    ["invalid", false],
+  ] as const) {
+    const name =
+      directory === "valid"
+        ? "screening-publication-provenance.json"
+        : "screening-publication-provenance-private-detail.json";
+    const candidate = await jsonFixture(
+      new URL(`../fixtures/${directory}/${name}`, import.meta.url),
+    );
+    expect(ScreeningSchemaDocumentSchema.safeParse(candidate).success).toBe(expected);
+    expect(validator(candidate)).toBe(expected);
+  }
   const valid = combined(validPublicAction, operatorReceipt);
   const zodValid = ScreeningContractsSchema.safeParse(valid);
 

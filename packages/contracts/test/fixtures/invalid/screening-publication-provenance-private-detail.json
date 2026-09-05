@@ -1,0 +1,18 @@
+{
+  "version": "ledger-publication-screening.v1",
+  "scope": "candidate-and-actor-only",
+  "principal": "platform:symposiarch",
+  "input_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "context_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "model_version": "synthetic-model:v1",
+  "policy_version": "synthetic-policy:v1",
+  "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "decided_at": "2026-09-05T00:00:00.000Z",
+  "latency_ms": 12,
+  "retry_count": 0,
+  "outcome": "pass",
+  "provider_status": "ok",
+  "decision_path": "provider",
+  "public_action": { "category": "benign-context", "action": "published", "notice": "none" },
+  "body_md": "SYNTHETIC-PRIVATE-DETAIL"
+}

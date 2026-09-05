@@ -16,6 +16,7 @@ import {
   ScreeningPromotionPolicyResponseSchema,
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
+  ScreeningPublicationProvenanceSchema,
   ScreeningSchemaDocumentSchema,
 } from "../../src/screening.ts";
 
@@ -59,6 +60,37 @@ async function fixture(url: URL): Promise<unknown> {
     throw new Error("synthetic screening fixture is not valid JSON");
   }
 }
+
+test("publication provenance accepts bounded facts and refuses private or invented evidence", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/screening-publication-provenance.json", import.meta.url),
+  );
+  const parsed = ScreeningPublicationProvenanceSchema.parse(valid);
+  expect(ScreeningSchemaDocumentSchema.safeParse(parsed).success).toBe(true);
+  const invalid = await fixture(
+    new URL(
+      "../fixtures/invalid/screening-publication-provenance-private-detail.json",
+      import.meta.url,
+    ),
+  );
+  expect(ScreeningPublicationProvenanceSchema.safeParse(invalid).success).toBe(false);
+  for (const patch of [
+    { outcome: "quarantine" },
+    { provider_status: "timeout" },
+    { decision_path: "benign-outage-degraded" },
+    { scope: "full-context" },
+    { principal: "fellow" },
+    { latency_ms: -1 },
+    { retry_count: 0.5 },
+    { input_digest: "missing" },
+    { policy_version: "private\nbody" },
+    { public_action: { category: "injection", action: "published", notice: "none" } },
+  ]) {
+    expect(ScreeningPublicationProvenanceSchema.safeParse({ ...parsed, ...patch }).success).toBe(
+      false,
+    );
+  }
+});
 
 function publicAction(
   category: string,

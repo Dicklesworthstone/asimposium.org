@@ -356,6 +356,8 @@ export {
   ScreeningPublicActionSchema,
   type ScreeningPublicationAction,
   ScreeningPublicationActionSchema,
+  type ScreeningPublicationProvenance,
+  ScreeningPublicationProvenanceSchema,
   type ScreeningPublicNotice,
   ScreeningPublicNoticeSchema,
   type ScreeningReviewState,

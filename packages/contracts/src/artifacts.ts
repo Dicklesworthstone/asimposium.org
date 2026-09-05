@@ -555,7 +555,7 @@ function generatedScreeningJsonSchema(): string {
     $id: SCREENING_SCHEMA_ID,
     title: "ASImposium screening promotion decision contracts",
     description:
-      "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion policy responses contain only a coarse category and appeal path. Decision provenance retains bounded digests and decision facts, never submitted content or detector detail; it is not the canonical screening log.",
+      "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion policy responses contain only a coarse category and appeal path. Private publication provenance binds successful ledger events to bounded decision facts and candidate/actor digests; it does not attest history screening and is not the complete screening log. No submitted content or detector detail is retained.",
     ...z.toJSONSchema(ScreeningSchemaDocumentSchema),
   };
   return formatJson(withExamples("screening", document));
@@ -570,6 +570,7 @@ function generatedScreeningTypes(): string {
     "ScreeningPromotionDeniedResponse",
     "ScreeningPromotionHoldResponse",
     "ScreeningPromotionPolicyResponse",
+    "ScreeningPublicationProvenance",
     "ScreeningOutcome",
     "ScreeningProviderStatus",
     "ScreeningPublicationAction",
@@ -585,6 +586,7 @@ function generatedScreeningTypes(): string {
     ScreeningPromotionDeniedResponse: import("./screening.ts").ScreeningPromotionDeniedResponse;
     ScreeningPromotionHoldResponse: import("./screening.ts").ScreeningPromotionHoldResponse;
     ScreeningPromotionPolicyResponse: import("./screening.ts").ScreeningPromotionPolicyResponse;
+    ScreeningPublicationProvenance: import("./screening.ts").ScreeningPublicationProvenance;
     ScreeningOutcome: ScreeningOutcome;
     ScreeningProviderStatus: ScreeningProviderStatus;
     ScreeningPublicationAction: ScreeningPublicationAction;

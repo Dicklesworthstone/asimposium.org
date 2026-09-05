@@ -239,6 +239,33 @@ const PassReceiptSchema = z
   })
   .strict();
 
+/**
+ * Private evidence committed with a public ledger event. The current ingress
+ * screens the candidate with an actor/problem binding; it does not claim to
+ * have screened problem statements or recent history. Refusals and operator
+ * review remain a separate screening-log concern.
+ */
+export const ScreeningPublicationProvenanceSchema = z
+  .object({
+    version: z.literal("ledger-publication-screening.v1"),
+    scope: z.literal("candidate-and-actor-only"),
+    principal: z.literal("platform:symposiarch"),
+    input_digest: ScreeningDigestSchema,
+    context_digest: ScreeningDigestSchema,
+    model_version: ScreeningVersionIdentifierSchema,
+    policy_version: ScreeningVersionIdentifierSchema,
+    configuration_digest: ScreeningDigestSchema,
+    decided_at: z.string().datetime({ offset: true }).max(40),
+    latency_ms: z.number().nonnegative(),
+    retry_count: z.int().nonnegative(),
+    outcome: z.literal("pass"),
+    provider_status: z.literal("ok"),
+    decision_path: z.literal("provider"),
+    public_action: PublishedPublicActionSchema,
+  })
+  .strict();
+export type ScreeningPublicationProvenance = z.infer<typeof ScreeningPublicationProvenanceSchema>;
+
 /** A provider warning publishes without opening an operator-review queue. */
 const ProviderWarningReceiptSchema = z
   .object({
@@ -782,5 +809,6 @@ export type ScreeningContracts = z.infer<typeof ScreeningContractsSchema>;
 export const ScreeningSchemaDocumentSchema = z.union([
   ScreeningContractsSchema,
   ScreeningPromotionPolicyResponseSchema,
+  ScreeningPublicationProvenanceSchema,
 ]);
 export type ScreeningSchemaDocument = z.infer<typeof ScreeningSchemaDocumentSchema>;
