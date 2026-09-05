@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
+import { ScreeningPublicationProvenanceSchema } from "../../../../packages/contracts/src/screening.ts";
 import {
   EvidenceRequestSchema,
   GapFileRequestSchema,
@@ -511,9 +512,56 @@ try {
       { kind: "addresses-gap", source_claim_id: "C-1", source_version: 1, target: gap.gap_id },
     ],
   ];
+  // The private graveyard must identify its bounded extract and row limit.
+  // These are real workshop pushes, including an actual private R2 spill.
+  let latestPrivateDeadEnd;
+  const privateDeadEndBody = `${privateCanary}\n${"An examined route has a missing step. ".repeat(50)}PRIVATE-DEAD-END-TAIL`;
+  for (let i = 0; i < 11; i += 1) {
+    latestPrivateDeadEnd = await call(
+      `${policyPath}/workshop`,
+      {
+        type: "dead-end",
+        title: `Private examined route ${i}`,
+        body_md: i === 10 ? privateDeadEndBody : "A checked local obstruction.",
+        relates_to: [],
+      },
+      author,
+      201,
+    );
+  }
+  const ownGraveyardPath = `${policyPath}/pack?profile=graveyard&max_tokens=8000`;
+  const ownGraveyardResponse = await worker.fetch(`${origin}${ownGraveyardPath}`, {
+    headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+  });
+  assert.equal(ownGraveyardResponse.status, 200);
+  const ownGraveyardBytes = await ownGraveyardResponse.text();
+  const ownGraveyard = PackResponseSchema.parse(JSON.parse(ownGraveyardBytes));
+  assert.equal(ownGraveyard.items.filter((item) => item.kind === "dead-end").length, 10);
+  const ownExcerpt = ownGraveyard.items.find(
+    (item) => item.id === latestPrivateDeadEnd.workshop_id,
+  );
+  assert.ok(ownExcerpt?.body.includes("Excerpt: first 280 characters"));
+  assert.ok(ownExcerpt.body.includes(privateCanary));
+  assert.ok(!ownGraveyardBytes.includes("PRIVATE-DEAD-END-TAIL"));
+  assert.ok(
+    ownGraveyard.omitted.some(
+      (item) =>
+        item.reason === "content_excerpt" && item.detail === latestPrivateDeadEnd.workshop_id,
+    ),
+  );
+  assert.ok(
+    ownGraveyard.omitted.some(
+      (item) => item.reason === "candidate_limit" && item.detail === "own-workshop-dead-ends",
+    ),
+  );
+  const repeatGraveyard = await worker.fetch(`${origin}${ownGraveyardPath}`, {
+    headers: { "User-Agent": userAgent, authorization: `Bearer ${author}` },
+  });
+  assert.equal(await repeatGraveyard.text(), ownGraveyardBytes);
   async function publicState() {
     return env.DB.prepare(`SELECT
       (SELECT count(*) FROM events) AS events,
+      (SELECT count(*) FROM screening_publications) AS screening_publications,
       (SELECT count(*) FROM outbox) AS outbox,
       (SELECT count(*) FROM claim_versions) AS versions,
       (SELECT sum(version) FROM claim_versions) AS claim_versions_sum,
@@ -561,7 +609,7 @@ try {
     "gap-close": GapTransitionRequestSchema,
     relation: RelationFileRequestSchema,
   };
-  for (const mode of ["reject", "quarantine", "unavailable"]) {
+  for (const mode of ["reject", "quarantine", "unavailable", "wrong-digest", "wrong-context"]) {
     await fixtures.setScreenMode(mode);
     for (const [suffix, kind, token, body] of candidates) {
       const path =
@@ -612,7 +660,7 @@ try {
   );
   await fixtures.setScreenMode("pass");
   console.log(
-    JSON.stringify({ stage: "screening-refusals-proved", routes: candidates.length, modes: 3 }),
+    JSON.stringify({ stage: "screening-refusals-proved", routes: candidates.length, modes: 5 }),
   );
   // Keep version and target preconditions valid while exercising each positive path.
   for (const index of [0, 2, 3, 5, 6, 8, 7, 4, 1]) {
@@ -622,6 +670,9 @@ try {
         ? `/v1/sessions/${policyReviewer.session_id}/review`
         : `${policyPath}/${suffix}`;
     const before = await publicState();
+    const headBefore = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind("P-DISC-POL")
+      .first();
     const calls = await fixtures.screeningCalls();
     const response = await call(
       path,
@@ -631,9 +682,75 @@ try {
       `positive-${kind}`,
     );
     assert.equal((await publicState()).events, before.events + 1, `${kind}: one accepted event`);
+    assert.equal(
+      (await publicState()).screening_publications,
+      before.screening_publications + 1,
+      `${kind}: one retained decision`,
+    );
+    const newEvents = await readEvents(env.DB, "P-DISC-POL", headBefore.public_seq, 2);
+    assert.equal(
+      newEvents.length,
+      1,
+      `${kind}: exactly one source event after the captured cursor`,
+    );
+    const retained =
+      await env.DB.prepare(`SELECT s.provenance_json, s.request_digest, e.actor_fellow_id, e.actor_session_id
+      FROM screening_publications s JOIN events e ON e.id = s.event_id
+      WHERE e.problem_id = ? AND e.seq = ?`)
+        .bind("P-DISC-POL", newEvents[0].seq)
+        .first();
+    assert.ok(retained, `${kind}: publication must retain its decision in the event transaction`);
+    const provenance = ScreeningPublicationProvenanceSchema.parse(
+      JSON.parse(retained.provenance_json),
+    );
+    assert.equal(provenance.model_version, "synthetic-local-model:v1");
+    assert.equal(provenance.policy_version, "synthetic-local-policy:v1");
+    assert.equal(provenance.principal, "platform:symposiarch");
+    assert.equal(
+      retained.actor_fellow_id,
+      token === reviewer ? reviewCard.fellow_id : authorCard.fellow_id,
+    );
+    assert.equal(
+      retained.actor_session_id,
+      kind === "review" ? policyReviewer.session_id : policySession.session_id,
+    );
+    const parsed = requestSchemas[kind].parse(body);
+    const screenedBody = JSON.stringify({
+      kind,
+      statement: kind === "conjecture" ? parsed.statement : JSON.stringify(parsed),
+      falsifier: ["conjecture", "revise", "hypotheses"].includes(kind) ? parsed.falsifier : null,
+    });
+    const bodyDigest = createHash("sha256").update(screenedBody).digest("hex");
+    assert.equal(
+      provenance.input_digest,
+      bodyDigest,
+      `${kind}: independently reconstructed candidate binding`,
+    );
+    assert.equal(
+      provenance.context_digest,
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            scope: "promotion-direct-v1",
+            problem_id: "P-DISC-POL",
+            fellow_id: retained.actor_fellow_id,
+            body_digest: `sha256:${bodyDigest}`,
+          }),
+        )
+        .digest("hex"),
+    );
+    assert.ok(!retained.provenance_json.includes(privateCanary));
+    assert.ok(
+      !retained.provenance_json.includes(author) && !retained.provenance_json.includes(reviewer),
+    );
     assert.equal(await fixtures.screeningCalls(), calls + 1);
     assert.deepEqual(await call(path, body, token, 200, `positive-${kind}`), response);
     assert.equal((await publicState()).events, before.events + 1, `${kind}: replay cannot append`);
+    assert.equal(
+      (await publicState()).screening_publications,
+      before.screening_publications + 1,
+      `${kind}: replay cannot mint evidence`,
+    );
     assert.equal(await fixtures.screeningCalls(), calls + 1, `${kind}: replay cannot screen again`);
   }
   const revisedBody = candidates[1][3];
@@ -788,6 +905,46 @@ try {
     assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
     assert.equal(await fixtures.screeningCalls(), calls + 1);
   }
+  const storageToken = await enroll("discovery-storage-failure", "usr_discoverystorage");
+  const storageSession = await call(
+    "/v1/sessions",
+    { problem_id: "P-DISC-POL", intent: "prove" },
+    storageToken,
+    201,
+  );
+  // Plant a real D1 write failure after screening. No source event may survive
+  // without its evidence. This trigger belongs only to this disposable database.
+  await env.DB.prepare(
+    "CREATE TRIGGER synthetic_publication_storage_failure BEFORE INSERT ON screening_publications BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_PUBLICATION_STORAGE_FAILURE'); END",
+  ).run();
+  const beforeStorageFailure = await publicState();
+  const storageFailure = await worker.fetch(
+    `${origin}/v1/sessions/${storageSession.session_id}/gaps`,
+    {
+      method: "POST",
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${storageToken}`,
+        "content-type": "application/json",
+        "idempotency-key": "provenance-storage-failure",
+      },
+      body: JSON.stringify({
+        target_claim_id: "C-1",
+        target_version: 2,
+        obligation: "Storage failure must roll back this gap.",
+        closes_what: "The missing proof step.",
+      }),
+    },
+  );
+  assert.equal(storageFailure.status, 500);
+  const storageFailureBody = await storageFailure.text();
+  assert.ok(!storageFailureBody.includes("SYNTHETIC_PUBLICATION_STORAGE_FAILURE"));
+  assert.ok(!storageFailureBody.includes(storageToken));
+  assert.deepEqual(
+    await publicState(),
+    beforeStorageFailure,
+    "real D1 evidence failure must roll back publication",
+  );
   console.log(
     JSON.stringify({
       kind: "discovery-real-bindings",
@@ -795,7 +952,7 @@ try {
       runtime: `node ${process.version}`,
       public_events: rawEvents.results.length,
       private_r2_objects: privateObjects.objects.length,
-      screening_refusals: candidates.length * 3,
+      screening_refusals: candidates.length * 5,
       boundary:
         "local Workerd/D1/R2; fixture classifier and sponsor setup; no staging, OAuth or live-model claim",
     }),

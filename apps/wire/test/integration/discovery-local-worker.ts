@@ -15,12 +15,20 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
+import { syntheticScreeningObservation } from "../support/screening.ts";
 
 export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
 
 let screenCalls = 0;
 let revokeDuringNextScreen = false;
-let screenMode: "pass" | "reject" | "quarantine" | "unavailable" = "pass";
+type ScreenMode =
+  | "pass"
+  | "reject"
+  | "quarantine"
+  | "unavailable"
+  | "wrong-digest"
+  | "wrong-context";
+let screenMode: ScreenMode = "pass";
 let lastScreen: { kind: string; problemId: string; fellowId: string; digest: string } | undefined;
 const app = createApp({
   screenPromotion: async (input, env) => {
@@ -65,15 +73,24 @@ const app = createApp({
       });
     }
     if (screenMode === "unavailable") throw new Error("synthetic provider unavailability");
-    if (screenMode !== "pass")
-      return { decision: screenMode, coarse_category: "injection", provider_status: "ok" };
-    return {
+    if (screenMode === "reject" || screenMode === "quarantine")
+      return syntheticScreeningObservation(input, {
+        decision: screenMode,
+        coarse_category: "injection",
+        provider_status: "ok",
+      });
+    const observation = await syntheticScreeningObservation(input, {
       decision: input.statement.includes("LOCAL_POLICY_CANARY") ? "reject" : "pass",
       coarse_category: input.statement.includes("LOCAL_POLICY_CANARY")
         ? "injection"
         : "benign-context",
       provider_status: "ok",
-    };
+    });
+    if (screenMode === "wrong-context")
+      return { ...observation, evaluated_context_digest: `sha256:${"0".repeat(64)}` };
+    return screenMode === "wrong-digest"
+      ? { ...observation, evaluated_body_digest: `sha256:${"0".repeat(64)}` }
+      : observation;
   },
 });
 
@@ -125,7 +142,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return screenCalls;
   }
 
-  setScreenMode(mode: "pass" | "reject" | "quarantine" | "unavailable"): void {
+  setScreenMode(mode: ScreenMode): void {
     screenMode = mode;
   }
 

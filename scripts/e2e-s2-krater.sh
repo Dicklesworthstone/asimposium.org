@@ -155,6 +155,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0040_krater_chain_v2_contiguity.sql
   db/migrations/0041_ledger_write_atomicity.sql
   db/migrations/0042_claim_versions_problem_scoped.sql
+  db/migrations/0043_screening_publication_provenance.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -240,6 +241,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/cas.ts
   apps/wire/src/screening/aggregate.ts
   apps/wire/src/screening/context.ts
+  apps/wire/src/screening/ingress.ts
   apps/wire/src/screening/provider.ts
   apps/wire/src/screening/route.ts
   apps/wire/src/screening/types.ts
@@ -341,6 +343,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0040_krater_chain_v2_contiguity.sql
   0041_ledger_write_atomicity.sql
   0042_claim_versions_problem_scoped.sql
+  0043_screening_publication_provenance.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

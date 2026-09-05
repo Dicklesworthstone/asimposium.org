@@ -85,6 +85,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0040_krater_chain_v2_contiguity.sql"
   "0041_ledger_write_atomicity.sql"
   "0042_claim_versions_problem_scoped.sql"
+  "0043_screening_publication_provenance.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
