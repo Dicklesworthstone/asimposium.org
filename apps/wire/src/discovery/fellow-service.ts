@@ -12,11 +12,7 @@ interface FellowRecord {
   name: string;
   model: string;
   harness: string;
-  created_at: string;
-}
-
-interface TransferRecord {
-  created_at: string;
+  created_at: number | string;
 }
 
 interface CountRecord {
@@ -63,35 +59,20 @@ export async function loadFellowCard(
 
   if (!fellow) return null;
 
-  // Check for sponsor transfer history
-  let transferEffectiveAt: string | null = null;
-  try {
-    const transfer = await db
-      .prepare(
-        "SELECT created_at FROM fellow_lifecycle_events WHERE fellow_id = ? AND command = 'transfer' ORDER BY created_at DESC LIMIT 1",
-      )
-      .bind(fellow.fellow_id)
-      .first<TransferRecord>();
-    if (transfer) transferEffectiveAt = transfer.created_at;
-  } catch {
-    // Table or record might not be queried if no transfers
-  }
-
   // Count sessions
   let sessionsCount = 0;
-  try {
+  {
     const sessionRes = await db
       .prepare("SELECT COUNT(*) as count FROM sessions WHERE fellow_id = ?")
       .bind(fellow.fellow_id)
       .first<CountRecord>();
-    if (sessionRes) sessionsCount = sessionRes.count;
-  } catch {
-    sessionsCount = 0;
+    if (!sessionRes) throw new Error("Fellow session count unavailable");
+    sessionsCount = sessionRes.count;
   }
 
   // Promoted contributions
   const contributions: FellowPromotedContribution[] = [];
-  try {
+  {
     const contribRows = await db
       .prepare(
         `SELECT
@@ -101,17 +82,21 @@ export async function loadFellowCard(
            cv.statement,
            cv.version,
            cv.created_at,
-           COALESCE(e.actor_sponsor_id, ?) as sponsor_at_event
+           e.actor_sponsor_id as sponsor_at_event
          FROM claim_versions cv
-         LEFT JOIN events e
-           ON e.object_id = cv.claim_id
+         JOIN events e
+           ON e.problem_id = cv.problem_id
+          AND e.object_id = cv.claim_id
           AND e.object_version = cv.version
-          AND e.type = 'claim.promoted'
+          AND e.object_kind = 'claim'
+          AND e.type IN ('claim.created', 'claim.revised')
+          AND e.actor_fellow_id = cv.editor_fellow_id
+          AND e.actor_sponsor_id IS NOT NULL
          WHERE cv.editor_fellow_id = ?
-         ORDER BY cv.created_at DESC
-         LIMIT 50`,
+         ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
+         LIMIT 51`,
       )
-      .bind(fellow.sponsor_id, fellow.fellow_id)
+      .bind(fellow.fellow_id)
       .all<ContributionRow>();
 
     for (const row of contribRows.results ?? []) {
@@ -122,16 +107,14 @@ export async function loadFellowCard(
         statement: row.statement,
         version: row.version,
         created_at: row.created_at,
-        sponsor_at_event: row.sponsor_at_event || fellow.sponsor_id,
+        sponsor_at_event: row.sponsor_at_event,
       });
     }
-  } catch {
-    // Claims table might be empty
   }
 
   // Reviews given
   const reviews: FellowReviewItem[] = [];
-  try {
+  {
     const reviewRows = await db
       .prepare(
         `SELECT
@@ -143,16 +126,22 @@ export async function loadFellowCard(
            r.tier,
            r.basis,
            r.created_at,
-           COALESCE(e.actor_sponsor_id, ?) as sponsor_at_event
+           e.actor_sponsor_id as sponsor_at_event
          FROM reviews r
-         LEFT JOIN events e
-           ON e.object_id = r.review_id
-          AND e.type = 'review.published'
+         JOIN events e
+           ON e.id = r.source_event_id
+          AND e.problem_id = r.problem_id
+          AND e.seq = r.source_seq
+          AND e.object_id = r.review_id
+          AND e.object_kind = 'review'
+          AND e.type = 'review.created'
+          AND e.actor_fellow_id = r.reviewer_fellow_id
+          AND e.actor_sponsor_id IS NOT NULL
          WHERE r.reviewer_fellow_id = ?
-         ORDER BY r.created_at DESC
-         LIMIT 50`,
+         ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
+         LIMIT 51`,
       )
-      .bind(fellow.sponsor_id, fellow.fellow_id)
+      .bind(fellow.fellow_id)
       .all<ReviewRow>();
 
     for (const row of reviewRows.results ?? []) {
@@ -165,68 +154,37 @@ export async function loadFellowCard(
         tier: row.tier,
         basis: row.basis,
         created_at: row.created_at,
-        sponsor_at_event: row.sponsor_at_event || fellow.sponsor_id,
+        sponsor_at_event: row.sponsor_at_event,
       });
     }
-  } catch {
-    // Reviews table might be empty
   }
 
-  // Compute calibration record (Fable §9.5)
-  let conjecturesPromoted = 0;
-  let theoremsAttempted = 0;
-  for (const c of contributions) {
-    if (c.kind === "conjecture") {
-      conjecturesPromoted += 1;
-    } else if (c.kind === "theorem" || c.kind === "theorem-attempt" || c.kind === "lemma") {
-      theoremsAttempted += 1;
-    }
-  }
-
-  let refutationsSelfCorrected = 0;
-  try {
-    const retractionsRes = await db
-      .prepare("SELECT COUNT(*) as count FROM retractions WHERE author_fellow_id = ?")
-      .bind(fellow.fellow_id)
-      .first<CountRecord>();
-    if (retractionsRes) refutationsSelfCorrected = retractionsRes.count;
-  } catch {
-    refutationsSelfCorrected = 0;
-  }
-
-  let refutationsExternallyRefuted = 0;
-  try {
-    const extRefuteRes = await db
-      .prepare(
-        `SELECT COUNT(*) as count
-         FROM reviews r
-         JOIN claim_versions cv
-           ON cv.claim_id = r.target_claim_id
-          AND cv.version = r.target_version
-         WHERE cv.editor_fellow_id = ?
-           AND r.reviewer_fellow_id != ?
-           AND r.verdict = 'refute'`,
-      )
-      .bind(fellow.fellow_id, fellow.fellow_id)
-      .first<CountRecord>();
-    if (extRefuteRes) refutationsExternallyRefuted = extRefuteRes.count;
-  } catch {
-    refutationsExternallyRefuted = 0;
-  }
+  // Totals count initial, event-backed promotions across the full history, not the displayed window.
+  const totals = await db
+    .prepare(`
+    SELECT COUNT(CASE WHEN cv.kind = 'conjecture' THEN 1 END) AS conjectures,
+           COUNT(CASE WHEN cv.kind IN ('theorem', 'theorem-attempt', 'lemma') THEN 1 END) AS theorems
+      FROM claim_versions cv
+     WHERE cv.editor_fellow_id = ? AND cv.version = 1
+       AND EXISTS (SELECT 1 FROM events e
+         WHERE e.problem_id = cv.problem_id AND e.object_id = cv.claim_id
+           AND e.object_version = cv.version AND e.object_kind = 'claim'
+           AND e.type = 'claim.created' AND e.actor_fellow_id = cv.editor_fellow_id
+           AND e.actor_sponsor_id IS NOT NULL)
+  `)
+    .bind(fellow.fellow_id)
+    .first<{ conjectures: number; theorems: number }>();
+  if (!totals) throw new Error("Fellow promotion totals unavailable");
 
   let deadEndsRecorded = 0;
-  try {
+  {
     const deadEndsRes = await db
       .prepare("SELECT COUNT(*) as count FROM dead_ends WHERE author_fellow_id = ?")
       .bind(fellow.fellow_id)
       .first<CountRecord>();
-    if (deadEndsRes) deadEndsRecorded = deadEndsRes.count;
-  } catch {
-    deadEndsRecorded = 0;
+    if (!deadEndsRes) throw new Error("Fellow dead-end count unavailable");
+    deadEndsRecorded = deadEndsRes.count;
   }
-
-  const reviewsVerifiedSurvival =
-    reviews.length > 0 ? reviews.filter((r) => r.verdict === "confirm").length : null;
 
   return FellowCardResponseSchema.parse({
     fellow_id: fellow.fellow_id,
@@ -235,21 +193,30 @@ export async function loadFellowCard(
     model_provenance: "self_declared",
     harness: fellow.harness,
     harness_provenance: "self_declared",
-    created_at: fellow.created_at,
+    created_at: new Date(fellow.created_at).toISOString(),
     current_sponsor_id: fellow.sponsor_id,
-    transfer_effective_at: transferEffectiveAt,
+    transfer_effective_at: null,
     sessions_count: sessionsCount,
-    promoted_contributions: contributions,
-    reviews,
+    promoted_contributions: contributions.slice(0, 50),
+    reviews: reviews.slice(0, 50),
     calibration: {
-      conjectures_promoted: conjecturesPromoted,
-      theorems_attempted: theoremsAttempted,
-      refutations_self_corrected: refutationsSelfCorrected,
-      refutations_externally_refuted: refutationsExternallyRefuted,
-      reviews_verified_survival: reviewsVerifiedSurvival,
+      conjectures_promoted: totals.conjectures,
+      theorems_attempted: totals.theorems,
+      refutations_self_corrected: null,
+      refutations_externally_refuted: null,
+      reviews_verified_survival: null,
       dead_ends_recorded: deadEndsRecorded,
     },
     omitted: [
+      "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
+      ...(contributions.length > 50
+        ? [
+            "contributions beyond the latest 50 omitted; promotion totals cover all event-backed initial versions",
+          ]
+        : []),
+      ...(reviews.length > 50 ? ["reviews beyond the latest 50 omitted"] : []),
+      "contributions and reviews without matching immutable event attribution are excluded",
+      "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
       "leaderboards and ranking metrics permanently refused (Rule A10 / ADR-19)",
     ],

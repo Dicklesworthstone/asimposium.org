@@ -5,14 +5,20 @@ import { problem as problemDocument } from "../http/envelope";
 import { loadAreaDetail, loadAreasIndex } from "./areas-service";
 import { loadFellowCard } from "./fellow-service";
 import {
+  renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
+  renderAreasIndexHtmlFragment,
   renderAreasIndexMarkdown,
+  renderFellowCardHtmlFragment,
   renderFellowCardMarkdown,
+  renderNowStripHtmlFragment,
   renderNowStripMarkdown,
 } from "./markdown";
 import { loadNowStrip } from "./now-service";
 
 const DISCOVERY_CACHE_CONTROL = "public, max-age=60, s-maxage=60, stale-while-revalidate=120";
+
+type FaceType = "json" | "markdown" | "html";
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
@@ -22,7 +28,7 @@ function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   });
 }
 
-async function computeStrongEtag(face: "json" | "markdown", body: string): Promise<string> {
+async function computeStrongEtag(face: FaceType, body: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(`${face}\n${body}`),
@@ -59,22 +65,31 @@ function serveRepresentation(
   });
 }
 
+function resolveFace(c: Context<{ Bindings: Env }>, forceFace?: FaceType): FaceType {
+  if (forceFace) return forceFace;
+  const accept = c.req.header("accept") ?? "";
+  if (accept.includes("application/json")) return "json";
+  if (accept.includes("text/html")) return "html";
+  return "markdown";
+}
+
 export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
-  // 1. Areas index (/areas, /areas.json, /areas.md)
-  async function handleAreas(c: Context<{ Bindings: Env }>, forceFace?: "json" | "markdown") {
+  // 1. Areas index (/areas, /areas.json, /areas.md, /areas.html)
+  async function handleAreas(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
     const data = await loadAreasIndex(c.env.DB);
-    let targetFace = forceFace;
-    if (!targetFace) {
-      const accept = c.req.header("accept") ?? "";
-      targetFace = accept.includes("application/json") ? "json" : "markdown";
-    }
+    const targetFace = resolveFace(c, forceFace);
 
     if (targetFace === "json") {
       const body = JSON.stringify(data);
       const etag = await computeStrongEtag("json", body);
       return serveRepresentation(c, body, "application/json; charset=utf-8", etag);
+    }
+    if (targetFace === "html") {
+      const html = renderAreasIndexHtmlFragment(data);
+      const etag = await computeStrongEtag("html", html);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag);
     }
     const md = renderAreasIndexMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
@@ -84,12 +99,13 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/areas", (c) => handleAreas(c));
   app.on(["GET", "HEAD"], "/areas.json", (c) => handleAreas(c, "json"));
   app.on(["GET", "HEAD"], "/areas.md", (c) => handleAreas(c, "markdown"));
+  app.on(["GET", "HEAD"], "/areas.html", (c) => handleAreas(c, "html"));
 
-  // 2. Area detail (/area/:slug, /area/:slug.json, /area/:slug.md)
+  // 2. Area detail (/area/:slug, /area/:slug.json, /area/:slug.md, /area/:slug.html)
   async function handleAreaDetail(
     c: Context<{ Bindings: Env }>,
     rawSlug: string,
-    forceFace?: "json" | "markdown",
+    forceFace?: FaceType,
   ) {
     const parsedSlug = AreaSlugSchema.safeParse(rawSlug);
     if (!parsedSlug.success) {
@@ -123,16 +139,17 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
       });
     }
 
-    let targetFace = forceFace;
-    if (!targetFace) {
-      const accept = c.req.header("accept") ?? "";
-      targetFace = accept.includes("application/json") ? "json" : "markdown";
-    }
+    const targetFace = resolveFace(c, forceFace);
 
     if (targetFace === "json") {
       const body = JSON.stringify(data);
       const etag = await computeStrongEtag("json", body);
       return serveRepresentation(c, body, "application/json; charset=utf-8", etag);
+    }
+    if (targetFace === "html") {
+      const html = renderAreaDetailHtmlFragment(data);
+      const etag = await computeStrongEtag("html", html);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag);
     }
     const md = renderAreaDetailMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
@@ -141,30 +158,34 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/area/:slug", (c) => {
     let slug = c.req.param("slug");
-    let forceFace: "json" | "markdown" | undefined;
+    let forceFace: FaceType | undefined;
     if (slug.endsWith(".json")) {
       slug = slug.slice(0, -".json".length);
       forceFace = "json";
     } else if (slug.endsWith(".md")) {
       slug = slug.slice(0, -".md".length);
       forceFace = "markdown";
+    } else if (slug.endsWith(".html")) {
+      slug = slug.slice(0, -".html".length);
+      forceFace = "html";
     }
     return handleAreaDetail(c, slug, forceFace);
   });
 
-  // 3. Now strip (/now, /now.json, /now.md)
-  async function handleNow(c: Context<{ Bindings: Env }>, forceFace?: "json" | "markdown") {
+  // 3. Now strip (/now, /now.json, /now.md, /now.html)
+  async function handleNow(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
     const data = await loadNowStrip(c.env.DB);
-    let targetFace = forceFace;
-    if (!targetFace) {
-      const accept = c.req.header("accept") ?? "";
-      targetFace = accept.includes("application/json") ? "json" : "markdown";
-    }
+    const targetFace = resolveFace(c, forceFace);
 
     if (targetFace === "json") {
       const body = JSON.stringify(data);
       const etag = await computeStrongEtag("json", body);
       return serveRepresentation(c, body, "application/json; charset=utf-8", etag);
+    }
+    if (targetFace === "html") {
+      const html = renderNowStripHtmlFragment(data);
+      const etag = await computeStrongEtag("html", html);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag);
     }
     const md = renderNowStripMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
@@ -174,12 +195,13 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/now", (c) => handleNow(c));
   app.on(["GET", "HEAD"], "/now.json", (c) => handleNow(c, "json"));
   app.on(["GET", "HEAD"], "/now.md", (c) => handleNow(c, "markdown"));
+  app.on(["GET", "HEAD"], "/now.html", (c) => handleNow(c, "html"));
 
-  // 4. Fellow card (/a/:name, /a/:name.json, /a/:name.md & /fellows/:id alias)
+  // 4. Fellow card (/a/:name, /a/:name.json, /a/:name.md, /a/:name.html & /fellows/:id alias)
   async function handleFellow(
     c: Context<{ Bindings: Env }>,
     idOrName: string,
-    forceFace?: "json" | "markdown",
+    forceFace?: FaceType,
   ) {
     const data = await loadFellowCard(c.env.DB, idOrName);
     if (!data) {
@@ -197,16 +219,17 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
       });
     }
 
-    let targetFace = forceFace;
-    if (!targetFace) {
-      const accept = c.req.header("accept") ?? "";
-      targetFace = accept.includes("application/json") ? "json" : "markdown";
-    }
+    const targetFace = resolveFace(c, forceFace);
 
     if (targetFace === "json") {
       const body = JSON.stringify(data);
       const etag = await computeStrongEtag("json", body);
       return serveRepresentation(c, body, "application/json; charset=utf-8", etag);
+    }
+    if (targetFace === "html") {
+      const html = renderFellowCardHtmlFragment(data);
+      const etag = await computeStrongEtag("html", html);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag);
     }
     const md = renderFellowCardMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
@@ -215,26 +238,32 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/a/:name", (c) => {
     let name = c.req.param("name");
-    let forceFace: "json" | "markdown" | undefined;
+    let forceFace: FaceType | undefined;
     if (name.endsWith(".json")) {
       name = name.slice(0, -".json".length);
       forceFace = "json";
     } else if (name.endsWith(".md")) {
       name = name.slice(0, -".md".length);
       forceFace = "markdown";
+    } else if (name.endsWith(".html")) {
+      name = name.slice(0, -".html".length);
+      forceFace = "html";
     }
     return handleFellow(c, name, forceFace);
   });
 
   app.on(["GET", "HEAD"], "/fellows/:id", (c) => {
     let id = c.req.param("id");
-    let forceFace: "json" | "markdown" | undefined;
+    let forceFace: FaceType | undefined;
     if (id.endsWith(".json")) {
       id = id.slice(0, -".json".length);
       forceFace = "json";
     } else if (id.endsWith(".md")) {
       id = id.slice(0, -".md".length);
       forceFace = "markdown";
+    } else if (id.endsWith(".html")) {
+      id = id.slice(0, -".html".length);
+      forceFace = "html";
     }
     return handleFellow(c, id, forceFace);
   });

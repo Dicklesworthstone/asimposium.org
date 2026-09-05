@@ -7,7 +7,9 @@ import { listDocuments, PROTOCOL_RULES_WORD_CAP, sha256Hex } from "@asimposium/p
 
 import { createApp } from "../../src/app";
 import {
+  configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
+  DISCOVERY_ORIGINS,
   DISCOVERY_UNDISCLOSED_ROUTES,
   DISCOVERY_VERSION,
   generateOpenApiDocument,
@@ -15,6 +17,13 @@ import {
   generateWellKnownDocument,
   normalizeOpenApiPath,
 } from "../../src/discovery/discovery";
+import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
+import {
+  AesGcmEnrollmentReplayProtector,
+  EnrollmentService,
+  InMemoryEnrollmentStore,
+} from "../../src/enrollment/service.ts";
+import { createSessionRouter } from "../../src/sessions/router.ts";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const GOLDEN_DIR = resolve(ROOT, "apps/wire/test/golden/discovery");
@@ -134,7 +143,7 @@ describe("discovery generators (W1.6)", () => {
   });
 
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {
-    expect(normalizeOpenApiPath("/p/:id{.+\\.json$}")).toBe("/p/{id}");
+    expect(normalizeOpenApiPath("/p/:id{.+\\.json$}")).toBe("/p/{id}.json");
     expect(normalizeOpenApiPath("/v1/sessions/:id/promote")).toBe("/v1/sessions/{id}/promote");
     expect(normalizeOpenApiPath("/")).toBe("/");
   });
@@ -143,6 +152,119 @@ describe("discovery generators (W1.6)", () => {
     expect(generateSchemaIndexDocument()).toBe(generateSchemaIndexDocument());
     expect(generateWellKnownDocument()).toBe(generateWellKnownDocument());
     expect(generateOpenApiDocument()).toBe(generateOpenApiDocument());
+  });
+
+  test("every request reference resolves to the public Zod-generated schema", () => {
+    for (const operation of DISCLOSED_OPERATIONS) {
+      if (operation.requestSchema === undefined) continue;
+      const [id, property] = operation.requestSchema.split(":");
+      const schema = listPublicSchemas().find((doc) => doc.id === id);
+      expect(schema, operation.honoPath).toBeDefined();
+      const parsed = JSON.parse(schema?.body ?? "{}") as { properties?: Record<string, unknown> };
+      expect(parsed.properties?.[property ?? ""], operation.honoPath).toBeDefined();
+    }
+  });
+
+  test("pre-credential operations require their flow material; private reads require bearer", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    for (const [path, auth, property] of [
+      ["/v1/device-code", "device-start", "device_code_start_request"],
+      ["/v1/device-token", "flow-handle", "flow_poll_request"],
+      ["/v1/fellows/flow", "flow-handle", "flow_poll_request"],
+      ["/v1/fellows", "enrollment-secret", "fellow_registration_request"],
+    ]) {
+      const op = doc.paths[path as string].post;
+      expect(op.security).toEqual([]);
+      expect(op["x-asimposium-auth"]).toBe(auth);
+      expect(op.requestBody.content["application/json"].schema.$ref).toEndWith(
+        `/properties/${property}`,
+      );
+    }
+    for (const path of ["/v1/hello", "/v1/sessions/{id}/pack"]) {
+      expect(doc.paths[path].get.security).toEqual([{ bearerAuth: [] }]);
+      expect(doc.paths[path].get["x-asimposium-auth"]).toBe("fellow-bearer");
+    }
+  });
+
+  test("both deployment origins are configured, closed and independent of hostile Host", async () => {
+    const env = {
+      STOA_ORIGIN: "https://a-staging.asimposium.org",
+      AGORA_ORIGIN: "https://staging.asimposium.org",
+    };
+    const origins = configuredDiscoveryOrigins(env);
+    expect(origins).toEqual({
+      agent: env.STOA_ORIGIN,
+      agora: env.AGORA_ORIGIN,
+      artifacts: "https://artifacts-staging.asimposium.org",
+    });
+    expect(
+      configuredDiscoveryOrigins({ ...env, AGORA_ORIGIN: DISCOVERY_ORIGINS.agora }),
+    ).toBeUndefined();
+    expect(
+      configuredDiscoveryOrigins({ ...env, STOA_ORIGIN: "https://attacker.invalid" }),
+    ).toBeUndefined();
+    const app = createApp();
+    for (const [path, generate] of [
+      ["/.well-known/asimposium.json", generateWellKnownDocument],
+      ["/openapi.json", generateOpenApiDocument],
+      ["/schemas/index.json", generateSchemaIndexDocument],
+    ] as const) {
+      const response = await app.request(
+        `https://attacker.invalid${path}`,
+        {
+          headers: {
+            Host: "attacker.invalid",
+            "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+          },
+        },
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(generate(origins));
+      const unavailable = await app.request(`https://a.asimposium.org${path}`, {}, {});
+      expect(unavailable.status).toBe(503);
+    }
+    const openapi = JSON.parse(generateOpenApiDocument(origins));
+    expect(openapi.servers).toEqual([{ url: env.STOA_ORIGIN }]);
+    expect(JSON.stringify(openapi)).not.toContain("https://a.asimposium.org/");
+  });
+
+  test("router-to-disclosure census includes middleware-dispatched session and enrollment apps", () => {
+    const replayProtector = new AesGcmEnrollmentReplayProtector(new Uint8Array(32));
+    const service = new EnrollmentService({
+      stoaOrigin: DISCOVERY_ORIGINS.agent,
+      agoraOrigin: DISCOVERY_ORIGINS.agora,
+      store: new InMemoryEnrollmentStore(),
+      replayProtector,
+    });
+    const routes = [
+      createApp(),
+      createEnrollmentRouter({ service }),
+      createSessionRouter({ service, replayProtector }),
+    ].flatMap((app) => app.routes);
+    const disclosed = new Set(DISCLOSED_OPERATIONS.map((op) => `${op.method} ${op.openApiPath}`));
+    const excluded = new Set(
+      Object.keys(DISCOVERY_UNDISCLOSED_ROUTES).map((key) => {
+        const space = key.indexOf(" ");
+        return `${key.slice(0, space)} ${normalizeOpenApiPath(key.slice(space + 1))}`;
+      }),
+    );
+    // HEAD shares GET representations; ALL entries are middleware, not operations.
+    // This one platform-principal internal route is intentionally not an agent capability.
+    excluded.add("POST /internal/screen");
+    const unclassified = (input: typeof routes) =>
+      input
+        .filter((route) => route.method !== "ALL" && route.method !== "HEAD")
+        .map((route) => `${route.method} ${normalizeOpenApiPath(route.path)}`)
+        .filter((key) => !disclosed.has(key) && !excluded.has(key));
+    expect(unclassified(routes)).toEqual([]);
+    const plant = {
+      basePath: "/",
+      method: "POST",
+      path: "/v1/sessions/:id/new-public-write",
+      handler: () => new Response(),
+    };
+    expect(unclassified([...routes, plant])).toEqual(["POST /v1/sessions/{id}/new-public-write"]);
   });
 
   test("golden artifacts match committed bytes", () => {

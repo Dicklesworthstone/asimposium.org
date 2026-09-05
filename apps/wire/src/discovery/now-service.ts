@@ -27,25 +27,25 @@ interface CursorRow {
  * Only object-level events are served; process/meta events are omitted.
  */
 export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
-  let cursor = 0;
-  try {
-    const cursorRow = await db
-      .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
-      .first<CursorRow>();
-    if (cursorRow) cursor = cursorRow.cursor;
-  } catch {
-    cursor = 0;
-  }
+  const cursorRow = await db
+    .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+    .first<CursorRow>();
+  if (!cursorRow) throw new Error("Public cursor unavailable");
+  const cursor = cursorRow.cursor;
 
   const events: MaterialEventItem[] = [];
-  try {
-    const eventRows = await db
-      .prepare(
-        `SELECT
+  const eventRows = await db
+    .prepare(
+      `SELECT
            e.id,
            e.problem_id,
            e.seq,
-           e.type,
+           CASE e.type
+             WHEN 'claim.created' THEN 'claim.promoted'
+             WHEN 'review.created' THEN 'review.published'
+             WHEN 'evidence.created' THEN 'evidence.filed'
+             ELSE e.type
+           END AS type,
            e.object_kind,
            e.object_id,
            e.actor_fellow_id,
@@ -56,34 +56,31 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
            ON f.fellow_id = e.actor_fellow_id
          WHERE e.type IN (
            'problem.admitted',
-           'claim.promoted',
-           'evidence.filed',
-           'review.published',
+           'claim.created',
+           'evidence.created',
+           'review.created',
            'hypothesis.killed',
            'dead_end.recorded'
          )
-         ORDER BY e.seq DESC
+         ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 20`,
-      )
-      .all<EventRow>();
+    )
+    .all<EventRow>();
 
-    for (const row of eventRows.results ?? []) {
-      const summary = formatMaterialEventSummary(row);
-      events.push({
-        event_id: row.id,
-        problem_id: row.problem_id,
-        seq: row.seq,
-        type: row.type as MaterialEventType,
-        object_kind: row.object_kind,
-        object_id: row.object_id,
-        summary,
-        actor_fellow_id: row.actor_fellow_id,
-        actor_fellow_name: row.actor_fellow_name,
-        created_at: row.created_at,
-      });
-    }
-  } catch {
-    // Events table might be empty
+  for (const row of eventRows.results ?? []) {
+    const summary = formatMaterialEventSummary(row);
+    events.push({
+      event_id: row.id,
+      problem_id: row.problem_id,
+      seq: row.seq,
+      type: row.type as MaterialEventType,
+      object_kind: row.object_kind,
+      object_id: row.object_id,
+      summary,
+      actor_fellow_id: row.actor_fellow_id,
+      actor_fellow_name: row.actor_fellow_name,
+      created_at: row.created_at,
+    });
   }
 
   return NowStripResponseSchema.parse({
@@ -91,7 +88,8 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
     cursor,
     omitted: [
       "process and meta events excluded by the materiality rule (Fable §9.6)",
-      "events beyond the latest 20 in sequence order omitted",
+      "latest 20 by event time, problem id, problem sequence and event id; problem sequences are not globally comparable",
+      "material types classify ledger claim.created, review.created and evidence.created as promoted, published and filed",
     ],
   });
 }

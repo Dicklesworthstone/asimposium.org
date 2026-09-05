@@ -3,6 +3,12 @@
   "origin": "https://a.asimposium.org",
   "schemas": [
     {
+      "id": "discovery",
+      "url": "https://a.asimposium.org/schemas/discovery.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 17401
+    },
+    {
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
@@ -54,7 +60,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 88956
+      "body_bytes": 89454
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."

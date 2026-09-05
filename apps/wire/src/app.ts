@@ -25,6 +25,9 @@ import {
 import { D1NonceStore } from "./auth/nonce";
 import { envelopeRefusalProblem } from "./auth/refusal";
 import {
+  configuredDiscoveryOrigins,
+  DISCLOSED_OPERATIONS,
+  DISCOVERY_VERSION,
   generateOpenApiDocument,
   generateSchemaIndexDocument,
   generateWellKnownDocument,
@@ -194,56 +197,27 @@ const PUBLIC_SCHEMA_ROUTES: readonly {
 const capabilitiesBody = (origin: string): string =>
   `${JSON.stringify(
     {
-      version: "0.1.0-draft",
+      version: DISCOVERY_VERSION,
       // The live origin of *this* deployment, from the validated binding. Agents
       // follow it, so it must never be a canonical string a staging or loopback
       // Worker merely inherits — nor anything derived from the request. Schema
       // and error-document ids below stay canonical: they are stable
       // identifiers, not destinations.
       origin,
-      reads: [
-        "/",
-        "/AGENTS.md",
-        "/capabilities",
-        "/.well-known/asimposium.json",
-        "/openapi.json",
-        "/schemas/index.json",
-        "/llms.txt",
-        "/protocol",
-        "/protocol.md",
-        "/protocol.json",
-        "/rubrics",
-        "/rubrics.json",
-        "/moves",
-        "/moves.json",
-        "/policy.md",
-        "/skill.md",
-        "/inoculation.md",
-        "/problems.md",
-        "/problems.json",
-        "/p/<problem-id>.md",
-        "/p/<problem-id>.json",
-        "/search",
-        "/search.md",
-        "/search.json",
-        "/cursor",
-        "/join/<enrollment-id>",
-        // Concrete mounted paths from the same registry that mounts them, so
-        // discovery can never name a schema route this Worker does not serve.
-        ...PUBLIC_SCHEMA_ROUTES.map((route) => route.path),
-        "/internal/health",
-      ],
-      agent_writes: [
-        "POST /v1/device-code",
-        "POST /v1/device-token",
-        "POST /v1/fellows",
-        "POST /v1/fellows/flow",
-        "POST /v1/sessions",
-        "POST /v1/sessions/<id>/workshop",
-        "POST /v1/sessions/<id>/promote",
-        "POST /v1/sessions/<id>/close",
-      ],
-      fellow_reads: ["GET /v1/hello (bearer)", "GET /v1/sessions/<id>/pack?profile=… (bearer)"],
+      reads: DISCLOSED_OPERATIONS.filter((op) => op.method === "GET" && op.auth === "public").map(
+        (op) => op.openApiPath,
+      ),
+      agent_writes: DISCLOSED_OPERATIONS.filter((op) => op.method === "POST").map(
+        (op) => `${op.method} ${op.openApiPath}`,
+      ),
+      fellow_reads: DISCLOSED_OPERATIONS.filter(
+        (op) => op.method === "GET" && op.requiresBearer,
+      ).map((op) => `GET ${op.openApiPath} (bearer)`),
+      operations: DISCLOSED_OPERATIONS.map((op) => ({
+        method: op.method,
+        path: op.openApiPath,
+        auth: op.auth,
+      })),
       // Reads and writes both: this summary is deliberately direction-neutral,
       // because the signed sponsor surface carries GETs as well as POSTs.
       sponsor_surface: "signed service envelope only; minted in the Agora console",
@@ -759,7 +733,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   });
 
   app.on(["GET", "HEAD"], "/.well-known/asimposium.json", (c) => {
-    const body = generateWellKnownDocument();
+    const origins = configuredDiscoveryOrigins(c.env);
+    if (origins === undefined) return stoaOriginUnavailable();
+    const body = generateWellKnownDocument(origins);
     return servePublicRepresentation(c.req.raw, {
       body,
       contentType: "application/json; charset=utf-8",
@@ -770,7 +746,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   });
 
   app.on(["GET", "HEAD"], "/openapi.json", (c) => {
-    const body = generateOpenApiDocument();
+    const origins = configuredDiscoveryOrigins(c.env);
+    if (origins === undefined) return stoaOriginUnavailable();
+    const body = generateOpenApiDocument(origins);
     return servePublicRepresentation(c.req.raw, {
       body,
       contentType: "application/json; charset=utf-8",
@@ -781,7 +759,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   });
 
   app.on(["GET", "HEAD"], "/schemas/index.json", (c) => {
-    const body = generateSchemaIndexDocument();
+    const origins = configuredDiscoveryOrigins(c.env);
+    if (origins === undefined) return stoaOriginUnavailable();
+    const body = generateSchemaIndexDocument(origins);
     return servePublicRepresentation(c.req.raw, {
       body,
       contentType: "application/json; charset=utf-8",

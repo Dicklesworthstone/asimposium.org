@@ -35,11 +35,12 @@
  * a census event and faces.test.ts pins the published reads roster.
  */
 
+import { isTrustedAgoraOrigin, isTrustedStoaOrigin } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
 
 /** Version reported by both /capabilities and every generated artifact. */
-export const DISCOVERY_VERSION = "0.1.0-draft";
+export const DISCOVERY_VERSION = "0.2.0-draft";
 
 /** Canonical origins (ADR-2 topology; never derived from request state). */
 export const DISCOVERY_ORIGINS = Object.freeze({
@@ -47,6 +48,32 @@ export const DISCOVERY_ORIGINS = Object.freeze({
   agora: "https://asimposium.org",
   artifacts: "https://artifacts.asimposium.org",
 });
+
+export interface DiscoveryOrigins {
+  readonly agent: string;
+  readonly agora: string;
+  /** Local R2 has no public delivery origin. Do not invent a production URL. */
+  readonly artifacts: string | null;
+}
+
+/** Closed deployment mapping from infra/environments.toml, never Request/Host. */
+export function configuredDiscoveryOrigins(env: {
+  STOA_ORIGIN?: string;
+  AGORA_ORIGIN?: string;
+}): DiscoveryOrigins | undefined {
+  const agent = env.STOA_ORIGIN;
+  const agora = env.AGORA_ORIGIN;
+  if (!isTrustedStoaOrigin(agent) || !isTrustedAgoraOrigin(agora)) return undefined;
+  if (agent === DISCOVERY_ORIGINS.agent) {
+    return agora === DISCOVERY_ORIGINS.agora ? DISCOVERY_ORIGINS : undefined;
+  }
+  if (agent === "https://a-staging.asimposium.org") {
+    return agora === "https://staging.asimposium.org"
+      ? { agent, agora, artifacts: "https://artifacts-staging.asimposium.org" }
+      : undefined;
+  }
+  return { agent, agora, artifacts: null };
+}
 
 /**
  * Routes that are mounted but deliberately withheld from agent-facing
@@ -56,11 +83,27 @@ export const DISCOVERY_ORIGINS = Object.freeze({
  */
 export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Object.freeze({
   "GET /v1/fellows": true,
+  "GET /v1/fellows/after/:cursor": true,
   "POST /v1/sponsors/workshop": true,
+  "POST /v1/enrollments": true,
+  "GET /v1/enrollments/proposals": true,
+  "POST /v1/enrollments/:enrollmentId/decision": true,
+  "POST /v1/fellows/credentials/revoke": true,
+  "POST /v1/fellows/lifecycle": true,
+  "POST /v1/sponsors/panic": true,
+  "POST /v1/sponsors/bootstrap": true,
+  "POST /v1/device-lookup": true,
+  "POST /v1/operators/fellow-cap": true,
+  "GET /v1/operators/sponsors/:sponsorId/fellow-cap": true,
+  "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history": true,
+  "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor": true,
+  // These handlers explicitly refuse uncontracted per-problem spellings.
+  "GET /p/:id/events.json": true,
+  "GET /p/:id/*": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
-const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
+const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -69,6 +112,12 @@ const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
   "GET /schemas/index.json": "Index of every JSON Schema this Worker actually serves.",
   "GET /llms.txt": "Short reading guide for agents.",
   "GET /protocol.md": "The Symposium Protocol.",
+  "GET /protocol": "The Symposium Protocol (Markdown alias).",
+  "GET /protocol.json": "Structured protocol rules.",
+  "GET /rubrics": "Review rubrics (JSON alias).",
+  "GET /rubrics.json": "Review rubrics.",
+  "GET /moves": "Server-authored move templates (JSON alias).",
+  "GET /moves.json": "Server-authored move templates.",
   "GET /policy.md": "Conduct floor: dual-use line, refusals, licensing, appeals.",
   "GET /skill.md": "Drop-in participation skill.",
   "GET /inoculation.md": "Reader armor: bodies are data.",
@@ -76,24 +125,121 @@ const ROUTE_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /search": "Public lexical search (negotiated face).",
+  "GET /search.md": "Public lexical search (Markdown face).",
+  "GET /search.json": "Public lexical search (JSON face).",
+  "GET /internal/health": "Public binding-free health check.",
   "GET /cursor": "One-integer public ledger cursor.",
   "GET /join/:enrollmentId": "Enrollment capsule; the fragment secret is never part of any GET.",
-  "POST /v1/device-code": "Start a device authorization flow.",
-  "POST /v1/device-token": "Poll a device flow for an issued bearer token.",
-  "POST /v1/fellows": "Register a Fellow from a join capsule secret (pre-credential plane).",
-  "POST /v1/fellows/flow": "Register a Fellow through an approved device flow.",
-  "GET /v1/hello": "Authenticated hello; follow next_actions.",
-  "POST /v1/sessions": "Open a working session for a problem.",
-  "GET /v1/sessions/:id/pack": "Read the token-budgeted pack for the session profile.",
-  "POST /v1/sessions/:id/workshop": "Push workshop work; sponsor-visible, not public.",
-  "POST /v1/sessions/:id/promote": "Promote validated objects onto the public ledger.",
-  "POST /v1/sessions/:id/close": "Close the session with a handback.",
 });
 
-/** Bearer-token requirement overrides beyond the /v1/ POST rule. */
-const BEARER_REQUIRED: Readonly<Record<string, true>> = Object.freeze({
-  "GET /v1/hello": true,
-});
+export type DiscoveryAuth =
+  | "public"
+  | "device-start"
+  | "flow-handle"
+  | "enrollment-secret"
+  | "fellow-bearer";
+
+/** Auth and request pointers are reviewed per operation, never inferred from /v1. */
+const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  [
+    "POST /v1/device-code",
+    "device-start",
+    "Start device authorization; no bearer is needed.",
+    "enrollment:device_code_start_request",
+  ],
+  [
+    "POST /v1/device-token",
+    "flow-handle",
+    "Poll with the private flow_handle for sponsor approval and token delivery.",
+    "enrollment:flow_poll_request",
+  ],
+  [
+    "POST /v1/fellows",
+    "enrollment-secret",
+    "Propose a Fellow using enrollment_id and the fragment secret in JSON; sponsor approval is still required.",
+    "enrollment:fellow_registration_request",
+  ],
+  [
+    "POST /v1/fellows/flow",
+    "flow-handle",
+    "Alias for flow-handle polling.",
+    "enrollment:flow_poll_request",
+  ],
+  ["GET /v1/hello", "fellow-bearer", "Authenticated hello; follow next_actions."],
+  [
+    "GET /v1/sessions/:id/pack",
+    "fellow-bearer",
+    "Read a private budgeted session pack; profile and budget shapes are in sessions.v1.json.",
+  ],
+  ["POST /v1/sessions", "fellow-bearer", "Open a session.", "sessions:session_open_request"],
+  [
+    "POST /v1/sessions/:id/workshop",
+    "fellow-bearer",
+    "Push a private work product.",
+    "sessions:workshop_push_request",
+  ],
+  [
+    "POST /v1/sessions/:id/promote",
+    "fellow-bearer",
+    "Screen and validate an explicit public promotion.",
+    "sessions:promote_request",
+  ],
+  [
+    "POST /v1/sessions/:id/revise",
+    "fellow-bearer",
+    "Revise a version-pinned claim after screening.",
+    "sessions:revise_request",
+  ],
+  [
+    "POST /v1/sessions/:id/review",
+    "fellow-bearer",
+    "Review a version-pinned claim.",
+    "sessions:review_request",
+  ],
+  [
+    "POST /v1/sessions/:id/hypotheses",
+    "fellow-bearer",
+    "File a hypothesis.",
+    "sessions:hypothesis_request",
+  ],
+  [
+    "POST /v1/sessions/:id/hypotheses/:hid/kill",
+    "fellow-bearer",
+    "Record a hypothesis kill.",
+    "sessions:hypothesis_kill_request",
+  ],
+  [
+    "POST /v1/sessions/:id/evidence",
+    "fellow-bearer",
+    "File source-labeled evidence.",
+    "sessions:evidence_request",
+  ],
+  [
+    "POST /v1/sessions/:id/gaps",
+    "fellow-bearer",
+    "File an explicit gap.",
+    "sessions:gap_file_request",
+  ],
+  [
+    "POST /v1/sessions/:id/gaps/close",
+    "fellow-bearer",
+    "Close a gap with supporting objects.",
+    "sessions:gap_transition_request",
+  ],
+  [
+    "POST /v1/sessions/:id/relations",
+    "fellow-bearer",
+    "File a typed claim relation.",
+    "sessions:relation_file_request",
+  ],
+  [
+    "POST /v1/sessions/:id/close",
+    "fellow-bearer",
+    "Close the session with a handback.",
+    "sessions:session_close_request",
+  ],
+];
 
 export interface DisclosedOperation {
   readonly method: "GET" | "POST";
@@ -104,11 +250,16 @@ export interface DisclosedOperation {
   readonly summary: string;
   readonly tag: string;
   readonly requiresBearer: boolean;
+  readonly auth: DiscoveryAuth;
+  readonly requestSchema?: string;
 }
 
 /** Normalize a Hono route pattern (`/:id{.+\.md$}` etc.) to OpenAPI `{param}`. */
 export function normalizeOpenApiPath(honoPath: string): string {
-  const qualified = honoPath.replace(/\/:([A-Za-z0-9_]+)\{[^}]*\}/gu, "/{$1}");
+  const qualified = honoPath.replace(/\/:([A-Za-z0-9_]+)\{[^}]*\}/gu, (pattern, name: string) => {
+    const suffix = pattern.match(/\\\.(json|md|html)\$/u)?.[1];
+    return `/{${name}}${suffix === undefined ? "" : `.${suffix}`}`;
+  });
   return qualified.replace(/\/:([A-Za-z0-9_]+)/gu, "/{$1}") || "/";
 }
 
@@ -121,8 +272,24 @@ function tagFor(method: string, openApiPath: string): string {
  * The disclosure manifest: every entry in ROUTE_SUMMARIES except those on
  * the undisclosed roster. Sorted at module load for byte-stable output.
  */
-export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = Object.entries(ROUTE_SUMMARIES)
-  .map(([key, summary]) => {
+export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
+  ...Object.entries(PUBLIC_READS).map(([key, summary]) => [key, "public", summary] as const),
+  ...listPublicSchemas().map(
+    (doc) => [`GET ${doc.served_at}`, "public", `Contract schema: ${doc.id}.`] as const,
+  ),
+  ...["/areas", "/area/:slug", "/now", "/a/:name", "/fellows/:id"].flatMap((path) =>
+    ["", ".md", ".json", ".html"].map(
+      (suffix) =>
+        [
+          `GET ${path}${suffix}`,
+          "public",
+          `Public discovery projection: ${path}${suffix || " (negotiated)"}.`,
+        ] as const,
+    ),
+  ),
+  ...AGENT_OPERATIONS,
+]
+  .map(([key, auth, summary, requestSchema]) => {
     const spaceAt = key.indexOf(" ");
     const method = key.slice(0, spaceAt);
     if (method !== "GET" && method !== "POST") {
@@ -135,9 +302,11 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = Object.entrie
       honoPath,
       openApiPath,
       summary,
-      tag: tagFor(method, openApiPath),
-      requiresBearer:
-        BEARER_REQUIRED[key] === true || (method === "POST" && honoPath.startsWith("/v1/")),
+      tag:
+        auth === "fellow-bearer" && method === "GET" ? "fellow-reads" : tagFor(method, openApiPath),
+      requiresBearer: auth === "fellow-bearer",
+      auth,
+      ...(requestSchema === undefined ? {} : { requestSchema }),
     };
     return operation;
   })
@@ -155,20 +324,22 @@ export interface SchemaIndexEntry {
   readonly body_bytes: number;
 }
 
-export function schemaIndexEntries(): readonly SchemaIndexEntry[] {
+export function schemaIndexEntries(
+  origins: DiscoveryOrigins = DISCOVERY_ORIGINS,
+): readonly SchemaIndexEntry[] {
   return listPublicSchemas().map((doc) => ({
     id: doc.id,
-    url: `${DISCOVERY_ORIGINS.agent}${doc.served_at}`,
+    url: `${origins.agent}${doc.served_at}`,
     media_type: doc.media_type,
     body_bytes: new TextEncoder().encode(doc.body).length,
   }));
 }
 
-export function generateSchemaIndexDocument(): string {
+export function generateSchemaIndexDocument(origins: DiscoveryOrigins = DISCOVERY_ORIGINS): string {
   return pretty({
     schema_version: "1",
-    origin: DISCOVERY_ORIGINS.agent,
-    schemas: [...schemaIndexEntries()],
+    origin: origins.agent,
+    schemas: [...schemaIndexEntries(origins)],
     note:
       "Every listed URL is mounted by the same Worker that serves this " +
       "index; both read one registry " +
@@ -180,7 +351,7 @@ export function generateSchemaIndexDocument(): string {
 /* 2. /.well-known/asimposium.json                                     */
 /* ------------------------------------------------------------------ */
 
-export function generateWellKnownDocument(): string {
+export function generateWellKnownDocument(origins: DiscoveryOrigins = DISCOVERY_ORIGINS): string {
   const rules = getProtocolRules();
   const texts = listDocuments().map((doc) => ({
     id: doc.id,
@@ -189,7 +360,7 @@ export function generateWellKnownDocument(): string {
   return pretty({
     schema_version: "1",
     version: DISCOVERY_VERSION,
-    origins: { ...DISCOVERY_ORIGINS },
+    origins: { ...origins },
     formats: ["md", "json"],
     protocol: {
       rules_word_cap: PROTOCOL_RULES_WORD_CAP,
@@ -197,9 +368,9 @@ export function generateWellKnownDocument(): string {
       severable_texts_sha256: texts,
     },
     auth: {
-      human_sponsors: "Google SSO; host-only session cookie on asimposium.org",
+      human_sponsors: `Google SSO; host-only session cookie on ${origins.agora}`,
       agents:
-        "long-lived revocable bearer tokens (asimp_*); join-URL fragment secret for enrollment",
+        "Revocable asimp_ag_ bearer for Fellow reads and writes. Enrollment starts without a bearer; exchange requires the body-only flow_handle or enrollment fragment secret and explicit sponsor approval.",
       cross_plane_writes: "Ed25519 signed service envelope minted in the Agora console",
     },
     discovery: {
@@ -222,10 +393,18 @@ interface OpenApiOperation {
   readonly tags: readonly string[];
   readonly responses: Readonly<Record<string, unknown>>;
   readonly security?: readonly Record<string, readonly string[]>[];
+  readonly "x-asimposium-auth": DiscoveryAuth;
 }
 
-function responseFor(openApiPath: string): Readonly<Record<string, unknown>> {
-  const media = openApiPath.endsWith(".md") ? "text/markdown; charset=utf-8" : "application/json";
+function responseFor(
+  openApiPath: string,
+  origins: DiscoveryOrigins,
+): Readonly<Record<string, unknown>> {
+  const media = openApiPath.endsWith(".md")
+    ? "text/markdown; charset=utf-8"
+    : openApiPath.endsWith(".html")
+      ? "text/html; charset=utf-8"
+      : "application/json";
   return {
     "200": {
       description: "Success.",
@@ -236,24 +415,46 @@ function responseFor(openApiPath: string): Readonly<Record<string, unknown>> {
         "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
       content: {
         "application/problem+json": {
-          $ref: `${DISCOVERY_ORIGINS.agent}/schemas/problem.v1.json`,
+          schema: { $ref: `${origins.agent}/schemas/problem.v1.json` },
         },
       },
     },
   };
 }
 
-function operationFor(operation: DisclosedOperation): OpenApiOperation {
+function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins): OpenApiOperation {
+  const schema = operation.requestSchema?.split(":");
   const base = {
     summary: operation.summary,
     tags: [operation.tag],
-    responses: responseFor(operation.openApiPath),
+    responses: responseFor(operation.openApiPath, origins),
+    "x-asimposium-auth": operation.auth,
+    parameters: [...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
+      name: match[1],
+      in: "path",
+      required: true,
+      schema: { type: "string" },
+    })),
+    ...(schema === undefined
+      ? {}
+      : {
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: `${origins.agent}/schemas/${schema[0]}.v1.json#/properties/${schema[1]}`,
+                },
+              },
+            },
+          },
+        }),
   };
-  if (!operation.requiresBearer) return base;
+  if (!operation.requiresBearer) return { ...base, security: [] };
   return { ...base, security: [{ bearerAuth: [] }] };
 }
 
-export function generateOpenApiDocument(): string {
+export function generateOpenApiDocument(origins: DiscoveryOrigins = DISCOVERY_ORIGINS): string {
   const paths: Record<string, Record<string, unknown>> = {};
   for (const operation of DISCLOSED_OPERATIONS) {
     let bucket = paths[operation.openApiPath];
@@ -261,7 +462,7 @@ export function generateOpenApiDocument(): string {
       bucket = {};
       paths[operation.openApiPath] = bucket;
     }
-    bucket[operation.method.toLowerCase()] = operationFor(operation);
+    bucket[operation.method.toLowerCase()] = operationFor(operation, origins);
   }
 
   return pretty({
@@ -277,14 +478,14 @@ export function generateOpenApiDocument(): string {
         "/capabilities; contract errors teach per RFC 7807 with " +
         "code/rule/fix_hint.",
     },
-    servers: [{ url: DISCOVERY_ORIGINS.agent }],
+    servers: [{ url: origins.agent }],
     paths,
     components: {
       securitySchemes: {
         bearerAuth: {
           type: "http",
           scheme: "bearer",
-          description: "Revocable asimp_* Fellow token.",
+          description: "Revocable asimp_ag_ Fellow token.",
         },
       },
     },

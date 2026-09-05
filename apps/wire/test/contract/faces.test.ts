@@ -498,12 +498,13 @@ describe("face wire format", () => {
       "error_dictionary",
       "fellow_reads",
       "not_yet",
+      "operations",
       "origin",
       "reads",
       "sponsor_surface",
       "version",
     ]);
-    expect(body.version).toBe("0.1.0-draft");
+    expect(body.version).toBe("0.2.0-draft");
     expect(body.origin).toBe(TRUSTED_STOA_ORIGIN);
     // The signed sponsor surface carries reads as well as writes, so the key is
     // direction-neutral; `sponsor_writes` would name only half of what it
@@ -511,36 +512,41 @@ describe("face wire format", () => {
     expect(body.sponsor_surface).toBe("signed service envelope only; minted in the Agora console");
     expect(body.error_dictionary).toBe("https://a.asimposium.org/schemas/problem.v1.json");
     const schemaReads = listPublicSchemas().map((document) => document.served_at);
-    expect(body.reads).toEqual([
-      "/",
-      "/AGENTS.md",
-      "/capabilities",
-      "/.well-known/asimposium.json",
-      "/openapi.json",
-      "/schemas/index.json",
-      "/llms.txt",
-      "/protocol",
-      "/protocol.md",
-      "/protocol.json",
-      "/rubrics",
-      "/rubrics.json",
-      "/moves",
-      "/moves.json",
-      "/policy.md",
-      "/skill.md",
-      "/inoculation.md",
-      "/problems.md",
-      "/problems.json",
-      "/p/<problem-id>.md",
-      "/p/<problem-id>.json",
-      "/search",
-      "/search.md",
-      "/search.json",
-      "/cursor",
-      "/join/<enrollment-id>",
-      ...schemaReads,
-      "/internal/health",
-    ]);
+    expect([...body.reads].sort()).toEqual(
+      [
+        "/",
+        "/AGENTS.md",
+        "/capabilities",
+        "/.well-known/asimposium.json",
+        "/openapi.json",
+        "/schemas/index.json",
+        "/llms.txt",
+        "/protocol",
+        "/protocol.md",
+        "/protocol.json",
+        "/rubrics",
+        "/rubrics.json",
+        "/moves",
+        "/moves.json",
+        "/policy.md",
+        "/skill.md",
+        "/inoculation.md",
+        "/problems.md",
+        "/problems.json",
+        "/p/{id}.md",
+        "/p/{id}.json",
+        "/search",
+        "/search.md",
+        "/search.json",
+        "/cursor",
+        "/join/{enrollmentId}",
+        ...["/areas", "/area/{slug}", "/now", "/a/{name}", "/fellows/{id}"].flatMap((path) =>
+          ["", ".md", ".json", ".html"].map((suffix) => `${path}${suffix}`),
+        ),
+        ...schemaReads,
+        "/internal/health",
+      ].sort(),
+    );
     // phg.1: discovery may advertise only concrete mounted paths. The exact
     // roster below reds the moment a template rejoins the list, and every
     // advertised URL is then requested through the mounted Worker with no D1
@@ -550,7 +556,7 @@ describe("face wire format", () => {
     const advertisedSchemaReads = body.reads.filter(
       (path) => path.startsWith("/schemas/") && path !== "/schemas/index.json",
     );
-    expect(advertisedSchemaReads).toEqual(schemaReads);
+    expect([...advertisedSchemaReads].sort()).toEqual([...schemaReads].sort());
     for (const advertised of advertisedSchemaReads) {
       expect(advertised, advertised).not.toContain("<");
       const document = listPublicSchemas().find((entry) => entry.served_at === advertised);
@@ -559,19 +565,31 @@ describe("face wire format", () => {
       expect(served.status, advertised).toBe(200);
       expect(served.bodyText, advertised).toBe(document.body);
     }
-    expect(body.agent_writes).toEqual([
-      "POST /v1/device-code",
-      "POST /v1/device-token",
-      "POST /v1/fellows",
-      "POST /v1/fellows/flow",
-      "POST /v1/sessions",
-      "POST /v1/sessions/<id>/workshop",
-      "POST /v1/sessions/<id>/promote",
-      "POST /v1/sessions/<id>/close",
-    ]);
+    expect([...body.agent_writes].sort()).toEqual(
+      [
+        "POST /v1/device-code",
+        "POST /v1/device-token",
+        "POST /v1/fellows",
+        "POST /v1/fellows/flow",
+        "POST /v1/sessions",
+        ...[
+          "workshop",
+          "promote",
+          "close",
+          "revise",
+          "review",
+          "evidence",
+          "gaps",
+          "gaps/close",
+          "relations",
+          "hypotheses",
+          "hypotheses/{hid}/kill",
+        ].map((path) => `POST /v1/sessions/{id}/${path}`),
+      ].sort(),
+    );
     expect(body.fellow_reads).toEqual([
       "GET /v1/hello (bearer)",
-      "GET /v1/sessions/<id>/pack?profile=… (bearer)",
+      "GET /v1/sessions/{id}/pack (bearer)",
     ]);
     expect(body.not_yet).toEqual([
       "rate-limit budgets",
@@ -1564,7 +1582,10 @@ describe("face wire format", () => {
 
   test("GET /schemas/index.json serves the generated schema-index bytes without D1", async () => {
     const body = generateSchemaIndexDocument();
-    const response = await callWorker("/schemas/index.json", {});
+    const response = await callWorker("/schemas/index.json", {
+      STOA_ORIGIN: "https://a.asimposium.org",
+      AGORA_ORIGIN: "https://asimposium.org",
+    });
     expect(response.status).toBe(200);
     expect(response.contentType).toBe("application/json; charset=utf-8");
     expect(response.bodyText).toBe(body);
