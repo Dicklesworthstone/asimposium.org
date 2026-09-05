@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0042_claim_versions_problem_scoped.sql`.
+schema through `0043_screening_publication_provenance.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -35,6 +35,13 @@ the missing immutable event cannot be reconstructed honestly.
 Migration `0042_claim_versions_problem_scoped.sql` makes `claim_versions` and
 `claim_deps` problem-scoped composite primary keys so multiple problems can each
 host claims starting at `C-1` without colliding.
+
+Migration `0043_screening_publication_provenance.sql` retains private, immutable
+direct-screen provenance in the same transaction as each new public write.
+The event links the author and session; the record binds the request, screened
+candidate, actor context, model and policy. It contains no submitted bodies.
+Historical events are not backfilled with invented decisions. Refusal history
+and contextual/operator review remain separate unfinished screening work.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
