@@ -9,7 +9,7 @@
     "docs/seed/sp4d/review-matrix.json": "630ea438006ec8986d67696008c3d026ca1df732bcd55d8eee7cea3322878941",
     "docs/seed/sp4d/check.mjs": "45cdec3bc631cf55842eaa7b0d559755f8c769f90847c1d5bd53a11a939f0ae8",
     "docs/seed/sp4d/check.test.mjs": "641fda6be43b70da6b2ddde998b98016f04901f0366289ed4fa8c416316ade6c",
-    "package.json": "4b94fbd9edbe18d352c7ecf389371d428f5ffe1395d23e8e0d22b4e8e4d6914a"
+    "package.json": "c41ef94e1f3530a2afd6434154ef7df407c3e0c802252c78ddf57df0e45c3ccf"
   },
   "reviewer_record": [
     {
@@ -51,7 +51,8 @@
     "2026-08-17: the render check asserted that the generated face contained the headings renderDossier hardcodes, which is true of any input. It now asserts that the dossier's own formulation, first locator, and expert gate reach the face.",
     "2026-08-21: re-pinned the frontier-slate, review-matrix, and checker digests after the 2026-08-19 session-admission refresh reformatted the slate and checker without changing this report's external-review-pending boundary. The ordinary root seed lane detected all three stale bindings before this ledger was updated.",
     "2026-08-26: re-pinned the package.json source digest after commit be8ee41 added the constrained Beads flush scripts ('beads:flush' and 'beads:flush:self-test') without changing any rule, boundary, or claim in this report or in the reviewed material. The root seed lane detected the stale binding on the next ordinary run, which is the behaviour this pin exists for.",
-    "2026-09-03: re-pinned check.mjs source digest after adding DOI fallback for downstream publisher timeouts when verifying reference URLs under bot user-agents."
+    "2026-09-03: re-pinned check.mjs source digest after adding DOI fallback for downstream publisher timeouts when verifying reference URLs under bot user-agents.",
+    "2026-09-05 (wgii): reviewed the one-line package.json repair that runs both unchanged node:test suites through the supported Bun test runner and invokes the SP4D link checker with Bun. The node executable on this workstation resolves to Bun and cannot start node:test files directly, even with --test. The 46 assertions execute under bun test; the subsequent root-lane run correctly detected this package digest change before this explicit update. The --verify-links flag and toolchain:test registration remain enforced by the unchanged causal test. This is author self-verification of runner wiring, not independent verification or mathematical review; external_review_pending is unchanged."
   ],
   "approval_state": "external_review_pending"
 }
