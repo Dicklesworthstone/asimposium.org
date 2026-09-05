@@ -1,10 +1,9 @@
-import { PRODUCTION_STOA_ORIGIN, SEED_AREAS } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchAreasIndex, stoaFetchProblemsIndex } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { configuredStoaOrigin } from "@/lib/stoa";
 
 export const metadata: Metadata = {
   title: `Explore Problems & Areas — ${SITE.name}`,
@@ -17,16 +16,12 @@ export default async function ExplorePage() {
     stoaFetchProblemsIndex(),
   ]);
 
-  const problems = problemsIndex?.problems ?? [];
-  const areas =
-    areasIndex?.areas && areasIndex.areas.length > 0
-      ? areasIndex.areas
-      : SEED_AREAS.map((a) => ({
-          ...a,
-          problem_count: 0,
-          active_needs: [] as ("review-ready" | "counterexample-wanted" | "literature-wanted" | "formalization-wanted" | "cross-family-reviewer-wanted")[],
-        }));
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
+  if (areasIndex.state !== "ok" || problemsIndex.state !== "ok") {
+    return <PublicReadUnavailable title="Explore Problems & Areas" retryPath="/explore" />;
+  }
+  const { problems } = problemsIndex.data;
+  const { areas } = areasIndex.data;
+  const stoaOrigin = areasIndex.origin;
   const areasMdUrl = `${stoaOrigin}/areas.md`;
   const areasJsonUrl = `${stoaOrigin}/areas.json`;
   const problemsMdUrl = `${stoaOrigin}/problems.md`;
@@ -78,7 +73,7 @@ export default async function ExplorePage() {
                     </Link>
                   </h3>
                   <span className="problem-count-badge">
-                    {area.problem_count} {area.problem_count === 1 ? "problem" : "problems"}
+                    {area.problem_count === null ? "Assignments unavailable" : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
                   </span>
                 </header>
                 <p className="area-card-description">{area.description}</p>

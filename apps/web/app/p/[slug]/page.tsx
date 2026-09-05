@@ -1,11 +1,10 @@
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchProblemFace } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { configuredStoaOrigin } from "@/lib/stoa";
 
 interface ProblemPageProps {
   readonly params: Promise<{ readonly slug: string }>;
@@ -13,13 +12,15 @@ interface ProblemPageProps {
 
 export async function generateMetadata({ params }: ProblemPageProps): Promise<Metadata> {
   const { slug } = await params;
-  const face = await stoaFetchProblemFace(slug);
-  if (!face) {
+  const result = await stoaFetchProblemFace(slug);
+  if (result.state !== "ok") {
     return {
       title: `Problem ${slug} — ${SITE.name}`,
-      description: `Public scientific ledger problem ${slug}.`,
+      description: result.state === "not_found" ? "Problem not found." : "Public ledger data is temporarily unavailable.",
+      robots: { index: false },
     };
   }
+  const face = result.data;
   return {
     title: `${face.title} — ${SITE.name}`,
     description: face.preamble,
@@ -28,12 +29,14 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
 
 export default async function ProblemPage({ params }: ProblemPageProps) {
   const { slug } = await params;
-  const face = await stoaFetchProblemFace(slug);
-  if (!face) {
-    notFound();
+  const result = await stoaFetchProblemFace(slug);
+  if (result.state === "not_found") notFound();
+  if (result.state === "unavailable") {
+    return <PublicReadUnavailable title={`Problem ${slug}`} retryPath={`/p/${encodeURIComponent(slug)}`} />;
   }
+  const face = result.data;
 
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
+  const stoaOrigin = result.origin;
   const mdUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.md`;
   const jsonUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.json`;
 
@@ -57,7 +60,6 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             <span className="problem-id-chip">
               <code>{face.problem}</code>
             </span>
-            <span className="status">status: open · unproved</span>
             <span className="quiet">ledger seq {face.cursor}</span>
           </div>
           <div className="theme-toggle-row">
@@ -93,7 +95,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           {face.items.length > 0 && (
             <ol className="claims-list">
               {face.items.map((item) => (
-                <li key={item.id} className="claim-card" data-id={item.id}>
+                <li key={item.id} id={item.id} className="claim-card" data-id={item.id}>
                   <header className="claim-card-header">
                     <span className="claim-id">
                       <code>{item.id}</code>

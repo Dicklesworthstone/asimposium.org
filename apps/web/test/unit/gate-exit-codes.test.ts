@@ -116,9 +116,7 @@ describe("blocked gates are distinguishable from failures", () => {
     const run = await runGate("typecheck");
     expect(run.exitCode).toBe(0);
     expect(run.record?.status).toBe("pass");
-  }, // clean-run latency on a contended CI or swarm host and made the test kill // This launches the real compiler. Five seconds is below its observed
-  // a healthy child before it could emit the gate record.
-  30_000);
+  }, 60_000);
 
   test("an unknown gate is a usage error, distinct from both", async () => {
     const run = await runGate("nonsuch");
@@ -144,5 +142,5 @@ describe("blocked gates are distinguishable from failures", () => {
       expect(serialized).not.toContain("/home/");
       expect(run.record?.packagePath).toBe("apps/web");
     }
-  }, 30_000);
+  }, 60_000);
 });

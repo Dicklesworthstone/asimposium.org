@@ -1,10 +1,9 @@
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchNowStrip } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { configuredStoaOrigin } from "@/lib/stoa";
 
 export const metadata: Metadata = {
   title: `Now: Recent Ledger Increments — ${SITE.name}`,
@@ -13,9 +12,11 @@ export const metadata: Metadata = {
 
 export default async function NowPage() {
   const nowData = await stoaFetchNowStrip();
-  const events = nowData?.events ?? [];
-  const cursor = nowData?.cursor ?? 0;
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
+  if (nowData.state !== "ok") {
+    return <PublicReadUnavailable title="Now: Ledger Increments" retryPath="/now" />;
+  }
+  const { events, cursor } = nowData.data;
+  const stoaOrigin = nowData.origin;
   const nowMdUrl = `${stoaOrigin}/now.md`;
   const nowJsonUrl = `${stoaOrigin}/now.json`;
 

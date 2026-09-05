@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { PRODUCTION_STOA_ORIGIN, SEED_AREAS, STAGING_STOA_ORIGIN } from "@asimposium/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { PublicRead } from "../../lib/public-ledger.ts";
 
 mock.module("server-only", () => ({}));
 
 const {
+  PUBLIC_LEDGER_MAX_BYTES,
   stoaFetchAreaDetail,
   stoaFetchAreasIndex,
   stoaFetchFellowCard,
@@ -19,6 +21,35 @@ const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
 const { default: FellowPage } = await import("../../app/a/[name]/page.tsx");
 const { default: NowPage } = await import("../../app/now/page.tsx");
+const { default: ProblemsPage } = await import("../../app/problems/page.tsx");
+const { default: FellowIdPage } = await import("../../app/fellows/[id]/page.tsx");
+
+let previousOrigin: string | undefined;
+beforeEach(() => {
+  previousOrigin = process.env.STOA_ORIGIN;
+  process.env.STOA_ORIGIN = PRODUCTION_STOA_ORIGIN;
+});
+afterEach(() => {
+  if (previousOrigin === undefined) delete process.env.STOA_ORIGIN;
+  else process.env.STOA_ORIGIN = previousOrigin;
+});
+
+function dataOf<T>(result: PublicRead<T>): T {
+  expect(result.state).toBe("ok");
+  if (result.state !== "ok") throw new Error("Expected a successful public read");
+  return result.data;
+}
+
+function missingProblem(): Response {
+  return Response.json({ status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 });
+}
+
+const AREAS_INDEX = {
+  areas: SEED_AREAS.map((area) => ({ ...area, is_seed: true, problem_count: 0, active_needs: [] })),
+  total_areas: SEED_AREAS.length,
+  total_problems: 0,
+  omitted: [],
+};
 
 const MOCK_PROBLEM_FACE = {
   schema: "asimposium.problem-face.v1",
@@ -100,35 +131,35 @@ describe("public-ledger client", () => {
     });
 
     const result = await stoaFetchProblemFace("P-SP4D", PRODUCTION_STOA_ORIGIN);
-    expect(result).not.toBeNull();
-    expect(result?.problem).toBe("P-SP4D");
-    expect(result?.cursor).toBe(42);
-    expect(result?.items.length).toBe(2);
+    const data = dataOf(result);
+    expect(data.problem).toBe("P-SP4D");
+    expect(data.cursor).toBe(42);
+    expect(data.items.length).toBe(2);
   });
 
-  test("stoaFetchProblemFace returns null on 404", async () => {
-    setMockFetch(async () => new Response("Not Found", { status: 404 }));
+  test("stoaFetchProblemFace confirms a missing problem from its typed 404", async () => {
+    setMockFetch(async () => missingProblem());
     const result = await stoaFetchProblemFace("P-UNKNOWN", PRODUCTION_STOA_ORIGIN);
-    expect(result).toBeNull();
+    expect(result).toEqual({ state: "not_found", origin: PRODUCTION_STOA_ORIGIN });
   });
 
-  test("stoaFetchProblemFace returns null on schema mismatch", async () => {
+  test("stoaFetchProblemFace reports unavailable on schema mismatch", async () => {
     setMockFetch(async () => new Response(JSON.stringify({ schema: "wrong" }), { status: 200 }));
     const result = await stoaFetchProblemFace("P-SP4D", PRODUCTION_STOA_ORIGIN);
-    expect(result).toBeNull();
+    expect(result).toEqual({ state: "unavailable", reason: "invalid_response" });
   });
 
-  test("stoaFetchProblemFace returns null on fetch rejection", async () => {
+  test("stoaFetchProblemFace reports unavailable on fetch rejection", async () => {
     setMockFetch(async () => {
       throw new Error("network-down");
     });
     const result = await stoaFetchProblemFace("P-SP4D", PRODUCTION_STOA_ORIGIN);
-    expect(result).toBeNull();
+    expect(result).toEqual({ state: "unavailable", reason: "network" });
   });
 
-  test("stoaFetchProblemFace returns null for untrusted origin", async () => {
+  test("stoaFetchProblemFace refuses an untrusted origin", async () => {
     const result = await stoaFetchProblemFace("P-SP4D", "https://attacker.invalid");
-    expect(result).toBeNull();
+    expect(result).toEqual({ state: "unavailable", reason: "configuration" });
   });
 
   test("stoaFetchProblemsIndex returns parsed index on 200", async () => {
@@ -141,17 +172,163 @@ describe("public-ledger client", () => {
     );
 
     const result = await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN);
-    expect(result).not.toBeNull();
-    expect(result?.problems.length).toBe(1);
-    expect(result?.problems[0]?.id).toBe("P-SP4D");
+    const data = dataOf(result);
+    expect(data.problems.length).toBe(1);
+    expect(data.problems[0]?.id).toBe("P-SP4D");
   });
 
-  test("stoaFetchProblemsIndex returns null on fetch rejection", async () => {
+  test("stoaFetchProblemsIndex reports unavailable on fetch rejection", async () => {
     setMockFetch(async () => {
       throw new Error("network-down");
     });
     const result = await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN);
-    expect(result).toBeNull();
+    expect(result).toEqual({ state: "unavailable", reason: "network" });
+  });
+});
+
+describe("public read failure boundaries and recovery", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  test("missing and foreign configuration never selects production or performs a request", async () => {
+    let calls = 0;
+    setMockFetch(async () => { calls += 1; throw new Error("unexpected request"); });
+    for (const origin of [undefined, "https://foreign.invalid", "https://a.asimposium.org/redirect"]) {
+      if (origin === undefined) delete process.env.STOA_ORIGIN;
+      else process.env.STOA_ORIGIN = origin;
+      const results = await Promise.all([
+        stoaFetchProblemsIndex(), stoaFetchProblemFace("P-1"), stoaFetchSearch("x"),
+        stoaFetchAreasIndex(), stoaFetchAreaDetail("algebra"), stoaFetchNowStrip(), stoaFetchFellowCard("test-agent"),
+      ]);
+      for (const result of results) expect(result).toEqual({ state: "unavailable", reason: "configuration" });
+    }
+    expect(calls).toBe(0);
+  });
+
+  test("staging reads and search links stay on staging, with bounded credential-free requests", async () => {
+    process.env.STOA_ORIGIN = STAGING_STOA_ORIGIN;
+    setMockFetch(async (input, init) => {
+      expect(String(input)).toBe(`${STAGING_STOA_ORIGIN}/now.json`);
+      const options = init as RequestInit;
+      expect(options.credentials).toBe("omit");
+      expect(options.redirect).toBe("error");
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      expect(new Headers(options.headers).get("user-agent")).toBe("OpenAI File Downloader, XaiImageApiFetch/1.0");
+      return Response.json({ events: [], cursor: 17, omitted: [] });
+    });
+    const html = renderToStaticMarkup(await NowPage());
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/now.json`);
+    expect(html).not.toContain(PRODUCTION_STOA_ORIGIN);
+    expect(html).toContain("No material events recorded yet");
+    expect(html).toContain("<code>17</code>");
+  });
+
+  test("every public read reports 503 and unknown-route 404 as unavailable", async () => {
+    for (const status of [503, 404]) {
+      setMockFetch(async () => Response.json({ status, code: "ROUTE_NOT_FOUND" }, { status }));
+      const results = await Promise.all([
+        stoaFetchProblemsIndex(), stoaFetchProblemFace("P-1"), stoaFetchSearch("x"),
+        stoaFetchAreasIndex(), stoaFetchAreaDetail("algebra"), stoaFetchNowStrip(), stoaFetchFellowCard("test-agent"),
+      ]);
+      for (const result of results) expect(result.state).toBe("unavailable");
+    }
+  });
+
+  test("resource-specific 404s cannot be confused with another resource or an outage", async () => {
+    setMockFetch(async () => Response.json({ status: 404, code: "AREA_NOT_FOUND" }, { status: 404 }));
+    expect((await stoaFetchAreaDetail("algebra")).state).toBe("not_found");
+    expect((await stoaFetchFellowCard("test-agent")).state).toBe("unavailable");
+    setMockFetch(async () => Response.json({ status: 404, code: "FELLOW_NOT_FOUND" }, { status: 404 }));
+    expect((await stoaFetchFellowCard("test-agent")).state).toBe("not_found");
+  });
+
+  test("all rendered read failures have a no-JavaScript retry and no fabricated empty state", async () => {
+    setMockFetch(async () => new Response("private upstream diagnostics", { status: 503 }));
+    const pages = await Promise.all([
+      NowPage(), ProblemsPage(), ExplorePage(),
+      ProblemPage({ params: Promise.resolve({ slug: "P-1" }) }),
+      AreaPage({ params: Promise.resolve({ slug: "algebra" }) }),
+      FellowPage({ params: Promise.resolve({ name: "test-agent" }) }),
+      FellowIdPage({ params: Promise.resolve({ id: "F-1" }) }),
+      SearchPage({ searchParams: Promise.resolve({ q: "a & b", kind: "claim" }) }),
+    ]);
+    for (const page of pages) {
+      const html = renderToStaticMarkup(page);
+      expect(html).toContain("temporarily unavailable");
+      expect(html).toContain('method="GET"');
+      expect(html).toContain("Try again");
+      expect(html).not.toContain("No material events");
+      expect(html).not.toContain("No public problems");
+      expect(html).not.toContain("private upstream diagnostics");
+      expect(html).not.toContain("status: open");
+    }
+    const search = renderToStaticMarkup(pages[7]);
+    expect(search).toContain('name="q" value="a &amp; b"');
+    expect(search).toContain('name="kind" value="claim"');
+    const metadata = await generateMetadata({ params: Promise.resolve({ slug: "P-1" }) });
+    expect(metadata.description).toContain("unavailable");
+    expect(metadata.robots).toEqual({ index: false });
+  });
+
+  test("declared and chunked oversize bodies are cancelled; malformed JSON and UTF-8 are refused", async () => {
+    let cancelled = false;
+    setMockFetch(async () => new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    }), { headers: { "content-length": String(PUBLIC_LEDGER_MAX_BYTES + 1) } }));
+    expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "oversize" });
+    expect(cancelled).toBe(true);
+    cancelled = false;
+    setMockFetch(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(PUBLIC_LEDGER_MAX_BYTES));
+        controller.enqueue(new Uint8Array(1));
+      },
+      cancel() { cancelled = true; },
+    })));
+    expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "oversize" });
+    expect(cancelled).toBe(true);
+    for (const body of ["{", new Uint8Array([0xff]), JSON.stringify({ events: "invalid" })]) {
+      setMockFetch(async () => new Response(body));
+      expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "invalid_response" });
+    }
+  });
+
+  test("a stalled response body is cancelled by the total deadline", async () => {
+    let cancelled = false;
+    setMockFetch(async () => new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    })));
+    expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "timeout" });
+    expect(cancelled).toBe(true);
+  });
+
+  test("real HTTP outage recovers to a verified empty view; a redirect is never followed", async () => {
+    let mode: "outage" | "empty" | "redirect" = "outage";
+    let redirectHits = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(request) {
+        expect(request.headers.get("user-agent")).toBe("OpenAI File Downloader, XaiImageApiFetch/1.0");
+        expect(request.headers.get("authorization")).toBeNull();
+        if (new URL(request.url).pathname === "/trap") { redirectHits += 1; return new Response("trap"); }
+        if (mode === "outage") return new Response(null, { status: 503 });
+        if (mode === "redirect") return Response.redirect(new URL("/trap", request.url).href);
+        return Response.json({ events: [], cursor: 12, omitted: [] });
+      },
+    });
+    try {
+      globalThis.fetch = originalFetch;
+      process.env.STOA_ORIGIN = `http://127.0.0.1:${server.port}`;
+      expect(renderToStaticMarkup(await NowPage())).toContain("temporarily unavailable");
+      mode = "empty";
+      const html = renderToStaticMarkup(await NowPage());
+      expect(html).toContain("No material events recorded yet");
+      expect(html).toContain("<code>12</code>");
+      expect(html).not.toContain("temporarily unavailable");
+      mode = "redirect";
+      expect((await stoaFetchNowStrip()).state).toBe("unavailable");
+      expect(redirectHits).toBe(0);
+    } finally { await server.stop(true); }
   });
 });
 
@@ -173,7 +350,7 @@ describe("ProblemPage Server Component", () => {
   });
 
   test("generateMetadata returns fallback title when problem is null", async () => {
-    setMockFetch(async () => new Response("Not Found", { status: 404 }));
+    setMockFetch(async () => missingProblem());
 
     const meta = await generateMetadata({
       params: Promise.resolve({ slug: "P-NONEXISTENT" }),
@@ -197,7 +374,7 @@ describe("ProblemPage Server Component", () => {
   });
 
   test("ProblemPage calls notFound when problem is not found", async () => {
-    setMockFetch(async () => new Response("Not Found", { status: 404 }));
+    setMockFetch(async () => missingProblem());
 
     // In Next.js App Router, notFound() throws a NEXT_NOT_FOUND error
     let threw = false;
@@ -221,7 +398,7 @@ describe("ExplorePage Server Component", () => {
   });
 
   test("ExplorePage renders problems and scientific areas", async () => {
-    setMockFetch(async () => new Response(JSON.stringify(MOCK_PROBLEMS_INDEX), { status: 200 }));
+    setMockFetch(async (url) => Response.json(String(url).endsWith("/areas.json") ? AREAS_INDEX : MOCK_PROBLEMS_INDEX));
 
     const element = await ExplorePage();
     expect(element).toBeDefined();
@@ -235,14 +412,11 @@ describe("ExplorePage Server Component", () => {
 
   test("ExplorePage renders empty state when no problems exist", async () => {
     setMockFetch(
-      async () =>
-        new Response(
-          JSON.stringify({
+      async (url) =>
+        Response.json(String(url).endsWith("/areas.json") ? AREAS_INDEX : {
             problems: [],
             omitted: ["no problems currently on ledger"],
           }),
-          { status: 200 },
-        ),
     );
 
     const element = await ExplorePage();
@@ -293,16 +467,16 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
   test("stoaFetchSearch parses valid search response", async () => {
     setMockFetch(async () => new Response(JSON.stringify(MOCK_SEARCH_RESPONSE), { status: 200 }));
     const result = await stoaFetchSearch("riemann");
-    expect(result).not.toBeNull();
-    expect(result?.q).toBe("riemann");
-    expect(result?.total_matches).toBe(1);
-    expect(result?.items[0]?.id).toBe("P-RIEMANN-01");
+    const data = dataOf(result);
+    expect(data.q).toBe("riemann");
+    expect(data.total_matches).toBe(1);
+    expect(data.items[0]?.id).toBe("P-RIEMANN-01");
   });
 
-  test("stoaFetchSearch returns null on fetch failure", async () => {
+  test("stoaFetchSearch reports unavailable on fetch failure", async () => {
     setMockFetch(async () => new Response("Internal Server Error", { status: 500 }));
     const result = await stoaFetchSearch("riemann");
-    expect(result).toBeNull();
+    expect(result).toEqual({ state: "unavailable", reason: "http" });
   });
 
   test("SearchPage renders search form with no query", async () => {
@@ -438,39 +612,39 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify(MOCK_AREAS_INDEX), { status: 200 })) as unknown as typeof fetch;
     const res = await stoaFetchAreasIndex();
-    expect(res).not.toBeNull();
-    expect(res?.total_areas).toBe(1);
-    expect(res?.areas?.[0]?.slug).toBe("topology-and-geometry");
+    const data = dataOf(res);
+    expect(data.total_areas).toBe(1);
+    expect(data.areas[0]?.slug).toBe("topology-and-geometry");
   });
 
   test("stoaFetchAreaDetail parses area detail and problems", async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify(MOCK_AREA_DETAIL), { status: 200 })) as unknown as typeof fetch;
     const res = await stoaFetchAreaDetail("topology-and-geometry");
-    expect(res).not.toBeNull();
-    expect(res?.area.slug).toBe("topology-and-geometry");
-    expect(res?.problems).toHaveLength(1);
-    expect(res?.problems?.[0]?.id).toBe("P-4DSP");
+    const data = dataOf(res);
+    expect(data.area.slug).toBe("topology-and-geometry");
+    expect(data.problems).toHaveLength(1);
+    expect(data.problems[0]?.id).toBe("P-4DSP");
   });
 
   test("stoaFetchNowStrip parses material events", async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify(MOCK_NOW_STRIP), { status: 200 })) as unknown as typeof fetch;
     const res = await stoaFetchNowStrip();
-    expect(res).not.toBeNull();
-    expect(res?.cursor).toBe(1);
-    expect(res?.events).toHaveLength(1);
-    expect(res?.events?.[0]?.type).toBe("claim.promoted");
+    const data = dataOf(res);
+    expect(data.cursor).toBe(1);
+    expect(data.events).toHaveLength(1);
+    expect(data.events[0]?.type).toBe("claim.promoted");
   });
 
   test("stoaFetchFellowCard parses fellow card and calibration record", async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify(MOCK_FELLOW_CARD), { status: 200 })) as unknown as typeof fetch;
     const res = await stoaFetchFellowCard("gauss-agent");
-    expect(res).not.toBeNull();
-    expect(res?.name).toBe("gauss-agent");
-    expect(res?.model_provenance).toBe("self_declared");
-    expect(res?.calibration.conjectures_promoted).toBe(1);
+    const data = dataOf(res);
+    expect(data.name).toBe("gauss-agent");
+    expect(data.model_provenance).toBe("self_declared");
+    expect(data.calibration.conjectures_promoted).toBe(1);
   });
 
   test("AreaPage renders area details and problem cards", async () => {

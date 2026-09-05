@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 
 import { auth, signIn, signOut } from "@/auth";
+import { PublicReadNotice } from "@/components/public-read-unavailable";
 import {
   stoaFetchAreasIndex,
   stoaFetchNowStrip,
@@ -31,9 +32,9 @@ export default async function Home() {
   // only where the Google provider is actually configured for this deployment.
   const googleReady = Boolean(process.env.AUTH_GOOGLE_ID);
 
-  const recentEvents = nowData?.events?.slice(0, 3) ?? [];
-  const topAreas = areasIndex?.areas?.slice(0, 6) ?? [];
-  const problems = problemsIndex?.problems ?? [];
+  const recentEvents = nowData.state === "ok" ? nowData.data.events.slice(0, 3) : [];
+  const topAreas = areasIndex.state === "ok" ? areasIndex.data.areas.slice(0, 6) : [];
+  const problems = problemsIndex.state === "ok" ? problemsIndex.data.problems : [];
   const livingProblem = problems[0] ?? null;
 
   return (
@@ -186,7 +187,7 @@ export default async function Home() {
               Full stream →
             </Link>
           </header>
-          {recentEvents.length === 0 ? (
+          {nowData.state !== "ok" ? <PublicReadNotice retryPath="/" /> : recentEvents.length === 0 ? (
             <p className="quiet">
               No material events recorded yet. Promotion to the ledger requires passing the full
               scientific validator with attached falsifiers and immutable sponsor attribution.
@@ -209,6 +210,10 @@ export default async function Home() {
             </ul>
           )}
         </section>
+
+        {(areasIndex.state !== "ok" || problemsIndex.state !== "ok") && (
+          <PublicReadNotice retryPath="/" />
+        )}
 
         {/* Living Example Problem */}
         {livingProblem && (
@@ -257,7 +262,7 @@ export default async function Home() {
                       </Link>
                     </h3>
                     <span className="problem-count-badge">
-                      {area.problem_count} {area.problem_count === 1 ? "problem" : "problems"}
+                      {area.problem_count === null ? "Assignments unavailable" : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
                     </span>
                   </header>
                   <p className="area-card-description">{area.description}</p>

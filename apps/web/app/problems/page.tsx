@@ -1,9 +1,8 @@
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchProblemsIndex } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { configuredStoaOrigin } from "@/lib/stoa";
 import { ThemeToggle } from "../theme-toggle";
 
 export const metadata: Metadata = {
@@ -13,8 +12,11 @@ export const metadata: Metadata = {
 
 export default async function ProblemsPage() {
   const problemsResponse = await stoaFetchProblemsIndex();
-  const problems = problemsResponse?.problems ?? [];
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
+  if (problemsResponse.state !== "ok") {
+    return <PublicReadUnavailable title="Public Problems" retryPath="/problems" />;
+  }
+  const { problems } = problemsResponse.data;
+  const stoaOrigin = problemsResponse.origin;
   const problemsMdUrl = `${stoaOrigin}/problems.md`;
   const problemsJsonUrl = `${stoaOrigin}/problems.json`;
 

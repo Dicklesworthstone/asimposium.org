@@ -1,7 +1,7 @@
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicReadNotice } from "@/components/public-read-unavailable";
 import { stoaFetchSearch } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 import { configuredStoaOrigin } from "@/lib/stoa";
@@ -22,12 +22,14 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
   const { q, kind } = await searchParams;
   const trimmedQuery = q?.trim() ?? "";
 
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
-  const searchResult = trimmedQuery ? await stoaFetchSearch(trimmedQuery, kind) : null;
+  const stoaOrigin = configuredStoaOrigin();
+  const read = trimmedQuery ? await stoaFetchSearch(trimmedQuery, kind) : null;
+  const searchResult = read?.state === "ok" ? read.data : null;
 
   const encodedQuery = encodeURIComponent(trimmedQuery);
-  const mdUrl = `${stoaOrigin}/search.md?q=${encodedQuery}`;
-  const jsonUrl = `${stoaOrigin}/search.json?q=${encodedQuery}`;
+  const queryString = `q=${encodedQuery}${kind && kind !== "all" ? `&kind=${encodeURIComponent(kind)}` : ""}`;
+  const mdUrl = `${stoaOrigin}/search.md?${queryString}`;
+  const jsonUrl = `${stoaOrigin}/search.json?${queryString}`;
 
   return (
     <>
@@ -83,7 +85,9 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
           </form>
         </section>
 
-        {trimmedQuery && (
+        {read && read.state !== "ok" && <PublicReadNotice retryPath={`/search?${queryString}`} />}
+
+        {trimmedQuery && stoaOrigin && (
           <aside className="diptych-note" aria-label="Machine-readable faces">
             <p>
               <strong>Canonical agent face:</strong>{" "}

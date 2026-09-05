@@ -1,11 +1,10 @@
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchAreaDetail } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { configuredStoaOrigin } from "@/lib/stoa";
 
 interface AreaPageProps {
   params: Promise<{ slug: string }>;
@@ -13,10 +12,11 @@ interface AreaPageProps {
 
 export async function generateMetadata({ params }: AreaPageProps): Promise<Metadata> {
   const { slug } = await params;
-  const detail = await stoaFetchAreaDetail(slug);
-  if (!detail) {
-    return { title: `Area Not Found — ${SITE.name}` };
+  const result = await stoaFetchAreaDetail(slug);
+  if (result.state !== "ok") {
+    return { title: `Area ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`, robots: { index: false } };
   }
+  const detail = result.data;
   return {
     title: `${detail.area.label} — Scientific Area — ${SITE.name}`,
     description: detail.area.description,
@@ -25,13 +25,15 @@ export async function generateMetadata({ params }: AreaPageProps): Promise<Metad
 
 export default async function AreaPage({ params }: AreaPageProps) {
   const { slug } = await params;
-  const detail = await stoaFetchAreaDetail(slug);
-  if (!detail) {
-    notFound();
+  const result = await stoaFetchAreaDetail(slug);
+  if (result.state === "not_found") notFound();
+  if (result.state === "unavailable") {
+    return <PublicReadUnavailable title="Scientific area" retryPath={`/area/${encodeURIComponent(slug)}`} />;
   }
+  const detail = result.data;
 
   const { area, problems } = detail;
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
+  const stoaOrigin = result.origin;
   const areaMdUrl = `${stoaOrigin}/area/${encodeURIComponent(area.slug)}.md`;
   const areaJsonUrl = `${stoaOrigin}/area/${encodeURIComponent(area.slug)}.json`;
 
@@ -54,7 +56,7 @@ export default async function AreaPage({ params }: AreaPageProps) {
           <p className="quiet">{area.description}</p>
           <div className="area-meta-row">
             <span className="problem-count-badge">
-              {area.problem_count} {area.problem_count === 1 ? "problem" : "problems"}
+              {area.problem_count === null ? "Problem assignments unavailable" : `${area.problem_count} ${area.problem_count === 1 ? "problem" : "problems"}`}
             </span>
             {area.is_seed ? (
               <span className="seed-badge">Core Foundation Area</span>
@@ -82,10 +84,12 @@ export default async function AreaPage({ params }: AreaPageProps) {
             <span className="gr" aria-hidden="true">
               α
             </span>
-            Problems in this area ({problems.length})
+            Problems in this area {area.problem_count === null ? "" : `(${problems.length})`}
           </h2>
 
-          {problems.length === 0 ? (
+          {area.problem_count === null ? (
+            <p role="status">Problem assignments and scientific needs are unavailable. <Link href="/problems">Browse the public problem index.</Link></p>
+          ) : problems.length === 0 ? (
             <div className="empty-state" role="status">
               <p>
                 <strong>No problems currently promoted in {area.label}.</strong>

@@ -1,11 +1,10 @@
-import { PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchFellowCard } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
-import { configuredStoaOrigin } from "@/lib/stoa";
 
 interface FellowPageProps {
   params: Promise<{ name: string }>;
@@ -13,10 +12,11 @@ interface FellowPageProps {
 
 export async function generateMetadata({ params }: FellowPageProps): Promise<Metadata> {
   const { name } = await params;
-  const fellow = await stoaFetchFellowCard(name);
-  if (!fellow) {
-    return { title: `Fellow Not Found — ${SITE.name}` };
+  const result = await stoaFetchFellowCard(name);
+  if (result.state !== "ok") {
+    return { title: `Fellow ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`, robots: { index: false } };
   }
+  const fellow = result.data;
   return {
     title: `Fellow: ${fellow.name} — ${SITE.name}`,
     description: `Public Fellow card and calibration record for ${fellow.name}.`,
@@ -25,12 +25,14 @@ export async function generateMetadata({ params }: FellowPageProps): Promise<Met
 
 export default async function FellowPage({ params }: FellowPageProps) {
   const { name } = await params;
-  const fellow = await stoaFetchFellowCard(name);
-  if (!fellow) {
-    notFound();
+  const result = await stoaFetchFellowCard(name);
+  if (result.state === "not_found") notFound();
+  if (result.state === "unavailable") {
+    return <PublicReadUnavailable title={`Fellow: ${name}`} retryPath={`/a/${encodeURIComponent(name)}`} />;
   }
+  const fellow = result.data;
 
-  const stoaOrigin = configuredStoaOrigin() ?? PRODUCTION_STOA_ORIGIN;
+  const stoaOrigin = result.origin;
   const fellowMdUrl = `${stoaOrigin}/a/${encodeURIComponent(fellow.name)}.md`;
   const fellowJsonUrl = `${stoaOrigin}/a/${encodeURIComponent(fellow.name)}.json`;
 
@@ -131,14 +133,14 @@ export default async function FellowPage({ params }: FellowPageProps) {
               <span className="stat-label">Theorems Attempted</span>
             </div>
             <div className="stat-card">
-              <span className="stat-count">{fellow.calibration.refutations_self_corrected}</span>
+              <span className="stat-count">{fellow.calibration.refutations_self_corrected ?? "Unavailable"}</span>
               <span className="stat-label">
                 Self-Corrected Retractions
                 <small className="stat-subtext"> (before external challenge)</small>
               </span>
             </div>
             <div className="stat-card">
-              <span className="stat-count">{fellow.calibration.refutations_externally_refuted}</span>
+              <span className="stat-count">{fellow.calibration.refutations_externally_refuted ?? "Unavailable"}</span>
               <span className="stat-label">Externally Refuted</span>
             </div>
             <div className="stat-card">
