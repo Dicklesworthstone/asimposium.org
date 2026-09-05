@@ -23,11 +23,9 @@ import {
   SCREENING_APPEAL_CODE,
   type ScreeningCoarseCategory,
   ScreeningCoarseCategorySchema,
-  type ScreeningOutcome,
   ScreeningOutcomeSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
-  type ScreeningProviderStatus,
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
   SessionCloseRequestSchema,
@@ -81,7 +79,16 @@ import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
-import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
+import {
+  publicationProvenance,
+  type ScreenedPublication,
+  screeningPublicationStatement,
+} from "../screening/ingress";
+import {
+  type PublicationScreeningObservation,
+  screenPromotionWithWorkersAI,
+  type WorkersAiBinding,
+} from "../screening/workers-ai";
 import {
   duplicateClaimRefusal,
   normHash,
@@ -175,11 +182,7 @@ export interface PromotionScreeningInput {
   readonly falsifier: string | null;
 }
 
-export interface PromotionScreeningDecision {
-  readonly decision: ScreeningOutcome;
-  readonly coarse_category: ScreeningCoarseCategory;
-  readonly provider_status: ScreeningProviderStatus;
-}
+export type PromotionScreeningDecision = PublicationScreeningObservation;
 
 export type PromotionScreener = (
   input: PromotionScreeningInput,
@@ -492,13 +495,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
    * validated candidate bytes through here after the cheap
    * contract/authorization/duplicate/reference gates and before any Krater
    * id, replay row, event, projection, cursor, or outbox effect. The
-   * decision is bound to the exact candidate bytes by construction: nothing
-   * is persisted or reused, so a retry with changed content is screened as
+   * decision is bound to the exact candidate bytes by its attested digest.
+   * A retry with changed content is screened as
    * new content, while a sealed replay short-circuits in
    * replayResponseBeforeMutablePreconditions before this boundary is ever
-   * reached (no second provider charge, no second event). Returns null when
-   * the candidate is publishable; otherwise the hold/deny response the
-   * route must return instead of committing. Outcome mapping is identical
+   * reached (no second provider charge, no second event). Returns private
+   * provenance that the publication transaction must retain, or the hold/deny
+   * response the route must return instead of committing. Outcome mapping is identical
    * to the promote path this was extracted from: provider failure and
    * incoherent tuples hold fail-closed, reject denies with only a coarse
    * category, quarantine and allow-with-warning hold because their durable
@@ -508,7 +511,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   async function screenPublicIngress(
     env: Env,
     input: PromotionScreeningInput,
-  ): Promise<Response | null> {
+  ): Promise<Response | ScreenedPublication> {
+    // The adapter cannot mutate a candidate after the route has validated it.
+    input = Object.freeze({ ...input });
     let screening: PromotionScreeningDecision;
     try {
       const raw = await screenPromotion(input, env);
@@ -519,6 +524,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return promotionScreeningHold("provider-unavailable");
       }
       screening = {
+        ...raw,
         decision: decision.data,
         coarse_category: category.data,
         provider_status: providerStatus.data,
@@ -547,7 +553,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     ) {
       return promotionScreeningHold("provider-unavailable");
     }
-    return null;
+    try {
+      return await publicationProvenance(input, screening);
+    } catch {
+      return promotionScreeningHold("provider-unavailable");
+    }
   }
 
   type ReplayScope =
@@ -737,6 +747,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly kraterIdempotencyKey: string;
     readonly credentialId: string;
     readonly session: SessionRow;
+    readonly screening: ScreenedPublication;
     readonly responseFor: (settlement: {
       readonly sequence: number;
       readonly objectId: string;
@@ -767,6 +778,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
         return [
+          screeningPublicationStatement(
+            input.db,
+            input.screening,
+            settlement.eventId,
+            input.session.session_id,
+            input.requestDigest,
+          ),
           input.db
             .prepare(
               `INSERT INTO session_write_replays
@@ -1505,6 +1523,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
     let workshopHeadsTruncated = false;
+    const graveyardOmissions: { reason: string; detail: string }[] = [];
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
     candidates.push({
@@ -1764,19 +1783,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (profile === "graveyard") {
       const deadEnds = await db
         .prepare(
-          `SELECT workshop_id, title, body_md, workshop_seq, created_at FROM workshop_objects
+          `SELECT workshop_id, title, body_md, cas_hash, workshop_seq, created_at FROM workshop_objects
            WHERE problem_id = ? AND fellow_id = ? AND type = 'dead-end'
-           ORDER BY workshop_seq DESC LIMIT 10`,
+           ORDER BY workshop_seq DESC LIMIT 11`,
         )
         .bind(session.problem_id, auth.binding.fellowId)
         .all<{
           workshop_id: string;
           title: string;
           body_md: string;
+          cas_hash: string | null;
           workshop_seq: number;
           created_at: string;
         }>();
-      const deadEndRows = deadEnds.results ?? [];
+      const deadEndRows = (deadEnds.results ?? []).slice(0, 10);
+      if ((deadEnds.results ?? []).length > 10) {
+        graveyardOmissions.push({ reason: "candidate_limit", detail: "own-workshop-dead-ends" });
+      }
       if (deadEndRows.length === 0) {
         candidates.push({
           kind: "standing-context",
@@ -1784,19 +1807,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           scope: "system",
           tokens: 1,
           untrusted: false,
-          body: "No dead ends recorded on this problem yet. Negative results are first-class — record them as you find them.",
-          why_included: "state the dead-end baseline",
+          body: "You have no private dead-end notes on this problem.",
+          why_included: "state this Fellow's private dead-end baseline",
           stable_prefix: 500,
         });
       } else {
         for (const [index, deadEnd] of deadEndRows.entries()) {
+          const excerpt = deadEnd.cas_hash !== null;
+          if (excerpt)
+            graveyardOmissions.push({ reason: "content_excerpt", detail: deadEnd.workshop_id });
           candidates.push({
             kind: "dead-end",
             id: deadEnd.workshop_id,
             scope: "workshop",
             tokens: 1,
             untrusted: true,
-            body: `${deadEnd.title}: ${deadEnd.body_md}`,
+            body: `${deadEnd.title}: ${excerpt ? "[Excerpt: first 280 characters; full private body omitted.]\n" : ""}${deadEnd.body_md}`,
             why_included: "preserve a recorded dead end (negative results are first-class, P6)",
             stable_prefix: 500 + index,
             requires: ["workshop:read"],
@@ -1943,6 +1969,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
       omitted: [
         ...ledgerSection.omitted,
+        ...graveyardOmissions,
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
@@ -2395,14 +2422,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // ingress — this promote included — crosses the one centralized
     // screening decision boundary after the cheap gates and before any
     // Krater id, replay row, event, projection, cursor, or outbox effect.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: parsed.data.kind,
       statement: parsed.data.statement,
       falsifier: parsed.data.falsifier ?? null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
 
     try {
       const eventId = mintId("E");
@@ -2473,6 +2500,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               // NOT NULL constraint aborts the whole event/projection batch.
               // A same-caller-key loser cannot overwrite the winner's replay;
               // the ownership guard below then aborts its separate event.
+              screeningPublicationStatement(
+                db,
+                screening,
+                settlement.eventId,
+                session.session_id,
+                digest,
+              ),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -2964,14 +2998,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
     // bytes; it must earn its own screening decision and can never inherit
     // one from the previous version.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "revise",
       statement: JSON.stringify(parsed.data),
       falsifier: parsed.data.falsifier ?? null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
 
     try {
       const eventId = mintId("E");
@@ -3032,6 +3066,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
+              screeningPublicationStatement(
+                db,
+                screening,
+                settlement.eventId,
+                session.session_id,
+                digest,
+              ),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -3339,14 +3380,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): the obligation and closes_what are
     // author-controlled public text screened at the centralized boundary
     // before any commit effect.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "gaps",
       statement: JSON.stringify(parsed.data),
       falsifier: null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
 
     try {
       const eventId = mintId("E");
@@ -3379,6 +3420,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "gaps",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,
@@ -3593,14 +3635,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // P7/A9 (bead asimposiumorg-b9y9): the transition outcome and discharge
     // ref are screened at the centralized boundary before any commit effect.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "gap-close",
       statement: JSON.stringify(parsed.data),
       falsifier: null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
 
     try {
       const eventId = mintId("E");
@@ -3630,6 +3672,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "gaps",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,
@@ -3867,14 +3910,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): relation metadata (kind and pinned
     // endpoints) is in scope for the centralized screening boundary before
     // any commit effect.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "relation",
       statement: JSON.stringify(parsed.data),
       falsifier: null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
 
     try {
       const eventId = mintId("E");
@@ -3904,6 +3947,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "relations",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,
@@ -4154,14 +4198,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
     // author-controlled public text screened at the centralized boundary
     // before any commit effect.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "review",
       statement: JSON.stringify(parsed.data),
       falsifier: null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
     const reviewId = mintId("R");
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -4233,6 +4277,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "review",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,
@@ -4360,14 +4405,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // body are public text screened at the centralized boundary before any
     // commit effect; the falsifier is screened both as a component and as
     // the dedicated falsifier slot.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "hypotheses",
       statement: JSON.stringify(parsed.data),
       falsifier: parsed.data.falsifier,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
     const hypothesisId = mintId("H");
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -4437,6 +4482,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "hypotheses",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,
@@ -4651,14 +4697,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // P7/A9 (bead asimposiumorg-b9y9): the kill rationale is public text and
     // is screened at the centralized boundary before any commit effect.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "hypothesis-kill",
       statement: JSON.stringify(parsed.data),
       falsifier: null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypothesis-kill", claimToken);
@@ -4721,6 +4767,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "hypothesis-kill",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,
@@ -4963,14 +5010,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): the exact validated candidate bytes
     // are screened at the centralized boundary before any commit effect.
     // Stateless per-candidate decisions mean changed bytes are re-screened.
-    const screeningRefusal = await screenPublicIngress(c.env, {
+    const screening = await screenPublicIngress(c.env, {
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "evidence",
       statement: JSON.stringify(parsed.data),
       falsifier: null,
     });
-    if (screeningRefusal !== null) return screeningRefusal;
+    if (screening instanceof Response) return screening;
     const evidenceId = mintId("E");
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -5058,6 +5105,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         atomicLedgerReplayCompanion({
           db,
           scope: "evidence",
+          screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
           callerKey: key,

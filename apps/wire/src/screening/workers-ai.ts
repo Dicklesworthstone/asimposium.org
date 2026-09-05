@@ -132,6 +132,7 @@ export async function workersAIConfigurationDigest(): Promise<string> {
     model_version: WORKERS_AI_MODEL_VERSION,
     policy_version: WORKERS_AI_POLICY_VERSION,
     prompt_version: WORKERS_AI_PROMPT_VERSION,
+    system_prompt: SYSTEM_PROMPT,
   });
   const bytes = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(document)),
@@ -283,6 +284,10 @@ export interface WorkersAIPromotionInput {
   readonly falsifier: string | null;
 }
 
+export type PublicationScreeningObservation = ScreeningObservation & {
+  readonly evaluated_context_digest: string;
+};
+
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -303,21 +308,8 @@ export async function screenPromotionWithWorkersAI(
   ai: WorkersAiBinding | undefined,
   input: WorkersAIPromotionInput,
   timeoutMs = WORKERS_AI_PROMOTION_TIMEOUT_MS,
-): Promise<ScreeningObservation> {
-  const body = JSON.stringify({
-    kind: input.kind,
-    statement: input.statement,
-    falsifier: input.falsifier,
-  });
-  const bodyDigest = `sha256:${await sha256Hex(body)}`;
-  const contextDigest = `sha256:${await sha256Hex(
-    JSON.stringify({
-      scope: "promotion-direct-v1",
-      problem_id: input.problemId,
-      fellow_id: input.fellowId,
-      body_digest: bodyDigest,
-    }),
-  )}`;
+): Promise<PublicationScreeningObservation> {
+  const { body, bodyDigest, contextDigest } = await promotionScreeningBinding(input);
   const identity = {
     corpus_revision: "promotion-direct-v1",
     corpus_digest: bodyDigest,
@@ -341,7 +333,7 @@ export async function screenPromotionWithWorkersAI(
             return body;
           },
         });
-  return screenWithProvider(
+  const observation = await screenWithProvider(
     provider,
     {
       example_id: "promotion-direct",
@@ -351,4 +343,24 @@ export async function screenPromotionWithWorkersAI(
     },
     { timeout_ms: timeoutMs },
   );
+  return { ...observation, evaluated_context_digest: contextDigest };
+}
+
+/** One serialization for provider input and publication attestation checking. */
+export async function promotionScreeningBinding(input: WorkersAIPromotionInput) {
+  const body = JSON.stringify({
+    kind: input.kind,
+    statement: input.statement,
+    falsifier: input.falsifier,
+  });
+  const bodyDigest = `sha256:${await sha256Hex(body)}`;
+  const contextDigest = `sha256:${await sha256Hex(
+    JSON.stringify({
+      scope: "promotion-direct-v1",
+      problem_id: input.problemId,
+      fellow_id: input.fellowId,
+      body_digest: bodyDigest,
+    }),
+  )}`;
+  return { body, bodyDigest, contextDigest };
 }

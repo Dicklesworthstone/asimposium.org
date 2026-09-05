@@ -12,6 +12,8 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
+import { POLICY_CATEGORIES, type ScreeningObservation } from "../screening/types";
+import { promotionScreeningBinding } from "../screening/workers-ai";
 import type { ClaimProjection, KraterWriteInput } from "./krater";
 import {
   attemptEnvelopeTamper,
@@ -87,7 +89,20 @@ interface KraterHarnessEnv extends KraterOutboxEnv {
  * index.ts` is — and the fall-through is gated on the local-only capability.
  */
 const productionApp = createApp({
-  screenPromotion: async () => ({
+  screenPromotion: async (input) => ({
+    example_id: "s2-synthetic-publication",
+    evaluated_body_digest: (await promotionScreeningBinding(input)).bodyDigest,
+    evaluated_context_digest: (await promotionScreeningBinding(input)).contextDigest,
+    category_score_bands: Object.fromEntries(
+      POLICY_CATEGORIES.map((category) => [category, undefined]),
+    ) as ScreeningObservation["category_score_bands"],
+    model_version: "s2-synthetic-model:v1",
+    policy_version: "s2-synthetic-policy:v1",
+    configuration_digest: `sha256:${"c".repeat(64)}`,
+    decision_path: "provider",
+    status_code: "SCREENED",
+    latency_ms: 0,
+    retry_count: 0,
     decision: "pass",
     coarse_category: "benign-context",
     provider_status: "ok",

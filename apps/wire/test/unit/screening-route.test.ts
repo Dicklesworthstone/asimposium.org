@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import worker from "../../src/index";
 import {
   type ScreeningCorpusExample,
@@ -9,6 +10,9 @@ import {
   screenPromotionWithWorkersAI,
   WORKERS_AI_MAX_PROMOTION_BODY_BYTES,
   WORKERS_AI_MODEL,
+  WORKERS_AI_MODEL_VERSION,
+  WORKERS_AI_POLICY_VERSION,
+  WORKERS_AI_PROMPT_VERSION,
   WorkersAIScreeningProvider,
 } from "../../src/screening/workers-ai";
 import { boundEnv, executionContext } from "../support/bindings";
@@ -214,6 +218,46 @@ describe("production promotion screening adapter", () => {
     expect(userContent).toContain(PROMOTION_INPUT.falsifier);
     expect(userContent).not.toContain(PROMOTION_INPUT.problemId);
     expect(userContent).not.toContain(PROMOTION_INPUT.fellowId);
+    const body = JSON.stringify({
+      kind: PROMOTION_INPUT.kind,
+      statement: PROMOTION_INPUT.statement,
+      falsifier: PROMOTION_INPUT.falsifier,
+    });
+    const bodyDigest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    expect(result.evaluated_body_digest).toBe(bodyDigest);
+    expect(result.evaluated_context_digest).toBe(
+      `sha256:${createHash("sha256")
+        .update(
+          JSON.stringify({
+            scope: "promotion-direct-v1",
+            problem_id: PROMOTION_INPUT.problemId,
+            fellow_id: PROMOTION_INPUT.fellowId,
+            body_digest: bodyDigest,
+          }),
+        )
+        .digest("hex")}`,
+    );
+    const systemPrompt = input.messages?.find((message) => message.role === "system")?.content;
+    expect(systemPrompt).toBeDefined();
+    expect(result.configuration_digest).toBe(
+      `sha256:${createHash("sha256")
+        .update(
+          JSON.stringify({
+            model: WORKERS_AI_MODEL,
+            model_version: WORKERS_AI_MODEL_VERSION,
+            policy_version: WORKERS_AI_POLICY_VERSION,
+            prompt_version: WORKERS_AI_PROMPT_VERSION,
+            system_prompt: systemPrompt,
+          }),
+        )
+        .digest("hex")}`,
+    );
+    const otherActor = await screenPromotionWithWorkersAI(ai, {
+      ...PROMOTION_INPUT,
+      fellowId: "F-another",
+    });
+    expect(otherActor.evaluated_body_digest).toBe(result.evaluated_body_digest);
+    expect(otherActor.evaluated_context_digest).not.toBe(result.evaluated_context_digest);
   });
 
   test("missing, throwing, and malformed providers all fail closed", async () => {

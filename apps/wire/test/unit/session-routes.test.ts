@@ -12,6 +12,7 @@ import {
   PromoteResponseSchema,
   RelationFiledResponseSchema,
   ReviseResponseSchema,
+  ScreeningPublicationProvenanceSchema,
   SessionOpenResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
@@ -39,9 +40,11 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
+import type { PublicationScreeningObservation } from "../../src/screening/workers-ai.ts";
 import { readLedgerPackSection } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
+import { syntheticScreeningObservation } from "../support/screening.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -314,6 +317,143 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
 
 type LocalBinding = string | number | null;
 
+describe("atomic publication screening provenance", () => {
+  async function candidate(options: LocalD1Options = {}) {
+    const f = await fixture(options);
+    const opened = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "provenance-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}`;
+    const pushed = await f.call(`${path}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "provenance-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Private draft",
+        body_md: "PRIVATE-PROVENANCE-CANARY",
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+    const draft = WorkshopPushResponseSchema.parse(await pushed.json());
+    const promote = () =>
+      f.call(`${path}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "provenance-promote" },
+        body: JSON.stringify({
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: "A publication requires a matching screen.",
+          falsifier: "An unscreened public event.",
+          relates_to: [],
+        }),
+      });
+    return { ...f, promote };
+  }
+
+  async function expectNoPublication(db: Env["DB"]) {
+    for (const table of [
+      "screening_publications",
+      "events",
+      "outbox",
+      "claims",
+      "claim_versions",
+      "idempotency",
+    ]) {
+      expect(await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>()).toEqual(
+        { n: 0 },
+      );
+    }
+    expect(
+      await db
+        .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+        .first<{ cursor: number }>(),
+    ).toEqual({ cursor: 0 });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'promote'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 0 });
+  }
+
+  test("successful publication retains immutable private evidence and replay adds nothing", async () => {
+    const f = await candidate({
+      screeningAttestation: (observation) => ({
+        ...observation,
+        private_detail: "PRIVATE-ADAPTER-DETAIL",
+      }),
+    });
+    const response = await f.promote();
+    expect(response.status).toBe(201);
+    const responseText = await response.text();
+    expect(responseText).not.toContain("model_version");
+    const rows = await f.db
+      .prepare("SELECT * FROM screening_publications")
+      .all<{ event_id: string; request_digest: string; provenance_json: string }>();
+    expect(rows.results).toHaveLength(1);
+    const row = rows.results[0];
+    expect(row).toBeDefined();
+    if (!row) throw new Error("Missing publication evidence");
+    const evidence = ScreeningPublicationProvenanceSchema.parse(JSON.parse(row.provenance_json));
+    expect(evidence.model_version).toBe("synthetic-local-model:v1");
+    expect(evidence.scope).toBe("candidate-and-actor-only");
+    expect(evidence.principal).toBe("platform:symposiarch");
+    expect(row.request_digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(row.provenance_json).not.toContain("PRIVATE-");
+    expect(row.provenance_json).not.toContain("A publication requires");
+    const replay = await f.promote();
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(responseText);
+    expect((await f.db.prepare("SELECT * FROM screening_publications").all()).results).toEqual(
+      rows.results,
+    );
+    await expect(
+      f.db
+        .prepare("UPDATE screening_publications SET provenance_json = '{}' WHERE event_id = ?")
+        .bind(row.event_id)
+        .run(),
+    ).rejects.toThrow("SCREENING_PUBLICATION_IMMUTABLE");
+  });
+
+  test("mismatched candidate or actor context and malformed provenance hold before publication", async () => {
+    for (const patch of [
+      { evaluated_body_digest: `sha256:${"0".repeat(64)}` },
+      { evaluated_context_digest: `sha256:${"0".repeat(64)}` },
+      { model_version: "invalid\nprivate detail" },
+      { configuration_digest: "missing" },
+      { latency_ms: -1 },
+    ]) {
+      const f = await candidate({
+        screeningAttestation: (observation) => ({ ...observation, ...patch }),
+      });
+      const held = await f.promote();
+      expect(held.status).toBe(202);
+      expect(await held.json()).toEqual({
+        code: "SCREENING_HOLD",
+        coarse_category: "provider-unavailable",
+        appeal: "SPONSOR_APPEAL_AVAILABLE",
+      });
+      await expectNoPublication(f.db);
+    }
+  });
+
+  test("provenance persistence failure rolls back the event, cursor and replay", async () => {
+    const f = await candidate();
+    await f.db
+      .prepare(
+        "CREATE TEMP TRIGGER refuse_publication_evidence BEFORE INSERT ON screening_publications BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_EVIDENCE_WRITE_FAILED'); END",
+      )
+      .run();
+    const response = await f.promote();
+    expect(response.status).toBe(500);
+    await expectNoPublication(f.db);
+  });
+});
+
 interface LocalRead {
   readonly kind: "run" | "first" | "all";
   readonly sql: string;
@@ -321,6 +461,9 @@ interface LocalRead {
 }
 
 interface LocalD1Options {
+  readonly screeningAttestation?: (
+    observation: PublicationScreeningObservation,
+  ) => PublicationScreeningObservation;
   readonly beforeRead?: (read: LocalRead) => Promise<void>;
   readonly afterRead?: (read: LocalRead) => Promise<void>;
   readonly afterFirstRead?: (query: string) => Promise<void>;
@@ -687,13 +830,17 @@ async function fixture(options: LocalD1Options = {}) {
   const sessionRouter = createSessionRouter({
     service,
     replayProtector,
-    screenPromotion:
-      options.screenPromotion ??
-      (async () => ({
-        decision: "pass",
-        coarse_category: "benign-context",
-        provider_status: "ok",
-      })),
+    screenPromotion: async (input) => {
+      const decision = options.screenPromotion
+        ? await options.screenPromotion(input)
+        : {
+            decision: "pass" as const,
+            coarse_category: "benign-context" as const,
+            provider_status: "ok" as const,
+          };
+      const observation = await syntheticScreeningObservation(input, decision);
+      return options.screeningAttestation?.(observation) ?? observation;
+    },
   });
   const db = migratedDb(options);
   const sponsor = { type: "sponsor", sponsorId: "usr_sessionsponsor1" } as const;
@@ -4585,6 +4732,31 @@ describe("session protocol routes", () => {
     expect(pack.status).toBe(200);
     const body = await pack.text();
     expect(body).toContain("The greedy approach fails");
+    expect(body).not.toContain("content_excerpt");
+    for (let i = 0; i < 10; i += 1) {
+      const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `graveyard-cap-${i}` },
+        body: JSON.stringify({
+          type: "dead-end",
+          title: `Later route ${i}`,
+          body_md: "A checked obstruction.",
+          relates_to: [],
+        }),
+      });
+      expect(pushed.status).toBe(201);
+    }
+    const bounded = await call(
+      `/v1/sessions/${session.session_id}/pack?profile=graveyard&max_tokens=8000`,
+    );
+    expect(bounded.status).toBe(200);
+    const boundedPack = PackResponseSchema.parse(await bounded.json());
+    expect(boundedPack.items.filter((item) => item.kind === "dead-end")).toHaveLength(10);
+    expect(boundedPack.omitted).toContainEqual({
+      reason: "candidate_limit",
+      detail: "own-workshop-dead-ends",
+    });
+    expect(JSON.stringify(boundedPack)).not.toContain("The greedy approach fails");
   });
 
   test("the digest pack surfaces projection staleness honestly (W2.6)", async () => {
