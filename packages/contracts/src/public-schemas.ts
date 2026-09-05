@@ -8,6 +8,7 @@
 
 /// <reference path="./assets.d.ts" />
 
+import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "text" };
 import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
 import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schema.json" with {
   type: "text",
@@ -23,6 +24,7 @@ import screeningSchemaModule from "../generated/screening.schema.json" with { ty
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
+  "discovery",
   "enrollment",
   "enrollment-capsule",
   "internal-health",
@@ -75,6 +77,12 @@ function exactTextModule(value: unknown, source: string): string {
 }
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
+  Object.freeze({
+    id: "discovery",
+    served_at: "/schemas/discovery.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(discoverySchemaModule, "generated/discovery.schema.json"),
+  }),
   Object.freeze({
     id: "enrollment",
     served_at: "/schemas/enrollment.v1.json",

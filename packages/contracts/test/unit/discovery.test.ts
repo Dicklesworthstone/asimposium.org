@@ -5,6 +5,7 @@ import {
   AreasIndexResponseSchema,
   FellowCalibrationRecordSchema,
   FellowCardResponseSchema,
+  FellowReviewItemSchema,
   MaterialEventTypeSchema,
   NowStripResponseSchema,
   SCIENTIFIC_NEED_TYPES,
@@ -13,6 +14,13 @@ import {
 } from "../../src/index.ts";
 
 describe("W8.2 Discovery & Fellow card contracts", () => {
+  test("Fellow metadata preserves the enrollment contract's full declared-runtime range", () => {
+    for (const field of ["model", "harness"] as const) {
+      expect(FellowCardResponseSchema.shape[field].safeParse("x".repeat(160)).success).toBe(true);
+      expect(FellowCardResponseSchema.shape[field].safeParse("x".repeat(161)).success).toBe(false);
+      expect(FellowCardResponseSchema.shape[field].safeParse("\0").success).toBe(false);
+    }
+  });
   describe("Seed areas taxonomy (Appendix C)", () => {
     test("defines exactly 16 seed areas matching Fable Appendix C", () => {
       expect(SEED_AREAS).toHaveLength(16);
@@ -73,6 +81,26 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
   });
 
   describe("Areas responses", () => {
+    test("unknown area assignments remain distinct from an established empty area", () => {
+      const area = { ...SEED_AREAS[0], is_seed: true, problem_count: null, active_needs: [] };
+      const value = {
+        areas: [area],
+        total_areas: 1,
+        total_problems: 0,
+        omitted: ["Area assignments unavailable"],
+      };
+      expect(AreasIndexResponseSchema.parse(value).areas[0]?.problem_count).toBeNull();
+      expect(
+        AreasIndexResponseSchema.safeParse({ ...value, areas: [{ ...area, problem_count: -1 }] })
+          .success,
+      ).toBe(false);
+      expect(
+        AreasIndexResponseSchema.safeParse({
+          ...value,
+          areas: [{ ...area, problem_count: "unknown" }],
+        }).success,
+      ).toBe(false);
+    });
     test("validates areas index response with omitted declaration", () => {
       const validIndex = {
         areas: [
@@ -166,6 +194,46 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
   });
 
   describe("Fellow Card & Calibration (Rule A3/A4/A10, Fable §9.5)", () => {
+    test("the read accepts the full writer basis limit and rejects oversized text", () => {
+      const review = {
+        review_id: "R-1",
+        problem_id: "P-4DSP",
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "inform",
+        tier: "T2",
+        basis: "x".repeat(500),
+        created_at: "2026-09-05T00:00:00.000Z",
+        sponsor_at_event: "usr_test",
+      };
+      expect(FellowReviewItemSchema.safeParse(review).success).toBe(true);
+      expect(FellowReviewItemSchema.safeParse({ ...review, basis: "x".repeat(501) }).success).toBe(
+        false,
+      );
+    });
+    test("uncomputed outcomes are null, while malformed or negative outcomes remain invalid", () => {
+      const record = {
+        conjectures_promoted: 1,
+        theorems_attempted: 0,
+        refutations_self_corrected: null,
+        refutations_externally_refuted: null,
+        reviews_verified_survival: null,
+        dead_ends_recorded: 0,
+      };
+      expect(FellowCalibrationRecordSchema.parse(record)).toEqual(record);
+      for (const value of [-1, "unknown", 0.5]) {
+        expect(
+          FellowCalibrationRecordSchema.safeParse({ ...record, refutations_self_corrected: value })
+            .success,
+        ).toBe(false);
+        expect(
+          FellowCalibrationRecordSchema.safeParse({
+            ...record,
+            refutations_externally_refuted: value,
+          }).success,
+        ).toBe(false);
+      }
+    });
     test("validates FellowCardResponse with full provenance and calibration", () => {
       const validFellow = {
         fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",

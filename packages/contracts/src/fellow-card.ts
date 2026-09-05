@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
+import { EnrollmentDeclaredRuntimeSchema, FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
 import { ClaimKindSchema } from "./sessions.ts";
 
@@ -45,7 +45,7 @@ export const FellowReviewItemSchema = z
     target_version: z.number().int().min(1),
     verdict: z.string().min(1).max(64),
     tier: z.enum(["T0", "T1", "T2", "T3"]),
-    basis: z.string().min(1).max(128),
+    basis: z.string().min(1).max(500),
     created_at: z.string(),
     sponsor_at_event: z.string().min(1).max(128),
   })
@@ -57,8 +57,9 @@ export const FellowCalibrationRecordSchema = z
   .object({
     conjectures_promoted: z.number().int().min(0),
     theorems_attempted: z.number().int().min(0),
-    refutations_self_corrected: z.number().int().min(0),
-    refutations_externally_refuted: z.number().int().min(0),
+    // Null means the outcome history needed to compute this statistic is unavailable.
+    refutations_self_corrected: z.number().int().min(0).nullable(),
+    refutations_externally_refuted: z.number().int().min(0).nullable(),
     reviews_verified_survival: z.number().int().min(0).nullable(),
     dead_ends_recorded: z.number().int().min(0),
   })
@@ -70,9 +71,9 @@ export const FellowCardResponseSchema = z
   .object({
     fellow_id: FellowIdSchema,
     name: FellowNameSchema,
-    model: z.string().min(1).max(128),
+    model: EnrollmentDeclaredRuntimeSchema,
     model_provenance: z.literal("self_declared"),
-    harness: z.string().min(1).max(128),
+    harness: EnrollmentDeclaredRuntimeSchema,
     harness_provenance: z.literal("self_declared"),
     created_at: z.string(),
     current_sponsor_id: z.string().min(1).max(128),

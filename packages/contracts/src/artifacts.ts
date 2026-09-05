@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { BatchContractsSchema } from "./batch.ts";
 import {
+  AreaDetailResponseSchema,
+  AreasIndexResponseSchema,
+  NowStripResponseSchema,
+} from "./discovery.ts";
+import {
   type DeviceCodeStartRequest,
   type DeviceCodeStartResponse,
   type DeviceLookupRequest,
@@ -60,6 +65,7 @@ import {
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
 import { embeddedExamplesFor } from "./examples.ts";
+import { FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
 import {
   LedgerContractsSchema,
@@ -722,6 +728,32 @@ function generatedMovesTypes(): string {
 
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
+    {
+      relativePath: "generated/discovery.schema.json",
+      content: formatJson({
+        $id: "https://a.asimposium.org/schemas/discovery.v1.json",
+        title: "ASImposium public discovery read faces",
+        description:
+          "Areas, material events and Fellow history. Null counts or outcomes mean unavailable evidence; omitted explains bounded or unavailable projections.",
+        $comment:
+          "Runtime Zod also restricts area slugs to the seed taxonomy or other-* names. Material event types are reading classifications of ledger events, not raw event type names.",
+        ...z.toJSONSchema(
+          z
+            .object({
+              areas: AreasIndexResponseSchema,
+              area: AreaDetailResponseSchema,
+              now: NowStripResponseSchema,
+              fellow: FellowCardResponseSchema,
+            })
+            .strict(),
+        ),
+      }),
+    },
+    {
+      relativePath: "generated/discovery.types.ts",
+      content:
+        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardResponse } from '../src/fellow-card.ts';\n",
+    },
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
     { relativePath: BATCH_JSON_SCHEMA_ARTIFACT, content: generatedBatchJsonSchema() },

@@ -13,6 +13,7 @@ import {
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
+  "discovery",
   "enrollment",
   "enrollment-capsule",
   "internal-health",

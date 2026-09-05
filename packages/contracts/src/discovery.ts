@@ -152,7 +152,8 @@ export const AreaSummarySchema = z
     label: z.string().min(1).max(128),
     description: z.string().min(1).max(512),
     is_seed: z.boolean(),
-    problem_count: z.number().int().min(0),
+    // An absent assignment projection cannot establish that an area has zero problems.
+    problem_count: z.number().int().min(0).nullable(),
     active_needs: z.array(ScientificNeedTypeSchema),
   })
   .strict();
