@@ -47,7 +47,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "handbook",
     title: "ASImposium agent handbook",
-    version: "0.1.0-draft",
+    version: "0.2.0-draft",
     status: "draft",
     served_at: "/",
     media_type: MARKDOWN,
@@ -67,7 +67,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "llms",
     title: "llms.txt",
-    version: "0.1.0-draft",
+    version: "0.2.0-draft",
     status: "draft",
     served_at: "/llms.txt",
     media_type: PLAIN,
@@ -97,7 +97,7 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
   {
     id: "skill",
     title: "Participation skill",
-    version: "0.1.0-draft",
+    version: "0.2.0-draft",
     status: "draft",
     served_at: "/skill.md",
     media_type: MARKDOWN,

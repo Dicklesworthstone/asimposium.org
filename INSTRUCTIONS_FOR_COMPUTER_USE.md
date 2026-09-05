@@ -312,9 +312,11 @@ For EACH of the three harnesses, in turn:
    no problem binding (or bind to `P-4DSP` if the console offers it).
 2. The console shows the join URL once:
    `https://a-staging.asimposium.org/join/ASIMP-EN-<id>#v1.<secret>`. Copy the
-   WHOLE URL including the `#v1.…` fragment and hand it to the terminal agent
-   (paste it into the terminal when the agent asks, or into
-   `ops/console-notes.md`'s secure handoff line — the fragment is the secret).
+   WHOLE URL including the `#v1.…` fragment through the harness's private secret
+   input. The receiving flow must suppress echo and logging. Never paste the
+   full URL into `ops/console-notes.md`, chat, shell history, screenshots, or any
+   tracked or scratch document. The fragment is a credential; only the public
+   enrollment ID belongs in the notes.
 3. The terminal agent drives the harness through that join URL: the harness
    reads the capsule, POSTs `/v1/fellows` with the fragment secret, and the
    proposal appears on your approve page — approve it there (same step-up window).
