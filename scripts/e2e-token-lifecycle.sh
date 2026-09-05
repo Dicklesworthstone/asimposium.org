@@ -36,7 +36,7 @@ readonly WRANGLER="${ROOT}/apps/wire/node_modules/wrangler-s1-local/bin/wrangler
 readonly CONFIG="${ROOT}/apps/wire/test/integration/wrangler.token-lifecycle.toml"
 readonly REPRODUCE="bash scripts/e2e-token-lifecycle.sh"
 readonly TOTAL_DEADLINE_SECONDS=150
-readonly READY_DEADLINE_SECONDS=60
+readonly READY_DEADLINE_SECONDS=35
 readonly CLEANUP_GRACE_SECONDS=15
 readonly SCRIPT_DEADLINE=$((SECONDS + TOTAL_DEADLINE_SECONDS))
 readonly HTTP_TIMEOUT_MS=8000
@@ -931,22 +931,35 @@ state_owned_processes() {
 
 state_fds_are_closed() {
   [[ -n "${STATE_DIR}" ]] || return 0
-  local status stderr_bytes stderr_path stdout_bytes stdout_path
+  local status stderr_bytes stderr_path stdout_bytes stdout_path known_warning=0
   stdout_path="${PROBE_DIR}/state-fd.stdout"
   stderr_path="${PROBE_DIR}/state-fd.stderr"
   prepare_probe_files "${stdout_path}" "${stderr_path}" || return 2
-  if "${LSOF}" -w +D "${STATE_DIR}" >"${stdout_path}" 2>"${stderr_path}"; then
+  if "${LSOF}" +w +D "${STATE_DIR}" >"${stdout_path}" 2>"${stderr_path}"; then
     status=0
   else
     status=$?
   fi
   stdout_bytes="$(file_byte_size "${stdout_path}")" || return 2
   stderr_bytes="$(file_byte_size "${stderr_path}")" || return 2
+  # Keep the raw warning file. Linux lsof can report its inaccessible kernel
+  # tracing mount while scanning this unrelated retained temporary directory.
+  # Accept only that exact paired diagnostic on a host with the named mount;
+  # every other warning still invalidates the scan, including whitespace drift.
+  if (( stderr_bytes > 0 )) && [[ -r /proc/self/mountinfo ]] && \
+    grep -q ' /sys/kernel/debug/tracing .* - tracefs ' /proc/self/mountinfo && \
+    cmp -s "${stderr_path}" <(printf '%s\n' \
+      "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing" \
+      '      Output information may be incomplete.'); then
+    cat "${stderr_path}" >&2
+    known_warning=1
+  fi
   if (( status == 0 )); then
-    (( stdout_bytes > 0 && stderr_bytes == 0 )) || return 2
+    (( stdout_bytes > 0 && (stderr_bytes == 0 || known_warning == 1) )) || return 2
     return 1
   fi
-  [[ "${status}" == "1" && "${stdout_bytes}" == "0" && "${stderr_bytes}" == "0" ]] || return 2
+  [[ "${status}" == "1" && "${stdout_bytes}" == "0" ]] && \
+    (( stderr_bytes == 0 || known_warning == 1 )) || return 2
   return 0
 }
 

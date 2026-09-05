@@ -4,6 +4,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -130,11 +131,11 @@ const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
 /**
  * The raw bundle is evidence, not a diagnostic. A one-command measurement of
- * the exact production/counterfactual build on 2026-08-20 observed maxima of
- * 1,186,765 raw canonical-evidence bytes and 1,291,325 nested-result bytes.
+ * the exact production/counterfactual build on 2026-09-05 observed a maximum
+ * of 1,233,343 raw canonical-evidence bytes; the old 1.2 MB limit truncated it.
  *
  * Keep the ordinary owned-command diagnostics at 1 MB. This narrowly gives
- * the isolated graph proof 13,235 bytes above its measured raw maximum. Its
+ * the isolated graph proof 116,657 bytes above its measured raw maximum. Its
  * canonical fresh result remains below the existing 3 MB pinned-result cap:
  * strict canonical JSON cannot contain a literal control byte, and nesting it
  * in the result JSON expands only quote/backslash bytes, at most twofold. The
@@ -5285,7 +5286,20 @@ test(
     const outputLines = stdout.split("\n").filter((line) => line.length > 0);
     const nonRecordLines = outputLines.filter((line) => !line.startsWith("{"));
     expect(nonRecordLines).toHaveLength(0);
-    const diagnosticLines = stderr.split("\n").filter((line) => line.length > 0);
+    // Keep every diagnostic visible. Only the complete warning from the
+    // verified Linux tracing mount is separate from the staging blocker;
+    // partial warnings, other mounts and extra diagnostics still fail here.
+    if (stderr.length > 0) process.stderr.write(stderr);
+    const tracefsWarning =
+      "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n" +
+      "      Output information may be incomplete.\n";
+    const knownTracefsMount =
+      existsSync("/proc/self/mountinfo") &&
+      / \/sys\/kernel\/debug\/tracing .* - tracefs /u.test(
+        readFileSync("/proc/self/mountinfo", "utf8"),
+      );
+    const otherDiagnostics = knownTracefsMount ? stderr.replaceAll(tracefsWarning, "") : stderr;
+    const diagnosticLines = otherDiagnostics.split("\n").filter((line) => line.length > 0);
     expect(diagnosticLines).toHaveLength(1);
     expect(diagnosticLines[0]).toContain("BLOCKED s3-staging-paired-principal");
     const records = outputLines

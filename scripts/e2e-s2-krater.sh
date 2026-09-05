@@ -3132,8 +3132,24 @@ lsof_scanner_is_healthy() {
   [[ "${output}" == *"p$$"* ]]
 }
 
+# Linux lsof reports this inaccessible kernel tracing mount while inspecting
+# unrelated sockets/regular files. Recognize only its exact paired diagnostic
+# on a host with that mount, and retain it on stderr. A generic incomplete-scan
+# warning, another mount, or any extra diagnostic remains a scan failure.
 s2_filter_lsof_ambient_warnings() {
-  printf '%s\n' "$1" | grep -v 'can.t stat.*tracefs' | grep -v 'Output information may be incomplete' | sed '/^$/d'
+  local output="$1"
+  local warning=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.'
+  if [[ -r /proc/self/mountinfo ]] && \
+    grep -q ' /sys/kernel/debug/tracing .* - tracefs ' /proc/self/mountinfo; then
+    case "${output}" in
+      "${warning}") printf '%s\n' "${warning}" >&2; return 0 ;;
+      "${warning}"$'\n'*)
+        printf '%s\n' "${warning}" >&2
+        output="${output#"${warning}"$'\n'}"
+        ;;
+    esac
+  fi
+  printf '%s' "${output}"
 }
 
 lsof_scan_has_no_matches() {
@@ -7711,16 +7727,22 @@ run_s2_shell_regression_test() {
         [[ "${arg}" == "+w" ]] && warnings_enabled=1
       done
       if [[ ${warnings_enabled} -eq 1 ]]; then
-        printf '%s\n' 'planted lsof traversal warning' >&2
+        printf '%s\n' "${lsof_warning}" >&2
       fi
       return 1
     }
-    if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-warning; then
-      return 1
-    fi
-    [[ "${S2_SURVIVOR_ASSERTION_FAILURE}" == "state-fd-scan" && \
-      "${S2_LSOF_LAST_STATUS}" == "1" && \
-      "${S2_LSOF_LAST_OUTPUT}" == *'planted lsof traversal warning'* ]] || return 1
+    for lsof_warning in \
+      'planted lsof traversal warning' \
+      'lsof: WARNING: Output information may be incomplete.' \
+      $'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/tracing\n      Output information may be incomplete.'; do
+      if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-warning; then
+        emit '{"suite":"s2-krater-shell","status":"fail","code":"S2_LSOF_WARNING_DISCARDED"}'
+        return 1
+      fi
+      [[ "${S2_SURVIVOR_ASSERTION_FAILURE}" == "state-fd-scan" && \
+        "${S2_LSOF_LAST_STATUS}" == "1" && \
+        "${S2_LSOF_LAST_OUTPUT}" == "${lsof_warning}" ]] || return 1
+    done
     lsof_transient_marker="${S2_STATE_DIR}/planted-lsof-transient-match-$(random_hex 8)"
     lsof_observer_trace="${lsof_transient_marker}.trace"
     [[ ! -e "${lsof_transient_marker}" && ! -L "${lsof_transient_marker}" && \

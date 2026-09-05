@@ -926,7 +926,21 @@ test("token lifecycle bounded live local Workerd+D1 proof works when Bun shadows
   expect(result.exitCode).toBe(0);
   expect(result.reaped).toBe(true);
   expect(result.groupEmpty).toBe(true);
-  expect(result.stderr).toBe("");
+  // The scanner now retains its known Linux mount warning instead of asking
+  // lsof to silence all warnings. No other stderr or partial warning is valid.
+  const allowedDiagnostics = [""];
+  if (
+    existsSync("/proc/self/mountinfo") &&
+    / \/sys\/kernel\/debug\/tracing .* - tracefs /u.test(
+      readFileSync("/proc/self/mountinfo", "utf8"),
+    )
+  ) {
+    allowedDiagnostics.push(
+      "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n" +
+        "      Output information may be incomplete.\n",
+    );
+  }
+  expect(allowedDiagnostics).toContain(result.stderr);
   expect(result.stdout).toContain(
     '"assertion":"concurrent_http_same_key_revoke_exact_replay","deterministic_barrier":true',
   );

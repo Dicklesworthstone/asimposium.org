@@ -936,14 +936,29 @@ group_members() {
   return 0
 }
 
+# Preserve the exact, unrelated Linux tracefs diagnostic on stderr. Only a
+# verified kernel mount and its complete two-line warning qualify; generic or
+# additional incomplete-scan diagnostics must still invalidate the observation.
 s3_filter_lsof_ambient_warnings() {
-  printf '%s\n' "$1" | grep -v 'can.t stat.*tracefs' | grep -v 'Output information may be incomplete' | sed '/^$/d'
+  local output="$1"
+  local warning=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.'
+  if [[ -r /proc/self/mountinfo ]] && \
+    grep -q ' /sys/kernel/debug/tracing .* - tracefs ' /proc/self/mountinfo; then
+    case "${output}" in
+      "${warning}") printf '%s\n' "${warning}" >&2; return 0 ;;
+      "${warning}"$'\n'*)
+        printf '%s\n' "${warning}" >&2
+        output="${output#"${warning}"$'\n'}"
+        ;;
+    esac
+  fi
+  printf '%s' "${output}"
 }
 
 listener_pids() {
   local port="$1" pids pid status
   command -v lsof >/dev/null 2>&1 || return 2
-  pids="$(lsof -nP -w -a -t "-iTCP@127.0.0.1:${port}" -sTCP:LISTEN 2>&1)"
+  pids="$(lsof -nP -a -t +w "-iTCP@127.0.0.1:${port}" -sTCP:LISTEN 2>&1)"
   status=$?
   pids="$(s3_filter_lsof_ambient_warnings "${pids}")"
   if (( status > 1 )) || { (( status == 1 )) && [[ -n "${pids}" ]]; }; then return 2; fi
@@ -976,7 +991,7 @@ owned_listener_ports_in_group() {
   [[ -n "${members}" ]] || return 1
   while IFS= read -r pid; do
     [[ "${pid}" =~ ^[0-9]+$ ]] || return 2
-    rows="$(lsof -nP -w -a -p "${pid}" -iTCP@127.0.0.1 -sTCP:LISTEN -Fpn 2>&1)"
+    rows="$(lsof -nP +w -a -p "${pid}" -iTCP@127.0.0.1 -sTCP:LISTEN -Fpn 2>&1)"
     status=$?
     rows="$(s3_filter_lsof_ambient_warnings "${rows}")"
     if (( status == 1 )) && [[ -z "${rows}" ]]; then continue; fi
@@ -2372,6 +2387,15 @@ run_state_holder_recheck_self_test() {
   if state_holder_pids >/dev/null; then return 1; else status=$?; fi
   (( status == 2 )) || return 1
   TEST_STATE_HOLDER_BROAD_ERROR_PLANT=""
+  # Exercise the ordinary command-result parser, beyond the explicit plants
+  # above. An incomplete scan with no numeric rows is not an empty scan.
+  lsof() {
+    printf '%s\n' 'lsof: WARNING: Output information may be incomplete.' >&2
+    return 1
+  }
+  holders="$(state_holder_pids)"; status=$?
+  unset -f lsof
+  (( status == 2 )) && [[ -z "${holders}" ]] || return 1
   emit '{"tool":"bash+lsof","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"recursive_lsof_warning_and_malformed_output_fail_closed","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
 }
 

@@ -2672,12 +2672,23 @@ describe("registered S2 shell and lifecycle regressions", () => {
         },
         () => {
           const survivors = liveProcessesContainingMarker(marker);
-          const holders = runCaptured("lsof", ["-nP", "-t", "-w", "--", heldFile], {}, 5_000);
-          const rawScannerStderr = (holders.stderr.split(" retained_logs=", 1)[0] ?? "")
-            .replace(/^lsof: WARNING: can't stat\(\) tracefs[^\n]*\n?/gm, "")
-            .replace(/^lsof: WARNING: Output information may be incomplete\.\n?/gm, "")
-            .trim();
-          if (holders.exitCode !== 1 || holders.stdout !== "" || rawScannerStderr !== "") {
+          const holders = runCaptured("lsof", ["-nP", "-t", "+w", "--", heldFile], {}, 5_000);
+          const rawScannerStderr = holders.stderr.split(" retained_logs=", 1)[0] ?? "";
+          const knownTracefsWarning =
+            rawScannerStderr ===
+              "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n" +
+                "      Output information may be incomplete.\n" &&
+            existsSync("/proc/self/mountinfo") &&
+            / \/sys\/kernel\/debug\/tracing .* - tracefs /u.test(
+              readFileSync("/proc/self/mountinfo", "utf8"),
+            );
+          // Keep the unmodified scanner record and surface the recognized warning.
+          if (knownTracefsWarning) process.stderr.write(rawScannerStderr);
+          if (
+            holders.exitCode !== 1 ||
+            holders.stdout !== "" ||
+            (rawScannerStderr !== "" && !knownTracefsWarning)
+          ) {
             throw new Error(
               `concurrent timeout retained-state scan failed: status=${holders.exitCode}; ` +
                 `stdout_bytes=${Buffer.byteLength(holders.stdout)}; ` +
