@@ -934,7 +934,7 @@ state_fds_are_closed() {
   stdout_path="${PROBE_DIR}/state-fd.stdout"
   stderr_path="${PROBE_DIR}/state-fd.stderr"
   prepare_probe_files "${stdout_path}" "${stderr_path}" || return 2
-  if "${LSOF}" +D "${STATE_DIR}" >"${stdout_path}" 2>"${stderr_path}"; then
+  if "${LSOF}" -w +D "${STATE_DIR}" >"${stdout_path}" 2>"${stderr_path}"; then
     status=0
   else
     status=$?

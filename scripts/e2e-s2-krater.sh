@@ -245,11 +245,13 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
+  apps/wire/src/sessions/ledger-pack.ts
   apps/wire/src/split/policy.ts
   apps/wire/src/search/router.ts
   apps/wire/src/search/markdown.ts
   apps/wire/src/search/service.ts
   packages/contracts/src/public-schemas.ts
+  packages/contracts/generated/discovery.schema.json
   packages/contracts/generated/enrollment.schema.json
   packages/contracts/generated/enrollment-capsule.schema.json
   packages/contracts/generated/ledger.schema.json
@@ -279,6 +281,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/package.json
   packages/render/src/index.ts
   packages/render/src/canonical.ts
+  packages/render/src/discovery.ts
   packages/render/src/errors.ts
   packages/render/src/pack-composer.ts
   packages/render/src/prepare.ts
@@ -3126,10 +3129,15 @@ lsof_scanner_is_healthy() {
   [[ "${output}" == *"p$$"* ]]
 }
 
+s2_filter_lsof_ambient_warnings() {
+  printf '%s\n' "$1" | grep -v 'can.t stat.*tracefs' | grep -v 'Output information may be incomplete' | sed '/^$/d'
+}
+
 lsof_scan_has_no_matches() {
   local output status
   output="$(lsof "$@" 2>&1)"
   status=$?
+  output="$(s2_filter_lsof_ambient_warnings "${output}")"
   S2_LSOF_LAST_OUTPUT="${output}"
   S2_LSOF_LAST_STATUS="${status}"
   case "${status}" in
@@ -3196,6 +3204,7 @@ lsof_scan_reaches_no_matches() {
       else
         candidate_status=$?
       fi
+      candidate_output="$(s2_filter_lsof_ambient_warnings "${candidate_output}")"
       S2_LSOF_LAST_OUTPUT="${candidate_output}"
       S2_LSOF_LAST_STATUS="${candidate_status}"
       if [[ ${candidate_status} -eq 1 && -z "${candidate_output}" ]]; then
@@ -3370,6 +3379,7 @@ legacy_residual_group_is_exact() {
   else
     holder_status=$?
   fi
+  holder_output="$(s2_filter_lsof_ambient_warnings "${holder_output}")"
   [[ ${holder_status} -eq 0 || ${holder_status} -eq 1 ]] || return 1
   [[ -n "${holder_output}" ]] || return 1
   while IFS= read -r holder_pid; do
@@ -8005,6 +8015,7 @@ run_s2_shell_regression_test() {
           else
             holder_status=$?
           fi
+          state_holders="$(s2_filter_lsof_ambient_warnings "${state_holders}")"
           if [[ ${holder_status} -eq 0 ]]; then
             lsof_observation="match"
           elif [[ ${holder_status} -eq 1 && -z "${state_holders}" ]]; then

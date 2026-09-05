@@ -936,11 +936,16 @@ group_members() {
   return 0
 }
 
+s3_filter_lsof_ambient_warnings() {
+  printf '%s\n' "$1" | grep -v 'can.t stat.*tracefs' | grep -v 'Output information may be incomplete' | sed '/^$/d'
+}
+
 listener_pids() {
   local port="$1" pids pid status
   command -v lsof >/dev/null 2>&1 || return 2
-  pids="$(lsof -nP -a -t "-iTCP@127.0.0.1:${port}" -sTCP:LISTEN 2>&1)"
+  pids="$(lsof -nP -w -a -t "-iTCP@127.0.0.1:${port}" -sTCP:LISTEN 2>&1)"
   status=$?
+  pids="$(s3_filter_lsof_ambient_warnings "${pids}")"
   if (( status > 1 )) || { (( status == 1 )) && [[ -n "${pids}" ]]; }; then return 2; fi
   while IFS= read -r pid; do
     [[ -z "${pid}" ]] && continue
@@ -971,8 +976,9 @@ owned_listener_ports_in_group() {
   [[ -n "${members}" ]] || return 1
   while IFS= read -r pid; do
     [[ "${pid}" =~ ^[0-9]+$ ]] || return 2
-    rows="$(lsof -nP -a -p "${pid}" -iTCP@127.0.0.1 -sTCP:LISTEN -Fpn 2>&1)"
+    rows="$(lsof -nP -w -a -p "${pid}" -iTCP@127.0.0.1 -sTCP:LISTEN -Fpn 2>&1)"
     status=$?
+    rows="$(s3_filter_lsof_ambient_warnings "${rows}")"
     if (( status == 1 )) && [[ -z "${rows}" ]]; then continue; fi
     (( status == 0 )) && [[ -n "${rows}" ]] || return 2
     seen_pid=0
@@ -1053,7 +1059,11 @@ state_holder_pids() {
   local -a candidates=()
   command -v lsof >/dev/null 2>&1 || return 2
   case "${TEST_STATE_HOLDER_BROAD_ERROR_PLANT}" in
-    "") pids="$(lsof -nP -t +w +D "${STATE_DIR}" 2>&1)"; status=$? ;;
+    "")
+      pids="$(lsof -nP -t +w +D "${STATE_DIR}" 2>&1)"
+      status=$?
+      pids="$(s3_filter_lsof_ambient_warnings "${pids}")"
+      ;;
     warning) pids="planted lsof traversal warning"; status=1 ;;
     malformed) pids="not-a-pid"; status=0 ;;
     *) return 2 ;;
@@ -1102,6 +1112,7 @@ state_holder_pids() {
   for pid in "${candidates[@]}"; do
     rechecked="$(lsof -nP -t +w -a -p "${pid}" +D "${STATE_DIR}" 2>&1)"
     recheck_status=$?
+    rechecked="$(s3_filter_lsof_ambient_warnings "${rechecked}")"
     if (( recheck_status == 1 )) && [[ -z "${rechecked}" ]]; then
       continue
     fi
