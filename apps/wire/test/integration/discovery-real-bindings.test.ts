@@ -47,8 +47,7 @@ test("production ledger writes reach discovery through real local Workerd/D1/R2"
     child.exited,
   ]);
   if (stderr.trim()) console.error(stderr);
-  if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
-  const receipt = stdout
+  const records = stdout
     .split("\n")
     .filter(Boolean)
     .map((line) => {
@@ -57,7 +56,9 @@ test("production ledger writes reach discovery through real local Workerd/D1/R2"
       } catch {
         return null;
       }
-    })
-    .find((line) => line?.kind === "discovery-real-bindings");
+    });
+  for (const record of records) if (record !== null) console.info(JSON.stringify(record));
+  if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
+  const receipt = records.find((line) => line?.kind === "discovery-real-bindings");
   expect(receipt?.status).toBe("pass");
 }, 240000);

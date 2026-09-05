@@ -84,7 +84,15 @@ try {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const data = await response.json();
+    const raw = await response.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} sha256=${createHash("sha256").update(raw).digest("hex")}`,
+      );
+    }
     // Refusal diagnostics never print request bodies, bearer tokens or enrollment secrets.
     assert.equal(
       response.status,

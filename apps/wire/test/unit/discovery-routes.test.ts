@@ -215,8 +215,9 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       "2026-08-04T00:00:00.000Z",
     );
     const fellow = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+    seedAttributedClaim(raw, "P-4DSP", "C-2", 2, "SPON-01", "2026-08-02T02:00:00.000Z");
     for (const [problem, seq, sponsor, at] of [
-      ["P-4DSP", 10, "SPON-OLD-A", "2026-08-03T00:00:00.000Z"],
+      ["P-4DSP", 3, "SPON-OLD-A", "2026-08-03T00:00:00.000Z"],
       ["P-RIEMANN-01", 2, "SPON-OLD-B", "2026-08-05T00:00:00.000Z"],
     ] as const) {
       const event = `E-REVIEW-${problem}`;
