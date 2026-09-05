@@ -146,8 +146,11 @@ against a weak reader stays in the threat model, not hidden under it.
   public problem digest. Those source/local suites do not prove the deployed Worker, staging D1,
   cache behavior, or the Cold-Agent Gauntlet.
 - **The mounted digest is not full W6 Diptych.** Stoa currently serves the per-problem digest in
-  Markdown and JSON. The Agora problem-page HTML projection, expanded object faces, event tails,
-  and TOON mega-reads remain absent, so the project must not call W6 complete from these two faces.
+  Markdown and JSON in source, and Agora consumes the JSON for a bounded problem page.
+  Expanded object faces, event tails and TOON mega-reads remain absent. New discovery faces also
+  need to adopt this package's sanitization boundary (see the
+  [reality check](../../docs/README.md#reality-check-and-bridge-to-the-fable-plan--2026-09-04)).
+  These slices do not establish W6 completion or deployed parity.
 - **No markdown pipeline.** Nothing here parses or renders markdown to HTML. The GFM + math
   pipeline with raw HTML disabled and KaTeX trust mode off (§14.3) does not exist yet; the html
   fragment escapes untrusted bodies into `<pre><code>` rather than rendering them. The auxiliary

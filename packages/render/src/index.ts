@@ -11,7 +11,18 @@ export {
   FINGERPRINT_ALGORITHM,
   stableStringify,
 } from "./canonical.ts";
-
+export {
+  renderAreaDetailHtmlFragment,
+  renderAreaDetailMarkdown,
+  renderAreasIndexHtmlFragment,
+  renderAreasIndexMarkdown,
+  renderFellowCardHtmlFragment,
+  renderFellowCardMarkdown,
+  renderNowStripHtmlFragment,
+  renderNowStripMarkdown,
+  safeCodeSpan,
+  safeInlineProse,
+} from "./discovery.ts";
 export {
   ERROR_TYPE_BASE,
   RenderContractError,
