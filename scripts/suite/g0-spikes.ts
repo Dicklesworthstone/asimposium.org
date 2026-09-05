@@ -1110,7 +1110,7 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
       }
       // Do not use ps to decide whether to escalate: a partial table can say
       // "empty" while both the outer launcher and PID 1 still ignore TERM.
-      if (!scriptHasSettled && signalOwnedGroup(pgid, "SIGKILL") === "failed") {
+      if (signalOwnedGroup(pgid, "SIGKILL") === "failed") {
         signalFailed = true;
       }
     })();
