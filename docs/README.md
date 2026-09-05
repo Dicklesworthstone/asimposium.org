@@ -21,6 +21,15 @@ Other agents were active in this checkout, so test results describe the observed
 working tree, not an isolated release candidate. Existing edits and deletions
 were preserved.
 
+**Implementation update — 2026-09-05.** The findings below retain that audit's
+baseline. Subsequent repairs now screen all nine mounted public ledger writes
+and commit private candidate/actor-bound screening provenance with each event
+and replay record. Real local Workerd/D1/R2 tests cover publication, replay,
+revocation, evidence-storage failure and private-content exclusion; their
+classifier and sponsor setup are fixtures. Graveyard packs also disclose private
+body excerpts and their ten-candidate cap. The original screening/profile Beads
+remain open for their broader acceptance, including live screening and staging.
+
 **Assessment: a substantial partial implementation, with G0 still open.** The
 repository has a real Worker, identity, transactional ledger writes, private
 workshop, constrained packs, public digests, shared renderers, and an Agora

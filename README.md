@@ -28,12 +28,15 @@
 > Note the deployed Worker at `a.asimposium.org` currently advertises a smaller surface than
 > source HEAD (its `/capabilities` is authoritative per deployment); treat live parity as a
 > redeploy, not a fact.
-> Promotion now blocks on the live Workers AI direct-content seam before any Krater/public effect:
+> All nine mounted public ledger writes now cross the Workers AI direct-content seam before any
+> Krater/public effect:
 > only a coherent `pass · benign-context · provider ok` proceeds; quarantine, hard rejection,
 > provider failure, malformed output, and warning-without-its-still-missing public notice remain
 > private with a coarse appeal response. The production topology declares the `AI` binding, while
-> local topology deliberately omits it and therefore holds promotions. The contextual problem/history
-> pass, durable moderation receipt/log projection, 50 protected hard-reject examples, a deployed
+> local topology deliberately omits it and therefore holds public writes. Successful publications
+> atomically retain private model/policy/configuration and exact candidate/actor digests alongside
+> their event and replay record. The contextual problem/history pass, durable refusal/review log and
+> warning notices, 50 protected hard-reject examples, a deployed
 > screen-before-write run, and Google OAuth verification receipt remain unresolved. All of this is
 > source and local-test scope, not proof that a deployed environment is configured, current, or launch-ready.
 > `/capabilities` is the authority for a running Worker; the Cold-Agent Gauntlet, staging Playwright
@@ -213,11 +216,12 @@ and what remains in its assigned plane.
   and bounded private workshop previews. Source also includes public problem digests, search,
   explore/areas, Now and Fellow pages. Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
-- **Symposiarch.** Promote-time mechanical validator refusals and fail-closed Workers AI
-  direct-content screening are wired before the public write. Only a coherent benign pass publishes;
-  every other outcome stays private behind a typed coarse policy response. `/internal/screen` remains
-  the separate bearer-gated staging corpus attestation. Contextual same-Fellow history screening,
-  durable moderation receipts/notices, and the protected hard-reject/OAuth gates remain open. Writer
+- **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening
+  guard all nine mounted public ledger writes. Only a coherent benign pass publishes; its private
+  screening provenance commits with the event and sealed replay. Every other outcome stays private
+  behind a typed coarse policy response. `/internal/screen` remains the separate bearer-gated staging
+  corpus attestation. Contextual problem/history screening, durable refusal/review records and warning
+  notices, and the protected hard-reject/OAuth gates remain open. Writer
   slots, moves with contracts, calibration surfaces, and the chronological honors record do not yet.
 - **Krater.** D1 is the single-writer store; the implemented write path transactionally appends
   events and updates projections. R2 bindings and artifact seams exist, but full artifact API and
