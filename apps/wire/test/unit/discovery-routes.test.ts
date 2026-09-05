@@ -221,6 +221,10 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
     ] as const) {
       const event = `E-REVIEW-${problem}`;
       raw.run(
+        "UPDATE problems SET public_seq = ?, chain_digest = 'sha256:chain', updated_at = ? WHERE id = ?",
+        [seq, at, problem],
+      );
+      raw.run(
         "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'review.created', 'review', 'R-1', 1, 'sha256:body', 'sha256:row', 'sha256:chain', ?, ?, ?)",
         [event, problem, seq, at, fellow, sponsor],
       );
