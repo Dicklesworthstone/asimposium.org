@@ -485,6 +485,70 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     );
   };
 
+  /**
+   * P7/A9 (bead asimposiumorg-b9y9): the ONE public-content screening
+   * decision boundary. Every mounted ledger mutation routes its exact
+   * validated candidate bytes through here after the cheap
+   * contract/authorization/duplicate/reference gates and before any Krater
+   * id, replay row, event, projection, cursor, or outbox effect. The
+   * decision is bound to the exact candidate bytes by construction: nothing
+   * is persisted or reused, so a retry with changed content is screened as
+   * new content, while a sealed replay short-circuits in
+   * replayResponseBeforeMutablePreconditions before this boundary is ever
+   * reached (no second provider charge, no second event). Returns null when
+   * the candidate is publishable; otherwise the hold/deny response the
+   * route must return instead of committing. Outcome mapping is identical
+   * to the promote path this was extracted from: provider failure and
+   * incoherent tuples hold fail-closed, reject denies with only a coarse
+   * category, quarantine and allow-with-warning hold because their durable
+   * public-notice projection has not landed, and only the coherent benign
+   * pass tuple publishes.
+   */
+  async function screenPublicIngress(
+    env: Env,
+    input: PromotionScreeningInput,
+  ): Promise<Response | null> {
+    let screening: PromotionScreeningDecision;
+    try {
+      const raw = await screenPromotion(input, env);
+      const decision = ScreeningOutcomeSchema.safeParse(raw.decision);
+      const category = ScreeningCoarseCategorySchema.safeParse(raw.coarse_category);
+      const providerStatus = ScreeningProviderStatusSchema.safeParse(raw.provider_status);
+      if (!decision.success || !category.success || !providerStatus.success) {
+        return promotionScreeningHold("provider-unavailable");
+      }
+      screening = {
+        decision: decision.data,
+        coarse_category: category.data,
+        provider_status: providerStatus.data,
+      };
+    } catch {
+      return promotionScreeningHold("provider-unavailable");
+    }
+    if (screening.provider_status !== "ok") {
+      return promotionScreeningHold("provider-unavailable");
+    }
+    if (screening.decision === "reject") {
+      return (
+        promotionScreeningDenied(screening.coarse_category) ??
+        promotionScreeningHold("provider-unavailable")
+      );
+    }
+    if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
+      return promotionScreeningHold(screening.coarse_category);
+    }
+    if (
+      !ScreeningPublicActionSchema.safeParse({
+        category: screening.coarse_category,
+        action: "published",
+        notice: "none",
+      }).success
+    ) {
+      return promotionScreeningHold("provider-unavailable");
+    }
+    return null;
+  }
+
   type ReplayScope =
     | "session_open"
     | "workshop_push"
@@ -2319,64 +2383,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
-    // Fable §9.1: a promotion is still private until the live direct-content
-    // policy dependency returns a coherent pass. This runs after the
-    // cheap contract/authorization/duplicate/reference gates, but before any
+    // Fable §9.1 + P7/A9 (bead asimposiumorg-b9y9): every public ledger
+    // ingress — this promote included — crosses the one centralized
+    // screening decision boundary after the cheap gates and before any
     // Krater id, replay row, event, projection, cursor, or outbox effect.
-    let screening: PromotionScreeningDecision;
-    try {
-      const raw = await screenPromotion(
-        {
-          problemId: session.problem_id,
-          fellowId: auth.binding.fellowId,
-          kind: parsed.data.kind,
-          statement: parsed.data.statement,
-          falsifier: parsed.data.falsifier ?? null,
-        },
-        c.env,
-      );
-      const decision = ScreeningOutcomeSchema.safeParse(raw.decision);
-      const category = ScreeningCoarseCategorySchema.safeParse(raw.coarse_category);
-      const providerStatus = ScreeningProviderStatusSchema.safeParse(raw.provider_status);
-      if (!decision.success || !category.success || !providerStatus.success) {
-        return promotionScreeningHold("provider-unavailable");
-      }
-      screening = {
-        decision: decision.data,
-        coarse_category: category.data,
-        provider_status: providerStatus.data,
-      };
-    } catch {
-      return promotionScreeningHold("provider-unavailable");
-    }
-
-    // A transport/provider failure can never publish even if an injected or
-    // future adapter accidentally pairs it with a permissive outcome.
-    if (screening.provider_status !== "ok") {
-      return promotionScreeningHold("provider-unavailable");
-    }
-    if (screening.decision === "reject") {
-      return (
-        promotionScreeningDenied(screening.coarse_category) ??
-        promotionScreeningHold("provider-unavailable")
-      );
-    }
-    if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
-      // Warning publication needs its durable public notice and decision
-      // provenance. Until that projection lands, holding is the only honest
-      // non-lossy behavior; silently publishing without the notice is not.
-      return promotionScreeningHold(screening.coarse_category);
-    }
-    // `pass` is publishable only in the contract's coherent benign tuple.
-    if (
-      !ScreeningPublicActionSchema.safeParse({
-        category: screening.coarse_category,
-        action: "published",
-        notice: "none",
-      }).success
-    ) {
-      return promotionScreeningHold("provider-unavailable");
-    }
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: parsed.data.kind,
+      statement: parsed.data.statement,
+      falsifier: parsed.data.falsifier ?? null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
 
     try {
       const eventId = mintId("E");
@@ -2935,6 +2953,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
+    // bytes; it must earn its own screening decision and can never inherit
+    // one from the previous version.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "revise",
+      statement: JSON.stringify(parsed.data),
+      falsifier: parsed.data.falsifier ?? null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
+
     try {
       const eventId = mintId("E");
       const claimToken = mintId("R");
@@ -3298,6 +3328,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // P7/A9 (bead asimposiumorg-b9y9): the obligation and closes_what are
+    // author-controlled public text screened at the centralized boundary
+    // before any commit effect.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "gaps",
+      statement: JSON.stringify(parsed.data),
+      falsifier: null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
+
     try {
       const eventId = mintId("E");
       const filedAt = new Date().toISOString();
@@ -3562,6 +3604,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       }
     }
+
+    // P7/A9 (bead asimposiumorg-b9y9): the transition outcome and discharge
+    // ref are screened at the centralized boundary before any commit effect.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "gap-close",
+      statement: JSON.stringify(parsed.data),
+      falsifier: null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
 
     try {
       const eventId = mintId("E");
@@ -3846,6 +3899,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       }
     }
+
+    // P7/A9 (bead asimposiumorg-b9y9): relation metadata (kind and pinned
+    // endpoints) is in scope for the centralized screening boundary before
+    // any commit effect.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "relation",
+      statement: JSON.stringify(parsed.data),
+      falsifier: null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
 
     try {
       const eventId = mintId("E");
@@ -4144,11 +4209,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
+    // author-controlled public text screened at the centralized boundary
+    // before any commit effect.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "review",
+      statement: JSON.stringify(parsed.data),
+      falsifier: null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
     const reviewId = mintId("R");
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
     const createdAt = new Date().toISOString();
+
     try {
       const write = await writeLedgerEvent(
         db,
@@ -4335,11 +4412,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
 
+    // P7/A9 (bead asimposiumorg-b9y9): the hypothesis route, mechanism, and
+    // body are public text screened at the centralized boundary before any
+    // commit effect; the falsifier is screened both as a component and as
+    // the dedicated falsifier slot.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "hypotheses",
+      statement: JSON.stringify(parsed.data),
+      falsifier: parsed.data.falsifier,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
     const hypothesisId = mintId("H");
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypotheses", claimToken);
     const createdAt = new Date().toISOString();
+
     try {
       const write = await writeLedgerEvent(
         db,
@@ -4613,10 +4703,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // P7/A9 (bead asimposiumorg-b9y9): the kill rationale is public text and
+    // is screened at the centralized boundary before any commit effect.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "hypothesis-kill",
+      statement: JSON.stringify(parsed.data),
+      falsifier: null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypothesis-kill", claimToken);
     const killedAt = new Date().toISOString();
+
     try {
       await writeLedgerEvent(
         db,
@@ -4911,11 +5012,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       mode: parsed.data.mode,
     });
 
+    // P7/A9 (bead asimposiumorg-b9y9): the exact validated candidate bytes
+    // are screened at the centralized boundary before any commit effect.
+    // Stateless per-candidate decisions mean changed bytes are re-screened.
+    const screeningRefusal = await screenPublicIngress(c.env, {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "evidence",
+      statement: JSON.stringify(parsed.data),
+      falsifier: null,
+    });
+    if (screeningRefusal !== null) return screeningRefusal;
     const evidenceId = mintId("E");
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
     const createdAt = new Date().toISOString();
+
     try {
       const write = await writeLedgerEvent(
         db,

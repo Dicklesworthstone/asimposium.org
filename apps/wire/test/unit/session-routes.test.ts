@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   ContractProblemSchema,
   GapFiledResponseSchema,
+  HypothesisResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
@@ -1969,6 +1970,331 @@ describe("session protocol routes", () => {
     }
   });
 
+  test("P7 census: every mounted ledger ingress screens at the centralized boundary (asimposiumorg-b9y9)", async () => {
+    const seen: { kind: string; statement: string; falsifier: string | null }[] = [];
+    // The setup stages pass; every screened public ingress under test is
+    // rejected with a deterministic decision fixture; this is not live-provider evidence.
+    const passKinds = ["conjecture", "hypotheses", "gaps"];
+    const base = await fixture({
+      screenPromotion: async (input) => {
+        seen.push({
+          kind: input.kind,
+          statement: input.statement,
+          falsifier: input.falsifier,
+        });
+        // Refuting evidence is setup for the kill case; supporting evidence
+        // is a screened census case and must be rejected.
+        if (input.kind === "evidence" && input.statement.includes('"refutes"')) {
+          return {
+            decision: "pass" as const,
+            coarse_category: "benign-context" as const,
+            provider_status: "ok" as const,
+          };
+        }
+        if (passKinds.includes(input.kind)) {
+          return {
+            decision: "pass" as const,
+            coarse_category: "benign-context" as const,
+            provider_status: "ok" as const,
+          };
+        }
+        return {
+          decision: "reject" as const,
+          coarse_category: "injection" as const,
+          provider_status: "ok" as const,
+        };
+      },
+    });
+    const { call, db } = base;
+    const rowCount = async (table: string): Promise<number> => {
+      const rows = await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).all<{ n: number }>();
+      return Number(rows.results[0]?.n ?? 0);
+    };
+    const expectNoPublicEffect = async (label: string, before: Record<string, number>) => {
+      for (const [table, expected] of Object.entries(before)) {
+        expect(await rowCount(table), `${label}: ${table} changed`).toBe(expected);
+      }
+    };
+    const snapshot = async () => ({
+      events: await rowCount("events"),
+      outbox: await rowCount("outbox"),
+      claim_versions: await rowCount("claim_versions"),
+      reviews: await rowCount("reviews"),
+      hypotheses: await rowCount("hypotheses"),
+      evidence: await rowCount("evidence"),
+      proof_gaps: await rowCount("proof_gaps"),
+      claim_relations: await rowCount("claim_relations"),
+    });
+
+    // Setup through the pass lane: session -> workshop -> promote -> C-1@1,
+    // then a hypothesis (H-1) and a gap (G-1) as targets for the rest.
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "P7 census",
+        body_md: "Private draft; the split keeps this out of every screened candidate.",
+        relates_to: [],
+      }),
+    });
+    const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "The P7 census claim holds.",
+        falsifier: "A public event contradicting it.",
+        relates_to: [],
+        depends_on: [],
+      }),
+    });
+    expect(promoted.status, await promoted.clone().text()).toBe(201);
+    const promotedBody = (await promoted.json()) as { claim_id: string; version: number };
+    const claimId = promotedBody.claim_id;
+    const claimVersion = promotedBody.version;
+    const proposed = await call(`/v1/sessions/${session.session_id}/hypotheses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-hyp" },
+      body: JSON.stringify({
+        route: "induction on the path length",
+        mechanism: "the toggle preserves the count, so induction closes it",
+        falsifier: "a path where the toggle changes the count",
+        origin: "proposed",
+        body_md: "P7 census hypothesis body.",
+      }),
+    });
+    expect(proposed.status, await proposed.clone().text()).toBe(201);
+    const hypothesisId = HypothesisResponseSchema.parse(await proposed.json()).hypothesis_id;
+    const gapFiled = await call(`/v1/sessions/${session.session_id}/gaps`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-gap" },
+      body: JSON.stringify({
+        target_claim_id: claimId,
+        target_version: claimVersion,
+        obligation: "Step 4 assumes the covering is finite without proving it.",
+        closes_what: "Finiteness of the covering.",
+      }),
+    });
+    expect(gapFiled.status, await gapFiled.clone().text()).toBe(201);
+    const gapBody = (await gapFiled.clone().json()) as { gap_id?: string };
+    const gapId = gapBody.gap_id ?? "";
+
+    // revise: new public bytes must earn their own decision, and the screener
+    // must see the REVISED bytes (never the previous version's).
+    const reviseBefore = await snapshot();
+    const revised = await call(`/v1/sessions/${session.session_id}/revise`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-revise" },
+      body: JSON.stringify({
+        claim_id: claimId,
+        base_version: claimVersion,
+        kind: "conjecture",
+        statement: "REVISED_STATEMENT_CANARY the census claim holds in the refined form.",
+        falsifier: "A refined-form counterexample.",
+        depends_on: [],
+      }),
+    });
+    expect(revised.status, await revised.clone().text()).toBe(403);
+    expect((await revised.json()) as { code: string }).toMatchObject({ code: "POLICY_DENIED" });
+    await expectNoPublicEffect("revise", reviseBefore);
+
+    // review: a second Fellow's review through their own session is screened.
+    const reviewer = await addApprovedFellow(base, {
+      suffix: "p7reviewer",
+      scopes: ["review"],
+    });
+    const reviewerSession = SessionOpenResponseSchema.parse(
+      await (
+        await reviewer.call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "p7-reviewer-open" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        })
+      ).json(),
+    );
+    const reviewBefore = await snapshot();
+    const review = await reviewer.call(`/v1/sessions/${reviewerSession.session_id}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-review" },
+      body: JSON.stringify({
+        target_claim_id: claimId,
+        target_version: claimVersion,
+        verdict: "confirm",
+        basis: "I checked the statement against the proof.",
+        capable_of_failure: "a counterexample on the 4-path",
+        rubric: [],
+        body_md: "Verified the quantifier scope and the inference chain.",
+      }),
+    });
+    expect(review.status, await review.clone().text()).toBe(403);
+    expect((await review.json()) as { code: string }).toMatchObject({ code: "POLICY_DENIED" });
+    await expectNoPublicEffect("review", reviewBefore);
+
+    // gaps/close, relations, evidence, hypothesis kill: same boundary, same
+    // fail-closed outcome, zero public effect.
+    const closeBefore = await snapshot();
+    const gapClosed = await call(`/v1/sessions/${session.session_id}/gaps/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-gap-close" },
+      body: JSON.stringify({ gap_id: gapId, outcome: "withdrawn" }),
+    });
+    expect(gapClosed.status, await gapClosed.clone().text()).toBe(403);
+    await expectNoPublicEffect("gap-close", closeBefore);
+
+    const relationBefore = await snapshot();
+    const related = await call(`/v1/sessions/${session.session_id}/relations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-relation" },
+      body: JSON.stringify({
+        kind: "addresses-gap",
+        source_claim_id: claimId,
+        source_version: claimVersion,
+        target: gapId,
+      }),
+    });
+    expect(related.status, await related.clone().text()).toBe(403);
+    await expectNoPublicEffect("relation", relationBefore);
+
+    const evidenceBefore = await snapshot();
+    const evidence = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-evidence" },
+      body: JSON.stringify({
+        bears_on_kind: "claim",
+        bears_on_id: claimId,
+        bears_on_version: claimVersion,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: "EVIDENCE_BODY_CANARY I recall a similar result.",
+      }),
+    });
+    expect(evidence.status, await evidence.clone().text()).toBe(403);
+    await expectNoPublicEffect("evidence", evidenceBefore);
+
+    // The kill route's reference gate requires real refuting evidence on the
+    // hypothesis; file it through the pass lane first.
+    const refuting = await call(`/v1/sessions/${session.session_id}/evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7-refuting-ev" },
+      body: JSON.stringify({
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypothesisId,
+        direction: "refutes",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "The path-length counterexample refutes the induction route.",
+      }),
+    });
+    expect(refuting.status, await refuting.clone().text()).toBe(201);
+    const refutingJson = (await refuting.json()) as { evidence_id: string };
+
+    const killBefore = await snapshot();
+    const killed = await call(
+      `/v1/sessions/${session.session_id}/hypotheses/${hypothesisId}/kill`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "p7-kill" },
+        body: JSON.stringify({
+          hypothesis_id: hypothesisId,
+          killed_by_evidence_id: refutingJson.evidence_id,
+          reason: "KILL_REASON_CANARY The counterexample kills the route.",
+        }),
+      },
+    );
+    expect(killed.status, await killed.clone().text()).toBe(403);
+    await expectNoPublicEffect("hypothesis-kill", killBefore);
+
+    // Every screened kind crossed the boundary exactly once with its exact
+    // candidate bytes; the pass-lane kinds are present too.
+    const seenKinds = seen.map((entry) => entry.kind);
+    for (const kind of [
+      "conjecture",
+      "hypotheses",
+      "gaps",
+      "revise",
+      "review",
+      "gap-close",
+      "relation",
+      "evidence",
+      "hypothesis-kill",
+    ]) {
+      expect(seenKinds, `kind ${kind} never reached the boundary`).toContain(kind);
+    }
+    expect(seen.find((entry) => entry.kind === "evidence")?.statement).toContain(
+      "EVIDENCE_BODY_CANARY",
+    );
+    expect(seen.find((entry) => entry.kind === "hypothesis-kill")?.statement).toContain(
+      "KILL_REASON_CANARY",
+    );
+  }, 60000);
+
+  test("P7: a quarantined ingress holds with zero public effect (asimposiumorg-b9y9)", async () => {
+    const { call, db } = await fixture({
+      screenPromotion: async () => ({
+        decision: "quarantine" as const,
+        coarse_category: "dual-use-boundary" as const,
+        provider_status: "ok" as const,
+      }),
+    });
+    const rowCount = async (table: string): Promise<number> => {
+      const rows = await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).all<{ n: number }>();
+      return Number(rows.results[0]?.n ?? 0);
+    };
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7q-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const before = {
+      events: await rowCount("events"),
+      outbox: await rowCount("outbox"),
+      claims: await rowCount("claims"),
+    };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7q-push" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Quarantine hold",
+        body_md: "Private draft.",
+        relates_to: [],
+      }),
+    });
+    const workshop = WorkshopPushResponseSchema.parse(await pushed.json());
+    const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "p7q-promote" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "The quarantine case cannot publish.",
+        falsifier: "A public event from this request.",
+        relates_to: [],
+        depends_on: [],
+      }),
+    });
+    expect(promoted.status).toBe(202);
+    expect((await promoted.json()) as { code: string }).toMatchObject({
+      code: "SCREENING_HOLD",
+      coarse_category: "dual-use-boundary",
+    });
+    expect(await rowCount("events")).toBe(before.events);
+    expect(await rowCount("outbox")).toBe(before.outbox);
+    expect(await rowCount("claims")).toBe(before.claims);
+  }, 30000);
   test("a committed promotion replay is a historical fact and never re-screens", async () => {
     let screeningCalls = 0;
     const { call } = await fixture({
