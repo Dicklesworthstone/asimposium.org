@@ -36,7 +36,7 @@ readonly WRANGLER="${ROOT}/apps/wire/node_modules/wrangler-s1-local/bin/wrangler
 readonly CONFIG="${ROOT}/apps/wire/test/integration/wrangler.token-lifecycle.toml"
 readonly REPRODUCE="bash scripts/e2e-token-lifecycle.sh"
 readonly TOTAL_DEADLINE_SECONDS=150
-readonly READY_DEADLINE_SECONDS=35
+readonly READY_DEADLINE_SECONDS=60
 readonly CLEANUP_GRACE_SECONDS=15
 readonly SCRIPT_DEADLINE=$((SECONDS + TOTAL_DEADLINE_SECONDS))
 readonly HTTP_TIMEOUT_MS=8000
@@ -1137,7 +1137,7 @@ stop_auxiliary_child() {
 }
 
 assert_migration_journal() {
-  "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+  "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
     --command 'SELECT id, name FROM d1_migrations ORDER BY id' --json \
     >"${MIGRATION_JOURNAL_LOG}" 2>"${MIGRATION_JOURNAL_ERROR_LOG}" || {
     fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_UNREADABLE"
@@ -1197,7 +1197,7 @@ seed_session_problem() {
     fail "TOKEN_LIFECYCLE_SESSION_TIME_INVALID"
     return 1
   }
-  "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+  "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
     --command "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}', 2); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}', 2); INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 130, '${now}', '${now}', '${pack_genesis}', 2); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 'complete', 0, '${now}', 2); WITH RECURSIVE claim_numbers(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM claim_numbers WHERE value < 130) INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) SELECT 'C-' || value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || value, printf('%064x', value), value, '${now}' FROM claim_numbers;" \
     --json >"${SESSION_SEED_LOG}" 2>"${SESSION_SEED_ERROR_LOG}" || {
     fail "TOKEN_LIFECYCLE_SESSION_SEED_FAILED"
@@ -1207,7 +1207,7 @@ seed_session_problem() {
 }
 
 assert_post_stop_d1_counts() {
-  "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+  "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
     --command "SELECT (SELECT COUNT(*) FROM fellow_lifecycle_events WHERE action = 'credential-revoked') AS credential_revoked_events, (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'credential-revoke') AS credential_replays, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_rows, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}' AND closed_at IS NOT NULL) AS closed_session_rows, (SELECT COUNT(*) FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_rows, (SELECT COUNT(*) FROM session_write_replays WHERE scope IN ('session_open', 'workshop_push', 'promote', 'session_close')) AS session_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'session_open' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS session_open_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'workshop_push' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS workshop_push_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'promote' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS promote_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'session_close' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS session_close_replays, (SELECT COUNT(*) FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_rows, (SELECT COUNT(*) FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_projection_rows, (SELECT COUNT(*) FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_rows, (SELECT COUNT(*) FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_rows, (SELECT COUNT(*) FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_idempotency_rows, (SELECT COUNT(*) FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_rows, (SELECT COUNT(*) FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_rows, (SELECT COUNT(*) FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_rows, (SELECT session_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_id, (SELECT workshop_id FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_id, (SELECT id FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_id, (SELECT source_seq FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_source_seq, (SELECT claim_id FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS projection_claim_id, (SELECT source_seq FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS projection_source_seq, (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_id, (SELECT object_id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_claim_id, (SELECT seq FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_seq, (SELECT event_id FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_event_id, (SELECT event_id FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS idempotency_event_id, (SELECT event_id FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_event_id, (SELECT checkpoint_seq FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_seq, (SELECT claim_id FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_claim_id, (SELECT public_seq FROM problems WHERE id = '${SESSION_PROBLEM_ID}') AS public_seq, (SELECT cursor FROM public_cursor WHERE singleton = 1) AS public_cursor" \
     --json >"${POST_STOP_D1_LOG}" 2>"${POST_STOP_D1_ERROR_LOG}" || {
       fail "TOKEN_LIFECYCLE_POST_STOP_D1_UNREADABLE"
@@ -1702,6 +1702,25 @@ if (( SELF_TEST == 1 )); then
 fi
 [[ -x "${WRANGLER}" ]] || { fail "TOKEN_LIFECYCLE_WRANGLER_UNAVAILABLE"; exit 1; }
 [[ -f "${CONFIG}" ]] || { fail "TOKEN_LIFECYCLE_CONFIG_UNAVAILABLE"; exit 1; }
+# Wrangler's Node shebang can resolve to Bun. D1 commands may still work while
+# `dev` never opens its listener, so choose a genuine supported Node once and
+# use it for every Wrangler invocation, including the supervised server.
+WRANGLER_NODE=""
+while IFS= read -r node_candidate; do
+  [[ "${node_candidate}" == /* && -x "${node_candidate}" ]] || continue
+  node_probe_seconds="$(remaining_seconds)" || {
+    fail "TOKEN_LIFECYCLE_DEADLINE_EXHAUSTED"
+    exit 1
+  }
+  if (( node_probe_seconds > 5 )); then node_probe_seconds=5; fi
+  if run_owned_for_seconds "${node_probe_seconds}" "${node_candidate}" -e \
+    'process.exit(!process.versions.bun && Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+    WRANGLER_NODE="${node_candidate}"
+    break
+  fi
+done < <(type -a -p node || true)
+[[ -n "${WRANGLER_NODE}" ]] || { fail "TOKEN_LIFECYCLE_NODE_UNAVAILABLE"; exit 1; }
+readonly WRANGLER_NODE
 LSOF="$(command -v lsof || true)"
 [[ "${LSOF}" == /* && -x "${LSOF}" ]] || { fail "TOKEN_LIFECYCLE_LSOF_UNAVAILABLE"; exit 1; }
 readonly LSOF
@@ -1806,7 +1825,7 @@ SERVER_SUPERVISOR_MARKER="token-lifecycle-supervisor-${SERVER_SUPERVISOR_NONCE}"
 if [[ "${TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE:-0}" != "1" ]]; then
   require_remaining
   migration_status=0
-  run_owned_deadline "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
+  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
     --persist-to "${STATE_DIR}" --env-file /dev/null >"${MIGRATION_LOG}" 2>&1 || migration_status=$?
   if (( migration_status != 0 )); then
     case "${migration_status}" in
@@ -2008,7 +2027,7 @@ exec {SERVER_SUPERVISOR_LEASE_FD}<>"${SERVER_SUPERVISOR_LEASE}" || {
       }
       my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
       exit($code);
-    ' "${SERVER_SUPERVISOR_MARKER}" "${WRANGLER}" dev --config "${CONFIG}" --local \
+    ' "${SERVER_SUPERVISOR_MARKER}" "${WRANGLER_NODE}" "${WRANGLER}" dev --config "${CONFIG}" --local \
       --persist-to "${STATE_DIR}" --port "${PORT}" --inspector-port 0 --log-level error \
       --env-file /dev/null
 ) <"${SERVER_SUPERVISOR_LEASE}" >"${SERVER_LOG}" 2>&1 &

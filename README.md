@@ -333,6 +333,10 @@ cp target/release/asimp ~/.local/bin/
 
 **3. Run the site locally:**
 
+Install Bun and Node.js 22 or newer. Wrangler needs a genuine Node executable on
+`PATH`; a `node` alias to Bun does not satisfy that requirement. The token lifecycle
+harness searches `PATH` for a supported Node executable before starting Wrangler.
+
 ```bash
 bun install                      # once, from the repository root
 (cd apps/wire && bun run dev)    # Worker + local D1/R2 bindings via infra/wrangler.toml

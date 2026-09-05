@@ -6,10 +6,11 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const SCRIPT = resolve(ROOT, "scripts/e2e-token-lifecycle.sh");
@@ -498,12 +499,14 @@ async function runOwnedProcess(options: {
 async function runHarness(
   args: readonly string[] = [],
   plants: Partial<Record<keyof typeof FAULT_PLANTS, "1">> = {},
+  pathOverride?: string,
 ): Promise<OwnedProcessResult> {
   const result = await runOwnedProcess({
     cmd: ["bash", SCRIPT, ...args],
     expectedCommandToken: "e2e-token-lifecycle.sh",
     env: {
       ...process.env,
+      ...(pathOverride === undefined ? {} : { PATH: pathOverride }),
       ...FAULT_PLANTS,
       ...plants,
       // Fault plants prove their own causal refusal and cleanup boundary. Do
@@ -916,8 +919,10 @@ test("PLANTED: shared panic verifier rejects omitted rows and a no-op rejection 
   }
 });
 
-test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit registered", async () => {
-  const result = await runHarness();
+test("token lifecycle bounded live local Workerd+D1 proof works when Bun shadows node", async () => {
+  const aliasDirectory = mkdtempSync(join(HARNESS_TMPDIR, "token-node-alias "));
+  symlinkSync(process.execPath, join(aliasDirectory, "node"));
+  const result = await runHarness([], {}, `${aliasDirectory}${delimiter}${process.env.PATH ?? ""}`);
   expect(result.exitCode).toBe(0);
   expect(result.reaped).toBe(true);
   expect(result.groupEmpty).toBe(true);
