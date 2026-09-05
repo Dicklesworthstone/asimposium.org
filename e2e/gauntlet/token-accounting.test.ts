@@ -79,7 +79,7 @@ describe("parseClaudeCodeUsage", () => {
     expect(parseClaudeCodeUsage(JSON.stringify(document))).toBeNull();
 
     const negative = JSON.parse(REAL_SHAPE_FIXTURE) as Record<string, unknown>;
-    ((negative.usage as Record<string, unknown>) as Record<string, unknown>).output_tokens = -4;
+    (negative.usage as Record<string, unknown> as Record<string, unknown>).output_tokens = -4;
     expect(parseClaudeCodeUsage(JSON.stringify(negative))).toBeNull();
   });
 

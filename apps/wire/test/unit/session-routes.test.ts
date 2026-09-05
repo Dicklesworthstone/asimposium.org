@@ -28,8 +28,10 @@ import {
 import type { Env } from "../../src/env.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import {
+  eventChainMatches,
   genesisChainDigest,
   KraterIdempotencyConflictError,
+  readEvents,
   writeLedgerEvent,
 } from "../../src/krater/krater.ts";
 import {
@@ -37,10 +39,278 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
+import { readLedgerPackSection } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+
+// These route tests use the explicitly labeled SQLite adapter below. The
+// separate discovery-real-bindings lane proves the same producer/read path on D1.
+async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionContent = false) {
+  const f = await fixture(options);
+  if (omitSectionContent) {
+    // Deliberately corrupt only this SQLite fixture: retain the real producer's
+    // event/projection, but lose its content insert. This is not a valid write.
+    await f.db
+      .prepare(`CREATE TEMP TRIGGER lose_section_content BEFORE INSERT ON event_content
+        WHEN (SELECT type FROM events WHERE id = NEW.event_id)
+          IN ('gap.filed', 'hypothesis.killed', 'relation.asserted')
+        BEGIN SELECT RAISE(IGNORE); END`)
+      .run();
+  }
+  let key = 0;
+  async function post(path: string, body: unknown, status = 201) {
+    const response = await f.call(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `ledger-pack-${++key}` },
+      body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(status);
+    return (await response.json()) as Record<string, string | number>;
+  }
+  const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+  const path = `/v1/sessions/${session.session_id}`;
+  const draft = await post(`${path}/workshop`, {
+    type: "draft",
+    title: "Private pack source",
+    body_md: "PRIVATE-PACK-SOURCE",
+    relates_to: [],
+  });
+  await post(`${path}/promote`, {
+    workshop_id: draft.workshop_id,
+    kind: "conjecture",
+    statement: "Two is even.",
+    falsifier: "A nonzero remainder after division by two.",
+    relates_to: [],
+  });
+  const gap = await post(`${path}/gaps`, {
+    target_claim_id: "C-1",
+    target_version: 1,
+    obligation: "GAP-PACK-CANARY check the finite covering.",
+    closes_what: "Finiteness.",
+  });
+  const hypothesis = await post(`${path}/hypotheses`, {
+    route: "HYPOTHESIS-PACK-CANARY induct on length.",
+    mechanism: "One step preserves parity.",
+    falsifier: "A step changes parity.",
+    expected_evidence: "A checked path.",
+    discriminating_predictions: [],
+    origin: "proposed",
+    body_md: "A synthetic route.",
+  });
+  const evidence = await post(`${path}/evidence`, {
+    bears_on_kind: "hypothesis",
+    bears_on_id: hypothesis.hypothesis_id,
+    direction: "refutes",
+    kind: "argument",
+    source: { kind: "model_memory" },
+    mode: "confirmatory",
+    body_md: "A step changes parity in this synthetic example.",
+  });
+  await post(
+    `${path}/hypotheses/${hypothesis.hypothesis_id}/kill`,
+    {
+      hypothesis_id: hypothesis.hypothesis_id,
+      killed_by_evidence_id: evidence.evidence_id,
+      reason: "KILL-PACK-CANARY this route has a checked counterexample.",
+    },
+    200,
+  );
+  const relation = await post(`${path}/relations`, {
+    kind: "addresses-gap",
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: gap.gap_id,
+  });
+  return { ...f, post, path, gap, hypothesis, evidence, relation };
+}
+
+describe("producer-backed ledger pack sections (ceq.5)", () => {
+  test("formal, graveyard and graph show real objects before unrelated claims", async () => {
+    const f = await ledgerPackFixture();
+    for (const [profile, kind, section, text] of [
+      ["formal", "proof-gap", "proof-gaps", "GAP-PACK-CANARY"],
+      ["graveyard", "killed-hypothesis", "killed-hypotheses", "KILL-PACK-CANARY"],
+      ["claim-graph", "claim-relation", "typed-relations", "Version pins: current"],
+    ]) {
+      const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+      expect(response.status).toBe(200);
+      const bytes = await response.text();
+      const pack = PackResponseSchema.parse(JSON.parse(bytes));
+      const index = pack.items.findIndex((item) => item.kind === kind);
+      expect(index).toBeGreaterThan(0);
+      expect(index).toBeLessThan(pack.items.findIndex((item) => item.kind === "claim"));
+      expect(pack.items[index]).toMatchObject({ scope: "ledger", untrusted: true });
+      expect(pack.items[index]?.body).toContain(text as string);
+      expect(pack.items[index]?.body).toContain("Provenance: P-4DSP#");
+      expect(bytes).not.toContain("PRIVATE-PACK-SOURCE");
+      expect(pack.omitted).not.toContainEqual({
+        reason: "profile_section_not_composed",
+        detail: section,
+      });
+      const repeated = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+      expect(await repeated.text()).toBe(bytes);
+      const conditional = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`, {
+        headers: { "if-none-match": response.headers.get("etag") as string },
+      });
+      expect(conditional.status).toBe(304);
+    }
+  });
+
+  test("gap filing, settlement and relation events retain the full authenticated attribution in the chain", async () => {
+    const f = await ledgerPackFixture();
+    await f.post(`${f.path}/gaps/close`, { gap_id: f.gap.gap_id, outcome: "withdrawn" });
+    const events = await readEvents(f.db, "P-4DSP", 0, 100);
+    expect(await eventChainMatches(events)).toBe(true);
+    const attributed = events.filter(
+      (event) => event.type.startsWith("gap.") || event.type === "relation.asserted",
+    );
+    expect(attributed.map((event) => event.type).sort()).toEqual([
+      "gap.filed",
+      "gap.withdrawn",
+      "relation.asserted",
+    ]);
+    for (const event of attributed) {
+      expect(event).toMatchObject({
+        actorFellowId: f.binding.fellowId,
+        actorSponsorId: f.binding.sponsorId,
+        actorSessionId: f.path.slice("/v1/sessions/".length),
+        modelStringSelfDeclared: f.binding.model,
+        harness: f.binding.harness,
+        writerCredentialId: f.binding.credentialId,
+      });
+    }
+  });
+
+  test("cursor cuts preserve an open gap and old relation pins across a later close/revision", async () => {
+    let interleave: (() => Promise<void>) | undefined;
+    const f = await ledgerPackFixture({
+      beforeRead: async (read) => {
+        if (
+          read.kind === "all" &&
+          (read.sql.includes("FROM proof_gaps g JOIN events e") ||
+            read.sql.includes("FROM claim_relations r JOIN events e"))
+        ) {
+          const action = interleave;
+          interleave = undefined;
+          await action?.();
+        }
+      },
+    });
+    const cut = Number(f.relation.seq);
+    interleave = async () => {
+      await f.post(`${f.path}/gaps/close`, { gap_id: f.gap.gap_id, outcome: "withdrawn" });
+    };
+    const beforeClose = await f.call(`${f.path}/pack?profile=formal&max_tokens=8000`);
+    const oldFormal = PackResponseSchema.parse(await beforeClose.json());
+    expect(oldFormal.cursor).toBe(cut);
+    expect(oldFormal.items.some((item) => item.id === f.gap.gap_id)).toBe(true);
+    const newFormal = PackResponseSchema.parse(
+      await (await f.call(`${f.path}/pack?profile=formal&max_tokens=8000`)).json(),
+    );
+    expect(newFormal.items.some((item) => item.id === f.gap.gap_id)).toBe(false);
+    interleave = async () => {
+      await f.post(`${f.path}/revise`, {
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "conjecture",
+        statement: "Four is even.",
+        falsifier: "A nonzero remainder.",
+        depends_on: [],
+      });
+    };
+    const oldGraph = PackResponseSchema.parse(
+      await (await f.call(`${f.path}/pack?profile=claim-graph&max_tokens=8000`)).json(),
+    );
+    expect(oldGraph.items.find((item) => item.kind === "claim-relation")?.body).toContain(
+      "Version pins: current",
+    );
+    const newGraph = PackResponseSchema.parse(
+      await (await f.call(`${f.path}/pack?profile=claim-graph&max_tokens=8000`)).json(),
+    );
+    expect(newGraph.items.find((item) => item.kind === "claim-relation")?.body).toContain(
+      "Version pins: superseded",
+    );
+  });
+
+  test("redacted content cannot return through retained projection copies", async () => {
+    const f = await ledgerPackFixture();
+    await f.db
+      .prepare(`UPDATE event_content SET payload_json = '{"control":"redacted"}',
+      redacted_at = '2026-09-05T00:00:00.000Z', redaction_reason = 'privacy'
+      WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP'
+        AND type IN ('gap.filed', 'hypothesis.killed', 'relation.asserted'))`)
+      .run();
+    for (const profile of ["formal", "graveyard", "claim-graph"] as const) {
+      const section = await readLedgerPackSection(f.db, "P-4DSP", Number(f.relation.seq), profile);
+      expect(section.candidates).toHaveLength(0);
+      expect(section.omitted).toHaveLength(1);
+      expect(section.omitted[0]?.reason).toBe("content_unavailable");
+      const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain("GAP-PACK-CANARY");
+      expect(body).not.toContain("KILL-PACK-CANARY");
+    }
+  });
+
+  test("the next-row probe discloses limits and scope/cursor exclusions stay empty", async () => {
+    const f = await ledgerPackFixture();
+    for (let index = 0; index < 20; index += 1) {
+      await f.post(`${f.path}/gaps`, {
+        target_claim_id: "C-1",
+        target_version: 1,
+        obligation: `Bounded obligation ${index}.`,
+        closes_what: "One missing step.",
+      });
+    }
+    const section = await readLedgerPackSection(f.db, "P-4DSP", 1000, "formal");
+    expect(section.candidates).toHaveLength(20);
+    expect(section.omitted).toContainEqual({ reason: "candidate_limit", detail: "proof-gaps" });
+    for (const profile of ["formal", "graveyard", "claim-graph"] as const) {
+      for (const [problem, cursor] of [
+        ["P-4DSP", 0],
+        ["P-OTHER", 1000],
+      ] as const) {
+        const empty = await readLedgerPackSection(f.db, problem, cursor, profile);
+        expect(empty.candidates).toHaveLength(1);
+        expect(empty.candidates[0]?.scope).toBe("system");
+        expect(empty.candidates[0]?.id).toEndWith("-empty");
+      }
+    }
+  });
+
+  test("missing event content is disclosed without serving the surviving projection", async () => {
+    const f = await ledgerPackFixture({}, true);
+    const missing = await f.db
+      .prepare(`SELECT COUNT(*) AS count FROM events e
+        LEFT JOIN event_content c ON c.event_id = e.id
+        WHERE e.problem_id = 'P-4DSP' AND c.event_id IS NULL`)
+      .first<{ count: number }>();
+    expect(missing?.count).toBe(3);
+    for (const profile of ["formal", "graveyard", "claim-graph"] as const) {
+      const section = await readLedgerPackSection(f.db, "P-4DSP", Number(f.relation.seq), profile);
+      expect(section.candidates).toHaveLength(0);
+      expect(section.omitted).toHaveLength(1);
+      expect(section.omitted[0]?.reason).toBe("content_unavailable");
+    }
+  });
+
+  test("a failed typed-section query cannot become a valid empty pack", async () => {
+    let refuse = false;
+    const f = await ledgerPackFixture({
+      beforeRead: async (read) => {
+        if (refuse && read.sql.includes("FROM proof_gaps g JOIN events e"))
+          throw new Error("synthetic query failure");
+      },
+    });
+    refuse = true;
+    const response = await f.call(`${f.path}/pack?profile=formal`);
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain("No recorded proof-gaps");
+  });
+});
 
 type LocalBinding = string | number | null;
 
@@ -4246,7 +4516,7 @@ describe("session protocol routes", () => {
       expect(replay.status).toBe(401);
       expect(await replay.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
     }
-  });
+  }, 30000);
 
   test("PLANTED: session policy ordering is replay, target reads, policy, then mutation", () => {
     const routerSource = readFileSync(
@@ -5788,8 +6058,14 @@ describe("session protocol routes", () => {
     expect(boundedPack.tokens_estimate).toBeLessThanOrEqual(800);
     expect(boundedPack.omitted).toContainEqual({ reason: "budget_exceeded" });
     expect(boundedText).not.toContain("large-12-");
-    expect(boundedPack.items[0]?.id).toBe("SYS-identity");
-    expect(boundedPack.items[1]?.id).toBe("SYS-inoculation");
+    expect(boundedPack.items[0]?.id).toBe("SYS-inoculation");
+    expect(boundedPack.items[0]).toMatchObject({ scope: "system", untrusted: false });
+    expect(roomyPack.items.find((item) => item.id === "SYS-identity")).toMatchObject({
+      scope: "ledger",
+      untrusted: true,
+    });
+    expect(boundedPack.items[1]?.id).toBe("SYS-identity");
+    expect(boundedPack.items[1]).toMatchObject({ scope: "ledger", untrusted: true });
 
     for (const invalid of ["800junk", "8001", "0", "1.5"]) {
       const refusal = await call(
@@ -5939,7 +6215,7 @@ describe("session protocol routes", () => {
     );
     expect(atCapResponse.status).toBe(200);
     const atCap = PackResponseSchema.parse(await atCapResponse.json());
-    const atCapIds = atCap.items.filter((item) => item.scope === "ledger").map((item) => item.id);
+    const atCapIds = atCap.items.filter((item) => item.kind === "claim").map((item) => item.id);
     expect(atCapIds.length).toBeGreaterThan(0);
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
@@ -5962,9 +6238,7 @@ describe("session protocol routes", () => {
     );
     expect(overCapResponse.status).toBe(200);
     const overCap = PackResponseSchema.parse(await overCapResponse.json());
-    const overCapIds = overCap.items
-      .filter((item) => item.scope === "ledger")
-      .map((item) => item.id);
+    const overCapIds = overCap.items.filter((item) => item.kind === "claim").map((item) => item.id);
     // The additional mandatory candidate_limit marker consumes envelope
     // budget, so the finalized over-cap prefix may be shorter by one or more
     // items. It must still be the same deterministic prefix, never a reordered

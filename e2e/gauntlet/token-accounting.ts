@@ -64,7 +64,12 @@ export function parseClaudeCodeUsage(json: string): ClaudeCodeTokenUsage | null 
   const cacheCreation = asFiniteNumber(usage.cache_creation_input_tokens);
   const cacheRead = asFiniteNumber(usage.cache_read_input_tokens);
   const outputTokens = asFiniteNumber(usage.output_tokens);
-  if (inputTokens === null || cacheCreation === null || cacheRead === null || outputTokens === null) {
+  if (
+    inputTokens === null ||
+    cacheCreation === null ||
+    cacheRead === null ||
+    outputTokens === null
+  ) {
     return null;
   }
 

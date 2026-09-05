@@ -8,12 +8,14 @@ import {
   GapTransitionRequestSchema,
   HypothesisKillRequestSchema,
   HypothesisRequestSchema,
+  PackResponseSchema,
   PromoteRequestSchema,
   RelationFileRequestSchema,
   ReviewRequestSchema,
   ReviseRequestSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
+import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
 
 // Wrangler's harness requires genuine Node: Bun can exit with unresolved startup.
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -635,6 +637,64 @@ try {
     assert.equal(await fixtures.screeningCalls(), calls + 1, `${kind}: replay cannot screen again`);
   }
   const revisedBody = candidates[1][3];
+  const policyEvents = await readEvents(env.DB, "P-DISC-POL", 0, 100);
+  assert.equal(
+    await eventChainMatches(policyEvents),
+    true,
+    "attribution must remain bound to the real D1 chain",
+  );
+  const attributedWrites = policyEvents.filter(
+    (event) => event.type.startsWith("gap.") || event.type === "relation.asserted",
+  );
+  assert.deepEqual([...new Set(attributedWrites.map((event) => event.type))].sort(), [
+    "gap.filed",
+    "gap.withdrawn",
+    "relation.asserted",
+  ]);
+  for (const event of attributedWrites) {
+    assert.equal(event.actorFellowId, authorCard.fellow_id);
+    assert.equal(event.actorSponsorId, authorCard.current_sponsor_id);
+    assert.equal(event.actorSessionId, policySession.session_id);
+    assert.equal(event.modelStringSelfDeclared, authorCard.model);
+    assert.equal(event.harness, authorCard.harness);
+    assert.equal(typeof event.writerCredentialId, "string");
+  }
+  // ceq.5: a different Fellow consumes the author's recorded negative
+  // knowledge and obligations through production packs, not a fixture read API.
+  for (const [profile, itemKind, section, expectedText] of [
+    ["formal", "proof-gap", "proof-gaps", "An additional synthetic obligation."],
+    ["graveyard", "killed-hypothesis", "killed-hypotheses", "Induct on path length"],
+    ["claim-graph", "claim-relation", "typed-relations", "Version pins: superseded"],
+  ]) {
+    const path = `/v1/sessions/${policyReviewer.session_id}/pack?profile=${profile}&max_tokens=8000`;
+    const headers = { authorization: `Bearer ${reviewer}`, "User-Agent": userAgent };
+    const response = await worker.fetch(`${origin}${path}`, { headers });
+    assert.equal(response.status, 200, `${profile}: producer-backed pack must be readable`);
+    const body = await response.text();
+    const pack = PackResponseSchema.parse(JSON.parse(body));
+    const items = pack.items.filter((item) => item.kind === itemKind);
+    assert.ok(items.length > 0, `${profile}: real public objects reach the reader`);
+    assert.ok(items.some((item) => item.body.includes(expectedText)));
+    assert.ok(items.every((item) => item.scope === "ledger" && item.untrusted));
+    assert.equal(pack.items[0].id, "SYS-inoculation");
+    assert.equal(pack.items.find((item) => item.id === "SYS-identity").untrusted, true);
+    assert.ok(
+      !pack.omitted.some(
+        (item) => item.reason === "profile_section_not_composed" && item.detail === section,
+      ),
+    );
+    assert.ok(!body.includes(privateCanary));
+    assert.ok(!body.includes(author));
+    assert.ok(!body.includes(reviewer));
+    assert.ok(!pack.items.some((item) => item.scope === "workshop"));
+    const repeated = await worker.fetch(`${origin}${path}`, { headers });
+    assert.equal(await repeated.text(), body);
+    const conditional = await worker.fetch(`${origin}${path}`, {
+      headers: { ...headers, "if-none-match": response.headers.get("etag") },
+    });
+    assert.equal(conditional.status, 304);
+  }
+  console.log(JSON.stringify({ stage: "cross-fellow-ledger-packs-proved", profiles: 3 }));
   const beforeConflict = await publicState();
   const callsBeforeConflict = await fixtures.screeningCalls();
   const changed = await call(
@@ -679,6 +739,52 @@ try {
       `${kind}: concurrent revoke must roll back the public transaction`,
     );
     const retry = await call(path, body, token, 401, `revoke-during-${kind}`);
+    assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
+    assert.equal(await fixtures.screeningCalls(), calls + 1);
+  }
+  // These routes formerly used a separate replay companion without a
+  // commit-time credential guard. Each race uses a fresh, genuinely enrolled
+  // Fellow; a revoked credential is never restored to manufacture another case.
+  for (const [index, suffix] of ["gaps", "gaps/close", "relations"].entries()) {
+    const token = await enroll(`discovery-race-${index}`, `usr_discoveryrace${index}`);
+    const session = await call(
+      "/v1/sessions",
+      { problem_id: "P-DISC-POL", intent: "prove" },
+      token,
+      201,
+    );
+    const path = `/v1/sessions/${session.session_id}`;
+    const gapBody = {
+      target_claim_id: "C-1",
+      target_version: 2,
+      obligation: `Synthetic race obligation ${index}.`,
+      closes_what: "A recorded missing step.",
+    };
+    let body = gapBody;
+    if (suffix !== "gaps") {
+      const target = await call(`${path}/gaps`, gapBody, token, 201);
+      body =
+        suffix === "gaps/close"
+          ? { gap_id: target.gap_id, outcome: "withdrawn" }
+          : {
+              kind: "addresses-gap",
+              source_claim_id: "C-1",
+              source_version: 2,
+              target: target.gap_id,
+            };
+    }
+    const before = await publicState();
+    const calls = await fixtures.screeningCalls();
+    await fixtures.revokeOnNextScreen();
+    const result = await call(`${path}/${suffix}`, body, token, 403, `race-${index}`);
+    assert.equal(result.code, "WRITE_REFUSED");
+    assert.equal(await fixtures.screeningCalls(), calls + 1);
+    assert.deepEqual(
+      await publicState(),
+      before,
+      `${suffix}: revoked authority must not append, project or advance a cursor`,
+    );
+    const retry = await call(`${path}/${suffix}`, body, token, 401, `race-${index}`);
     assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
     assert.equal(await fixtures.screeningCalls(), calls + 1);
   }

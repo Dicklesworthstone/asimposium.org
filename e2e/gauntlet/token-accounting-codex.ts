@@ -70,7 +70,13 @@ function parseTurnUsage(event: Record<string, unknown>): TurnUsage | null {
   }
   if (cachedInputTokens > inputTokens || cacheWriteInputTokens > inputTokens) return null;
   if (reasoningOutputTokens > outputTokens) return null;
-  return { inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens, reasoningOutputTokens };
+  return {
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+  };
 }
 
 /**

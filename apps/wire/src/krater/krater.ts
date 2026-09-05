@@ -2673,6 +2673,7 @@ export type KraterGapInput =
       readonly targetClaimId: string;
       readonly targetVersion: number;
       readonly authorFellowId: string;
+      readonly attribution?: KraterWriteInput["attribution"];
       /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
       readonly writerCredentialId?: string;
       readonly createdAt: string;
@@ -2685,6 +2686,7 @@ export type KraterGapInput =
       readonly gapId: string;
       readonly closedBy: string | null;
       readonly actorFellowId: string;
+      readonly attribution?: KraterWriteInput["attribution"];
       /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
       readonly writerCredentialId?: string;
       readonly createdAt: string;
@@ -2737,6 +2739,9 @@ export async function writeGapEvent(
     const payloadJson = canonicalGapPayload(input);
     const payloadSha256 = await sha256Hex(payloadJson);
     const actorFellowId = input.mode === "filed" ? input.authorFellowId : input.actorFellowId;
+    if (input.attribution !== undefined && input.attribution.fellowId !== actorFellowId) {
+      inputError("Gap attribution must identify the event actor.");
+    }
     const nextRowDigest = await eventEnvelopeRowDigest({
       eventId: input.eventId,
       problemId: input.problemId,
@@ -2748,10 +2753,10 @@ export async function writeGapEvent(
       payloadSha256,
       createdAt: input.createdAt,
       actorFellowId,
-      actorSponsorId: null,
-      actorSessionId: null,
-      modelStringSelfDeclared: null,
-      harness: null,
+      actorSponsorId: input.attribution?.sponsorId ?? null,
+      actorSessionId: input.attribution?.sessionId ?? null,
+      modelStringSelfDeclared: input.attribution?.modelSelfDeclared ?? null,
+      harness: input.attribution?.harness ?? null,
       writerCredentialId: input.writerCredentialId ?? null,
     });
     const nextChainDigest = await eventChainDigest(
@@ -2855,7 +2860,7 @@ export async function writeGapEvent(
               actor_fellow_id, actor_sponsor_id, actor_session_id,
               model_string_self_declared, harness, writer_credential_id)
            SELECT ?, p.id, p.public_seq, 'gap.${input.mode}', 'gap', ?, 1, ?, ?, ?, ?,
-                  ?, NULL, NULL, NULL, NULL, ?
+                  ?, ?, ?, ?, ?, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL${settleGuardSql}`,
@@ -2866,6 +2871,10 @@ export async function writeGapEvent(
           nextChainDigest,
           input.createdAt,
           actorFellowId,
+          input.attribution?.sponsorId ?? null,
+          input.attribution?.sessionId ?? null,
+          input.attribution?.modelSelfDeclared ?? null,
+          input.attribution?.harness ?? null,
           input.writerCredentialId ?? null,
           input.idempotencyKey,
           input.problemId,
@@ -3000,6 +3009,7 @@ export interface KraterRelationInput {
   readonly sourceVersion: number;
   readonly targetRef: string;
   readonly assertedByFellow: string;
+  readonly attribution?: KraterWriteInput["attribution"];
   /** Durable per-credential accounting unit for grant-wide budgets (wqlf). */
   readonly writerCredentialId?: string;
   readonly createdAt: string;
@@ -3040,6 +3050,9 @@ export async function writeRelationEvent(
       target: input.targetRef,
     });
     const payloadSha256 = await sha256Hex(payloadJson);
+    if (input.attribution !== undefined && input.attribution.fellowId !== input.assertedByFellow) {
+      inputError("Relation attribution must identify the event actor.");
+    }
     const nextRowDigest = await eventEnvelopeRowDigest({
       eventId: input.eventId,
       problemId: input.problemId,
@@ -3051,10 +3064,10 @@ export async function writeRelationEvent(
       payloadSha256,
       createdAt: input.createdAt,
       actorFellowId: input.assertedByFellow,
-      actorSponsorId: null,
-      actorSessionId: null,
-      modelStringSelfDeclared: null,
-      harness: null,
+      actorSponsorId: input.attribution?.sponsorId ?? null,
+      actorSessionId: input.attribution?.sessionId ?? null,
+      modelStringSelfDeclared: input.attribution?.modelSelfDeclared ?? null,
+      harness: input.attribution?.harness ?? null,
       writerCredentialId: input.writerCredentialId ?? null,
     });
     const nextChainDigest = await eventChainDigest(
@@ -3129,7 +3142,7 @@ export async function writeRelationEvent(
               actor_fellow_id, actor_sponsor_id, actor_session_id,
               model_string_self_declared, harness, writer_credential_id)
            SELECT ?, p.id, p.public_seq, 'relation.asserted', 'relation', ?, 1, ?, ?, ?, ?,
-                  ?, NULL, NULL, NULL, NULL, ?
+                  ?, ?, ?, ?, ?, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
@@ -3140,6 +3153,10 @@ export async function writeRelationEvent(
           nextChainDigest,
           input.createdAt,
           input.assertedByFellow,
+          input.attribution?.sponsorId ?? null,
+          input.attribution?.sessionId ?? null,
+          input.attribution?.modelSelfDeclared ?? null,
+          input.attribution?.harness ?? null,
           input.writerCredentialId ?? null,
           input.idempotencyKey,
           input.problemId,
