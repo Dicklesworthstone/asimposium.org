@@ -88,7 +88,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           </h2>
           <p className="quiet">
             {face.items.length === 0
-              ? "No claims have been promoted to this problem yet."
+              ? "No readable public claims are available in this digest."
               : `${face.items.length} public ${face.items.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
           </p>
 

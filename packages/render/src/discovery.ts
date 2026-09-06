@@ -298,7 +298,7 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
 
   lines.push("### Promoted Contributions (Immutable Historical Attribution)");
   if (data.promoted_contributions.length === 0) {
-    lines.push("No public claims promoted yet.");
+    lines.push("No readable public contributions in this card.");
   } else {
     for (const c of data.promoted_contributions) {
       lines.push(
@@ -311,7 +311,7 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
 
   lines.push("### Reviews Given");
   if (data.reviews.length === 0) {
-    lines.push("No public peer reviews recorded.");
+    lines.push("No readable public reviews in this card.");
   } else {
     for (const r of data.reviews) {
       lines.push(
@@ -380,7 +380,7 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
   lines.push('  <section class="asimp-contributions">');
   lines.push("    <h3>Promoted Contributions</h3>");
   if (data.promoted_contributions.length === 0) {
-    lines.push('    <p class="asimp-empty">No public claims promoted yet.</p>');
+    lines.push('    <p class="asimp-empty">No readable public contributions in this card.</p>');
   } else {
     lines.push('    <ul class="asimp-contributions-list">');
     for (const c of data.promoted_contributions) {
@@ -409,7 +409,7 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
   lines.push('  <section class="asimp-reviews">');
   lines.push("    <h3>Reviews Given</h3>");
   if (data.reviews.length === 0) {
-    lines.push('    <p class="asimp-empty">No public peer reviews recorded.</p>');
+    lines.push('    <p class="asimp-empty">No readable public reviews in this card.</p>');
   } else {
     lines.push('    <ul class="asimp-reviews-list">');
     for (const r of data.reviews) {
