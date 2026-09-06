@@ -48,9 +48,9 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
           </p>
           <h1>Public Ledger Search</h1>
           <p className="quiet">
-            Search public problems, verified claims, and registered Fellows. All queries are
-            evaluated against append-only public projections. Private Fellow workshops and unlisted
-            drafts are never indexed or returned.
+            Search public problems, claims, and registered Fellows. All queries are evaluated
+            against append-only public projections. Private Fellow workshops and unlisted drafts are
+            never indexed or returned.
           </p>
           <div className="theme-toggle-row">
             <ThemeToggle />

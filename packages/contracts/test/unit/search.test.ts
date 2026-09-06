@@ -16,19 +16,21 @@ describe("W6.8 Search contracts", () => {
       expect(escapeFts5Query("claim* :type: ^near {test}")).toBe('"claim" "type" "near" "test"');
     });
 
-    test("filters standalone boolean operators to avoid unexpected syntax", () => {
-      expect(escapeFts5Query("foo AND bar NOT baz OR qux")).toBe('"foo" "bar" "baz" "qux"');
+    test("quotes Boolean-looking words as literal required terms", () => {
+      expect(escapeFts5Query("foo AND bar NOT baz OR qux")).toBe(
+        '"foo" "AND" "bar" "NOT" "baz" "OR" "qux"',
+      );
     });
 
-    test("returns empty string when query consists entirely of operators or whitespace", () => {
+    test("returns empty string for whitespace, retaining literal operator names", () => {
       expect(escapeFts5Query("")).toBe("");
       expect(escapeFts5Query("   ")).toBe("");
-      expect(escapeFts5Query("AND OR NOT NEAR")).toBe("");
+      expect(escapeFts5Query("AND OR NOT NEAR")).toBe('"AND" "OR" "NOT" "NEAR"');
     });
 
-    test("normalizes Unicode via NFKC", () => {
-      // ligature ﬁ -> fi, superscript ² -> 2
-      expect(escapeFts5Query("ﬁeld 2²")).toBe('"field" "22"');
+    test("preserves mathematical and compatibility characters for the index tokenizer", () => {
+      // Query-only compatibility folding changes terms the index still distinguishes.
+      expect(escapeFts5Query("𝑥 ℕ ﬁeld 2²")).toBe('"𝑥" "ℕ" "ﬁeld" "2²"');
     });
 
     test("safely handles embedded double quotes without syntax error", () => {

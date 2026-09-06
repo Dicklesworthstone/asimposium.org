@@ -165,18 +165,18 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
  * Prevents syntax errors, operator injection (AND, OR, NOT, NEAR),
  * and special punctuation issues.
  *
- * Each lexical token is normalized, stripped of dangerous characters,
- * and quoted as a literal string in the FTS syntax (`"token"`).
+ * Each lexical token is quoted as a literal string in FTS syntax (`"token"`).
+ * Preserve Unicode characters for the index's own tokenizer: query-only NFKC
+ * folding would conflate mathematical symbols and lose literal excerpt matches.
  */
 export function escapeFts5Query(rawQuery: string): string {
-  const normalized = rawQuery.normalize("NFKC");
   let withoutControlChars = "";
-  for (let i = 0; i < normalized.length; i++) {
-    const code = normalized.charCodeAt(i);
+  for (let i = 0; i < rawQuery.length; i++) {
+    const code = rawQuery.charCodeAt(i);
     if (code < 32 || code === 127) {
       withoutControlChars += " ";
     } else {
-      withoutControlChars += normalized[i];
+      withoutControlChars += rawQuery[i];
     }
   }
 
@@ -189,12 +189,6 @@ export function escapeFts5Query(rawQuery: string): string {
 
   if (rawTokens.length === 0) return "";
 
-  // Filter out standalone uppercase FTS5 operators to avoid syntax issues
-  const FTS5_RESERVED = new Set(["AND", "OR", "NOT", "NEAR"]);
-  const tokens = rawTokens.filter((t) => !FTS5_RESERVED.has(t));
-
-  if (tokens.length === 0) return "";
-
-  // Quote each token: "token"
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ");
+  // Quoted AND/OR/NOT/NEAR are ordinary terms, never executable operators.
+  return rawTokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ");
 }

@@ -154,6 +154,7 @@ try {
     FORGED.handler,
     FORGED.javascriptUrl,
   ].join("\n");
+  const literalSearchText = "Symbols 𝑥 𝑧 ℕ 2² ﬁeld; operator names AND OR NOT NEAR.\n";
   const reviewBasis = `Checked synthetic bounded arithmetic.\n${FORGED.fenceBreakout}\n${FORGED.faceHeader}\n${FORGED.nextActions}\n${FORGED.handler}`;
   for (const problem of ["P-DISC-A", "P-DISC-B"]) {
     await fixtures.seedProblem(problem);
@@ -173,7 +174,7 @@ try {
     const promotion = {
       workshop_id: draft.workshop_id,
       kind: "conjecture",
-      statement: `Synthetic ${problem}: integer 2 is even.\n${publicCanary}`,
+      statement: `Synthetic ${problem}: integer 2 is even.\n${problem === "P-DISC-B" ? literalSearchText : ""}${publicCanary}`,
       falsifier: "An integer remainder of one after division by two.",
       relates_to: [],
     };
@@ -1133,6 +1134,61 @@ try {
       pack_profiles: 12,
     }),
   );
+  // The promotion/index producer keeps these characters. Query escaping must
+  // preserve them too, while Boolean-looking words remain ordinary literals.
+  let literalSearchReads = 0;
+  for (const q of ["𝑥", "𝑧", "ℕ", "2²", "ﬁeld", "AND", "OR", "NOT", "NEAR"]) {
+    for (const suffix of ["", ".json", ".md"]) {
+      const url = `${origin}/search${suffix}?${new URLSearchParams({ q, kind: "claim" })}`;
+      const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      assert.ok(
+        body.includes("https://asimposium.org/p/P-DISC-B#C-1"),
+        `${q}: literal source excerpt must find its claim`,
+      );
+      assert.ok(!body.includes(redactedClaimText));
+      assert.ok(!body.includes(privateCanary));
+      if (suffix !== ".json") {
+        assert.ok(body.includes("Query text and result excerpts are untrusted data"));
+        assert.ok(!body.includes("<!-- asimp:item"));
+        assert.ok(!body.includes("<script>"));
+        assert.ok(!body.includes("](javascript:"));
+      }
+      if (suffix === ".json") {
+        const result = JSON.parse(body);
+        assert.deepEqual(
+          result.items.map((item) => [item.problem_id, item.id]),
+          [["P-DISC-B", "C-1"]],
+        );
+        assert.equal(result.items[0].match_type, "lexical_fts");
+        assert.ok(result.items[0].statement.includes(literalSearchText));
+      }
+      const repeated = await worker.fetch(url, {
+        headers: { "User-Agent": userAgent, "if-none-match": response.headers.get("etag") },
+      });
+      assert.equal(repeated.status, 304);
+      literalSearchReads += 1;
+    }
+  }
+  for (const q of [
+    // The retained XSS canary legitimately contains src=x; z has no such
+    // independent occurrence, so this negative isolates compatibility folding.
+    "Symbols z",
+    "Symbols N",
+    "Symbols 22",
+    "Symbols field",
+    "Symbols OR absentcanary",
+    "Symbols NOT absentcanary",
+  ]) {
+    const result = await call(`/search.json?${new URLSearchParams({ q, kind: "claim" })}`);
+    assert.deepEqual(
+      result.items.map((item) => [item.problem_id, item.id]),
+      [],
+      `${q}: no compatibility alias or executed Boolean operator`,
+    );
+  }
+  console.log(JSON.stringify({ stage: "literal-scientific-search", literalSearchReads }));
   // Exercise actual D1 read failures without deleting rows or mocking a binding.
   // Restore each table in finally, then prove the healthy body/ETag returns.
   let unavailableReads = 0;
