@@ -53,14 +53,15 @@ done
 
 if ! awk '
   /e2e_validate_staging_origin / && validation == 0 { validation = NR }
-  /command -v bunx/ && dependency == 0 { dependency = NR }
+  /command -v node/ && dependency == 0 { dependency = NR }
   /if ! e2e_claim_artifact_run_at_root / && claim == 0 { claim = NR }
   /e2e_select_artifact_claim_at_root / && selected == 0 { selected = NR }
+  /playwright_node=.*e2e_select_node_runtime/ { runtime = NR }
   /ASIMPOSIUM_PLAYWRIGHT_ARTIFACT_ROOT_IDENTITY=/ { capability = NR }
-  /bunx --no-install playwright test/ { launch = NR }
+  /\$playwright_node.*\$playwright_cli.* test/ { launch = NR }
   END {
     exit(!(validation > 0 && dependency > validation && claim > dependency &&
-      selected > claim && capability > selected && launch >= capability))
+      selected > claim && runtime > selected && capability > runtime && launch >= capability))
   }
 ' "$repository_root/e2e/run-playwright.sh"; then
   emit "fail" "PLAYWRIGHT_ARTIFACT_NAMESPACE_NOT_CLAIMED"
@@ -142,7 +143,7 @@ mkdir "$collision_bin" || {
   emit "fail" "ARTIFACT_CLAIM_FIXTURE_UNAVAILABLE"
   exit 1
 }
-for trapped_binary in curl bunx bun python3; do
+for trapped_binary in curl bunx bun node python3; do
   # shellcheck disable=SC2016
   printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -340,13 +341,25 @@ assert_production_refused "$repository_root/scripts/smoke-gallery.sh" "STAGING_A
 assert_production_refused "$repository_root/e2e/run-playwright.sh" "STAGING_SURFACE_BASE_URL_INVALID"
 assert_production_refused "$repository_root/e2e/gauntlet/run.sh" "STAGING_AGENT_BASE_URL_INVALID"
 
+playwright_node="$(e2e_select_node_runtime)" || {
+  emit "blocked" "PLAYWRIGHT_NODE_UNAVAILABLE"
+  exit 78
+}
+playwright_cli="$repository_root/e2e/node_modules/@playwright/test/cli.js"
+# A real positive CLI result guards against the observed vacuous exit zero.
+playwright_version="$("$playwright_node" "$playwright_cli" --version)"
+if [[ ! "$playwright_version" =~ ^Version[[:space:]][0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  emit "fail" "PLAYWRIGHT_CLI_DID_NOT_EXECUTE"
+  exit 1
+fi
+
 set +e
 direct_playwright_output="$(
   cd "$repository_root/e2e" \
     && ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
       ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://a.asimposium.org" \
       ASIMPOSIUM_STAGING_AGORA_BASE_URL="https://asimposium.org" \
-      bunx --no-install playwright test --config playwright.config.ts --list 2>&1
+      "$playwright_node" "$playwright_cli" test --config playwright.config.ts --list 2>&1
 )"
 direct_playwright_status=$?
 set -e
@@ -384,7 +397,7 @@ forged_playwright_output="$(
       ASIMPOSIUM_PLAYWRIGHT_RUN_IDENTITY="0:0" \
       ASIMPOSIUM_PLAYWRIGHT_LEASE_DIRECTORY="$repository_root/e2e/.artifact-writer-leases/$playwright_lease_epoch/lease-1-1-1-1" \
       ASIMPOSIUM_PLAYWRIGHT_LEASE_IDENTITY="0:0" \
-      bunx --no-install playwright test --config playwright.config.ts --list 2>&1
+      "$playwright_node" "$playwright_cli" test --config playwright.config.ts --list 2>&1
 )"
 forged_playwright_status=$?
 set -e

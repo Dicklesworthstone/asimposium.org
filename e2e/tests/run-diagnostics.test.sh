@@ -78,8 +78,8 @@ escaped_json="$(e2e_json_escape "quote\"backslash\\newline"$'\n'"tab"$'\t')"
 
 # JSON field injection negative test
 injection_line="$(e2e_format_diagnostic 's"x' 0 pass 'OK","leaked":"FRAGMENT_SECRET' "$reproduce")"
-node -e '
-const line = process.argv[1];
+printf '%s' "$injection_line" | bun -e '
+const line = await Bun.stdin.text();
 const parsed = JSON.parse(line);
 const expectedKeys = ["tool", "tool_version", "package", "suite", "version", "duration_ms", "status", "code", "reproduce"].sort();
 const actualKeys = Object.keys(parsed).sort();
@@ -92,7 +92,7 @@ if ("leaked" in parsed) {
 if (parsed.suite !== "s\"x" || parsed.code !== "OK\",\"leaked\":\"FRAGMENT_SECRET") {
   process.exit(3);
 }
-' "$injection_line" || fail "JSON_DIAGNOSTIC_INJECTION_FAILED"
+' || fail "JSON_DIAGNOSTIC_INJECTION_FAILED"
 
 for valid_run_id in "a" "OPS.1-20260813" "run_42"; do
   e2e_validate_run_id "$valid_run_id" || {

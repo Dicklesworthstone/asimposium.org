@@ -45,6 +45,21 @@ e2e_ascii_lower() {
   LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
 }
 
+# Playwright must execute under Node, even when the first `node` on PATH is
+# Bun's compatibility alias. Return a verified executable, never an exit-only
+# success from a CLI that did not consume its arguments.
+e2e_select_node_runtime() {
+  local candidate
+  while IFS= read -r candidate; do
+    [[ "$candidate" == /* && -x "$candidate" ]] || continue
+    if "$candidate" -e 'process.exit(!process.versions.bun && Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)'; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(type -a -p node || true)
+  return 1
+}
+
 e2e_curl_header_preserves_user_agent() {
   local header_value="$1"
 

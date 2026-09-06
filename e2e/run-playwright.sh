@@ -74,11 +74,10 @@ for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGOR
   fi
 done
 
-if ! command -v bunx >/dev/null 2>&1; then
-  e2e_emit_diagnostic "$suite" "$started_ms" "fail" "BUNX_UNAVAILABLE" "$reproduce"
-  exit 69
+if ! command -v node >/dev/null 2>&1; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "PLAYWRIGHT_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
 fi
-
 # Playwright writes failure output even when the caller does not request the
 # shell diagnostic JSONL. Claim its fresh namespace after write-free preflight
 # and before launch so Playwright may clean only its new run-scoped child.
@@ -91,6 +90,17 @@ if ! e2e_select_artifact_claim_at_root "$repository_root" "$run_id"; then
   exit 78
 fi
 
+playwright_cli="$repository_root/e2e/node_modules/@playwright/test/cli.js"
+if [[ ! -f "$playwright_cli" ]]; then
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "PLAYWRIGHT_DEPENDENCY_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+# Do not execute even a runtime probe until the fresh artifact claim is proven.
+playwright_node="$(e2e_select_node_runtime)" || {
+  e2e_emit_diagnostic "$suite" "$started_ms" "blocked" "PLAYWRIGHT_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
+}
+
 cd "$repository_root/e2e"
 set +e
 ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
@@ -100,7 +110,7 @@ ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
   ASIMPOSIUM_PLAYWRIGHT_RUN_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_RUN_IDENTITY" \
   ASIMPOSIUM_PLAYWRIGHT_LEASE_DIRECTORY="$ASIMPOSIUM_E2E_SELECTED_LEASE_DIRECTORY" \
   ASIMPOSIUM_PLAYWRIGHT_LEASE_IDENTITY="$ASIMPOSIUM_E2E_SELECTED_LEASE_IDENTITY" \
-  bunx --no-install playwright test --config playwright.config.ts
+  "$playwright_node" "$playwright_cli" test --config playwright.config.ts
 playwright_status=$?
 set -e
 
