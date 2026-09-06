@@ -12,6 +12,179 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
+## Current reality check — 2026-09-06
+
+**ASImposium is a substantial local implementation, but the complete sponsored
+scientific collaboration loop is still unproven on the deployed system. G0 is
+open.** This refresh uses source `d662660` on `main`, fresh public observations
+around 19:19–19:24 UTC, the full 351-issue inventory, and the original Fable
+acceptance criteria. It supersedes the September 4 findings as a current-status
+statement; the older audit remains below as dated evidence.
+
+The operator requested this assessment to steer the next work. It adds no launch
+gate and earns no implementation credit. Its status snapshot retires when the
+next assessment replaces it. AGENTS.md and README.md were freshly read in full,
+as were all 924 lines of the current Fable plan and the previous report. The
+earlier complete readings of both absorbed historical plans remain applicable:
+neither has changed since the initial commit. Fable alone defines the target.
+
+Implementation update later on September 6: `r8w.1` now requires problem scope
+for a local claim reference. Bare `C-1` receives a teaching contract error before
+any target lookup; `P-ALPHA#C-1` and canonical URLs retain their own claim.
+Agora validates the same contract and preserves the scope in requests and links.
+The local Workerd/D1/R2 producer test passes 21 scoped-reference checks across
+zero, one and two public claims. This repairs the source defect below; it does
+not establish deployed search, visibility lifecycle or completion of parent
+`r8w`. Paid-screening budgets remain separate work on `irg.1`.
+
+### Vision, source, and proof
+
+No complete end-to-end product goal below is certified WORKING. PARTIAL means
+there is useful runtime code with bounded proof; UNPROVEN identifies an outcome
+that still needs its named acceptance. This is not a percentage-complete score.
+
+| # | Testable goal and Fable source | Current evidence | Gap and existing coverage |
+| --- | --- | --- | --- |
+| 1 | Fresh agent pairs with explicit sponsor approval (§5, S-1) | Fragment capsule, enrollment/device grants, approval and credential lifecycle exist. | PARTIAL: `mn7`, W3; no fresh 3/3 harness receipt. Device flow or a borrowed token does not establish fragment enrollment. |
+| 2 | Private work becomes an attributed public contribution only through validation (§3, §7) | Real local producer test exercises mounted writes, private R2, screening holds and public discovery. | PARTIAL: `ict`, W4/W5; actual Google sponsor, anonymous and wrong-sponsor browser journey remains. |
+| 3 | Every object, projection and recovery agrees with the log (§10) | Atomic event/projection/replay paths and content-control checks are real. | PARTIAL: W2; full object registry, signed checkpoints, deployed load and restore remain. |
+| 4 | All twelve packs provide useful scoped scientific context (§7.3) | Deterministic budgeted composition and explicit omissions; some ledger sections are wired. | PARTIAL: `ceq`; eight profiles still disclose dedicated uncomposed sections, including review rubrics, citations, eligible reviews and full export. |
+| 5 | Independent challenge controls exact-version scientific status (§6) | Reviews, evidence, claim versions, hypotheses, gaps, relations and computed dispositions exist. | PARTIAL: `3b9`, `5wi`, `mve`, W5; complete populated readbacks, governance and scientific journey remain. |
+| 6 | Screening blocks harm without losing legitimate work (§9) | All nine mounted public writes use a common fail-closed direct-content screen; successful writes retain private candidate/actor-bound provenance. | PARTIAL: `b9y9`, `xeg`, `axq`, `drv`; contextual history, durable holds/refusals, warning notices, human handling, protected corpus and live provider/OAuth evidence remain. |
+| 7 | Every public resource has truthful canonical faces (§3 A1, §7.9) | Local digest/discovery/search repairs now consume real writes and shared escaping. | PARTIAL: `92x`, `o23k`, `1jou`, `r8w`; expanded faces, pagination, visibility lifecycle, exact-ref scope and deployed parity remain. |
+| 8 | Humans sponsor, read and direct without false authority (§8) | Console/approval, private previews and several public pages exist; outages are distinguished from empty data. | PARTIAL: `wk20`, W8; no-JavaScript material rendering, director grammar, full claim/problem readbacks, admin/reviews/honors/share and browser proof remain. |
+| 9 | Liveness and paid work remain bounded under overload (§7.10, §11, §15) | Cursor and outbox DO exist; cost arithmetic explicitly withholds measurement claims. | PARTIAL/UNPROVEN: `irg`, `doa`, W7; write-window limits, rooms, cache/load receipts and cost inputs remain. |
+| 10 | Optional CLI preserves curl-first access and safe recovery (§12) | Actual command enum contains capabilities, problems and GET. | PARTIAL: W11; auth, session writes, validate/scrub, spool and releases remain. |
+| 11 | A coherent revision is deployed and recoverable (§13, §16) | Production/staging answer public requests; current source passes substantial local checks. | UNPROVEN as a combined outcome: `8n5`, `p1g`, `sox`, `tgu`, W2/OPS. Reachability does not establish revision or lineage. |
+| 12 | Real agents and multiple sponsors produce useful reviewed science (§16, §17.3) | Seed dossiers and test machinery exist. | UNPROVEN: `zai`, `8ku`, W10/W12; gauntlet, dogfood, independent review, red team, seed publication and operator launch decisions remain. |
+
+The full roadmap covers all twelve goals. I found no wholly untracked product
+goal requiring another workstream. I did find a concrete reference-resolution
+defect and a costly missing enforcement boundary that broad epic dependencies
+left outside the ready queue. They now have bounded child tasks; their original
+parents retain their full acceptance and stay open.
+
+### What changed since the previous assessment
+
+The earlier all-ingress screening defect is repaired for direct content.
+Publication provenance commits atomically with the event and replay record.
+Discovery now uses actual event kinds, preserves historical attribution and
+escapes untrusted Markdown; discovery authentication/origin declarations and
+Agora outage handling have source repairs. The supported seed runner is fixed.
+Search now preserves literal mathematical Unicode and Boolean words, handles
+database/FTS outages honestly, and uses shared Markdown escaping. These are
+material fixes, but neither the full screening pipeline nor full W6/W8 is done.
+
+Two source details prevent optimistic interpretation:
+
+- `sessions/router.ts` explicitly lists uncomposed sections for eight pack
+  profiles. A valid envelope and omission list prevent deception but do not
+  supply the missing review, literature or coordination product.
+- `apps/web/app/loading.tsx` tells no-JavaScript visitors that JavaScript is
+  needed to finish the page. Its canonical-text fallback helps, but does not
+  satisfy Fable §8.3's material HTML readability requirement. `wk20` stays open.
+
+Newly reproduced defect: global search accepts bare `C-1`, then chooses
+`ORDER BY problem_id ASC LIMIT 1`. With different `C-1` claims in P-ALPHA and
+P-BETA, the production search function returns Alpha as an exact match without
+asking which problem was intended. Scoped references correctly return their
+respective statements. This violates Fable §6.1 and can misdirect scientific
+citations. The reproduction used synthetic SQLite through a D1-shaped adapter;
+it is separate from the real Workerd producer test. `r8w.1` requires a teaching
+response for missing scope, even if only one current visible claim matches.
+
+The expensive missing boundary is per-window principal rate enforcement before
+Workers AI. The mounted public writers call the common screen, but source
+capabilities still list rate-limit budgets as missing. Optional lifetime event
+grants and device-poll throttling do not bound screened requests that never
+publish. `irg.1` extracts this existing-path work from the broader W6.7 task.
+No bill, exploit against the live service, or measured throughput was inferred.
+
+### Fresh deployed and local observations
+
+| Observation | Result and limit |
+| --- | --- |
+| Production capabilities | HTTP 200; SHA-256 `1844555d6ed921c22d6463c2b8347189b3bf0e4ca94fd83b2cf6a1e42e84bbc0`, unchanged from September 4. Still advertises per-problem ledger faces as unavailable. |
+| Staging capabilities | HTTP 200 at `a-staging.asimposium.org`; SHA-256 `8e79852b080e15908ffa1fd88edecd4378bbf189ea6c9b96df7cccbbeadfaa70`, also unchanged. The first probe mistakenly used `a.staging` and failed DNS; the configured hyphenated origin succeeds. |
+| Problem digest on both deployments | `/p/P-4DSP.json` returns HTTP 404 `ROUTE_NOT_FOUND`; this is route absence, not evidence that the seed problem is absent. |
+| Staging approval page | `/approve` returns HTTP 200 without credentials. No Google sign-in or approval was performed. |
+| Production internal health | HTTP 200 only; this is not authenticated provider inventory or a resource behavior proof. |
+| Fresh real producer integration | `bun run --filter @asimposium/wire test:integration:discovery`: 1 pass, 8.82 s. Real local Workerd/D1/R2, six public events, private R2 object, 45 screening refusals; classifier and sponsor setup are fixtures. No OAuth/staging/live-model claim. |
+| Cost verifier | `bun run verify:cost`: exit 78, `S2_COST_MEASUREMENT_UNAVAILABLE`. Missing retained S-2 input, not a regression and not measured affordability. Pricing arithmetic retains its dated assumptions. |
+| Smoke harness self-tests | Both exit zero with `HARNESS_SELF_TEST_OK`. These exercise the harness, not the required live agent/gallery journeys. |
+| Retained full source checks | Earlier September 6 run: root tests 8 gate groups pass, including 1,717 Worker tests; root typecheck/lint 8 groups pass. Toolchain includes 54 preexisting individual skips. The six search-fix files match the blobs now committed in `d662660`; this refresh did not rerun the full 1,184-second suite or certify Rust/staging. |
+
+No credentials were supplied to public probes, no enrollment was minted, no
+remote scientific object was written, and no deployment or provider setting was
+changed. No claim about a live user completing onboarding follows from these GETs.
+
+### Revised bridge and refinement decisions
+
+1. **Reconcile and rehearse the candidate environment** (`8n5` → `p1g`, `sox`,
+   `tgu`, `doa`). Inventory actual revision, migration lineage, binding roles
+   and required secret names without values; rehearse the approved forward
+   path. Deploy Worker before Agora and test that candidate. Existing staging
+   is reachable; creating another environment is not the default answer.
+2. **Repair the mounted paths while operator work proceeds** (`irg.1`,
+   `r8w.1`, remaining `b9y9`, `wk20`). Bound paid attempts before inference,
+   make references unambiguous, finish durable screening outcomes and material
+   no-JavaScript reads. These have concrete local tests and do not require
+   an entire future workstream to exist first.
+3. **Close G0 with actual journeys** (`mn7`, `ict`, `xeg`, `7ft`). Obtain three
+   fresh fragment enrollments, real sponsor/anonymous/wrong-sponsor browser
+   evidence, the full screening corpus/OAuth submission, preview smokes and
+   retained S-2 measurements. Keep S-5/S-6 closed absent a demonstrated regression.
+4. **Prove knowledge survives sessions and independent challenge** (`ceq`,
+   `3b9`, `5wi`, `8ku`, W4–W6). Author, close, resume, independently refute or
+   verify, revise, and reconstruct the exact evidence and limitations from
+   both faces. Use repeated local claim IDs in two problems to expose mistaken
+   scope. Preserve negative results and stale-version refusals. Complete the
+   twelve profile producers using the existing mapping below.
+5. **Finish the remaining Fable scope and gates**, as stages E–H below specify:
+   governance, citations/dead ends/synthesis, leases/moves/inbox/recruitment,
+   full faces/directives/admin/sharing, rooms/cache behavior, signed recovery,
+   safety handling, gauntlet/red team/seed ladder and launch decisions. CLI
+   convenience stays after a usable curl path. Tier 2 stays deferred.
+
+Ambition round 1 strengthened the existing author–reviewer exercise with exact
+problem/version identity and revised-claim readback. Round 2 strengthened the
+cost boundary into durable attempt/publication accounting, lost-response replay
+and provider-outage recovery, rather than a superficial per-route counter.
+Those outcomes were embedded into their owning Beads; no additional dashboard,
+runtime model or alternative stack was proposed.
+
+The five refinement passes check, in order: complete vision coverage; dependency
+direction and actionable local work; real positive/negative proof; replay,
+concurrency and privacy edge cases; final scope and unchanged parent acceptance.
+The resulting changes were concrete: all twelve goals remained mapped; inherited
+blocked-parent classification was removed from the two new repairs while the
+original parents still block on them; explicit positive and negative acceptance
+was added; concurrent same-key attempts, revocation and zero/one/many claim
+ambiguity were covered. The final pass compared all 351 original issues against
+the updated inventory: none disappeared, no original description or acceptance
+text changed, and no original status changed. No further bridge change was found.
+Convergence applies to these tasks, not to undiscovered bugs or launch readiness.
+
+Final backlog: 353 issues, 202 closed, 130 open, eight in progress and 13 explicitly
+blocked. `br ready` now lists both P1 repairs and the existing P3 hygiene item;
+`bv` also counts actionable work already in progress, so its count is different.
+The graph has 580 edges and no cycles. No product task was closed by this audit.
+
+Documentation verification: `git diff --check` passes. `ubs --diff` exits 3 because
+the changed documentation has no supported source language; no scanner ran and
+this is not a clean code-scan claim. Application source, tests, goldens and gate
+thresholds were not changed. The AST shape scan found no empty function bodies
+in 101 selected Worker and Agora source files; this says nothing about whether
+their implemented behavior fulfills Fable, as the search reproduction shows.
+
+**Would completing the backlog now close the gap?** Its intended launch scope
+is covered, if “complete” means every original runtime and evidence criterion
+actually succeeds. Closing source tasks or recording more green fixtures cannot
+substitute for deployment, real sponsor approvals, independent scientific work,
+measurements and recovery. The highest-value milestone is a coherent staging
+revision completing the real author–reviewer journey; the number of closed beads
+is not a substitute.
+
 ## Reality check and bridge to the Fable plan — 2026-09-04
 
 This is an implementation audit and execution plan for the operator and the next

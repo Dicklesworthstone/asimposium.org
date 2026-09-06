@@ -271,12 +271,13 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
-As of the 2026-09-03 reality check, only **S-5 and S-6 are closed**. The spike ledger
+As of the 2026-09-06 reality check, only **S-5 and S-6 are closed**. The spike ledger
 (per `br`, the authority — run `br stats` for live counts):
 
-- **S-1 Capsule** (`asimposiumorg-mn7`, blocked) — source implemented; re-run blocked on staging
+- **S-1 Capsule** (`asimposiumorg-mn7`, open) — source implemented; three fresh harness
+  completions with real sponsor approval remain unproven
 - **S-2 Krater** (`asimposiumorg-doa`, blocked) — `EDGE_CACHE_ENVIRONMENT_ABSENT`; needs the
-  provisioned staging environment and must publish the retained S-2 cost receipt that
+  reconciled staging revision and must publish the retained S-2 cost receipt that
   `scripts/verify-cost-model.ts` consumes
 - **S-3 Split** (`asimposiumorg-ict`, in_progress) — `scripts/smoke-gallery.sh` still ends in
   exit 70 `GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED`
@@ -284,10 +285,14 @@ As of the 2026-09-03 reality check, only **S-5 and S-6 are closed**. The spike l
 - **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`,
   `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
 
-The backlog is wide (≈130 open, most dependency-blocked) but nearly starved at the tip: the
-staging environment (OPS.3 chain) is the common unblocker for S-1/S-2 re-runs, S-4's staging
-probe, and S-7's preview runs. Locally-verifiable work without credentials exists and is
-tracked (see `br ready`).
+The backlog is wide (≈130 open, most dependency-blocked) but nearly starved at the tip.
+Both production and staging answered public probes on September 6; their capabilities
+still omit the per-problem digests implemented in source. Do not provision duplicate
+resources based on an old “environment absent” label. OPS.3 must reconcile deployment
+revision, migration lineage and binding roles before S-1/S-2/S-4/S-7 can provide their
+required evidence. Locally startable repairs include `asimposiumorg-irg.1` (budgets
+before paid screening) and `asimposiumorg-r8w.1` (require problem scope for claim
+references). Confirm current ownership and `br ready` before starting.
 
 **S-6 is CLOSED (`asimposiumorg-vw3`, 2026-08-24).** `scripts/e2e-s6-cross-plane-auth.sh`
 is a finished spike's self-test: **do not keep polishing it.** In the 171 commits after that
@@ -301,10 +306,12 @@ Local gates you can run now, with no credentials:
 
 `verify:cost` deliberately ends **blocked (exit 78, `S2_COST_MEASUREMENT_UNAVAILABLE`)** until
 the retained S-2 measurement receipt exists — blocked is its honest state, not a pass and not a
-regression. Also note two environment-blocked gates on this workstation: e2e/gauntlet `lint`
-needs `shellcheck`, and the cli cargo gate is refused by the machine's RCH cargo shim
-(tracked as `asimposiumorg-gate-unavailable-not-fail-63gs` so the dispatcher reports blocked
-instead of fail).
+regression. Earlier shellcheck absence is no longer current on this workstation:
+the September 6 source check passed all eight root typecheck/lint/test gate groups.
+Those root groups do not certify the optional Rust CLI or deployed product gates.
+Check actual tool availability rather than carrying forward the old RCH cargo-shim
+or shellcheck diagnosis; `asimposiumorg-gate-unavailable-not-fail-63gs` preserves the
+rule that an unavailable tool reports blocked rather than a fabricated test failure.
 
 Then, per Fable §17.2: W1 Contracts → W2 Krater → W3 Propylon (fragment join + approval card) → W4 Sessions + workshop → W5 Ledger + validator → W6 Stoa surface → W7 Herald → W8 Agora → W9 Symposiarch → W10 Hardening → W11 asimp → W12 Launch. Do not start Agora chrome before the Worker can accept a typed promotion.
 
