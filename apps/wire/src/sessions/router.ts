@@ -74,6 +74,7 @@ import {
   writeRelationEvent,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 import { computeCurrentClaimDisposition } from "../ledger/disposition-read";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
@@ -1522,6 +1523,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
+    let claimContentUnavailable = false;
     let workshopHeadsTruncated = false;
     const graveyardOmissions: { reason: string; detail: string }[] = [];
 
@@ -1550,12 +1552,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (profile !== "hello") {
       const claims = await db
         .prepare(
-          `SELECT id, statement, source_seq FROM claims
+          `SELECT id,
+             CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN statement END AS statement,
+             source_seq FROM claims
            WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC
            LIMIT ?`,
         )
         .bind(session.problem_id, cursor, PACK_CLAIM_CANDIDATE_LIMIT + 1)
-        .all<{ id: string; statement: string; source_seq: number }>();
+        .all<{ id: string; statement: string | null; source_seq: number }>();
       const claimRows = claims.results ?? [];
       claimsTruncated = claimRows.length > PACK_CLAIM_CANDIDATE_LIMIT;
       if (claimRows.length === 0) {
@@ -1652,6 +1656,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
 
         for (const [index, claim] of selectedClaims.entries()) {
+          if (claim.statement === null) {
+            claimContentUnavailable = true;
+            continue;
+          }
           const claimEvents = claimEventsById.get(claim.id) ?? [];
           const reviewRows = reviewRowsById.get(claim.id) ?? [];
           const refutingEvidence = refutingEvidenceById.get(claim.id) ?? [];
@@ -1968,6 +1976,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             ],
       omitted: [
+        ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
         ...graveyardOmissions,
         ...(auth.binding.grantedResources.eventBudget !== undefined &&

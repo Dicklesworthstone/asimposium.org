@@ -17,6 +17,7 @@ import { Hono } from "hono";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { readEvents } from "./krater/krater";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
 
 /**
  * Public ledger read faces. JSON is canonical; Markdown is the reading face.
@@ -65,15 +66,15 @@ const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
   p.public_seq AS public_seq,
-  c.id AS claim_id,
-  c.statement AS statement,
-  c.source_seq AS source_seq
+  claims.id AS claim_id,
+  CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN claims.statement END AS statement,
+  claims.source_seq AS source_seq
 FROM problems p
-LEFT JOIN claims c
-  ON c.problem_id = p.id
- AND c.source_seq <= p.public_seq
+LEFT JOIN claims
+  ON claims.problem_id = p.id
+ AND claims.source_seq <= p.public_seq
 WHERE p.id = ?
-ORDER BY c.source_seq ASC, c.id ASC
+ORDER BY claims.source_seq ASC, claims.id ASC
 LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 
 interface ProblemDigestRow {
@@ -210,7 +211,8 @@ async function loadProblemFace(
 
   const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> =
     [];
-  for (const row of rows) {
+  let contentUnavailable = false;
+  for (const [index, row] of rows.entries()) {
     if (row.problem_id !== first.problem_id || row.public_seq !== first.public_seq) {
       throw new Error("the problem digest snapshot mixed problem heads");
     }
@@ -221,9 +223,8 @@ async function loadProblemFace(
       continue;
     }
     if (
-      nullFields !== 0 ||
       typeof claimId !== "string" ||
-      typeof statement !== "string" ||
+      (statement !== null && typeof statement !== "string") ||
       !Number.isSafeInteger(sourceSeq) ||
       sourceSeq === null ||
       sourceSeq < 1 ||
@@ -231,10 +232,15 @@ async function loadProblemFace(
     ) {
       throw new Error("the problem digest snapshot returned an invalid or future claim row");
     }
+    if (index === PROBLEM_DIGEST_CANDIDATE_LIMIT) continue;
+    if (statement === null) {
+      contentUnavailable = true;
+      continue;
+    }
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
-  const candidateTruncated = claims.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
+  const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
     session: "PUBLIC-FACE",
@@ -268,6 +274,14 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...(contentUnavailable
+        ? [
+            {
+              reason: "content_unavailable",
+              detail: "Claim text without an available, matching source event is omitted.",
+            },
+          ]
+        : []),
       {
         reason: "digest_fields",
         detail:

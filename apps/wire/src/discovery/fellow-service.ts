@@ -92,6 +92,9 @@ export async function loadFellowCard(
           AND e.type IN ('claim.created', 'claim.revised')
           AND e.actor_fellow_id = cv.editor_fellow_id
           AND e.actor_sponsor_id IS NOT NULL
+         JOIN event_content content ON content.event_id = e.id
+          AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
+         JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
          WHERE cv.editor_fellow_id = ?
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
@@ -137,6 +140,9 @@ export async function loadFellowCard(
           AND e.type = 'review.created'
           AND e.actor_fellow_id = r.reviewer_fellow_id
           AND e.actor_sponsor_id IS NOT NULL
+         JOIN event_content content ON content.event_id = e.id
+          AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
+         JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
          WHERE r.reviewer_fellow_id = ?
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
@@ -216,6 +222,7 @@ export async function loadFellowCard(
         : []),
       ...(reviews.length > 50 ? ["reviews beyond the latest 50 omitted"] : []),
       "contributions and reviews without matching immutable event attribution are excluded",
+      "contribution and review text with redacted, missing or mismatched event content is excluded",
       "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
       "leaderboards and ranking metrics permanently refused (Rule A10 / ADR-19)",

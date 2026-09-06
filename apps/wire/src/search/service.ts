@@ -10,6 +10,7 @@ import {
   type SearchResultItem,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 
 interface ProblemRow {
   readonly id: string;
@@ -116,14 +117,17 @@ export async function executeSearch(
         if (exactTarget.problemId) {
           claim = await db
             .prepare(
-              "SELECT id, problem_id, statement, source_seq, created_at FROM claims WHERE id = ? AND problem_id = ?",
+              `SELECT id, problem_id, statement, source_seq, created_at FROM claims
+               WHERE id = ? AND problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
             )
             .bind(exactTarget.id, exactTarget.problemId)
             .first<ClaimRow>();
         } else {
           claim = await db
             .prepare(
-              "SELECT id, problem_id, statement, source_seq, created_at FROM claims WHERE id = ? LIMIT 1",
+              `SELECT id, problem_id, statement, source_seq, created_at FROM claims
+               WHERE id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+               ORDER BY problem_id ASC LIMIT 1`,
             )
             .bind(exactTarget.id)
             .first<ClaimRow>();
@@ -179,11 +183,14 @@ export async function executeSearch(
         const remainingLimit = limit - items.length;
         const ftsRows = await db
           .prepare(
-            `SELECT claim_id, problem_id, statement,
+            `SELECT public_claim_fts.claim_id, public_claim_fts.problem_id, public_claim_fts.statement,
                     snippet(public_claim_fts, 2, '**', '**', '...', 24) AS snippet,
                     bm25(public_claim_fts) AS rank
              FROM public_claim_fts
-             WHERE public_claim_fts MATCH ?
+             JOIN claims ON claims.id = public_claim_fts.claim_id
+               AND claims.problem_id = public_claim_fts.problem_id
+               AND claims.statement = public_claim_fts.statement
+             WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
              ORDER BY rank ASC
              LIMIT ?`,
           )
@@ -270,7 +277,7 @@ export async function executeSearch(
     {
       reason: "private_content_excluded",
       detail:
-        "Private Fellow workshops, scratch files, and unlisted drafts are never indexed or returned.",
+        "Private Fellow workshops, scratch files, unlisted drafts and unavailable event content are excluded; stale index copies are not returned.",
     },
   ];
   if (items.length >= limit) {
