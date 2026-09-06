@@ -6,6 +6,7 @@ import { SearchResponseSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 import { renderSearchMarkdown } from "../../src/search/markdown.ts";
+import { executeSearch } from "../../src/search/service.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -144,6 +145,38 @@ describe("W6.8 Public Search Routes", () => {
     expect(body.source_cursor).toBe(37);
     expect(body.items).toEqual([]);
     expect(body.explanation).toBe("no_lexical_matches");
+  });
+
+  test("missing claim scope teaches before any database access, including HEAD and conditional reads", async () => {
+    const db = {
+      prepare() {
+        throw new Error("Unscoped references must never inspect target existence");
+      },
+    } as unknown as Env["DB"];
+    await expect(executeSearch(db, { q: "C-1", kind: "claim", limit: 1 })).rejects.toThrow(
+      "enclosing problem",
+    );
+    for (const suffix of ["", ".json", ".md"]) {
+      for (const method of ["GET", "HEAD"]) {
+        const response = await createApp().request(
+          `https://a.asimposium.org/search${suffix}?q=C-1&kind=claim&limit=1`,
+          { method, headers: { "if-none-match": "*" } },
+          mockEnv(db),
+        );
+        expect(response.status).toBe(400);
+        expect(response.headers.get("etag")).toBeNull();
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        if (method === "HEAD") expect(await response.text()).toBe("");
+        else {
+          const body = await response.json();
+          expect(body).toMatchObject({
+            code: "SCHEMA_INVALID",
+            fix_hint: expect.stringContaining("problem"),
+            example: { path: expect.stringContaining("%23C-1") },
+          });
+        }
+      }
+    }
   });
 
   test.each([null, -1, 0.5, 9_007_199_254_740_992, "unknown"])(
@@ -317,7 +350,7 @@ describe("W6.8 Public Search Routes", () => {
     expect(parsed.items[0]?.url).toBe("https://asimposium.org/p/P-RIEMANN-01");
   });
 
-  test("resolves exact claim ID and composite problem#claim ref", async () => {
+  test("resolves the composite reference and refuses an unscoped ID even with one public match", async () => {
     const { db, raw } = createMigratedDb();
     const app = createApp();
     const env = mockEnv(db);
@@ -353,11 +386,13 @@ describe("W6.8 Public Search Routes", () => {
 
     // Search by bare claim ID
     const resBare = await app.request("https://a.asimposium.org/search.json?q=C-42", {}, env);
-    expect(resBare.status).toBe(200);
+    expect(resBare.status).toBe(400);
     const jsonBare = await resBare.json();
-    const parsedBare = SearchResponseSchema.parse(jsonBare);
-    expect(parsedBare.total_matches).toBe(1);
-    expect(parsedBare.items[0]?.id).toBe("C-42");
+    expect(jsonBare).toMatchObject({
+      code: "SCHEMA_INVALID",
+      fix_hint: expect.stringContaining("problem"),
+    });
+    expect(JSON.stringify(jsonBare)).not.toContain("P-TEST-99");
   });
 
   test("executes FTS5 lexical match on public_claim_fts", async () => {

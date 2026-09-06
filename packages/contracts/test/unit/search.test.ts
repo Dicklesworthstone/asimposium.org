@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import {
   escapeFts5Query,
   parseExactReference,
@@ -7,6 +8,21 @@ import {
 } from "../../src/search.ts";
 
 describe("W6.8 Search contracts", () => {
+  test("served JSON Schema and Zod agree on scoped and unscoped golden queries", async () => {
+    const schema = await Bun.file(
+      new URL("../../generated/ledger.schema.json", import.meta.url),
+    ).json();
+    const ajv = new Ajv2020({ strict: false });
+    const validate = ajv.compile(schema.properties.search_query_request);
+    for (const [path, valid] of [
+      ["valid/search-scoped-claim.json", true],
+      ["invalid/search-unscoped-claim.json", false],
+    ] as const) {
+      const query = await Bun.file(new URL(`../fixtures/${path}`, import.meta.url)).json();
+      expect(SearchQueryRequestSchema.safeParse(query).success).toBe(valid);
+      expect(validate(query)).toBe(valid);
+    }
+  });
   describe("escapeFts5Query", () => {
     test("quotes plain whitespace-separated tokens", () => {
       expect(escapeFts5Query("riemann hypothesis")).toBe('"riemann" "hypothesis"');
@@ -54,15 +70,9 @@ describe("W6.8 Search contracts", () => {
       });
     });
 
-    test("detects exact claim IDs", () => {
-      expect(parseExactReference("C-1")).toEqual({
-        kind: "claim",
-        id: "C-1",
-      });
-      expect(parseExactReference("C-9999")).toEqual({
-        kind: "claim",
-        id: "C-9999",
-      });
+    test("does not resolve problem-local claim IDs without a problem", () => {
+      expect(parseExactReference("C-1")).toBeNull();
+      expect(parseExactReference("C-9999")).toBeNull();
     });
 
     test("detects exact fellow IDs", () => {
@@ -108,10 +118,23 @@ describe("W6.8 Search contracts", () => {
       expect(parseExactReference("P-")).toBeNull();
       expect(parseExactReference("C-")).toBeNull();
       expect(parseExactReference("not an id P-123")).toBeNull();
+      for (const query of ["P-#C-1", "P--ALPHA#C-1", "P-ALPHA#C-", "#C-1", "/C-1"]) {
+        expect(parseExactReference(query)).toBeNull();
+      }
     });
   });
 
   describe("SearchQueryRequestSchema", () => {
+    test("requires enclosing problem for a local claim reference", () => {
+      for (const q of ["C-1", " C-9999 "]) {
+        const result = SearchQueryRequestSchema.safeParse({ q });
+        expect(result.success).toBe(false);
+        if (!result.success) expect(result.error.issues[0]?.message).toContain("problem");
+      }
+      for (const q of ["P-ALPHA#C-1", "P-BETA/C-1", "the C-1 boundary"]) {
+        expect(SearchQueryRequestSchema.safeParse({ q }).success).toBe(true);
+      }
+    });
     test("validates valid query parameters", () => {
       const parsed = SearchQueryRequestSchema.parse({
         q: "riemann",

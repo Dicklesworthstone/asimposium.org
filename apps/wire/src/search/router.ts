@@ -47,18 +47,23 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
     if (!parseResult.success) {
       const issue = parseResult.error.issues[0];
       const detail = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid search query";
-      return problemDocument({
+      const response = problemDocument({
         status: 400,
         code: "SCHEMA_INVALID",
         title: "Search query is invalid",
         detail,
-        fixHint: "Provide a valid non-empty query, e.g. GET /search?q=riemann",
+        fixHint:
+          "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
         rule: "A5",
+        headers: { "cache-control": "no-store" },
         extensions: {
           schema: "https://a.asimposium.org/schemas/ledger.v1.json",
-          example: { path: "/search?q=riemann" },
+          example: { path: "/search?q=P-EXAMPLE%23C-1" },
         },
       });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
     }
 
     const query = parseResult.data;

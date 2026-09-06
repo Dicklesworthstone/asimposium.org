@@ -43,6 +43,10 @@ export const SearchQueryRequestSchema = z
       .trim()
       .min(1, "search query cannot be empty")
       .max(SEARCH_QUERY_MAX_LENGTH, "search query too long")
+      .regex(
+        /^(?!\s*C-[0-9]+\s*$)/,
+        "A claim reference requires its enclosing problem, e.g. P-EXAMPLE#C-1",
+      )
       .refine((val) => !val.includes("\u0000"), "search query cannot contain null bytes"),
     kind: SearchKindFilterSchema.optional().default("all"),
     limit: z.coerce
@@ -109,7 +113,7 @@ export type SearchResponse = z.infer<typeof SearchResponseSchema>;
  */
 export type ExactReferenceTarget =
   | { readonly kind: "problem"; readonly id: string }
-  | { readonly kind: "claim"; readonly id: string; readonly problemId?: string }
+  | { readonly kind: "claim"; readonly id: string; readonly problemId: string }
   | { readonly kind: "fellow"; readonly id: string };
 
 export function parseExactReference(rawQuery: string): ExactReferenceTarget | null {
@@ -147,12 +151,8 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
     return { kind: "problem", id: query };
   }
 
-  // 4. Claim ID
-  if (EXACT_CLAIM_ID_PATTERN.test(query)) {
-    return { kind: "claim", id: query };
-  }
-
-  // 5. Fellow ID
+  // Local C-n identifiers require a problem; never guess a global target.
+  // 4. Fellow ID
   if (EXACT_FELLOW_ID_PATTERN.test(query)) {
     return { kind: "fellow", id: query };
   }

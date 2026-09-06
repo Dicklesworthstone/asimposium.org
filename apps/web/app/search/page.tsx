@@ -1,3 +1,4 @@
+import { SearchQueryRequestSchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
@@ -21,9 +22,11 @@ interface SearchPageProps {
 export default async function SearchPage({ searchParams }: SearchPageProps) {
   const { q, kind } = await searchParams;
   const trimmedQuery = q?.trim() ?? "";
+  const queryCheck = SearchQueryRequestSchema.safeParse({ q: trimmedQuery, kind });
 
   const stoaOrigin = configuredStoaOrigin();
-  const read = trimmedQuery ? await stoaFetchSearch(trimmedQuery, kind) : null;
+  const read =
+    trimmedQuery && queryCheck.success ? await stoaFetchSearch(trimmedQuery, kind) : null;
   const searchResult = read?.state === "ok" ? read.data : null;
 
   const encodedQuery = encodeURIComponent(trimmedQuery);
@@ -63,7 +66,7 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
               type="text"
               name="q"
               defaultValue={trimmedQuery}
-              placeholder="Search by keyword, exact ID (P-..., C-..., F-...), or URL..."
+              placeholder="Search by keyword, exact ID (P-..., P-...#C-1, F-...), or URL..."
               required
               aria-label="Search query"
               className="search-input"
@@ -85,6 +88,12 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
           </form>
         </section>
 
+        {trimmedQuery && !queryCheck.success && (
+          <p role="status">
+            {queryCheck.error.issues[0]?.message}. For a claim, include its problem, for example{" "}
+            <code>P-EXAMPLE#C-1</code>, or paste its full URL.
+          </p>
+        )}
         {read && read.state !== "ok" && <PublicReadNotice retryPath={`/search?${queryString}`} />}
 
         {trimmedQuery && stoaOrigin && (

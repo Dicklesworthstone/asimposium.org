@@ -188,19 +188,34 @@ describe("public-ledger client", () => {
 
 describe("public read failure boundaries and recovery", () => {
   const originalFetch = globalThis.fetch;
-  afterEach(() => { globalThis.fetch = originalFetch; });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
 
   test("missing and foreign configuration never selects production or performs a request", async () => {
     let calls = 0;
-    setMockFetch(async () => { calls += 1; throw new Error("unexpected request"); });
-    for (const origin of [undefined, "https://foreign.invalid", "https://a.asimposium.org/redirect"]) {
+    setMockFetch(async () => {
+      calls += 1;
+      throw new Error("unexpected request");
+    });
+    for (const origin of [
+      undefined,
+      "https://foreign.invalid",
+      "https://a.asimposium.org/redirect",
+    ]) {
       if (origin === undefined) delete process.env.STOA_ORIGIN;
       else process.env.STOA_ORIGIN = origin;
       const results = await Promise.all([
-        stoaFetchProblemsIndex(), stoaFetchProblemFace("P-1"), stoaFetchSearch("x"),
-        stoaFetchAreasIndex(), stoaFetchAreaDetail("algebra"), stoaFetchNowStrip(), stoaFetchFellowCard("test-agent"),
+        stoaFetchProblemsIndex(),
+        stoaFetchProblemFace("P-1"),
+        stoaFetchSearch("x"),
+        stoaFetchAreasIndex(),
+        stoaFetchAreaDetail("algebra"),
+        stoaFetchNowStrip(),
+        stoaFetchFellowCard("test-agent"),
       ]);
-      for (const result of results) expect(result).toEqual({ state: "unavailable", reason: "configuration" });
+      for (const result of results)
+        expect(result).toEqual({ state: "unavailable", reason: "configuration" });
     }
     expect(calls).toBe(0);
   });
@@ -213,7 +228,9 @@ describe("public read failure boundaries and recovery", () => {
       expect(options.credentials).toBe("omit");
       expect(options.redirect).toBe("error");
       expect(options.signal).toBeInstanceOf(AbortSignal);
-      expect(new Headers(options.headers).get("user-agent")).toBe("OpenAI File Downloader, XaiImageApiFetch/1.0");
+      expect(new Headers(options.headers).get("user-agent")).toBe(
+        "OpenAI File Downloader, XaiImageApiFetch/1.0",
+      );
       return Response.json({ events: [], cursor: 17, omitted: [] });
     });
     const html = renderToStaticMarkup(await NowPage());
@@ -227,25 +244,36 @@ describe("public read failure boundaries and recovery", () => {
     for (const status of [503, 404]) {
       setMockFetch(async () => Response.json({ status, code: "ROUTE_NOT_FOUND" }, { status }));
       const results = await Promise.all([
-        stoaFetchProblemsIndex(), stoaFetchProblemFace("P-1"), stoaFetchSearch("x"),
-        stoaFetchAreasIndex(), stoaFetchAreaDetail("algebra"), stoaFetchNowStrip(), stoaFetchFellowCard("test-agent"),
+        stoaFetchProblemsIndex(),
+        stoaFetchProblemFace("P-1"),
+        stoaFetchSearch("x"),
+        stoaFetchAreasIndex(),
+        stoaFetchAreaDetail("algebra"),
+        stoaFetchNowStrip(),
+        stoaFetchFellowCard("test-agent"),
       ]);
       for (const result of results) expect(result.state).toBe("unavailable");
     }
   });
 
   test("resource-specific 404s cannot be confused with another resource or an outage", async () => {
-    setMockFetch(async () => Response.json({ status: 404, code: "AREA_NOT_FOUND" }, { status: 404 }));
+    setMockFetch(async () =>
+      Response.json({ status: 404, code: "AREA_NOT_FOUND" }, { status: 404 }),
+    );
     expect((await stoaFetchAreaDetail("algebra")).state).toBe("not_found");
     expect((await stoaFetchFellowCard("test-agent")).state).toBe("unavailable");
-    setMockFetch(async () => Response.json({ status: 404, code: "FELLOW_NOT_FOUND" }, { status: 404 }));
+    setMockFetch(async () =>
+      Response.json({ status: 404, code: "FELLOW_NOT_FOUND" }, { status: 404 }),
+    );
     expect((await stoaFetchFellowCard("test-agent")).state).toBe("not_found");
   });
 
   test("all rendered read failures have a no-JavaScript retry and no fabricated empty state", async () => {
     setMockFetch(async () => new Response("private upstream diagnostics", { status: 503 }));
     const pages = await Promise.all([
-      NowPage(), ProblemsPage(), ExplorePage(),
+      NowPage(),
+      ProblemsPage(),
+      ExplorePage(),
       ProblemPage({ params: Promise.resolve({ slug: "P-1" }) }),
       AreaPage({ params: Promise.resolve({ slug: "algebra" }) }),
       FellowPage({ params: Promise.resolve({ name: "test-agent" }) }),
@@ -272,32 +300,57 @@ describe("public read failure boundaries and recovery", () => {
 
   test("declared and chunked oversize bodies are cancelled; malformed JSON and UTF-8 are refused", async () => {
     let cancelled = false;
-    setMockFetch(async () => new Response(new ReadableStream({
-      cancel() { cancelled = true; },
-    }), { headers: { "content-length": String(PUBLIC_LEDGER_MAX_BYTES + 1) } }));
+    setMockFetch(
+      async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-length": String(PUBLIC_LEDGER_MAX_BYTES + 1) } },
+        ),
+    );
     expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "oversize" });
     expect(cancelled).toBe(true);
     cancelled = false;
-    setMockFetch(async () => new Response(new ReadableStream({
-      start(controller) {
-        controller.enqueue(new Uint8Array(PUBLIC_LEDGER_MAX_BYTES));
-        controller.enqueue(new Uint8Array(1));
-      },
-      cancel() { cancelled = true; },
-    })));
+    setMockFetch(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(PUBLIC_LEDGER_MAX_BYTES));
+              controller.enqueue(new Uint8Array(1));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+    );
     expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "oversize" });
     expect(cancelled).toBe(true);
     for (const body of ["{", new Uint8Array([0xff]), JSON.stringify({ events: "invalid" })]) {
       setMockFetch(async () => new Response(body));
-      expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "invalid_response" });
+      expect(await stoaFetchNowStrip()).toEqual({
+        state: "unavailable",
+        reason: "invalid_response",
+      });
     }
   });
 
   test("a stalled response body is cancelled by the total deadline", async () => {
     let cancelled = false;
-    setMockFetch(async () => new Response(new ReadableStream({
-      cancel() { cancelled = true; },
-    })));
+    setMockFetch(
+      async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+    );
     expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "timeout" });
     expect(cancelled).toBe(true);
   });
@@ -306,11 +359,17 @@ describe("public read failure boundaries and recovery", () => {
     let mode: "outage" | "empty" | "redirect" = "outage";
     let redirectHits = 0;
     const server = Bun.serve({
-      hostname: "127.0.0.1", port: 0,
+      hostname: "127.0.0.1",
+      port: 0,
       fetch(request) {
-        expect(request.headers.get("user-agent")).toBe("OpenAI File Downloader, XaiImageApiFetch/1.0");
+        expect(request.headers.get("user-agent")).toBe(
+          "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        );
         expect(request.headers.get("authorization")).toBeNull();
-        if (new URL(request.url).pathname === "/trap") { redirectHits += 1; return new Response("trap"); }
+        if (new URL(request.url).pathname === "/trap") {
+          redirectHits += 1;
+          return new Response("trap");
+        }
         if (mode === "outage") return new Response(null, { status: 503 });
         if (mode === "redirect") return Response.redirect(new URL("/trap", request.url).href);
         return Response.json({ events: [], cursor: 12, omitted: [] });
@@ -328,7 +387,9 @@ describe("public read failure boundaries and recovery", () => {
       mode = "redirect";
       expect((await stoaFetchNowStrip()).state).toBe("unavailable");
       expect(redirectHits).toBe(0);
-    } finally { await server.stop(true); }
+    } finally {
+      await server.stop(true);
+    }
   });
 });
 
@@ -398,7 +459,9 @@ describe("ExplorePage Server Component", () => {
   });
 
   test("ExplorePage renders problems and scientific areas", async () => {
-    setMockFetch(async (url) => Response.json(String(url).endsWith("/areas.json") ? AREAS_INDEX : MOCK_PROBLEMS_INDEX));
+    setMockFetch(async (url) =>
+      Response.json(String(url).endsWith("/areas.json") ? AREAS_INDEX : MOCK_PROBLEMS_INDEX),
+    );
 
     const element = await ExplorePage();
     expect(element).toBeDefined();
@@ -411,12 +474,15 @@ describe("ExplorePage Server Component", () => {
   });
 
   test("ExplorePage renders empty state when no problems exist", async () => {
-    setMockFetch(
-      async (url) =>
-        Response.json(String(url).endsWith("/areas.json") ? AREAS_INDEX : {
-            problems: [],
-            omitted: ["no problems currently on ledger"],
-          }),
+    setMockFetch(async (url) =>
+      Response.json(
+        String(url).endsWith("/areas.json")
+          ? AREAS_INDEX
+          : {
+              problems: [],
+              omitted: ["no problems currently on ledger"],
+            },
+      ),
     );
 
     const element = await ExplorePage();
@@ -487,6 +553,22 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(html).toContain("Search by keyword, exact ID");
   });
 
+  test("SearchPage teaches missing claim scope without a fetch or an outage claim", async () => {
+    let fetches = 0;
+    setMockFetch(async () => {
+      fetches++;
+      throw new Error("Unexpected target lookup");
+    });
+    const html = renderToStaticMarkup(
+      await SearchPage({ searchParams: Promise.resolve({ q: "C-1" }) }),
+    );
+    expect(fetches).toBe(0);
+    expect(html).toContain("include its problem");
+    expect(html).toContain("P-EXAMPLE#C-1");
+    expect(html).not.toContain("temporarily unavailable");
+    expect(html).not.toContain("No public ledger objects matched");
+  });
+
   test("SearchPage renders search results and agent face links", async () => {
     setMockFetch(async () => new Response(JSON.stringify(MOCK_SEARCH_RESPONSE), { status: 200 }));
 
@@ -502,6 +584,45 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(html).toContain("search.md");
     expect(html).toContain("search.json");
     expect(html).toContain("Deliberate Omissions");
+  });
+
+  test("SearchPage preserves claim scope in the Worker request and rendered links", async () => {
+    for (const problem of ["P-ALPHA", "P-BETA"]) {
+      const q = `${problem}#C-1`;
+      let calls = 0;
+      setMockFetch(async (input) => {
+        calls++;
+        const url = new URL(String(input));
+        expect(url.searchParams.get("q")).toBe(q);
+        expect(url.hash).toBe("");
+        return Response.json({
+          q,
+          source_cursor: 2,
+          total_matches: 1,
+          items: [
+            {
+              kind: "claim",
+              id: "C-1",
+              problem_id: problem,
+              url: `https://asimposium.org/p/${problem}#C-1`,
+              statement: `${problem} scoped statement`,
+              snippet: `${problem} scoped statement`,
+              match_type: "exact_reference",
+              score_explanation: "exact scoped reference",
+            },
+          ],
+          omitted: [],
+          next_actions: [],
+        });
+      });
+      const html = renderToStaticMarkup(
+        await SearchPage({ searchParams: Promise.resolve({ q, kind: "claim" }) }),
+      );
+      expect(calls).toBe(1);
+      expect(html).toContain(`href="/p/${problem}#C-1"`);
+      expect(html).toContain(`${problem} scoped statement`);
+      expect(html).toContain(`q=${problem}%23C-1`);
+    }
   });
 });
 

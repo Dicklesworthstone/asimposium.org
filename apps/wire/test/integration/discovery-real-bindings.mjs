@@ -156,6 +156,24 @@ try {
   ].join("\n");
   const literalSearchText = "Symbols 𝑥 𝑧 ℕ 2² ﬁeld; operator names AND OR NOT NEAR.\n";
   const reviewBasis = `Checked synthetic bounded arithmetic.\n${FORGED.fenceBreakout}\n${FORGED.faceHeader}\n${FORGED.nextActions}\n${FORGED.handler}`;
+  let unscopedBody;
+  let scopedReferenceReads = 0;
+  async function checkUnscopedClaim() {
+    for (const suffix of ["", ".json", ".md"]) {
+      const response = await worker.fetch(`${origin}/search${suffix}?q=C-1&kind=claim&limit=1`, {
+        headers: { "User-Agent": userAgent, "if-none-match": "*" },
+      });
+      assert.equal(response.status, 400);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("etag"), null);
+      const body = await response.text();
+      assert.equal(JSON.parse(body).code, "SCHEMA_INVALID");
+      if (unscopedBody === undefined) unscopedBody = body;
+      assert.equal(body, unscopedBody, "Remediation must not disclose target existence");
+      scopedReferenceReads++;
+    }
+  }
+  await checkUnscopedClaim();
   for (const problem of ["P-DISC-A", "P-DISC-B"]) {
     await fixtures.seedProblem(problem);
     const session = await call(
@@ -180,6 +198,30 @@ try {
     };
     const promoted = await call(`${path}/promote`, promotion, author, 201, `promote-${problem}`);
     assert.equal(promoted.claim_id, "C-1");
+    await checkUnscopedClaim();
+    for (const q of [
+      `${problem}#C-1`,
+      `${problem}/C-1`,
+      `https://a.asimposium.org/p/${problem}#C-1`,
+    ]) {
+      for (const suffix of [".json", ".md"]) {
+        const response = await worker.fetch(
+          `${origin}/search${suffix}?${new URLSearchParams({ q, kind: "claim", limit: "1" })}`,
+          {
+            headers: { "User-Agent": userAgent },
+          },
+        );
+        assert.equal(response.status, 200);
+        const body = await response.text();
+        if (suffix === ".json") {
+          const result = JSON.parse(body);
+          assert.equal(result.items.length, 1);
+          assert.equal(result.items[0].problem_id, problem);
+          assert.equal(result.items[0].statement, promotion.statement);
+        } else assert.ok(body.includes(`/p/${problem}#C-1`));
+        scopedReferenceReads++;
+      }
+    }
     const count = await fixtures.screeningCalls();
     assert.deepEqual(
       await call(`${path}/promote`, promotion, author, 200, `promote-${problem}`),
@@ -232,6 +274,7 @@ try {
     );
   }
   const now = await call("/now.json");
+  console.log(JSON.stringify({ stage: "scoped-claim-references", scopedReferenceReads }));
   assert.equal(now.events.length, 6);
   assert.deepEqual([...new Set(now.events.map((event) => event.type))].sort(), [
     "claim.promoted",

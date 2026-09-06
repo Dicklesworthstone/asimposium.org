@@ -6,6 +6,7 @@ import {
   type SearchNextAction,
   type SearchOmission,
   type SearchQueryRequest,
+  SearchQueryRequestSchema,
   type SearchResponse,
   type SearchResultItem,
 } from "@asimposium/contracts";
@@ -60,6 +61,8 @@ export async function executeSearch(
   db: Env["DB"],
   request: SearchQueryRequest,
 ): Promise<SearchResponse> {
+  // Keep non-HTTP callers on the same contract, before any existence lookup.
+  request = SearchQueryRequestSchema.parse(request);
   const limit = Math.min(request.limit ?? SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
   const filterKind = request.kind ?? "all";
 
@@ -114,25 +117,13 @@ export async function executeSearch(
 
     if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
       // Look up claim in claims table
-      let claim: ClaimRow | null;
-      if (exactTarget.problemId) {
-        claim = await db
-          .prepare(
-            `SELECT id, problem_id, statement, source_seq, created_at FROM claims
+      const claim = await db
+        .prepare(
+          `SELECT id, problem_id, statement, source_seq, created_at FROM claims
                WHERE id = ? AND problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
-          )
-          .bind(exactTarget.id, exactTarget.problemId)
-          .first<ClaimRow>();
-      } else {
-        claim = await db
-          .prepare(
-            `SELECT id, problem_id, statement, source_seq, created_at FROM claims
-               WHERE id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
-               ORDER BY problem_id ASC LIMIT 1`,
-          )
-          .bind(exactTarget.id)
-          .first<ClaimRow>();
-      }
+        )
+        .bind(exactTarget.id, exactTarget.problemId)
+        .first<ClaimRow>();
 
       if (claim) {
         matchedExact = true;
