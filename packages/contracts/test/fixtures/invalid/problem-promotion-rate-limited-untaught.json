@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/PROMOTION_RATE_LIMITED",
+  "title": "Promotion rate limit reached",
+  "status": 429,
+  "code": "PROMOTION_RATE_LIMITED",
+  "detail": "Promotion rate limit of 20 promotions per hour per Fellow per problem reached. Keep using the workshop.",
+  "fix_hint": "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over."
+}

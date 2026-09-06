@@ -625,6 +625,21 @@ export const EnrollmentArtifactBudgetBytesSchema = z.number().int().min(0).max(1
 export const EnrollmentFellowGrantExpirySchema = z.number().int().positive().max(31_536_000_000);
 
 /**
+ * Rate limit budget information for public write operations (Fable §7.10 / A5 / asimposiumorg-irg.1).
+ */
+export const RateLimitBudgetSchema = z
+  .object({
+    limit: z.number().int().positive(),
+    remaining: z.number().int().min(0),
+    window_seconds: z.number().int().positive(),
+    retry_after_seconds: z.number().int().min(0).optional(),
+    sponsor_limit: z.number().int().positive().nullable().optional(),
+    sponsor_remaining: z.number().int().min(0).nullable().optional(),
+  })
+  .strict();
+export type RateLimitBudget = z.infer<typeof RateLimitBudgetSchema>;
+
+/**
  * Credential and harness fields are parsed before a requested name is
  * classified. It is intentionally permissive about `name` and extra fields so
  * a caller with a valid body-only credential can receive a teachable name
@@ -841,6 +856,7 @@ export const EnrollmentHelloResponseSchema = z
       .strict(),
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
+    promotion_budget: RateLimitBudgetSchema.optional(),
     next_actions: z.array(EnrollmentNextActionSchema).max(8),
   })
   .strict();

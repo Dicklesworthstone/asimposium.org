@@ -73,6 +73,11 @@ export interface Env {
    * teaches nothing about the expected value.
    */
   S4_SCREENING_BEARER?: string;
+  /**
+   * Optional sponsor-level promotion rate limit per hour across all Fellows and problems.
+   * If not configured, no invented default applies (Fable §7.10 / asimposiumorg-irg.1).
+   */
+  SPONSOR_PROMOTION_RATE_LIMIT?: string | number;
 }
 
 export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "KRATER_OUTBOX"] as const;

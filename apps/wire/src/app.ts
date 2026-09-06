@@ -629,6 +629,8 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
 
   const router = createEnrollmentRouter({
     service,
+    db: env.DB,
+    sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
     verifiedSponsor,
     verifiedOperator: async (request, route, action) => {
       if (keyring === undefined || operatorPrincipalIds === undefined) {

@@ -17,6 +17,7 @@ import {
   ProblemDocumentSchema,
   parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
+  type RateLimitBudget,
   SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
   SponsorCredentialRevokeRequestSchema,
@@ -32,14 +33,16 @@ import {
   SponsorProposalListResponseSchema,
   stoaJoinUrl,
 } from "@asimposium/contracts";
+import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
-
 import {
   cancelUnconsumedRequestBody,
   parseExactJsonBytes,
   readBoundedRequestBody,
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
+import type { Env } from "../env.ts";
+import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
   capsuleUnavailableHtml,
   enrollmentCapsuleHtml,
@@ -117,6 +120,8 @@ function idempotencyConflictExample(request: Request): Record<string, unknown> {
 
 export interface EnrollmentRouterOptions {
   readonly service: EnrollmentService;
+  readonly db?: D1Database;
+  readonly sponsorPromotionRateLimit?: number | string | null;
   /**
    * Parent-supplied verified sponsor seam: authenticates the signed service
    * envelope for one exact route template and action. A returned `Response`
@@ -1228,6 +1233,24 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
           "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
         );
       }
+      let promotionBudget: RateLimitBudget | undefined;
+      try {
+        const env = (c.env ?? {}) as Partial<Env>;
+        const db = options.db ?? env.DB;
+        if (db !== undefined) {
+          const rawSponsorLimit =
+            options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT;
+          const sponsorLimit = parseSponsorLimit(rawSponsorLimit);
+          promotionBudget = await getRemainingBudget(db, {
+            fellowId: binding.fellowId,
+            problemId: binding.grantedResources.problemBinding ?? null,
+            sponsorId: binding.sponsorId,
+            sponsorLimit,
+          });
+        }
+      } catch {
+        // Safe reads remain usable even if quota storage is unavailable
+      }
       const response = EnrollmentHelloResponseSchema.parse({
         fellow: {
           fellow_id: binding.fellowId,
@@ -1257,6 +1280,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
                 fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt,
               }),
         },
+        ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
         next_actions: [
           {
             action: "read",

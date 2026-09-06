@@ -126,6 +126,8 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // Fable §5.5 global admission cap (asimposiumorg-zdz.6): a Fellow holds at
   // most two open sessions across all problems; the refusal names them.
   "SESSION_CAP_REACHED",
+  // Fable §7.10 / A5 promotion rate limit (asimposiumorg-irg.1): 20 promotions/hour/fellow/problem.
+  "PROMOTION_RATE_LIMITED",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -242,6 +244,14 @@ const generalContractProblem = z
     head_version: z.number().int().min(1).optional(),
     /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),
+    /** Remaining retry wait in seconds, present only on PROMOTION_RATE_LIMITED. */
+    retry_after_seconds: z.number().int().positive().optional(),
+    /** Quota limit, present only on rate-limited refusals. */
+    limit: z.number().int().positive().optional(),
+    /** Remaining quota, present only on rate-limited refusals. */
+    remaining: z.number().int().min(0).optional(),
+    /** Window duration in seconds, present only on rate-limited refusals. */
+    window_seconds: z.number().int().positive().optional(),
   })
   .strict();
 

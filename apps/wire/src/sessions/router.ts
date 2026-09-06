@@ -14,6 +14,7 @@ import {
   PackResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
+  type RateLimitBudget,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
   ReviewRequestSchema,
@@ -41,6 +42,7 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import {
+  byteLength,
   composedPackToProjection,
   composePack,
   PACK_BUDGET_BUCKETS,
@@ -97,6 +99,15 @@ import {
   sha256Hex,
 } from "../split/policy";
 import { readLedgerPackSection } from "./ledger-pack";
+import {
+  checkAndReserveQuota,
+  getRemainingBudget,
+  parseSponsorLimit,
+  promotionRateLimitedProblem,
+  type QuotaReservation,
+  settleQuotaReservation,
+  settleQuotaReservationStatement,
+} from "./quota";
 
 /**
  * The session protocol (Fable §7): open → pack → workshop push → promote →
@@ -561,6 +572,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   }
 
+  async function screenWithQuota(
+    env: Env,
+    quotaParams: {
+      readonly fellowId: string;
+      readonly problemId: string;
+      readonly sponsorId: string;
+      readonly sessionId: string;
+      readonly route: string;
+      readonly idempotencyKey: string;
+      readonly requestDigest: string;
+    },
+    screeningInput: PromotionScreeningInput,
+  ): Promise<
+    | { readonly error: Response }
+    | { readonly screening: ScreenedPublication; readonly reservation: QuotaReservation }
+  > {
+    const sponsorLimit = parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT);
+    const quotaResult = await checkAndReserveQuota(env.DB, {
+      ...quotaParams,
+      sponsorLimit,
+    });
+    if (!quotaResult.allowed) {
+      if (quotaResult.reason === "RATE_LIMITED") {
+        return { error: promotionRateLimitedProblem(quotaResult) };
+      }
+      return { error: idempotencyConflictProblem() };
+    }
+    const { reservation } = quotaResult;
+
+    const screening = await screenPublicIngress(env, screeningInput);
+    if (screening instanceof Response) {
+      const holdStatus =
+        screening.status === 409 || screening.status === 422 ? "settled_rejected" : "settled_held";
+      await settleQuotaReservation(env.DB, reservation.reservationId, holdStatus);
+      return { error: screening };
+    }
+
+    return { screening, reservation };
+  }
+
   type ReplayScope =
     | "session_open"
     | "workshop_push"
@@ -749,6 +800,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly credentialId: string;
     readonly session: SessionRow;
     readonly screening: ScreenedPublication;
+    readonly reservationId?: string;
     readonly responseFor: (settlement: {
       readonly sequence: number;
       readonly objectId: string;
@@ -786,6 +838,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             input.session.session_id,
             input.requestDigest,
           ),
+          ...(input.reservationId === undefined
+            ? []
+            : [settleQuotaReservationStatement(input.db, input.reservationId)]),
           input.db
             .prepare(
               `INSERT INTO session_write_replays
@@ -1459,17 +1514,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const cursor = await readCursor(db, session.problem_id);
+    let promotionBudget: RateLimitBudget | undefined;
     const packResponse = async (composed: ReturnType<typeof composePack>): Promise<Response> => {
       const rendered = renderProjection(composedPackToProjection(composed), "json");
+      const body = rendered.body;
+      const parsed = JSON.parse(body);
+      PackResponseSchema.parse(parsed);
       const itemTokenTotal = composed.items.reduce((total, item) => total + item.tokens, 0);
-      if (
-        itemTokenTotal > composed.tokens_estimate ||
-        Math.ceil(rendered.bytes / 4) > composed.tokens_estimate
-      ) {
+      const est = Math.max(composed.tokens_estimate, Math.ceil(byteLength(body) / 4));
+      if (itemTokenTotal > est) {
         throw new Error("pack composer token estimate diverged from the canonical JSON face");
       }
-      PackResponseSchema.parse(JSON.parse(rendered.body));
-      const body = rendered.body;
       const etag = `"${await sha256Text(body)}"`;
       const headers = {
         "cache-control": "private, no-store",
@@ -1520,6 +1575,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         action_candidates: [],
         omitted: [{ reason: "no_membership" }],
       });
+    }
+    try {
+      const sponsorLimit = parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT);
+      promotionBudget = await getRemainingBudget(db, {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sponsorLimit,
+      });
+    } catch {
+      // Safe reads remain usable even if quota storage is unavailable
     }
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
@@ -1952,6 +2018,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         membership: membership ?? "none",
         effective_permissions: actionPermissions,
       },
+      promotion_budget: promotionBudget,
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
@@ -1959,22 +2026,32 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? []
-          : [
-              {
-                method: "POST",
-                url: `/v1/sessions/${session.session_id}/workshop`,
-                why: "push a note or draft to your private workshop as you work",
-                public_read: false,
-                requires: ["workshop:write"],
-              },
-              {
-                method: "POST",
-                url: `/v1/sessions/${session.session_id}/promote`,
-                why: "promote a finished object to the public ledger (runs the validator)",
-                public_read: false,
-                requires: ["promote:write"],
-              },
-            ],
+          : promotionBudget?.remaining === 0
+            ? [
+                {
+                  method: "POST",
+                  url: `/v1/sessions/${session.session_id}/workshop`,
+                  why: "promotion rate limit reached; continue drafting in your private workshop until the window rolls over",
+                  public_read: false,
+                  requires: ["workshop:write"],
+                },
+              ]
+            : [
+                {
+                  method: "POST",
+                  url: `/v1/sessions/${session.session_id}/workshop`,
+                  why: "push a note or draft to your private workshop as you work",
+                  public_read: false,
+                  requires: ["workshop:write"],
+                },
+                {
+                  method: "POST",
+                  url: `/v1/sessions/${session.session_id}/promote`,
+                  why: "promote a finished object to the public ledger (runs the validator)",
+                  public_read: false,
+                  requires: ["promote:write"],
+                },
+              ],
       omitted: [
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
@@ -1982,6 +2059,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
+          : []),
+        ...(promotionBudget?.remaining === 0
+          ? [
+              {
+                reason: "promotion_rate_limited",
+                detail: `window rolls over in ${promotionBudget.retry_after_seconds ?? 3600}s`,
+              },
+            ]
           : []),
         ...(claimsTruncated ? [{ reason: "candidate_limit", detail: "claims" }] : []),
         ...(profile === "working" && workshopHeadsTruncated
@@ -2431,14 +2516,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // ingress — this promote included — crosses the one centralized
     // screening decision boundary after the cheap gates and before any
     // Krater id, replay row, event, projection, cursor, or outbox effect.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: parsed.data.kind,
-      statement: parsed.data.statement,
-      falsifier: parsed.data.falsifier ?? null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "promote",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: parsed.data.kind,
+        statement: parsed.data.statement,
+        falsifier: parsed.data.falsifier ?? null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
 
     try {
       const eventId = mintId("E");
@@ -2516,6 +2614,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session.session_id,
                 digest,
               ),
+              settleQuotaReservationStatement(db, reservation.reservationId),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -2678,9 +2777,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       // P11 commit-time guard: a concurrent identical promotion committed
       // first and this batch died on claims_problem_norm_hash_idx — the read
       // above ran before the winner landed. Name the winning claim in the
@@ -3007,14 +3108,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
     // bytes; it must earn its own screening decision and can never inherit
     // one from the previous version.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "revise",
-      statement: JSON.stringify(parsed.data),
-      falsifier: parsed.data.falsifier ?? null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "revise",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "revise",
+        statement: JSON.stringify(parsed.data),
+        falsifier: parsed.data.falsifier ?? null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
 
     try {
       const eventId = mintId("E");
@@ -3082,6 +3196,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session.session_id,
                 digest,
               ),
+              settleQuotaReservationStatement(db, reservation.reservationId),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -3201,9 +3316,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (error instanceof Error && /claim_versions/.test(error.message)) {
         // The stale-base backstop: a concurrent revision minted @base+1 first,
         // so this batch died on the claim_versions primary key without
@@ -3389,14 +3506,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): the obligation and closes_what are
     // author-controlled public text screened at the centralized boundary
     // before any commit effect.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "gaps",
-      statement: JSON.stringify(parsed.data),
-      falsifier: null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "gaps",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "gaps",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
 
     try {
       const eventId = mintId("E");
@@ -3438,6 +3568,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: (settlement) =>
             GapFiledResponseSchema.parse({
               gap_id: `G-${settlement.sequence}`,
@@ -3473,9 +3604,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
       throw error;
@@ -3644,14 +3777,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // P7/A9 (bead asimposiumorg-b9y9): the transition outcome and discharge
     // ref are screened at the centralized boundary before any commit effect.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "gap-close",
-      statement: JSON.stringify(parsed.data),
-      falsifier: null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "gaps/close",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "gap-close",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
 
     try {
       const eventId = mintId("E");
@@ -3690,6 +3836,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: (settlement) =>
             GapClosedResponseSchema.parse({
               gap_id: parsed.data.gap_id,
@@ -3725,9 +3872,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       // The settle race lost: re-read the gap; if it is no longer open, the
       // concurrent transition won and nothing was double-written.
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -3919,14 +4068,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): relation metadata (kind and pinned
     // endpoints) is in scope for the centralized screening boundary before
     // any commit effect.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "relation",
-      statement: JSON.stringify(parsed.data),
-      falsifier: null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "relations",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "relation",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
 
     try {
       const eventId = mintId("E");
@@ -3965,6 +4127,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: (settlement) =>
             RelationFiledResponseSchema.parse({
               problem_id: session.problem_id,
@@ -4002,9 +4165,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
         }
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       // The natural key is the duplicate guard: asserting the same edge twice
       // aborts the loser's whole batch.
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -4207,14 +4372,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
     // author-controlled public text screened at the centralized boundary
     // before any commit effect.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "review",
-      statement: JSON.stringify(parsed.data),
-      falsifier: null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "review",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "review",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
     const reviewId = mintId("R");
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -4295,6 +4473,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             ReviewResponseSchema.parse({
               review_id: reviewId,
@@ -4329,9 +4508,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -4414,14 +4595,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // body are public text screened at the centralized boundary before any
     // commit effect; the falsifier is screened both as a component and as
     // the dedicated falsifier slot.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "hypotheses",
-      statement: JSON.stringify(parsed.data),
-      falsifier: parsed.data.falsifier,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "hypotheses",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "hypotheses",
+        statement: JSON.stringify(parsed.data),
+        falsifier: parsed.data.falsifier,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
     const hypothesisId = mintId("H");
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -4500,6 +4694,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
         }),
@@ -4528,9 +4723,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -4704,16 +4901,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    // P7/A9 (bead asimposiumorg-b9y9): the kill rationale is public text and
-    // is screened at the centralized boundary before any commit effect.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "hypothesis-kill",
-      statement: JSON.stringify(parsed.data),
-      falsifier: null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "hypothesis-kill",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "hypothesis-kill",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypothesis-kill", claimToken);
@@ -4785,6 +4993,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             HypothesisKillResponseSchema.parse({
               hypothesis_id: hypothesisId,
@@ -4816,9 +5025,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (error instanceof KraterLedgerPreconditionError) {
         return validatedProblem({
           status: 422,
@@ -5016,17 +5227,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       mode: parsed.data.mode,
     });
 
-    // P7/A9 (bead asimposiumorg-b9y9): the exact validated candidate bytes
-    // are screened at the centralized boundary before any commit effect.
-    // Stateless per-candidate decisions mean changed bytes are re-screened.
-    const screening = await screenPublicIngress(c.env, {
-      problemId: session.problem_id,
-      fellowId: auth.binding.fellowId,
-      kind: "evidence",
-      statement: JSON.stringify(parsed.data),
-      falsifier: null,
-    });
-    if (screening instanceof Response) return screening;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "evidence",
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "evidence",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
     const evidenceId = mintId("E");
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -5123,6 +5344,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             EvidenceResponseSchema.parse({
               evidence_id: evidenceId,
@@ -5156,9 +5378,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))

@@ -175,6 +175,7 @@ test("the generated enrollment TypeScript face exports the exact public contract
     "OperatorFellowCapOverrideResponse",
     "OperatorFellowCapSignerKid",
     "OperatorFellowCapStateResponse",
+    "RateLimitBudget",
     "RequestedScope",
     "SponsorBootstrapRequest",
     "SponsorBootstrapResponse",

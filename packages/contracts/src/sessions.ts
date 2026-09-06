@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { FellowIdSchema } from "./enrollment.ts";
+import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
+
+export { type RateLimitBudget, RateLimitBudgetSchema };
 
 /**
  * Session-protocol contracts (Fable §7). The session is the unit of work; a
@@ -183,6 +185,8 @@ const PackResponseContentsSchema = z.object({
         .strict(),
     ])
     .optional(),
+  /** Rate limit budget for promotions on this problem (Fable §7.10 / A5). */
+  promotion_budget: RateLimitBudgetSchema.optional(),
 });
 
 /** The union keeps each token ceiling visible in generated JSON Schema. */

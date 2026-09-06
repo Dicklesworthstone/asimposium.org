@@ -44,6 +44,7 @@ import {
   type OperatorFellowCapOverrideResponse,
   type OperatorFellowCapSignerKid,
   type OperatorFellowCapStateResponse,
+  type RateLimitBudget,
   type RequestedScope,
   type SponsorBootstrapRequest,
   type SponsorBootstrapResponse,
@@ -292,6 +293,7 @@ function generatedEnrollmentTypes(): string {
     "OperatorFellowCapOverrideResponse",
     "OperatorFellowCapSignerKid",
     "OperatorFellowCapStateResponse",
+    "RateLimitBudget",
     "RequestedScope",
     "SponsorBootstrapRequest",
     "SponsorBootstrapResponse",
@@ -344,6 +346,7 @@ function generatedEnrollmentTypes(): string {
     OperatorFellowCapOverrideResponse: OperatorFellowCapOverrideResponse;
     OperatorFellowCapSignerKid: OperatorFellowCapSignerKid;
     OperatorFellowCapStateResponse: OperatorFellowCapStateResponse;
+    RateLimitBudget: RateLimitBudget;
     RequestedScope: RequestedScope;
     SponsorBootstrapRequest: SponsorBootstrapRequest;
     SponsorBootstrapResponse: SponsorBootstrapResponse;

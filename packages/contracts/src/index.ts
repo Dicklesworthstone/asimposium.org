@@ -443,6 +443,8 @@ export {
   PromoteRequestSchema,
   type PromoteResponse,
   PromoteResponseSchema,
+  type RateLimitBudget,
+  RateLimitBudgetSchema,
   type RelationFiledResponse,
   RelationFiledResponseSchema,
   type RelationFileRequest,

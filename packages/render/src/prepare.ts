@@ -6,6 +6,7 @@
  * one place where the structural trust rules of Fable §14.4 are enforced.
  */
 
+import type { RateLimitBudget } from "@asimposium/contracts";
 import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
 import {
@@ -81,6 +82,7 @@ export interface PreparedProjection {
   readonly next_actions: readonly { method: "GET" | "POST"; url: string; why: string }[];
   readonly degraded: readonly string[];
   readonly viewer?: ProjectionViewer;
+  readonly promotion_budget?: RateLimitBudget;
   readonly fingerprint: string;
   /** Flat per-item report, in item order. */
   readonly neutralized: readonly NeutralizationReport[];
@@ -375,6 +377,8 @@ function snapshotProjection(value: Projection): Projection {
 
   const viewerValue = readProjectionMember(source, "viewer", "viewer");
   const viewer = viewerValue === undefined ? undefined : snapshotViewer(viewerValue);
+  const promotionBudgetValue = readProjectionMember(source, "promotion_budget", "promotion_budget");
+  const promotionBudget = snapshotPromotionBudget(promotionBudgetValue);
 
   return {
     schema,
@@ -392,6 +396,66 @@ function snapshotProjection(value: Projection): Projection {
     next_actions: nextActions,
     degraded,
     ...(viewer === undefined ? {} : { viewer }),
+    ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
+  };
+}
+
+function snapshotPromotionBudget(value: unknown): RateLimitBudget | undefined {
+  if (value === undefined) return undefined;
+  const source = runtimeRecord(value, "promotion_budget");
+  const limit = snapshotNumber(
+    readProjectionMember(source, "limit", "promotion_budget.limit"),
+    "promotion_budget.limit",
+  );
+  const remaining = snapshotNumber(
+    readProjectionMember(source, "remaining", "promotion_budget.remaining"),
+    "promotion_budget.remaining",
+  );
+  const windowSeconds = snapshotNumber(
+    readProjectionMember(source, "window_seconds", "promotion_budget.window_seconds"),
+    "promotion_budget.window_seconds",
+  );
+  const retryAfterRaw = readProjectionMember(
+    source,
+    "retry_after_seconds",
+    "promotion_budget.retry_after_seconds",
+  );
+  const retryAfter =
+    retryAfterRaw === undefined
+      ? undefined
+      : snapshotNumber(retryAfterRaw, "promotion_budget.retry_after_seconds");
+
+  const sponsorLimitRaw = readProjectionMember(
+    source,
+    "sponsor_limit",
+    "promotion_budget.sponsor_limit",
+  );
+  const sponsorLimit =
+    sponsorLimitRaw === undefined
+      ? undefined
+      : sponsorLimitRaw === null
+        ? null
+        : snapshotNumber(sponsorLimitRaw, "promotion_budget.sponsor_limit");
+
+  const sponsorRemainingRaw = readProjectionMember(
+    source,
+    "sponsor_remaining",
+    "promotion_budget.sponsor_remaining",
+  );
+  const sponsorRemaining =
+    sponsorRemainingRaw === undefined
+      ? undefined
+      : sponsorRemainingRaw === null
+        ? null
+        : snapshotNumber(sponsorRemainingRaw, "promotion_budget.sponsor_remaining");
+
+  return {
+    limit,
+    remaining,
+    window_seconds: windowSeconds,
+    ...(retryAfter === undefined ? {} : { retry_after_seconds: retryAfter }),
+    ...(sponsorLimit === undefined ? {} : { sponsor_limit: sponsorLimit }),
+    ...(sponsorRemaining === undefined ? {} : { sponsor_remaining: sponsorRemaining }),
   };
 }
 
@@ -931,6 +995,9 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
                   effective_permissions: [...projection.viewer.effective_permissions],
                 },
         }),
+    ...(projection.promotion_budget === undefined
+      ? {}
+      : { promotion_budget: projection.promotion_budget }),
   });
 
   return {
@@ -976,6 +1043,9 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
                   effective_permissions: [...projection.viewer.effective_permissions],
                 },
         }),
+    ...(projection.promotion_budget === undefined
+      ? {}
+      : { promotion_budget: projection.promotion_budget }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,
   };

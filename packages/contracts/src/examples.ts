@@ -28,6 +28,7 @@ import { FellowRegistrationRequestSchema, MintEnrollmentRequestSchema } from "./
 import { ProblemFaceResponseSchema, ProblemsIndexResponseSchema } from "./ledger.ts";
 import { ProblemDocumentSchema } from "./problem.ts";
 import { ScreeningContractsSchema } from "./screening.ts";
+import { SearchQueryRequestSchema } from "./search.ts";
 import { PromoteRequestSchema, SessionOpenRequestSchema } from "./sessions.ts";
 
 const FIXTURES_DIR = join(import.meta.dir, "..", "test", "fixtures", "valid");
@@ -72,10 +73,15 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
   },
   {
     kind: "ledger",
-    fixtures: ["ledger-problems-index.json", "ledger-problem-face.json"],
+    fixtures: [
+      "ledger-problems-index.json",
+      "ledger-problem-face.json",
+      "search-scoped-claim.json",
+    ],
     build: ({ bodies }: BuilderInput): unknown => [
       { problems_index_response: ProblemsIndexResponseSchema.parse(bodies[0]) },
       { problem_face_response: ProblemFaceResponseSchema.parse(bodies[1]) },
+      { search_query_request: SearchQueryRequestSchema.parse(bodies[2]) },
     ],
   },
   {

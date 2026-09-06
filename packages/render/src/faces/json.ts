@@ -44,6 +44,9 @@ export function renderJsonFace(prepared: PreparedProjection): string {
     next_actions: prepared.next_actions,
     degraded: prepared.degraded,
     ...(prepared.viewer === undefined ? {} : { viewer: prepared.viewer }),
+    ...(prepared.promotion_budget === undefined
+      ? {}
+      : { promotion_budget: prepared.promotion_budget }),
   };
   return `${stableStringify(body, 2)}\n`;
 }

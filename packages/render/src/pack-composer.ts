@@ -9,6 +9,7 @@
  * property of one route.
  */
 
+import type { RateLimitBudget } from "@asimposium/contracts";
 import { byteLength, contentFingerprint, countNewlines, stableStringify } from "./canonical.ts";
 import { codePointCountThroughLimit, ITEM_ID_PATTERN, MAX_BODY_CODE_POINTS } from "./prepare.ts";
 import { renderProjection } from "./render.ts";
@@ -104,6 +105,7 @@ export interface PackComposerInput {
   /** Server-authored selector omissions known before budget selection. */
   readonly omitted?: readonly OmittedEntry[] | undefined;
   readonly degraded?: readonly string[] | undefined;
+  readonly promotion_budget?: RateLimitBudget | undefined;
 }
 
 export interface ComposedPackItem {
@@ -159,6 +161,7 @@ interface PackContents {
   readonly omitted: readonly OmittedEntry[];
   readonly next_actions: readonly NextAction[];
   readonly degraded: readonly string[];
+  readonly promotion_budget?: RateLimitBudget | undefined;
 }
 
 interface CanonicalPack extends PackContents {
@@ -608,6 +611,7 @@ function packProjection(pack: PackContents, tokensEstimate: number): Projection 
     next_actions: pack.next_actions,
     degraded: pack.degraded,
     viewer: toProjectionViewer(pack.viewer),
+    ...(pack.promotion_budget !== undefined ? { promotion_budget: pack.promotion_budget } : {}),
   };
 }
 
@@ -795,6 +799,7 @@ function composePackWithSelectionEstimator(
       membership: publicAudience ? ("none" as const) : viewer.membership,
       effective_permissions: publicAudience ? [] : viewer.permissions,
     },
+    promotion_budget: source.promotion_budget as RateLimitBudget | undefined,
   } as const;
 
   if (!Number.isSafeInteger(common.cursor) || (common.cursor as number) < 0) {

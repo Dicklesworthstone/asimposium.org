@@ -8,6 +8,8 @@
  * envelopes that violate the structural trust rules of §14.4.
  */
 
+import type { RateLimitBudget } from "@asimposium/contracts";
+
 /** Faces this package can emit. `toon` is deliberately absent: see README. */
 export type FaceFormat = "md" | "json" | "html-fragment";
 
@@ -86,6 +88,7 @@ export interface Projection {
   readonly degraded: readonly string[];
   /** The access this projection was composed under. Present on session packs. */
   readonly viewer?: ProjectionViewer;
+  readonly promotion_budget?: RateLimitBudget;
 }
 
 /** What the sanitizer did to one item, surfaced on every face. */

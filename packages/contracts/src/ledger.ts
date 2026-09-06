@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SearchQueryRequestSchema, SearchResponseSchema } from "./search.ts";
 import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./sessions.ts";
 
 /**
@@ -194,5 +195,7 @@ export const LedgerContractsSchema = z
     problem_index_entry: ProblemIndexEntrySchema,
     problems_index_response: ProblemsIndexResponseSchema,
     problem_face_response: ProblemFaceResponseSchema,
+    search_query_request: SearchQueryRequestSchema.optional(),
+    search_response: SearchResponseSchema.optional(),
   })
   .strict();

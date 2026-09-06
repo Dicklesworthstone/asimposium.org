@@ -82,6 +82,14 @@ const INVALID_SESSION_CLOSE_ACTIONS_UNAVAILABLE_UNTAUGHT = new URL(
   "../fixtures/invalid/problem-session-close-actions-unavailable-untaught.json",
   import.meta.url,
 );
+const VALID_PROMOTION_RATE_LIMITED = new URL(
+  "../fixtures/valid/problem-promotion-rate-limited.json",
+  import.meta.url,
+);
+const INVALID_PROMOTION_RATE_LIMITED_UNTAUGHT = new URL(
+  "../fixtures/invalid/problem-promotion-rate-limited-untaught.json",
+  import.meta.url,
+);
 
 const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-unauthorized.json", "UNAUTHORIZED", 401, "opaque"],
@@ -137,6 +145,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-workshop-push-body-invalid.json", "WORKSHOP_PUSH_BODY_INVALID", 422, "contract"],
   ["problem-promote-body-invalid.json", "PROMOTE_BODY_INVALID", 422, "contract"],
   ["problem-session-close-body-invalid.json", "SESSION_CLOSE_BODY_INVALID", 422, "contract"],
+  ["problem-promotion-rate-limited.json", "PROMOTION_RATE_LIMITED", 429, "contract"],
 ] as const;
 
 async function fixture(url: URL): Promise<unknown> {
@@ -233,6 +242,30 @@ test("session close actions unavailable is a teaching contract refusal", async (
       keep: [],
       discard: [],
     },
+  });
+});
+
+test("promotion rate limit is a teaching contract refusal with retry and quota fields", async () => {
+  const document = await fixture(VALID_PROMOTION_RATE_LIMITED);
+  const parsed = ProblemDocumentSchema.safeParse(document);
+  expect(parsed.success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(false);
+  expect(CONTRACT_PROBLEM_CODES).toContain("PROMOTION_RATE_LIMITED");
+  expect(OPAQUE_PROBLEM_CODES).not.toContain("PROMOTION_RATE_LIMITED" as never);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_PROMOTION_RATE_LIMITED_UNTAUGHT)).success,
+  ).toBe(false);
+  if (!parsed.success) return;
+  expect(parsed.data).toMatchObject({
+    code: "PROMOTION_RATE_LIMITED",
+    status: 429,
+    rule: "A5",
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    retry_after_seconds: 1800,
+    limit: 20,
+    remaining: 0,
+    window_seconds: 3600,
   });
 });
 

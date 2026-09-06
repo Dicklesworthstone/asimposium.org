@@ -285,13 +285,32 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
 
   test("the next-row probe discloses limits and scope/cursor exclusions stay empty", async () => {
     const f = await ledgerPackFixture();
+    const second = await addApprovedFellow(f, {
+      suffix: "gap-producer",
+      scopes: ["promote", "review"],
+    });
+    const secondSessionRes = await second.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "second-session-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(secondSessionRes.status).toBe(201);
+    const secondSession = (await secondSessionRes.json()) as { session_id: string };
     for (let index = 0; index < 20; index += 1) {
-      await f.post(`${f.path}/gaps`, {
-        target_claim_id: "C-1",
-        target_version: 1,
-        obligation: `Bounded obligation ${index}.`,
-        closes_what: "One missing step.",
+      const response = await second.call(`/v1/sessions/${secondSession.session_id}/gaps`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `second-gap-${index}`,
+        },
+        body: JSON.stringify({
+          target_claim_id: "C-1",
+          target_version: 1,
+          obligation: `Bounded obligation ${index}.`,
+          closes_what: "One missing step.",
+        }),
       });
+      expect(response.status).toBe(201);
     }
     const section = await readLedgerPackSection(f.db, "P-4DSP", 1000, "formal");
     expect(section.candidates).toHaveLength(20);
@@ -1998,7 +2017,7 @@ describe("session protocol routes", () => {
         }),
       });
 
-    barrier.arm([/FROM session_write_replays/, /SELECT public_seq, chain_digest.*FROM problems/]);
+    barrier.arm([/FROM session_write_replays/]);
     const responses = await Promise.all([
       promote("The first concurrent body may own this key."),
       promote("The second concurrent body must receive a typed conflict."),
