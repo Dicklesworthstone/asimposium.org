@@ -717,9 +717,9 @@ describe("face wire format", () => {
     expect(face.items.every((item) => !("tokens" in item))).toBe(true);
     expect(queries).toHaveLength(1);
     expect(bindings).toEqual(["P-4DSP"]);
-    expect(queries[0]).toContain("LEFT JOIN claims c");
-    expect(queries[0]).toContain("c.source_seq <= p.public_seq");
-    expect(queries[0]).toContain("ORDER BY c.source_seq ASC, c.id ASC");
+    expect(queries[0]).toContain("LEFT JOIN claims");
+    expect(queries[0]).toContain("claims.source_seq <= p.public_seq");
+    expect(queries[0]).toContain("ORDER BY claims.source_seq ASC, claims.id ASC");
     expect(queries[0]).toContain("LIMIT 201");
 
     const markdown = await wireEntrypoint.fetch(
@@ -873,6 +873,7 @@ describe("face wire format", () => {
 
   test("only a real 201st claim declares candidate-limit truncation", async () => {
     let rowCount = 200;
+    let hidePrefix = false;
     const env = trustedStoaEnv();
     env.DB = {
       prepare(query: string) {
@@ -884,7 +885,7 @@ describe("face wire format", () => {
                 problem_id: "P-CANDIDATES",
                 public_seq: 201,
                 claim_id: `C-${index + 1}`,
-                statement: `claim ${index + 1}`,
+                statement: hidePrefix && index < 200 ? null : `claim ${index + 1}`,
                 source_seq: index + 1,
               })),
             }),
@@ -915,6 +916,21 @@ describe("face wire format", () => {
     const truncatedFace = ProblemFaceResponseSchema.parse(await truncated.json());
     expect(truncatedFace.omitted).toContainEqual(
       expect.objectContaining({ reason: "candidate_limit" }),
+    );
+    hidePrefix = true;
+    const unavailable = await wireEntrypoint.fetch(
+      new Request("https://a.asimposium.org/p/P-CANDIDATES.json"),
+      env,
+      context,
+    );
+    expect(unavailable.status).toBe(200);
+    const unavailableFace = ProblemFaceResponseSchema.parse(await unavailable.json());
+    expect(unavailableFace.items).toEqual([]);
+    expect(unavailableFace.omitted).toContainEqual(
+      expect.objectContaining({ reason: "candidate_limit" }),
+    );
+    expect(unavailableFace.omitted).toContainEqual(
+      expect.objectContaining({ reason: "content_unavailable" }),
     );
   });
 
@@ -966,7 +982,7 @@ describe("face wire format", () => {
     env.DB = {
       prepare(query: string) {
         prepares += 1;
-        expect(query).toContain("LEFT JOIN claims c");
+        expect(query).toContain("LEFT JOIN claims");
         return {
           bind: () => ({
             all: async () => ({
@@ -999,14 +1015,20 @@ describe("face wire format", () => {
     expect(prepares).toBe(1);
   });
 
-  test("the mounted snapshot query excludes a future claim beyond the frozen problem cursor", async () => {
+  test("the mounted snapshot query excludes future claims and unavailable source content", async () => {
     const visibleClaim = "VISIBLE-AT-FROZEN-CURSOR";
     const secretFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
     const db = new Database(":memory:");
     try {
       db.run("CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL)");
       db.run(
-        "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL)",
+        "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL, payload_sha256 TEXT NOT NULL DEFAULT 'sha256:fixture')",
+      );
+      db.run(
+        "CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_id TEXT, object_kind TEXT, type TEXT, payload_sha256 TEXT)",
+      );
+      db.run(
+        "CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, redacted_at TEXT)",
       );
       db.prepare("INSERT INTO problems (id, public_seq) VALUES (?, ?)").run("P-4DSP", 7);
       const insertClaim = db.prepare(
@@ -1014,6 +1036,24 @@ describe("face wire format", () => {
       );
       insertClaim.run("C-7", "P-4DSP", visibleClaim, 7);
       insertClaim.run("C-8", "P-4DSP", secretFuture, 8);
+      for (const seq of [7, 8]) {
+        db.prepare(
+          "INSERT INTO events VALUES (?, 'P-4DSP', ?, ?, 'claim', 'claim.created', 'sha256:fixture')",
+        ).run(`E-${seq}`, seq, `C-${seq}`);
+        db.prepare("INSERT INTO event_content VALUES (?, 'sha256:fixture', NULL)").run(`E-${seq}`);
+      }
+      insertClaim.run("C-6", "P-4DSP", "MISSING-EVENT-CANARY", 6);
+      insertClaim.run("C-5", "P-4DSP", "MISSING-CONTENT-CANARY", 5);
+      insertClaim.run("C-4", "P-4DSP", "MISMATCHED-CONTENT-CANARY", 4);
+      insertClaim.run("C-3", "P-4DSP", "WRONG-OBJECT-CANARY", 3);
+      for (const seq of [3, 4, 5]) {
+        db.prepare(
+          "INSERT INTO events VALUES (?, 'P-4DSP', ?, ?, 'claim', 'claim.created', 'sha256:fixture')",
+        ).run(`E-${seq}`, seq, seq === 3 ? "C-other" : `C-${seq}`);
+      }
+      db.run(
+        "INSERT INTO event_content VALUES ('E-4', 'sha256:wrong', NULL), ('E-3', 'sha256:fixture', NULL)",
+      );
 
       let capturedSql: string | undefined;
       const env = trustedStoaEnv();
@@ -1033,13 +1073,17 @@ describe("face wire format", () => {
         executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2],
       );
 
-      expect(capturedSql).toContain("c.source_seq <= p.public_seq");
+      expect(capturedSql).toContain("claims.source_seq <= p.public_seq");
       expect(response.status).toBe(200);
       const body = await response.text();
       const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
       expect(face.items.map((item) => item.id)).toEqual(["C-7"]);
       expect(body).toContain(visibleClaim);
       expect(body).not.toContain(secretFuture);
+      expect(body).not.toContain("CANARY");
+      expect(face.omitted).toContainEqual(
+        expect.objectContaining({ reason: "content_unavailable" }),
+      );
     } finally {
       db.close();
     }

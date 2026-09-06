@@ -120,6 +120,9 @@ function seedDiscoveryData(raw: Database) {
     `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
      VALUES ('E-1', 'P-4DSP', 1, 'claim.created', 'claim', 'C-1', 1, 'sha256:abcd', 'sha256:row1', 'sha256:chain1', '2026-08-02T01:00:00.000Z', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', 'SPON-01')`,
   );
+  raw.run(
+    "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-1', 'sha256:abcd', '{}')",
+  );
 }
 
 /** SQL projection fixtures only; the Workerd lane separately exercises production writes. */
@@ -147,6 +150,10 @@ function seedAttributedClaim(
   raw.run(
     "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, 'sha256:abcd', 'sha256:row', 'sha256:chain', ?, ?, ?)",
     [`E-${problemId}-${id}`, problemId, seq, id, at, fellow, sponsor],
+  );
+  raw.run(
+    "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, 'sha256:abcd', '{}')",
+    [`E-${problemId}-${id}`],
   );
 }
 
@@ -228,6 +235,10 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       raw.run(
         "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'review.created', 'review', 'R-1', 1, 'sha256:body', 'sha256:row', 'sha256:chain', ?, ?, ?)",
         [event, problem, seq, at, fellow, sponsor],
+      );
+      raw.run(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, 'sha256:body', '{}')",
+        [event],
       );
       raw.run(
         "INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq) VALUES ('R-1', ?, 'C-1', 1, ?, 'T0', 'inform', ?, 'Synthetic SQL join fixture', ?, ?, ?)",
@@ -485,6 +496,9 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     raw.run(
       `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
        VALUES ('E-1', 'P-HOSTILE', 1, 'claim.created', 'claim', 'C-1', 1, 'sha256:abcdef0123456789', 'sha256:rowH', 'sha256:chainH', '2026-08-02T01:00:00.000Z', 'F-ADVERSARIAL-01', 'SPON-02')`,
+    );
+    raw.run(
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-1', 'sha256:abcdef0123456789', '{}')",
     );
 
     // 1. Markdown face: no active control comments, fences cannot break out

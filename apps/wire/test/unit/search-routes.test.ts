@@ -179,6 +179,12 @@ describe("W6.8 Public Search Routes", () => {
 
       INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
       VALUES ('C-42', 'P-TEST-99', 'Every even integer greater than 2 is sum of two primes', 'sha256:abc', 1, '2026-08-25T00:00:00.000Z');
+
+      UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
+      VALUES ('E-42', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-42', 1, 'sha256:abc', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
+      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-42', 'sha256:abc', '{}');
     `);
 
     // Search by composite ref
@@ -209,8 +215,17 @@ describe("W6.8 Public Search Routes", () => {
     const app = createApp();
     const env = mockEnv(db);
 
-    // Seed FTS5 index
+    // SQL projection fixture with an available source event; Workerd proof is separate.
     raw.run(`
+      INSERT INTO problems (id, public_seq, created_at, updated_at)
+      VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
+      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
+      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'sha256:abc', 1, '2026-08-25T00:00:00.000Z');
+      UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
+      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'sha256:abc', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
+      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'sha256:abc', '{}');
       INSERT INTO public_claim_fts (claim_id, problem_id, statement)
       VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition');
     `);
@@ -228,6 +243,17 @@ describe("W6.8 Public Search Routes", () => {
     expect(parsed.items[0]?.id).toBe("C-777");
     expect(parsed.items[0]?.match_type).toBe("lexical_fts");
     expect(parsed.items[0]?.snippet).toBeDefined();
+
+    // A retained FTS copy of an older statement is not an independent source.
+    raw.run(`INSERT INTO public_claim_fts (claim_id, problem_id, statement)
+      VALUES ('C-777', 'P-TEST-99', 'StaleIndexCanary from a superseded statement')`);
+    const stale = await app.request(
+      "https://a.asimposium.org/search.json?q=StaleIndexCanary",
+      {},
+      env,
+    );
+    expect(stale.status).toBe(200);
+    expect(SearchResponseSchema.parse(await stale.json()).items).toEqual([]);
   });
 
   test("honors unlisted exact-reference law: absent ID never leaks or confirms", async () => {

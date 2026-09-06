@@ -40,6 +40,7 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import type { PublicationScreeningObservation } from "../../src/screening/workers-ai.ts";
 import { readLedgerPackSection } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
@@ -47,6 +48,30 @@ import { sha256Hex } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+
+// Explicit source rows for the legacy SQL-only projection fixtures below.
+// Never invoked by production-write fixtures or missing-content controls.
+async function seedClaimPublication(db: Env["DB"], claimId: string) {
+  await db
+    .prepare(`UPDATE problems SET public_seq = (
+    SELECT source_seq FROM claims WHERE problem_id = 'P-4DSP' AND id = ?
+  ) WHERE id = 'P-4DSP'`)
+    .bind(claimId)
+    .run();
+  await db
+    .prepare(`INSERT INTO events
+    (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
+    SELECT 'E-fixture-' || c.id, c.problem_id, c.source_seq, 'claim.created', 'claim', c.id, 1,
+      c.payload_sha256, c.created_at, 'sha256:fixture-row', p.chain_digest
+    FROM claims c JOIN problems p ON p.id = c.problem_id WHERE c.problem_id = 'P-4DSP' AND c.id = ?`)
+    .bind(claimId)
+    .run();
+  await db
+    .prepare(`INSERT INTO event_content (event_id, payload_sha256, payload_json)
+    SELECT id, payload_sha256, '{}' FROM events WHERE id = ?`)
+    .bind(`E-fixture-${claimId}`)
+    .run();
+}
 
 // These route tests use the explicitly labeled SQLite adapter below. The
 // separate discovery-real-bindings lane proves the same producer/read path on D1.
@@ -5546,6 +5571,7 @@ describe("session protocol routes", () => {
       )
       .bind(claimMarker, "c".repeat(64), "2026-08-19T00:00:00.000Z")
       .run();
+    await seedClaimPublication(db, "C-1");
     await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
 
     const first = await call(`/v1/sessions/${session.session_id}/pack?profile=working`);
@@ -5857,9 +5883,10 @@ describe("session protocol routes", () => {
 
   test("PLANTED: a pack binds one captured public generation across a concurrent promotion", async () => {
     const cursorSql = "SELECT public_seq FROM problems WHERE id = ?";
-    const claimsSql =
-      "SELECT id, statement, source_seq FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?";
     const normalizeSql = (sql: string) => sql.replace(/\s+/g, " ").trim();
+    const claimsSql = normalizeSql(`SELECT id,
+      CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN statement END AS statement,
+      source_seq FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?`);
     const observedReads: LocalRead[] = [];
     let recordReads = false;
     let barrierArmed = false;
@@ -6150,6 +6177,7 @@ describe("session protocol routes", () => {
       )
       .bind("C-1", hostile, "a".repeat(64), 1, "2026-08-19T00:00:00.000Z")
       .run();
+    await seedClaimPublication(db, "C-1");
     await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
     await db
       .prepare(
@@ -6218,6 +6246,7 @@ describe("session protocol routes", () => {
           `2026-08-19T00:00:${index.toString().padStart(2, "0")}.000Z`,
         )
         .run();
+      await seedClaimPublication(db, `C-${index}`);
     }
     await db.prepare("UPDATE problems SET public_seq = 12 WHERE id = 'P-4DSP'").run();
     const bounded = await call(
@@ -6260,6 +6289,9 @@ describe("session protocol routes", () => {
       )
       .run();
     await db.prepare("UPDATE problems SET public_seq = 130 WHERE id = 'P-4DSP'").run();
+    for (let index = 13; index <= 130; index += 1) {
+      await seedClaimPublication(db, `C-${index}`);
+    }
     recordDispositionReads = true;
     const capped = await call(
       `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=8000`,
@@ -6331,6 +6363,7 @@ describe("session protocol routes", () => {
       )
       .bind(statement, "d".repeat(64), "2026-08-20T00:00:00.000Z")
       .run();
+    await seedClaimPublication(db, "C-oversized");
     await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
 
     const refusal = await callMounted(
@@ -6381,6 +6414,7 @@ describe("session protocol routes", () => {
       )
       .run();
     await db.prepare("UPDATE problems SET public_seq = 128 WHERE id = 'P-4DSP'").run();
+    for (const id of expected) await seedClaimPublication(db, id);
 
     const atCapResponse = await call(
       `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=8000`,
@@ -6404,6 +6438,7 @@ describe("session protocol routes", () => {
       )
       .run();
     await db.prepare("UPDATE problems SET public_seq = 129 WHERE id = 'P-4DSP'").run();
+    await seedClaimPublication(db, "C-129");
 
     const overCapResponse = await call(
       `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=8000`,

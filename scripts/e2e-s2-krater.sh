@@ -239,6 +239,7 @@ readonly -a S2_SOURCE_PATHS=(
   # moment that import landed, which is this attestation working as intended.
   apps/wire/src/krater/intent.ts
   apps/wire/src/krater/cas.ts
+  apps/wire/src/krater/public-content.ts
   apps/wire/src/screening/aggregate.ts
   apps/wire/src/screening/context.ts
   apps/wire/src/screening/ingress.ts

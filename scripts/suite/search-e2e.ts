@@ -77,7 +77,7 @@ export function createSearchTestEnvironment(): {
     VALUES ('P-RIEMANN-01', 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
 
     INSERT INTO problems (id, public_seq, created_at, updated_at)
-    VALUES ('P-GOLDBACH-02', 2, '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z');
+    VALUES ('P-GOLDBACH-02', 1, '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z');
   `);
 
   // Seed public claims
@@ -86,8 +86,51 @@ export function createSearchTestEnvironment(): {
     VALUES ('C-101', 'P-RIEMANN-01', 'All nontrivial zeros of the zeta function have real part equal to one half.', 'sha256:claim101', 1, '2026-08-20T00:00:00.000Z');
 
     INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-    VALUES ('C-202', 'P-GOLDBACH-02', 'Every even integer greater than 2 can be expressed as sum of two primes.', 'sha256:claim202', 2, '2026-08-21T00:00:00.000Z');
+    VALUES ('C-202', 'P-GOLDBACH-02', 'Every even integer greater than 2 can be expressed as sum of two primes.', 'sha256:claim202', 1, '2026-08-21T00:00:00.000Z');
   `);
+
+  // These are SQL projection fixtures, not Workerd/D1 producer proof. Supply
+  // explicit source events so a bare claims/FTS row cannot grant publication.
+  // Each problem has its own sequence: both first claims start at one.
+  sqlite.run(`
+    UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain'
+    WHERE id IN ('P-RIEMANN-01', 'P-GOLDBACH-02');
+  `);
+  sqlite.run(`
+    INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
+    VALUES ('P-RIEMANN-01', 'complete', 0, 2), ('P-GOLDBACH-02', 'complete', 0, 2);
+  `);
+  const sourceClaim = sqlite.prepare<
+    {
+      problem_id: string;
+      id: string;
+      source_seq: number;
+      payload_sha256: string;
+      created_at: string;
+    },
+    [string]
+  >("SELECT problem_id, id, source_seq, payload_sha256, created_at FROM claims WHERE id = ?");
+  for (const id of ["C-101", "C-202"]) {
+    const claim = sourceClaim.get(id);
+    if (!claim) throw new Error("Search fixture claim was not seeded");
+    sqlite
+      .prepare(`INSERT INTO events (id, problem_id, seq, type, object_kind, object_id,
+      object_version, payload_sha256, created_at, row_digest, chain_digest)
+      VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, ?, ?, 'sha256:fixture-row', 'sha256:fixture-chain')`)
+      .run(
+        `E-fixture-${id}`,
+        claim.problem_id,
+        claim.source_seq,
+        id,
+        claim.payload_sha256,
+        claim.created_at,
+      );
+    sqlite
+      .prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, '{}')",
+      )
+      .run(`E-fixture-${id}`, claim.payload_sha256);
+  }
 
   // Seed public_claim_fts
   sqlite.run(`

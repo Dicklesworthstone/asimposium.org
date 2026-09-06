@@ -945,6 +945,194 @@ try {
     beforeStorageFailure,
     "real D1 evidence failure must roll back publication",
   );
+
+  // ADR23: redaction must win over every retained projection and FTS copy.
+  // Publish through the production routes above, then apply the existing
+  // operator-owned content control directly to this disposable real D1.
+  const redactedClaimText = "Synthetic P-DISC-A: integer 2 is even.";
+  const survivingClaimText = "Synthetic P-DISC-B: integer 2 is even.";
+  // Earlier race cases revoke the original author. Use a freshly enrolled
+  // reader so an expected auth refusal cannot masquerade as redaction proof.
+  const redactionReader = await enroll("discovery-redaction-reader", "usr_discoveryredaction");
+  const redactionSession = await call(
+    "/v1/sessions",
+    { problem_id: "P-DISC-A", intent: "review" },
+    redactionReader,
+    201,
+  );
+  const originalPack = await call(
+    `/v1/sessions/${redactionSession.session_id}/pack?profile=working`,
+    undefined,
+    redactionReader,
+  );
+  assert.ok(JSON.stringify(originalPack).includes(redactedClaimText));
+  const publicReadPaths = [
+    "/p/P-DISC-A.json",
+    "/p/P-DISC-A.md",
+    "/a/discovery-author.json",
+    "/a/discovery-author.md",
+    "/a/discovery-author.html",
+    "/a/discovery-reviewer.json",
+    "/a/discovery-reviewer.md",
+    "/a/discovery-reviewer.html",
+    "/search.json?q=P-DISC-A%23C-1",
+    "/search.md?q=P-DISC-A%23C-1",
+    "/search.json?q=Synthetic&kind=claim&limit=50",
+    "/search.md?q=Synthetic&kind=claim&limit=50",
+  ];
+  const beforeRedaction = new Map();
+  for (const path of publicReadPaths) {
+    const response = await worker.fetch(`${origin}${path}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200, path);
+    const etag = response.headers.get("etag");
+    assert.ok(etag, path);
+    beforeRedaction.set(path, { etag, body: await response.text() });
+  }
+  assert.ok(beforeRedaction.get("/p/P-DISC-A.json").body.includes(redactedClaimText));
+  assert.ok(
+    beforeRedaction
+      .get("/search.json?q=Synthetic&kind=claim&limit=50")
+      .body.includes(redactedClaimText),
+  );
+  const envelopeBefore = await env.DB.prepare(
+    "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
+  )
+    .bind("P-DISC-A")
+    .all();
+  await env.DB.prepare(
+    `UPDATE event_content SET payload_json = '{"control":"redacted"}',
+       redacted_at = '2026-09-05T00:00:00.000Z', redaction_reason = 'privacy'
+     WHERE event_id IN (SELECT id FROM events WHERE problem_id = ?
+       AND type IN ('claim.created', 'review.created'))`,
+  )
+    .bind("P-DISC-A")
+    .run();
+  assert.deepEqual(
+    (
+      await env.DB.prepare(
+        "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
+      )
+        .bind("P-DISC-A")
+        .all()
+    ).results,
+    envelopeBefore.results,
+  );
+  // The unsafe copies really remain; a pass cannot come from deleting the fixture.
+  assert.ok(
+    (
+      await env.DB.prepare("SELECT statement FROM claims WHERE problem_id = ? AND id = 'C-1'")
+        .bind("P-DISC-A")
+        .first()
+    ).statement.includes(redactedClaimText),
+  );
+  assert.ok(
+    (
+      await env.DB.prepare(
+        "SELECT statement FROM public_claim_fts WHERE problem_id = ? AND claim_id = 'C-1'",
+      )
+        .bind("P-DISC-A")
+        .first()
+    ).statement.includes(redactedClaimText),
+  );
+  const redactionFailures = [];
+  for (const path of publicReadPaths) {
+    const response = await worker.fetch(`${origin}${path}`, {
+      headers: { "User-Agent": userAgent, "if-none-match": beforeRedaction.get(path).etag },
+    });
+    if (response.status === 304) redactionFailures.push(`${path}: stale conditional response`);
+    assert.equal(response.status, 200, `${path}: redaction must return a successful fresh face`);
+    const etag = response.headers.get("etag");
+    assert.ok(etag, path);
+    assert.notEqual(etag, beforeRedaction.get(path).etag, path);
+    const body = await response.text();
+    if (path === "/p/P-DISC-A.json") {
+      const face = JSON.parse(body);
+      assert.equal(face.items.length, 0);
+      assert.ok(face.omitted.some((item) => item.reason === "content_unavailable"));
+    }
+    if (body.includes(redactedClaimText)) redactionFailures.push(`${path}: retained claim text`);
+    if (path === "/a/discovery-reviewer.json" && response.status === 200) {
+      const card = JSON.parse(body);
+      if (card.reviews.some((review) => review.problem_id === "P-DISC-A"))
+        redactionFailures.push(`${path}: retained review text`);
+      assert.ok(card.reviews.some((review) => review.problem_id === "P-DISC-B"));
+    }
+    if (path === "/a/discovery-author.json" && response.status === 200)
+      assert.ok(body.includes(survivingClaimText));
+    const unchanged = await worker.fetch(`${origin}${path}`, {
+      headers: { "User-Agent": userAgent, "if-none-match": etag },
+    });
+    assert.equal(unchanged.status, 304, `${path}: fresh validator remains usable`);
+    assert.equal(await unchanged.text(), "");
+  }
+  for (const profile of [
+    "hello",
+    "orient",
+    "working",
+    "claim",
+    "review",
+    "digest",
+    "graveyard",
+    "literature",
+    "formal",
+    "review-queue",
+    "claim-graph",
+    "full",
+  ]) {
+    const pack = await call(
+      `/v1/sessions/${redactionSession.session_id}/pack?profile=${profile}`,
+      undefined,
+      redactionReader,
+    );
+    if (JSON.stringify(pack).includes(redactedClaimText))
+      redactionFailures.push(`pack:${profile}: retained claim text`);
+    if (profile !== "hello") {
+      assert.ok(
+        pack.omitted.some(
+          (item) => item.reason === "content_unavailable" && item.detail === "claims",
+        ),
+      );
+    }
+  }
+  assert.ok(JSON.stringify(await call("/p/P-DISC-B.json")).includes(survivingClaimText));
+  assert.deepEqual(
+    redactionFailures,
+    [],
+    "redacted content must not return through public projections",
+  );
+  // Lawful redaction preserves the digest. Real D1 must reject a rewrite;
+  // malformed legacy-source reads are exercised separately on the SQL seam.
+  await assert.rejects(
+    env.DB.prepare(`UPDATE event_content SET payload_sha256 = ?
+    WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-DISC-B'
+      AND type IN ('claim.created', 'review.created'))`)
+      .bind("0".repeat(64))
+      .run(),
+    /KRATER_CONTENT_REDACTION_INVALID/,
+  );
+  const survivingSession = await call(
+    "/v1/sessions",
+    { problem_id: "P-DISC-B", intent: "review" },
+    redactionReader,
+    201,
+  );
+  const survivingPack = await call(
+    `/v1/sessions/${survivingSession.session_id}/pack?profile=working`,
+    undefined,
+    redactionReader,
+  );
+  assert.ok(JSON.stringify(survivingPack).includes(survivingClaimText));
+  assert.ok(!survivingPack.omitted.some((item) => item.reason === "content_unavailable"));
+  console.log(
+    JSON.stringify({
+      stage: "retained-projection-redaction",
+      status: "pass",
+      public_faces: publicReadPaths.length,
+      pack_profiles: 12,
+    }),
+  );
   console.log(
     JSON.stringify({
       kind: "discovery-real-bindings",

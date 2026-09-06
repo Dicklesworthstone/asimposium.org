@@ -4694,6 +4694,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     // closure verdict. An omission here could not have been detected at all.
     ["apps/wire/src/krater/krater.ts"],
     ["apps/wire/src/krater/cas.ts"],
+    ["apps/wire/src/krater/public-content.ts"],
     ["apps/wire/src/krater/outbox-do.ts"],
     // The S-4 contract barrel now makes this a real Worker dependency. Keep
     // the source-closure plant causal: deleting it from the attested set must
