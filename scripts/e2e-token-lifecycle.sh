@@ -1178,7 +1178,7 @@ assert_migration_journal() {
 }
 
 seed_session_problem() {
-  local genesis pack_genesis now
+  local genesis pack_genesis now claim_seq publication_sql=""
   genesis="$(TOKEN_LIFECYCLE_SESSION_PROBLEM_ID="${SESSION_PROBLEM_ID}" "${BUN}" --eval '
     import { genesisChainDigest } from "./apps/wire/src/krater/krater.ts";
     const problemId = process.env.TOKEN_LIFECYCLE_SESSION_PROBLEM_ID;
@@ -1210,8 +1210,39 @@ seed_session_problem() {
     fail "TOKEN_LIFECYCLE_SESSION_TIME_INVALID"
     return 1
   }
+  # SQL read-benchmark fixtures, not promotion or integrity-chain proof. Each
+  # readable claim has an explicit source; keep D1's head and contiguity guards.
+  for ((claim_seq = 1; claim_seq <= 130; claim_seq++)); do
+    publication_sql+="
+      UPDATE problems SET public_seq = ${claim_seq} WHERE id = '${PACK_MEASUREMENT_PROBLEM_ID}';
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id,
+        object_version, payload_sha256, created_at, row_digest, chain_digest)
+      SELECT 'E-pack-measurement-' || source_seq, problem_id, source_seq,
+        'claim.created', 'claim', id, 1, payload_sha256, created_at,
+        payload_sha256, '${pack_genesis}'
+      FROM claims WHERE problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}' AND source_seq = ${claim_seq};
+    "
+  done
   "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-    --command "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}', 2); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}', 2); INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 130, '${now}', '${now}', '${pack_genesis}', 2); INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 'complete', 0, '${now}', 2); WITH RECURSIVE claim_numbers(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM claim_numbers WHERE value < 130) INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) SELECT 'C-' || value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || value, printf('%064x', value), value, '${now}' FROM claim_numbers;" \
+    --command "
+      INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version)
+      VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}', 2);
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
+      VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}', 2);
+      INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version)
+      VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 0, '${now}', '${now}', '${pack_genesis}', 2);
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
+      VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 'complete', 0, '${now}', 2);
+      WITH RECURSIVE claim_numbers(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM claim_numbers WHERE value < 130)
+      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
+      SELECT 'C-' || value, '${PACK_MEASUREMENT_PROBLEM_ID}', 'pack-measurement-' || value,
+        printf('%064x', value), value, '${now}' FROM claim_numbers;
+      ${publication_sql}
+      INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      SELECT 'E-pack-measurement-' || source_seq, payload_sha256,
+        json_object('statement', statement)
+      FROM claims WHERE problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}';
+    " \
     --json >"${SESSION_SEED_LOG}" 2>"${SESSION_SEED_ERROR_LOG}" || {
     fail "TOKEN_LIFECYCLE_SESSION_SEED_FAILED"
     return 1
