@@ -13,27 +13,27 @@ type LocalBinding = string | number | null;
 function localD1(sqlite: Database) {
   return {
     prepare(query: string) {
-      return {
-        bind(...values: LocalBinding[]) {
-          return {
-            async run() {
-              if (/^\s*SELECT\b/i.test(query)) {
-                const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
-                return { results: rows, meta: { changes: 0 } };
-              }
-              const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-              return { results: [], meta: { changes: result.changes } };
-            },
-            async first<T>(): Promise<T | null> {
-              const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
-              return (row ?? null) as T | null;
-            },
-            async all<T>(): Promise<{ results: T[] }> {
-              const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-              return { results: rows };
-            },
-          };
+      const bind = (...values: LocalBinding[]) => ({
+        async run() {
+          if (/^\s*SELECT\b/i.test(query)) {
+            const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
+            return { results: rows, meta: { changes: 0 } };
+          }
+          const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
+          return { results: [], meta: { changes: result.changes } };
         },
+        async first<T>(): Promise<T | null> {
+          const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
+          return (row ?? null) as T | null;
+        },
+        async all<T>(): Promise<{ results: T[] }> {
+          const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
+          return { results: rows };
+        },
+      });
+      return {
+        ...bind(),
+        bind,
       };
     },
     async batch(statements: readonly { run(): Promise<unknown> }[]) {
@@ -81,6 +81,106 @@ function mockEnv(db: Env["DB"]): Env {
 }
 
 describe("W6.8 Public Search Routes", () => {
+  test("uses the recorded nonzero cursor even for a genuine empty search", async () => {
+    const { db, raw } = createMigratedDb();
+    raw.prepare("UPDATE public_cursor SET cursor = 37 WHERE singleton = 1").run();
+    const response = await createApp().request(
+      "https://a.asimposium.org/search.json?q=unmatched&kind=claim",
+      {},
+      mockEnv(db),
+    );
+    expect(response.status).toBe(200);
+    const body = SearchResponseSchema.parse(await response.json());
+    expect(body.source_cursor).toBe(37);
+    expect(body.items).toEqual([]);
+    expect(body.explanation).toBe("no_lexical_matches");
+  });
+
+  test.each([null, -1, 0.5, 9_007_199_254_740_992, "unknown"])(
+    "a missing or invalid cursor %s is unavailable, never zero",
+    async (cursor) => {
+      const raw = new Database(":memory:");
+      raw.run("CREATE TABLE public_cursor (singleton INTEGER, cursor)");
+      if (cursor !== null) raw.prepare("INSERT INTO public_cursor VALUES (1, ?)").run(cursor);
+      const response = await createApp().request(
+        "https://a.asimposium.org/search.json?q=unmatched",
+        {},
+        mockEnv(localD1(raw)),
+      );
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).not.toHaveProperty("source_cursor");
+    },
+  );
+
+  test("a later lexical failure discards partial matches but preserves the verified exact result", async () => {
+    const { db, raw } = createMigratedDb();
+    raw.run(`INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES
+      ('P-TARGET', 0, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'),
+      ('P-TARGET-OTHER', 0, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z')`);
+    const app = createApp();
+    const env = mockEnv(db);
+    const url = "https://a.asimposium.org/search.json?q=P-TARGET";
+    const healthy = SearchResponseSchema.parse(await (await app.request(url, {}, env)).json());
+    expect(healthy.items.map((item) => item.id)).toEqual(["P-TARGET", "P-TARGET-OTHER"]);
+    raw.run("ALTER TABLE enrollment_fellows RENAME TO retained_fellows");
+    const response = await app.request(url, { headers: { "if-none-match": "*" } }, env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const partial = SearchResponseSchema.parse(await response.json());
+    expect(partial.items).toEqual(healthy.items.slice(0, 1));
+    expect(partial.total_matches).toBe(1);
+    expect(partial.omitted).toContainEqual(
+      expect.objectContaining({ reason: "lexical_search_unavailable" }),
+    );
+    const repeated = await app.request(
+      url,
+      {
+        headers: { "if-none-match": response.headers.get("etag") ?? "" },
+      },
+      env,
+    );
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toEqual(partial);
+  });
+
+  test.each([
+    ["public_cursor", "unmatched", "claim"],
+    ["claims", "P-RIEMANN-01#C-1", "claim"],
+    ["public_claim_fts", "unmatched", "claim"],
+    ["problems", "unmatched", "problem"],
+    ["enrollment_fellows", "unmatched", "fellow"],
+  ])("an unavailable %s source never reports no matches", async (table, q, kind) => {
+    const { db, raw } = createMigratedDb();
+    // Real SQLite schema failure, with all rows retained under the new name.
+    raw.run(`ALTER TABLE ${table} RENAME TO retained_unavailable_source`);
+    const env = mockEnv(db);
+    const app = createApp();
+    for (const suffix of ["", ".json", ".md"]) {
+      for (const method of ["GET", "HEAD"]) {
+        const response = await app.request(
+          `https://a.asimposium.org/search${suffix}?${new URLSearchParams({ q, kind })}`,
+          { method, headers: { "if-none-match": "*" } },
+          env,
+        );
+        expect(response.status).toBe(503);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        expect(response.headers.get("etag")).toBeNull();
+        const body = await response.text();
+        if (method === "HEAD") {
+          expect(body).toBe("");
+        } else {
+          const problem = JSON.parse(body);
+          expect(problem.code).toBe("INTERNAL_ERROR");
+          expect(problem.fix_hint).toBeDefined();
+          expect(body).not.toContain("retained_unavailable_source");
+          expect(body).not.toContain("no such table");
+          expect(body).not.toContain(q);
+        }
+      }
+    }
+  });
+
   test("GET /search without query returns 400 SCHEMA_INVALID problem document", async () => {
     const { db } = createMigratedDb();
     const app = createApp();

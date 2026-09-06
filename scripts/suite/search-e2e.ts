@@ -14,27 +14,27 @@ type LocalBinding = string | number | null;
 function localD1(sqlite: Database): Env["DB"] {
   return {
     prepare(query: string) {
-      return {
-        bind(...values: LocalBinding[]) {
-          return {
-            async run() {
-              if (/^\s*SELECT\b/i.test(query)) {
-                const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
-                return { results: rows, meta: { changes: 0 } };
-              }
-              const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-              return { results: [], meta: { changes: result.changes } };
-            },
-            async first<T>(): Promise<T | null> {
-              const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
-              return (row ?? null) as T | null;
-            },
-            async all<T>(): Promise<{ results: T[] }> {
-              const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-              return { results: rows };
-            },
-          };
+      const bind = (...values: LocalBinding[]) => ({
+        async run() {
+          if (/^\s*SELECT\b/i.test(query)) {
+            const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
+            return { results: rows, meta: { changes: 0 } };
+          }
+          const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
+          return { results: [], meta: { changes: result.changes } };
         },
+        async first<T>(): Promise<T | null> {
+          const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
+          return (row ?? null) as T | null;
+        },
+        async all<T>(): Promise<{ results: T[] }> {
+          const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
+          return { results: rows };
+        },
+      });
+      return {
+        ...bind(),
+        bind,
       };
     },
     async batch(statements: readonly { run(): Promise<unknown> }[]) {

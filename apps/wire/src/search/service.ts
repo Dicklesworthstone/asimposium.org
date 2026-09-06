@@ -47,6 +47,8 @@ interface CursorRow {
   readonly cursor: number;
 }
 
+export const LEXICAL_SEARCH_UNAVAILABLE = "lexical_search_unavailable";
+
 /**
  * Execute public search against D1 tables and public_claim_fts.
  *
@@ -62,17 +64,17 @@ export async function executeSearch(
   const filterKind = request.kind ?? "all";
 
   // 1. Fetch current global public cursor
-  let sourceCursor = 0;
-  try {
-    const cursorResult = await db
-      .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
-      .first<CursorRow>();
-    if (cursorResult && typeof cursorResult.cursor === "number") {
-      sourceCursor = cursorResult.cursor;
-    }
-  } catch {
-    // If public_cursor table is missing or unseeded, default to 0
+  const cursorResult = await db
+    .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+    .first<CursorRow>();
+  if (
+    cursorResult === null ||
+    !Number.isSafeInteger(cursorResult.cursor) ||
+    cursorResult.cursor < 0
+  ) {
+    throw new Error("Public search cursor is unavailable.");
   }
+  const sourceCursor = cursorResult.cursor;
 
   const items: SearchResultItem[] = [];
   const seenKeys = new Set<string>();
@@ -112,28 +114,24 @@ export async function executeSearch(
 
     if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
       // Look up claim in claims table
-      let claim: ClaimRow | null = null;
-      try {
-        if (exactTarget.problemId) {
-          claim = await db
-            .prepare(
-              `SELECT id, problem_id, statement, source_seq, created_at FROM claims
+      let claim: ClaimRow | null;
+      if (exactTarget.problemId) {
+        claim = await db
+          .prepare(
+            `SELECT id, problem_id, statement, source_seq, created_at FROM claims
                WHERE id = ? AND problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
-            )
-            .bind(exactTarget.id, exactTarget.problemId)
-            .first<ClaimRow>();
-        } else {
-          claim = await db
-            .prepare(
-              `SELECT id, problem_id, statement, source_seq, created_at FROM claims
+          )
+          .bind(exactTarget.id, exactTarget.problemId)
+          .first<ClaimRow>();
+      } else {
+        claim = await db
+          .prepare(
+            `SELECT id, problem_id, statement, source_seq, created_at FROM claims
                WHERE id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
                ORDER BY problem_id ASC LIMIT 1`,
-            )
-            .bind(exactTarget.id)
-            .first<ClaimRow>();
-        }
-      } catch {
-        // Table not present or query failed
+          )
+          .bind(exactTarget.id)
+          .first<ClaimRow>();
       }
 
       if (claim) {
@@ -175,6 +173,18 @@ export async function executeSearch(
     }
   }
 
+  // A verified exact reference survives a lexical outage. Discard any partial
+  // lexical results and disclose the failure; no exact result means unavailable,
+  // not an authoritative empty match set. Required cursor/exact reads above
+  // never enter this fallback.
+  const exactItems = [...items];
+  let lexicalUnavailable = false;
+  const lexicalFailure = (error: unknown) => {
+    if (!matchedExact) throw error;
+    items.splice(0, items.length, ...exactItems);
+    lexicalUnavailable = true;
+  };
+
   // 3. FTS5 search on claims (public_claim_fts)
   if (items.length < limit && (filterKind === "all" || filterKind === "claim")) {
     const ftsQuery = escapeFts5Query(request.q);
@@ -197,7 +207,7 @@ export async function executeSearch(
           .bind(ftsQuery, remainingLimit)
           .all<FtsClaimRow>();
 
-        for (const row of ftsRows.results ?? []) {
+        for (const row of ftsRows.results) {
           addItem({
             kind: "claim",
             id: row.claim_id,
@@ -210,14 +220,18 @@ export async function executeSearch(
             score_explanation: `bm25_rank_${row.rank.toFixed(2)}`,
           });
         }
-      } catch {
-        // FTS table empty or MATCH query had no matchable index tokens
+      } catch (error) {
+        lexicalFailure(error);
       }
     }
   }
 
   // 4. Substring problem search (when searching all or problems)
-  if (items.length < limit && (filterKind === "all" || filterKind === "problem")) {
+  if (
+    !lexicalUnavailable &&
+    items.length < limit &&
+    (filterKind === "all" || filterKind === "problem")
+  ) {
     const remainingLimit = limit - items.length;
     const cleanPattern = `%${request.q.replace(/[%_\\]/g, "\\$&")}%`;
     try {
@@ -228,7 +242,7 @@ export async function executeSearch(
         .bind(cleanPattern, remainingLimit)
         .all<ProblemRow>();
 
-      for (const row of problemRows.results ?? []) {
+      for (const row of problemRows.results) {
         addItem({
           kind: "problem",
           id: row.id,
@@ -239,13 +253,17 @@ export async function executeSearch(
           score_explanation: "problem_id_lexical_match",
         });
       }
-    } catch {
-      // Problems search failed gracefully
+    } catch (error) {
+      lexicalFailure(error);
     }
   }
 
   // 5. Substring fellow search (when searching all or fellows)
-  if (items.length < limit && (filterKind === "all" || filterKind === "fellow")) {
+  if (
+    !lexicalUnavailable &&
+    items.length < limit &&
+    (filterKind === "all" || filterKind === "fellow")
+  ) {
     const remainingLimit = limit - items.length;
     const cleanPattern = `%${request.q.replace(/[%_\\]/g, "\\$&")}%`;
     try {
@@ -256,7 +274,7 @@ export async function executeSearch(
         .bind(cleanPattern, remainingLimit)
         .all<FellowRow>();
 
-      for (const row of fellowRows.results ?? []) {
+      for (const row of fellowRows.results) {
         addItem({
           kind: "fellow",
           id: row.fellow_id,
@@ -267,13 +285,22 @@ export async function executeSearch(
           score_explanation: "fellow_name_lexical_match",
         });
       }
-    } catch {
-      // Fellows search failed gracefully
+    } catch (error) {
+      lexicalFailure(error);
     }
   }
 
   // 6. Deliberate omissions declaration (Rule A4 / A5)
   const omissions: SearchOmission[] = [
+    ...(lexicalUnavailable
+      ? [
+          {
+            reason: LEXICAL_SEARCH_UNAVAILABLE,
+            detail:
+              "Only the verified exact reference is shown. Lexical search is temporarily unavailable; retry this search later.",
+          },
+        ]
+      : []),
     {
       reason: "private_content_excluded",
       detail:

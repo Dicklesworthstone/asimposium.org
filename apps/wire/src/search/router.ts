@@ -1,9 +1,9 @@
-import { SearchQueryRequestSchema } from "@asimposium/contracts";
+import { SearchQueryRequestSchema, type SearchResponse } from "@asimposium/contracts";
 import { type Context, Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem as problemDocument } from "../http/envelope";
 import { renderSearchMarkdown } from "./markdown";
-import { executeSearch } from "./service";
+import { executeSearch, LEXICAL_SEARCH_UNAVAILABLE } from "./service";
 
 const PUBLIC_SEARCH_CACHE_CONTROL = "public, max-age=30, s-maxage=60, stale-while-revalidate=120";
 
@@ -62,7 +62,28 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
     }
 
     const query = parseResult.data;
-    const searchResponse = await executeSearch(c.env.DB, query);
+    let searchResponse: SearchResponse;
+    try {
+      searchResponse = await executeSearch(c.env.DB, query);
+    } catch {
+      // Required-source failures are neither no-match results nor cache validators.
+      // Keep SQL details and the user's query out of this fixed recovery face.
+      const response = problemDocument({
+        status: 503,
+        code: "INTERNAL_ERROR",
+        title: "Search is temporarily unavailable",
+        detail: "The public search sources could not be read reliably.",
+        fixHint: "Retry this search later. Public ledger links may still be available.",
+        headers: { "cache-control": "no-store" },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    const degraded = searchResponse.omitted.some(
+      (item) => item.reason === LEXICAL_SEARCH_UNAVAILABLE,
+    );
+    const cacheControl = degraded ? "no-store" : PUBLIC_SEARCH_CACHE_CONTROL;
 
     // Determine target face: forced or negotiated
     let targetFace: "json" | "markdown" = forcedFace ?? "markdown";
@@ -79,12 +100,12 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
     if (targetFace === "json") {
       const jsonBody = JSON.stringify(searchResponse);
       const etag = await searchStrongEtag("json", jsonBody);
-      if (ifNoneMatchMatches(ifNoneMatch, etag)) {
+      if (!degraded && ifNoneMatchMatches(ifNoneMatch, etag)) {
         return new Response(null, {
           status: 304,
           headers: {
             etag,
-            "cache-control": PUBLIC_SEARCH_CACHE_CONTROL,
+            "cache-control": cacheControl,
             vary: "Accept, Accept-Encoding",
           },
         });
@@ -94,7 +115,7 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
         headers: {
           "content-type": "application/json; charset=utf-8",
           etag,
-          "cache-control": PUBLIC_SEARCH_CACHE_CONTROL,
+          "cache-control": cacheControl,
           vary: "Accept, Accept-Encoding",
         },
       });
@@ -103,12 +124,12 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
     // Markdown face (canonical Diptych)
     const markdownBody = renderSearchMarkdown(searchResponse);
     const etag = await searchStrongEtag("markdown", markdownBody);
-    if (ifNoneMatchMatches(ifNoneMatch, etag)) {
+    if (!degraded && ifNoneMatchMatches(ifNoneMatch, etag)) {
       return new Response(null, {
         status: 304,
         headers: {
           etag,
-          "cache-control": PUBLIC_SEARCH_CACHE_CONTROL,
+          "cache-control": cacheControl,
           vary: "Accept, Accept-Encoding",
         },
       });
@@ -118,7 +139,7 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
       headers: {
         "content-type": "text/markdown; charset=utf-8",
         etag,
-        "cache-control": PUBLIC_SEARCH_CACHE_CONTROL,
+        "cache-control": cacheControl,
         vary: "Accept, Accept-Encoding",
       },
     });

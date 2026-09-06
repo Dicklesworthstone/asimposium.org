@@ -1133,6 +1133,101 @@ try {
       pack_profiles: 12,
     }),
   );
+  // Exercise actual D1 read failures without deleting rows or mocking a binding.
+  // Restore each table in finally, then prove the healthy body/ETag returns.
+  let unavailableReads = 0;
+  let exactFallbackReads = 0;
+  for (const [table, q, kind] of [
+    ["public_cursor", "Synthetic", "claim"],
+    ["claims", "Synthetic", "claim"],
+    ["public_claim_fts", "Synthetic", "claim"],
+    ["problems", "DISC", "problem"],
+    ["enrollment_fellows", "discovery", "fellow"],
+  ]) {
+    const suffixes = ["", ".json", ".md"];
+    const healthy = new Map();
+    for (const suffix of suffixes) {
+      const path = `/search${suffix}?${new URLSearchParams({ q, kind })}`;
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200, path);
+      const body = await response.text();
+      assert.ok(!body.includes("No public ledger objects matched"), path);
+      if (suffix === ".json") {
+        const search = JSON.parse(body);
+        assert.ok(search.items.length > 0, path);
+        assert.ok(search.source_cursor > 0, path);
+      }
+      assert.ok(response.headers.get("etag"), path);
+      healthy.set(path, { body, etag: response.headers.get("etag") });
+    }
+    await env.DB.prepare(`ALTER TABLE ${table} RENAME TO retained_search_source`).run();
+    try {
+      for (const [path, previous] of healthy) {
+        for (const method of ["GET", "HEAD"]) {
+          const response = await worker.fetch(`${origin}${path}`, {
+            method,
+            headers: { "User-Agent": userAgent, "if-none-match": previous.etag },
+          });
+          assert.equal(response.status, 503, `${table}: ${method} ${path}`);
+          assert.equal(response.headers.get("cache-control"), "no-store");
+          assert.equal(response.headers.get("etag"), null);
+          const body = await response.text();
+          if (method === "HEAD") assert.equal(body, "");
+          else {
+            assert.equal(JSON.parse(body).code, "INTERNAL_ERROR");
+            assert.ok(!body.includes("retained_search_source"));
+            assert.ok(!body.includes("no such table"));
+            assert.ok(!body.includes(q));
+          }
+          unavailableReads += 1;
+        }
+      }
+      if (table === "public_claim_fts") {
+        for (const suffix of suffixes) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await worker.fetch(
+              `${origin}/search${suffix}?q=P-DISC-B%23C-1&kind=claim`,
+              { method, headers: { "User-Agent": userAgent, "if-none-match": "*" } },
+            );
+            assert.equal(response.status, 200, "exact lookup survives lexical outage");
+            assert.equal(response.headers.get("cache-control"), "no-store");
+            const body = await response.text();
+            if (method === "HEAD") assert.equal(body, "");
+            else {
+              assert.ok(body.includes("lexical_search_unavailable"));
+              assert.ok(body.includes(survivingClaimText));
+              assert.ok(!body.includes(redactedClaimText));
+              if (suffix === ".json") {
+                const search = JSON.parse(body);
+                assert.equal(search.items.length, 1);
+                assert.equal(search.items[0].match_type, "exact_reference");
+              }
+            }
+            exactFallbackReads += 1;
+          }
+        }
+      }
+    } finally {
+      await env.DB.prepare(`ALTER TABLE retained_search_source RENAME TO ${table}`).run();
+    }
+    for (const [path, previous] of healthy) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200, `${table}: recovered ${path}`);
+      assert.equal(await response.text(), previous.body);
+      assert.equal(response.headers.get("etag"), previous.etag);
+      const unchanged = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, "if-none-match": previous.etag },
+      });
+      assert.equal(unchanged.status, 304);
+    }
+  }
+  console.log(
+    JSON.stringify({ stage: "search-failure-recovery", unavailableReads, exactFallbackReads }),
+  );
   console.log(
     JSON.stringify({
       kind: "discovery-real-bindings",
