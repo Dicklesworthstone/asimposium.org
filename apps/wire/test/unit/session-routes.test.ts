@@ -5445,15 +5445,33 @@ describe("session protocol routes", () => {
   });
 
   test("a workshop body over 1 KB spills to the CAS with an extract + hash in the row (W2.7)", async () => {
-    const { call, db, env } = await fixture();
+    const { call, db, env, binding, service, replayProtector } = await fixture();
     // A fake CAS bucket captures the spilled bytes.
     const written = new Map<string, string>();
+    let readMode: "valid" | "missing" | "corrupt" | "oversized" = "valid";
+    let casReads = 0;
+    let bodyReads = 0;
     env.ARTIFACTS = {
       put: async (key: string, body: string) => {
         written.set(key, body);
         return {};
       },
-      get: async () => null,
+      get: async (key: string) => {
+        casReads += 1;
+        const stored = written.get(key);
+        if (readMode === "missing" || stored === undefined) return null;
+        const bytes = new TextEncoder().encode(
+          readMode === "corrupt" ? "PRIVATE_CORRUPT_CANARY" : stored,
+        );
+        return {
+          size: readMode === "oversized" ? MAX_SESSION_REQUEST_BODY_BYTES + 1 : bytes.byteLength,
+          body: new Response(bytes).body,
+          arrayBuffer: async () => {
+            bodyReads += 1;
+            return bytes.buffer;
+          },
+        };
+      },
     } as never;
 
     const opened = await call("/v1/sessions", {
@@ -5462,7 +5480,7 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
     });
     const session = (await opened.json()) as { session_id: string };
-    const bigBody = "A large derivation. ".repeat(200); // ~3600 bytes, over the 1 KB threshold
+    const bigBody = `\uFEFF${"A large derivation. ".repeat(200)}`; // Includes a legitimate UTF-8 BOM.
     const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "spill-push" },
@@ -5485,6 +5503,48 @@ describe("session protocol routes", () => {
     // The full body spilled to the CAS at the content-addressed key.
     expect(written.size).toBe(1);
     expect([...written.values()][0]).toBe(bigBody);
+
+    let actingSponsor = binding.sponsorId;
+    const sponsorRouter = createSessionRouter({
+      service,
+      replayProtector,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: actingSponsor },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+    });
+    const readWorkshop = () =>
+      sponsorRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+          method: "POST",
+          body: JSON.stringify({ problem_id: "P-4DSP", fellow_id: binding.fellowId }),
+        }),
+        env,
+      );
+    const complete = await readWorkshop();
+    expect(complete.status).toBe(200);
+    expect(SponsorWorkshopViewSchema.parse(await complete.json()).objects[0]?.body_md).toBe(
+      bigBody,
+    );
+    expect(casReads).toBe(1);
+    expect(bodyReads).toBe(1);
+
+    actingSponsor = "usr_wrong_owner";
+    const denied = await readWorkshop();
+    expect(denied.status).toBe(404);
+    expect(casReads).toBe(1); // Ownership must be checked before touching R2.
+    actingSponsor = binding.sponsorId;
+    for (const mode of ["missing", "corrupt", "oversized"] as const) {
+      readMode = mode;
+      const priorBodyReads = bodyReads;
+      const failed = await readWorkshop();
+      expect(failed.status, mode).toBe(500);
+      expect(failed.headers.get("cache-control"), mode).toBe("private, no-store");
+      const failedBody = await failed.text();
+      expect(failedBody, mode).not.toContain("PRIVATE_CORRUPT_CANARY");
+      expect(failedBody, mode).not.toContain("A large derivation");
+      if (mode === "oversized") expect(bodyReads).toBe(priorBodyReads);
+    }
   });
 
   test("the §7.6 intent classifier refuses a claim-shaped note, and force_note is the recorded escape", async () => {

@@ -60,7 +60,7 @@ import type {
 import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
-import { storeWorkshopBody } from "../krater/cas";
+import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
@@ -5760,7 +5760,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // before this query ever runs.
       const beforeWorkshopSeq = parsedRequest.data.before_workshop_seq;
       const objects = await c.env.DB.prepare(
-        `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at
+        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at
            FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
              AND (? IS NULL OR workshop_seq < ?)
            ORDER BY workshop_seq DESC LIMIT ${SPONSOR_WORKSHOP_PAGE_LIMIT + 1}`,
@@ -5771,6 +5771,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           type: string;
           title: string;
           body_md: string;
+          cas_hash: string | null;
           relates_to_json: string;
           workshop_seq: number;
           created_at: string;
@@ -5778,19 +5779,48 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const rows = objects.results ?? [];
       const hasMore = rows.length > SPONSOR_WORKSHOP_PAGE_LIMIT;
       const pageRows = hasMore ? rows.slice(0, SPONSOR_WORKSHOP_PAGE_LIMIT) : rows;
+      // The D1 row holds only an excerpt after a spill. Retrieve complete
+      // private bytes only AFTER sponsor ownership is established, and only
+      // for emitted rows (never the lookahead row used for has_more).
+      const materialized = [];
+      for (const row of pageRows) {
+        let bodyMd = row.body_md;
+        if (row.cas_hash !== null) {
+          if (!/^sha256:[a-f0-9]{64}$/.test(row.cas_hash)) return sponsorWorkshopUnavailable();
+          const digest = row.cas_hash.slice("sha256:".length);
+          const object = await c.env.ARTIFACTS.get(casKeyForHash(digest));
+          if (object === null) return sponsorWorkshopUnavailable();
+          // R2's immutable object size bounds allocation before arrayBuffer.
+          // The original complete push must fit this same request ceiling;
+          // the shared response schema enforces the tighter string bound.
+          if (
+            !Number.isSafeInteger(object.size) ||
+            object.size <= 0 ||
+            object.size > MAX_SESSION_REQUEST_BODY_BYTES
+          ) {
+            await object.body.cancel();
+            return sponsorWorkshopUnavailable();
+          }
+          const bytes = await object.arrayBuffer();
+          if (bytes.byteLength !== object.size) return sponsorWorkshopUnavailable();
+          bodyMd = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+          if ((await sha256Text(bodyMd)) !== digest) return sponsorWorkshopUnavailable();
+        }
+        materialized.push({
+          workshop_id: row.workshop_id,
+          type: row.type,
+          title: row.title,
+          body_md: bodyMd,
+          relates_to: JSON.parse(row.relates_to_json) as string[],
+          workshop_seq: row.workshop_seq,
+          created_at: row.created_at,
+        });
+      }
       const view = SponsorWorkshopViewSchema.parse({
         schema: "https://a.asimposium.org/schemas/sessions.v1.json",
         problem_id: problemId,
         fellow_id: fellowId,
-        objects: pageRows.map((row) => ({
-          workshop_id: row.workshop_id,
-          type: row.type,
-          title: row.title,
-          body_md: row.body_md,
-          relates_to: JSON.parse(row.relates_to_json) as string[],
-          workshop_seq: row.workshop_seq,
-          created_at: row.created_at,
-        })),
+        objects: materialized,
         has_more: hasMore,
         next_cursor: hasMore ? (pageRows.at(-1)?.workshop_seq ?? null) : null,
       });
