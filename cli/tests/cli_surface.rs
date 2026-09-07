@@ -35,6 +35,39 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
         vec!["hello"],
         vec!["session", "status", "S-1"],
         vec!["pack", "S-1"],
+        vec![
+            "session",
+            "open",
+            "--file",
+            "private-canary.json",
+            "--idempotency-key",
+            "op-1",
+        ],
+        vec![
+            "workshop",
+            "push",
+            "S-1",
+            "--file",
+            "private-canary.json",
+            "--idempotency-key",
+            "op-1",
+        ],
+        vec![
+            "promote",
+            "S-1",
+            "--file",
+            "private-canary.json",
+            "--idempotency-key",
+            "op-1",
+        ],
+        vec![
+            "close",
+            "S-1",
+            "--file",
+            "private-canary.json",
+            "--idempotency-key",
+            "op-1",
+        ],
     ] {
         for token in [None, Some("secret-canary\r\nx-header: bad")] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
@@ -50,6 +83,51 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
             assert!(!stderr.contains("secret-canary"));
         }
     }
+}
+
+#[test]
+fn write_help_and_required_inputs_explain_json_files_and_retained_keys() {
+    for args in [
+        vec!["session", "open"],
+        vec!["workshop", "push", "S-1"],
+        vec!["promote", "S-1"],
+        vec!["close", "S-1"],
+    ] {
+        let help = invoke(&[args.clone(), vec!["--help"]].concat());
+        assert!(help.output.status.success());
+        let text = String::from_utf8_lossy(&help.output.stdout);
+        for expected in ["--file", "--idempotency-key", "--json", "Retain", "24h"] {
+            assert!(text.contains(expected), "missing help: {expected}");
+        }
+        let missing = invoke(&args);
+        assert_eq!(missing.output.status.code(), Some(2));
+        let text = String::from_utf8_lossy(&missing.output.stderr);
+        assert!(text.contains("--file"));
+        assert!(text.contains("--idempotency-key"));
+    }
+}
+
+#[test]
+fn missing_request_file_fails_without_network_or_private_path_disclosure() {
+    let output = Command::new(env!("CARGO_BIN_EXE_asimp"))
+        .args([
+            "--origin",
+            "https://example.invalid",
+            "session",
+            "open",
+            "--file",
+            "/unavailable-canary/request.json",
+            "--idempotency-key",
+            "key-canary",
+        ])
+        .env("ASIMP_TOKEN", "asimp_ag_synthetic_canary")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot read --file"));
+    assert!(!stderr.contains("canary"));
 }
 
 struct Invocation {

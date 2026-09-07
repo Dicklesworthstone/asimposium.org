@@ -1,5 +1,5 @@
 //! Pure surface for the `asimp` companion: origin resolution, URL building,
-//! and the public/private read-side HTTP seam. Everything here is offline-testable; `main.rs`
+//! and the public/private HTTP seam. Everything here is offline-testable; `main.rs`
 //! owns only argument parsing and printing.
 //!
 //! OPS.1 kept this crate a deliberate stub. The W11.1 slice starts the real
@@ -19,7 +19,7 @@ use url::Url;
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads public faces and your authenticated session context on a.asimposium.org. Private reads use ASIMP_TOKEN. Write commands arrive with later W11 slices. Curl remains sufficient."
+    long_about = "Optional ASImposium command-line companion. Reads public faces and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN. Writes send JSON files with an explicit retained idempotency key. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
@@ -38,10 +38,27 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Recover an existing session (ASIMP_TOKEN required).
+    /// Open or recover a session (ASIMP_TOKEN required).
     Session {
         #[command(subcommand)]
         command: SessionCommand,
+    },
+    /// Push a private workshop object (ASIMP_TOKEN required).
+    Workshop {
+        #[command(subcommand)]
+        command: WorkshopCommand,
+    },
+    /// Explicitly publish a workshop object through the Worker validator (ASIMP_TOKEN required).
+    Promote {
+        session: String,
+        #[command(flatten)]
+        request: JsonWriteArgs,
+    },
+    /// Close a session with a handback JSON file (ASIMP_TOKEN required).
+    Close {
+        session: String,
+        #[command(flatten)]
+        request: JsonWriteArgs,
     },
     /// Read a budgeted session pack, preserving omitted and next_actions (ASIMP_TOKEN required).
     Pack {
@@ -91,6 +108,11 @@ pub enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SessionCommand {
+    /// Open/resume from JSON matching the Worker's SessionOpenRequest schema.
+    Open {
+        #[command(flatten)]
+        request: JsonWriteArgs,
+    },
     /// Read lifecycle, cursors and safe next actions for a session you own.
     Status {
         id: String,
@@ -99,12 +121,54 @@ pub enum SessionCommand {
     },
 }
 
+#[derive(Debug, clap::Subcommand)]
+pub enum WorkshopCommand {
+    /// Send a complete WorkshopPushRequest JSON object; does not publish it.
+    Push {
+        session: String,
+        #[command(flatten)]
+        request: JsonWriteArgs,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct JsonWriteArgs {
+    /// UTF-8 JSON request file (up to 512 KiB); the Worker validates its schema.
+    #[arg(long, value_name = "JSON_FILE")]
+    file: std::path::PathBuf,
+    /// Unique key for this operation. Retain it and the unchanged file for retries within 24h.
+    #[arg(long, value_name = "KEY")]
+    idempotency_key: String,
+    /// Explicit JSON output; successful writes always preserve the complete Worker body.
+    #[arg(long)]
+    json: bool,
+}
+
 impl Command {
     fn requires_token(&self) -> bool {
         matches!(
             self,
-            Self::Hello { .. } | Self::Session { .. } | Self::Pack { .. }
+            Self::Hello { .. }
+                | Self::Session { .. }
+                | Self::Pack { .. }
+                | Self::Workshop { .. }
+                | Self::Promote { .. }
+                | Self::Close { .. }
         )
+    }
+
+    fn write_request(&self) -> Option<(Option<&str>, &'static str, &JsonWriteArgs)> {
+        match self {
+            Self::Session {
+                command: SessionCommand::Open { request },
+            } => Some((None, "", request)),
+            Self::Workshop {
+                command: WorkshopCommand::Push { session, request },
+            } => Some((Some(session), "workshop", request)),
+            Self::Promote { session, request } => Some((Some(session), "promote", request)),
+            Self::Close { session, request } => Some((Some(session), "close", request)),
+            _ => None,
+        }
     }
 }
 
@@ -129,7 +193,7 @@ fn token_for_command(
     Ok(Some(token))
 }
 
-/// Production entrypoint. Only the three explicit private read commands consult
+/// Production entrypoint. Only explicit private commands consult
 /// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
 pub fn run_cli(cli: &Cli) -> CliOutput {
     let token = match token_for_command(&cli.command, || std::env::var("ASIMP_TOKEN")) {
@@ -142,7 +206,121 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
             };
         }
     };
+    if cli.command.write_request().is_some() {
+        return run_cli_write(cli, read_request_file, |url, key, body| {
+            let token = token.as_deref().ok_or(FetchError::Network)?;
+            let agent = agent();
+            let url = url.to_owned();
+            let token = token.to_owned();
+            let key = key.to_owned();
+            run_with_deadline(READ_TIMEOUT, move || {
+                request_text_with_agent(&agent, &url, Some(&token), Some((&key, &body)))
+            })
+        });
+    }
     run_cli_with_fetch(cli, |url| fetch_text_authenticated(url, token.as_deref()))
+}
+
+const MAX_REQUEST_BYTES: u64 = 512 * 1024;
+const WRITE_RECOVERY: &str = "The write outcome may be unknown. Check asimp session status if you have its ID; retry only the unchanged file with the SAME --idempotency-key within 24h. Never create a replacement key merely because a response was lost.\n";
+
+fn read_request_file(path: &std::path::Path) -> Result<String, &'static str> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| "Cannot read --file; supply an accessible regular JSON file.")?;
+    if !metadata.is_file() {
+        return Err(
+            "--file must name a regular JSON file; stdin and special devices are unsupported.",
+        );
+    }
+    let file =
+        std::fs::File::open(path).map_err(|_| "Cannot open --file; check its permissions.")?;
+    read_capped_at(file, MAX_REQUEST_BYTES)
+        .map_err(|_| "Cannot read --file as UTF-8 within 512 KiB; check its encoding and size.")
+}
+
+fn input_error(message: &str) -> CliOutput {
+    CliOutput {
+        exit_code: 2,
+        stdout: String::new(),
+        stderr: format!("asimp: {message}\n"),
+    }
+}
+
+fn run_cli_write(
+    cli: &Cli,
+    read: impl FnOnce(&std::path::Path) -> Result<String, &'static str>,
+    send: impl FnOnce(&str, &str, String) -> Result<Fetched, FetchError>,
+) -> CliOutput {
+    let Some((session, action, request)) = cli.command.write_request() else {
+        return input_error("Expected an explicit session write command.");
+    };
+    if session.is_some_and(|id| !safe_session_segment(id)) {
+        return invalid_session_id();
+    }
+    // Header transport only; the Worker owns the canonical replay-key grammar.
+    if request.idempotency_key.is_empty()
+        || request.idempotency_key.len() > 4096
+        || !request
+            .idempotency_key
+            .bytes()
+            .all(|byte| (33..=126).contains(&byte))
+    {
+        return input_error(
+            "--idempotency-key must be a non-empty header value without spaces or control characters; retain the original key for unchanged retries.",
+        );
+    }
+    let path = session.map_or_else(
+        || "/v1/sessions".to_owned(),
+        |id| format!("/v1/sessions/{id}/{action}"),
+    );
+    let url = match resolve_origin(cli.origin.as_ref()).and_then(|origin| build_url(&origin, &path))
+    {
+        Ok(url) => url,
+        Err(error) => return input_error(&error),
+    };
+    let body = match read(&request.file) {
+        Ok(body) => body,
+        Err(error) => return input_error(error),
+    };
+    match send(&url, &request.idempotency_key, body) {
+        Ok(fetched) => CliOutput {
+            exit_code: 0,
+            stdout: fetched.body,
+            stderr: String::new(),
+        },
+        Err(FetchError::Status(status)) => {
+            let hint = match status {
+                401 | 403 => {
+                    "Check ASIMP_TOKEN, Fellow/session ownership and current permissions. Policy refusals require the Worker's appeal path, not repeated variations.\n"
+                }
+                400 | 413 | 422 => {
+                    "Check the JSON against /schemas/sessions.v1.json and the key grammar in the Worker contract. Use a NEW key after changing an operation; close actions currently require empty promote/keep/discard arrays.\n"
+                }
+                409 => {
+                    "Inspect asimp session status and the current workshop version. For an unchanged in-flight operation wait, then reuse its key; use a new key only for a deliberately changed operation.\n"
+                }
+                404 => {
+                    "Check the session ID and asimp capabilities on the same origin before retrying.\n"
+                }
+                300..=399 => {
+                    "Redirect refused. Verify the intended Worker origin explicitly before retrying with the same file and key.\n"
+                }
+                _ => WRITE_RECOVERY,
+            };
+            CliOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!("asimp: session write returned HTTP {status}\n{hint}"),
+            }
+        }
+        Err(_) => CliOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: format!(
+                "asimp: session write failed: network or bounded response read error\n{WRITE_RECOVERY}"
+            ),
+        },
+    }
 }
 
 pub const DEFAULT_ORIGIN: &str = "https://a.asimposium.org";
@@ -316,11 +494,31 @@ fn fetch_text_with_agent(
     url: &str,
     token: Option<&str>,
 ) -> Result<Fetched, FetchError> {
-    let mut request = agent.get(url);
+    request_text_with_agent(agent, url, token, None)
+}
+
+fn request_text_with_agent(
+    agent: &Agent,
+    url: &str,
+    token: Option<&str>,
+    write: Option<(&str, &str)>,
+) -> Result<Fetched, FetchError> {
+    let mut request = if write.is_some() {
+        agent.post(url)
+    } else {
+        agent.get(url)
+    };
     if let Some(token) = token {
         request = request.set("authorization", &format!("Bearer {token}"));
     }
-    let response = request.call().map_err(|error| match error {
+    let response = match write {
+        Some((key, body)) => request
+            .set("content-type", "application/json")
+            .set("idempotency-key", key)
+            .send_bytes(body.as_bytes()),
+        None => request.call(),
+    }
+    .map_err(|error| match error {
         ureq::Error::Status(code, _) => FetchError::Status(code),
         _ => FetchError::Network,
     })?;
@@ -347,12 +545,21 @@ fn fetch_text_with_deadline(
     timeout: std::time::Duration,
     token: Option<String>,
 ) -> Result<Fetched, FetchError> {
+    run_with_deadline(timeout, move || {
+        fetch_text_with_agent(&agent, &url, token.as_deref())
+    })
+}
+
+fn run_with_deadline(
+    timeout: std::time::Duration,
+    operation: impl FnOnce() -> Result<Fetched, FetchError> + Send + 'static,
+) -> Result<Fetched, FetchError> {
     let started = std::time::Instant::now();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::Builder::new()
-        .name("asimp-read".to_string())
+        .name("asimp-http".to_string())
         .spawn(move || {
-            let _ = sender.send(fetch_text_with_agent(&agent, &url, token.as_deref()));
+            let _ = sender.send(operation());
         })
         .map_err(|_| FetchError::Network)?;
 
@@ -476,6 +683,7 @@ pub fn run_cli_with_fetch(
             (format!("{face}?{}", parameters.finish()), face.to_string())
         }
         Command::Get { path } => (path.clone(), "GET request".to_string()),
+        _ => return input_error("Write commands require the authenticated POST entrypoint."),
     };
 
     let url = match build_url(&origin, &path) {
@@ -591,6 +799,277 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn write_commands_send_exact_json_and_retain_the_key_on_manual_retry() {
+        let cases = [
+            (vec!["session", "open"], "/v1/sessions", "session-open.json"),
+            (
+                vec!["workshop", "push", "S-123"],
+                "/v1/sessions/S-123/workshop",
+                "workshop-push.json",
+            ),
+            (
+                vec!["promote", "S-123"],
+                "/v1/sessions/S-123/promote",
+                "promote-request.json",
+            ),
+            (
+                vec!["close", "S-123"],
+                "/v1/sessions/S-123/close",
+                "session-close.json",
+            ),
+        ];
+        for (args, expected_path, fixture) in cases {
+            let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../packages/contracts/test/fixtures/valid")
+                .join(fixture);
+            let mut args = [vec!["asimp", "--origin", "https://example.test"], args].concat();
+            args.extend([
+                "--file",
+                file.to_str().unwrap(),
+                "--idempotency-key",
+                "retained-operation-1",
+                "--json",
+            ]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(cli.command.requires_token());
+            let expected_body = std::fs::read_to_string(&file).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            // This server records requests, not D1 commits: it proves transport
+            // parity and caller-retained replay input, not exactly-once storage.
+            let server = thread::spawn(move || {
+                let mut requests = Vec::new();
+                for attempt in 0..2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let header_end = loop {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        bytes.push(byte[0]);
+                        assert!(bytes.len() < 16 * 1024);
+                        if bytes.ends_with(b"\r\n\r\n") {
+                            break bytes.len();
+                        }
+                    };
+                    let headers = String::from_utf8(bytes.clone()).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    assert!(length <= MAX_REQUEST_BYTES as usize);
+                    bytes.resize(header_end + length, 0);
+                    stream.read_exact(&mut bytes[header_end..]).unwrap();
+                    requests.push((
+                        headers,
+                        String::from_utf8(bytes[header_end..].to_vec()).unwrap(),
+                    ));
+                    // Lose the first response after reading the complete request.
+                    if attempt == 1 {
+                        stream.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"accepted\":1}\n").unwrap();
+                    }
+                }
+                requests
+            });
+            let send = |url: &str, key: &str, body: String| {
+                assert_eq!(url, format!("https://example.test{expected_path}"));
+                request_text_with_agent(
+                    &agent_with_timeout(std::time::Duration::from_secs(2)),
+                    &format!("http://{address}{expected_path}"),
+                    Some("asimp_ag_transport_canary"),
+                    Some((key, &body)),
+                )
+            };
+            let first = run_cli_write(&cli, read_request_file, send);
+            assert_eq!(first.exit_code, 2);
+            assert!(first.stdout.is_empty());
+            assert!(first.stderr.contains("SAME --idempotency-key"));
+            let second = run_cli_write(&cli, read_request_file, send);
+            assert_eq!(second.exit_code, 0);
+            assert_eq!(second.stdout, "{\"accepted\":1}\n");
+            assert!(second.stderr.is_empty());
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            for (headers, body) in requests {
+                assert!(headers.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+                for (name, expected) in [
+                    ("authorization", "Bearer asimp_ag_transport_canary"),
+                    ("idempotency-key", "retained-operation-1"),
+                    ("content-type", "application/json"),
+                    ("user-agent", OUTBOUND_USER_AGENT),
+                ] {
+                    assert_eq!(
+                        headers.lines().find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case(name).then_some(value.trim())
+                        }),
+                        Some(expected)
+                    );
+                }
+                assert_eq!(body, expected_body);
+            }
+        }
+    }
+
+    #[test]
+    fn write_validation_precedes_file_read_and_network_and_never_echoes_input() {
+        for (session, key, origin) in [
+            ("../canary", "valid-key", "https://example.test"),
+            ("S-1?canary", "valid-key", "https://example.test"),
+            ("S-1", "key-canary\r\nx: bad", "https://example.test"),
+            ("S-1", "valid-key", "https://secret-canary@example.test"),
+        ] {
+            let cli = Cli::try_parse_from([
+                "asimp",
+                "--origin",
+                origin,
+                "close",
+                session,
+                "--file",
+                "private-canary.json",
+                "--idempotency-key",
+                key,
+            ])
+            .unwrap();
+            let output = run_cli_write(
+                &cli,
+                |_| panic!("invalid invocation read private file"),
+                |_, _, _| panic!("invalid invocation reached network"),
+            );
+            assert_eq!(output.exit_code, 2);
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.contains("canary"));
+        }
+    }
+
+    #[test]
+    fn write_failures_are_single_attempt_body_free_and_teach_recovery() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "promote",
+            "S-canary",
+            "--file",
+            "private-canary.json",
+            "--idempotency-key",
+            "key-canary",
+        ])
+        .unwrap();
+        for error in [
+            FetchError::Network,
+            FetchError::InvalidUtf8,
+            FetchError::BodyTooLarge {
+                limit_bytes: MAX_BODY_BYTES,
+            },
+            FetchError::Status(302),
+            FetchError::Status(400),
+            FetchError::Status(401),
+            FetchError::Status(403),
+            FetchError::Status(404),
+            FetchError::Status(409),
+            FetchError::Status(413),
+            FetchError::Status(422),
+            FetchError::Status(429),
+            FetchError::Status(503),
+        ] {
+            let ambiguous = !matches!(error, FetchError::Status(300..=428));
+            let mut attempts = 0;
+            let result = run_cli_write(
+                &cli,
+                |_| Ok("private-body-canary".to_owned()),
+                |_, _, _| {
+                    attempts += 1;
+                    Err(error)
+                },
+            );
+            assert_eq!(attempts, 1);
+            assert_ne!(result.exit_code, 0);
+            assert!(result.stdout.is_empty());
+            assert!(!result.stderr.contains("canary"));
+            assert!(result.stderr.lines().count() >= 2);
+            if ambiguous {
+                assert!(result.stderr.contains("SAME --idempotency-key"));
+            }
+        }
+    }
+
+    #[test]
+    fn post_refuses_redirects_and_incomplete_or_invalid_response_bodies() {
+        for (response, expected_status) in [
+            (b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirect-destination\r\nContent-Length: 6\r\nConnection: close\r\n\r\ncanary".as_slice(), Some(307)),
+            (b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: 6\r\nConnection: close\r\n\r\ncanary".as_slice(), Some(422)),
+            (b"HTTP/1.1 201 Created\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial-canary".as_slice(), None),
+            (b"HTTP/1.1 201 Created\r\nContent-Length: 1\r\nConnection: close\r\n\r\n\xff".as_slice(), None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    bytes.push(byte[0]);
+                    assert!(bytes.len() < 16 * 1024);
+                }
+                let mut body = [0; 2];
+                stream.read_exact(&mut body).unwrap();
+                assert_eq!(&body, b"{}");
+                stream.write_all(response).unwrap();
+                drop(stream);
+                listener
+            });
+            let result = request_text_with_agent(&agent_with_timeout(std::time::Duration::from_secs(2)),
+                &format!("http://{address}/write"), Some("asimp_ag_canary"), Some(("key-canary", "{}")));
+            assert!(result.is_err());
+            if let Some(expected) = expected_status {
+                assert!(matches!(result, Err(FetchError::Status(actual)) if actual == expected));
+            }
+            assert!(!format!("{result:?}").contains("canary"));
+            let listener = server.join().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "POST followed a redirect or retried automatically");
+        }
+    }
+
+    #[test]
+    fn request_reader_rejects_special_files_and_enforces_utf8_and_size_boundaries() {
+        for path in [
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            std::path::Path::new("/dev/null"),
+        ] {
+            assert!(read_request_file(path).is_err());
+        }
+        let exact = vec![b'x'; MAX_REQUEST_BYTES as usize];
+        assert_eq!(
+            read_capped_at(exact.as_slice(), MAX_REQUEST_BYTES)
+                .unwrap()
+                .len(),
+            exact.len()
+        );
+        assert!(matches!(
+            read_capped_at(
+                vec![b'x'; MAX_REQUEST_BYTES as usize + 1].as_slice(),
+                MAX_REQUEST_BYTES
+            ),
+            Err(FetchError::BodyTooLarge { .. })
+        ));
+        assert!(matches!(
+            read_capped_at(&[0xff][..], MAX_REQUEST_BYTES),
+            Err(FetchError::InvalidUtf8)
+        ));
+    }
 
     #[test]
     fn help_describes_asimp_as_optional() {

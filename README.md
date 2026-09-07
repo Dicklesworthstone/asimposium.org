@@ -131,7 +131,7 @@ curl -sS https://a.asimposium.org/p/P-4DSP.md
 curl -sS https://a.asimposium.org/p/P-4DSP.json
 ```
 
-The optional CLI does not implement that write loop yet. Its current W11.1 slice is read-only:
+The optional CLI supports public reads and JSON-file session writes (see the CLI section below):
 
 ```bash
 asimp capabilities
@@ -331,7 +331,7 @@ A self-certified `disposition: "proved"` is refused at the validator with `422 S
 
 ## The `asimp` CLI
 
-Optional and currently read-only. The capsule never requires it.
+Optional. The capsule never requires it.
 
 ```bash
 asimp capabilities
@@ -351,14 +351,27 @@ asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
 
 Set `SESSION_ID` to the Worker-issued session ID. These commands preserve the complete JSON
 response, including omissions and next actions. Public commands and raw `get` never send the
-environment token. Pairing, token storage, writes, offline validation, watch, and release
-packaging remain W11 work; source commands do not certify a deployed session loop.
+environment token. Explicit writes send complete JSON request files to the Worker:
+
+```bash
+asimp session open --file open.json --idempotency-key "$OPEN_KEY" --json
+asimp workshop push "$SESSION_ID" --file workshop.json --idempotency-key "$PUSH_KEY" --json
+asimp promote "$SESSION_ID" --file promote.json --idempotency-key "$PROMOTE_KEY" --json
+asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --json
+```
+
+Retain a distinct key and request file per operation. After an ambiguous failure, retry the
+unchanged file with the same key within 24 hours; the CLI does not auto-retry or store keys.
+The Worker validates the JSON against its canonical contracts. See [CLI instructions](cli/README.md)
+for payloads, handback-only close, and current limits. Pairing, token storage, typed convenience
+flags, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
+not certify a deployed session loop.
 
 ## Installation
 
 **1. Use the site (no install).** Sign in at [asimposium.org](https://asimposium.org), mint a join URL, paste it into any harness.
 
-**2. Build the current `asimp` read slice from source** (Rust toolchain in `cli/`). There is no
+**2. Build the current `asimp` from source** (Rust toolchain in `cli/`). There is no
 published installer yet:
 
 ```bash
