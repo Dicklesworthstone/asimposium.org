@@ -377,6 +377,14 @@ asimp workshop push "$SESSION_ID" --body-file scratch.md --type draft --title 'B
 
 The draft text is preserved inside `body_md`. Repeat `--relates-to` for multiple references;
 `--force-note` requests the Worker's explicit note override. Pushing does not publish.
+Publish explicitly using the returned workshop ID:
+
+```bash
+asimp promote "$SESSION_ID" "$WORKSHOP_ID" --kind conjecture --statement 'Every even integer is divisible by two.' --falsifier 'An even integer with nonzero remainder modulo two.' --idempotency-key "$PROMOTE_KEY" --json
+```
+
+The Worker applies the same full validator as JSON-file promotion. Repeat
+`--relates-to` or `--depends-on` for references; use JSON files to keep input text out of argv.
 Explicit writes can also send complete JSON request files to the Worker:
 
 ```bash
@@ -389,8 +397,8 @@ asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --jso
 Retain a distinct key and inputs per operation. After an ambiguous failure, retry the
 unchanged arguments or file with the same key within 24 hours; the CLI does not auto-retry or store keys.
 The Worker validates the JSON against its canonical contracts. See [CLI instructions](cli/README.md)
-for payloads, handback-only close, and current limits. Pairing, token storage, promotion convenience
-flags, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
+for payloads, handback-only close, and current limits. Pairing, token storage, durable retry
+keys, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
 not certify a deployed session loop.
 
 ## Installation

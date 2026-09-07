@@ -113,6 +113,19 @@ fn typed_session_help_describes_alternatives_and_rejects_conflicting_inputs() {
             vec!["close", "--help"],
             vec!["--handback", "--file", "off argv"],
         ),
+        (
+            vec!["promote", "--help"],
+            vec![
+                "[WORKSHOP]",
+                "--kind",
+                "--statement",
+                "--falsifier",
+                "--relates-to",
+                "--depends-on",
+                "--file",
+                "out of argv",
+            ],
+        ),
     ] {
         let output = invoke(&args).output;
         assert!(output.status.success());
@@ -138,6 +151,23 @@ fn typed_session_help_describes_alternatives_and_rejects_conflicting_inputs() {
             "private-file-canary",
             "--handback",
             "private-handback-canary",
+        ],
+        vec!["promote", "S-1", "W-1", "--file", "private-file-canary"],
+        vec![
+            "promote",
+            "S-1",
+            "--file",
+            "private-file-canary",
+            "--kind",
+            "conjecture",
+        ],
+        vec![
+            "promote",
+            "S-1",
+            "--file",
+            "private-file-canary",
+            "--statement",
+            "private-statement-canary",
         ],
     ] {
         let output = invoke(&[args, vec!["--idempotency-key", "op-1"]].concat()).output;

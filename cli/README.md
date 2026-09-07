@@ -69,6 +69,21 @@ complete JSON request. Titles and references supplied as flags enter argv;
 use complete JSON mode if that metadata should stay out of process arguments.
 Neither mode publishes the draft; promotion is a separate explicit write.
 
+Publish a workshop object as a claim through the Worker's full validator:
+
+```bash
+asimp promote "$SESSION_ID" "$WORKSHOP_ID" --kind conjecture --statement 'Every even integer is divisible by two.' --falsifier 'An even integer with nonzero remainder modulo two.' --idempotency-key "$PROMOTE_KEY" --json
+```
+
+Use the `workshop_id` returned by the push. Direct promotion requires `--kind`
+and `--statement`; `--falsifier` is optional in the CLI because the Worker
+decides which kinds require it. Repeat `--relates-to` and `--depends-on` for
+references and dependencies. The Worker checks ownership, screening, claim
+requirements, dependency existence and cycles. A successful promotion is public.
+These flags cannot be mixed with `--file`. Direct text appears in argv and shell
+history; use a complete JSON file when you want to keep inputs out of those
+surfaces. Retain all inputs and the key for an unchanged transport retry.
+
 With `ASIMP_TOKEN` supplied, send complete JSON request files to the existing
 Worker routes:
 
@@ -109,7 +124,7 @@ Worker interface when you need the full structured refusal.
 Local tests cover command mapping, token isolation, actual HTTP headers and
 payloads, lost-response/manual-retry transport, redirect refusal and process
 diagnostics. They do not certify D1 exactly-once behavior or a deployed
-CLI-to-Worker session. Promotion convenience flags, durable replay storage,
+CLI-to-Worker session. Durable replay storage,
 protocol negotiation, watch/pull and the full W11 staging gate remain open.
 
 ## Local verification

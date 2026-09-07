@@ -288,7 +288,17 @@ impl Command {
                     },
                 },
             }),
-            Self::Promote { session, workshop, kind, statement, falsifier, relates_to, depends_on, file, options } => Some(WriteRequest {
+            Self::Promote {
+                session,
+                workshop,
+                kind,
+                statement,
+                falsifier,
+                relates_to,
+                depends_on,
+                file,
+                options,
+            } => Some(WriteRequest {
                 session: Some(session),
                 action: "promote",
                 options,
@@ -382,7 +392,14 @@ impl WriteBody<'_> {
     ) -> Result<String, String> {
         let value = match self {
             Self::File(path) => return read(path).map_err(str::to_owned),
-            Self::Promote { workshop, kind, statement, falsifier, relates_to, depends_on } => {
+            Self::Promote {
+                workshop,
+                kind,
+                statement,
+                falsifier,
+                relates_to,
+                depends_on,
+            } => {
                 let mut value = serde_json::json!({
                     "workshop_id": workshop, "kind": kind, "statement": statement,
                     "relates_to": relates_to, "depends_on": depends_on,
@@ -1185,12 +1202,38 @@ mod tests {
     fn inline_session_inputs_encode_exact_json_without_reading_files() {
         for (args, path, expected) in [
             (
-                vec!["promote", "S-123", "W-abcdefghijklmnopqrstuvwxyz", "--kind", "conjecture", "--statement", "  Every even integer is divisible by two.  "],
+                vec![
+                    "promote",
+                    "S-123",
+                    "W-abcdefghijklmnopqrstuvwxyz",
+                    "--kind",
+                    "conjecture",
+                    "--statement",
+                    "  Every even integer is divisible by two.  ",
+                ],
                 "/v1/sessions/S-123/promote",
                 serde_json::json!({"workshop_id":"W-abcdefghijklmnopqrstuvwxyz", "kind":"conjecture", "statement":"  Every even integer is divisible by two.  ", "relates_to":[], "depends_on":[]}),
             ),
             (
-                vec!["promote", "S-123", "W-X\",\"admin\":true", "--kind", "future-kind", "--statement", "Claim \"x\\y\"\n😀", "--falsifier", "Counterexample\n😀", "--relates-to", "C-1", "--relates-to", "H-2", "--depends-on", "C-3", "--depends-on", "C-4\",\"admin\":true"],
+                vec![
+                    "promote",
+                    "S-123",
+                    "W-X\",\"admin\":true",
+                    "--kind",
+                    "future-kind",
+                    "--statement",
+                    "Claim \"x\\y\"\n😀",
+                    "--falsifier",
+                    "Counterexample\n😀",
+                    "--relates-to",
+                    "C-1",
+                    "--relates-to",
+                    "H-2",
+                    "--depends-on",
+                    "C-3",
+                    "--depends-on",
+                    "C-4\",\"admin\":true",
+                ],
                 "/v1/sessions/S-123/promote",
                 serde_json::json!({"workshop_id":"W-X\",\"admin\":true", "kind":"future-kind", "statement":"Claim \"x\\y\"\n😀", "falsifier":"Counterexample\n😀", "relates_to":["C-1","H-2"], "depends_on":["C-3","C-4\",\"admin\":true"]}),
             ),
@@ -1376,9 +1419,14 @@ mod tests {
         );
         let mut promote: serde_json::Value = serde_json::from_str(include_str!(
             "../../packages/contracts/test/fixtures/valid/promote-request.json"
-        )).unwrap();
-        let refs: Vec<String> = promote["relates_to"].as_array().unwrap().iter()
-            .map(|value| value.as_str().unwrap().to_owned()).collect();
+        ))
+        .unwrap();
+        let refs: Vec<String> = promote["relates_to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect();
         let encoded = WriteBody::Promote {
             workshop: promote["workshop_id"].as_str().unwrap(),
             kind: promote["kind"].as_str().unwrap(),
@@ -1386,33 +1434,76 @@ mod tests {
             falsifier: promote["falsifier"].as_str(),
             relates_to: &refs,
             depends_on: &[],
-        }.encode(|_| panic!("typed promote read a file")).unwrap();
+        }
+        .encode(|_| panic!("typed promote read a file"))
+        .unwrap();
         // The canonical fixture omits depends_on; its schema default is [].
         promote["depends_on"] = serde_json::json!([]);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap(), promote);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            promote
+        );
     }
 
     #[test]
     fn typed_promotion_rejects_incomplete_or_mixed_inputs() {
         for args in [
-            vec![], vec!["W-1"], vec!["W-1", "--kind", "conjecture"],
+            vec![],
+            vec!["W-1"],
+            vec!["W-1", "--kind", "conjecture"],
             vec!["W-1", "--statement", "Claim"],
-            vec!["--file", "request.json", "W-1", "--kind", "conjecture", "--statement", "Claim"],
+            vec![
+                "--file",
+                "request.json",
+                "W-1",
+                "--kind",
+                "conjecture",
+                "--statement",
+                "Claim",
+            ],
             vec!["--file", "request.json", "--kind", "conjecture"],
             vec!["--file", "request.json", "--statement", "Claim"],
             vec!["--file", "request.json", "--falsifier", "Counterexample"],
             vec!["--file", "request.json", "--relates-to", "C-1"],
             vec!["--file", "request.json", "--depends-on", "C-2"],
         ] {
-            assert!(Cli::try_parse_from([vec!["asimp", "promote", "S-123", "--idempotency-key", "op-1"], args.clone()].concat()).is_err(), "accepted incomplete/mixed promotion: {args:?}");
+            assert!(
+                Cli::try_parse_from(
+                    [
+                        vec!["asimp", "promote", "S-123", "--idempotency-key", "op-1"],
+                        args.clone()
+                    ]
+                    .concat()
+                )
+                .is_err(),
+                "accepted incomplete/mixed promotion: {args:?}"
+            );
         }
     }
 
     #[test]
     fn typed_promotion_size_failure_never_sends_or_echoes_claim() {
         let statement = format!("private-canary{}", "\u{0001}".repeat(100_000));
-        let cli = Cli::try_parse_from(["asimp", "--origin", "https://example.test", "promote", "S-123", "W-1", "--kind", "conjecture", "--statement", &statement, "--idempotency-key", "op-1"]).unwrap();
-        let result = run_cli_write(&cli, |_| panic!("typed promote read a file"), |_, _, _| panic!("oversized promotion reached network"));
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "promote",
+            "S-123",
+            "W-1",
+            "--kind",
+            "conjecture",
+            "--statement",
+            &statement,
+            "--idempotency-key",
+            "op-1",
+        ])
+        .unwrap();
+        let result = run_cli_write(
+            &cli,
+            |_| panic!("typed promote read a file"),
+            |_, _, _| panic!("oversized promotion reached network"),
+        );
         assert_eq!(result.exit_code, 2);
         assert!(result.stdout.is_empty());
         assert!(result.stderr.contains("Encoded request exceeds 512 KiB"));
@@ -1447,7 +1538,17 @@ mod tests {
                 "promote-request.json",
             ),
             (
-                vec!["promote", "S-123", "W-abcdefghijklmnopqrstuvwxyz", "--kind", "conjecture", "--statement", "Every even integer is divisible by two.", "--falsifier", "An even integer with nonzero remainder modulo two."],
+                vec![
+                    "promote",
+                    "S-123",
+                    "W-abcdefghijklmnopqrstuvwxyz",
+                    "--kind",
+                    "conjecture",
+                    "--statement",
+                    "Every even integer is divisible by two.",
+                    "--falsifier",
+                    "An even integer with nonzero remainder modulo two.",
+                ],
                 "/v1/sessions/S-123/promote",
                 "promote-request.json",
             ),
@@ -1465,13 +1566,12 @@ mod tests {
             let typed_promote = args.contains(&"--kind");
             let mut args = [vec!["asimp", "--origin", "https://example.test"], args].concat();
             if !typed_promote {
-                args.extend([if markdown { "--body-file" } else { "--file" }, file.to_str().unwrap()]);
+                args.extend([
+                    if markdown { "--body-file" } else { "--file" },
+                    file.to_str().unwrap(),
+                ]);
             }
-            args.extend([
-                "--idempotency-key",
-                "retained-operation-1",
-                "--json",
-            ]);
+            args.extend(["--idempotency-key", "retained-operation-1", "--json"]);
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(cli.command.requires_token());
             let source = std::fs::read_to_string(&file).unwrap();
