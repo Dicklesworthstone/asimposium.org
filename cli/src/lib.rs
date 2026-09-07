@@ -1,5 +1,5 @@
 //! Pure surface for the `asimp` companion: origin resolution, URL building,
-//! and the read-side HTTP seam. Everything here is offline-testable; `main.rs`
+//! and the public/private read-side HTTP seam. Everything here is offline-testable; `main.rs`
 //! owns only argument parsing and printing.
 //!
 //! OPS.1 kept this crate a deliberate stub. The W11.1 slice starts the real
@@ -19,7 +19,7 @@ use url::Url;
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads the public agent surface on a.asimposium.org. Write commands arrive with later W11 slices. Curl remains sufficient."
+    long_about = "Optional ASImposium command-line companion. Reads public faces and your authenticated session context on a.asimposium.org. Private reads use ASIMP_TOKEN. Write commands arrive with later W11 slices. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
@@ -32,6 +32,33 @@ pub struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
+    /// Read your Fellow identity and next actions (ASIMP_TOKEN required).
+    Hello {
+        /// Explicit JSON output; hello always preserves the Worker's JSON face.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recover an existing session (ASIMP_TOKEN required).
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Read a budgeted session pack, preserving omitted and next_actions (ASIMP_TOKEN required).
+    Pack {
+        session: String,
+        /// Pack profile, validated by the Worker.
+        #[arg(long, default_value = "working")]
+        profile: String,
+        /// Requested token budget; the Worker applies its budget buckets.
+        #[arg(long)]
+        max_tokens: Option<u32>,
+        /// Exact claim version for claim/review packs, e.g. C-1@2.
+        #[arg(long)]
+        target: Option<String>,
+        /// Explicit JSON output; packs always preserve the complete JSON face.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the Worker's capability document (`/capabilities`).
     Capabilities {
         /// Request JSON explicitly; capabilities always prints the Worker's JSON face.
@@ -60,6 +87,62 @@ pub enum Command {
     },
     /// GET an origin-relative path and print the body verbatim.
     Get { path: String },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum SessionCommand {
+    /// Read lifecycle, cursors and safe next actions for a session you own.
+    Status {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+impl Command {
+    fn requires_token(&self) -> bool {
+        matches!(
+            self,
+            Self::Hello { .. } | Self::Session { .. } | Self::Pack { .. }
+        )
+    }
+}
+
+fn token_for_command(
+    command: &Command,
+    read: impl FnOnce() -> Result<String, std::env::VarError>,
+) -> Result<Option<String>, &'static str> {
+    if !command.requires_token() {
+        return Ok(None);
+    }
+    let token =
+        read().map_err(|_| "Set ASIMP_TOKEN to your sponsor-approved Fellow bearer token.")?;
+    // Transport validation only; token identity and authority belong to the Worker.
+    if token.is_empty()
+        || token.len() > 4096
+        || !token.bytes().all(|byte| (33..=126).contains(&byte))
+    {
+        return Err(
+            "ASIMP_TOKEN must be a non-empty bearer value without spaces or control characters.",
+        );
+    }
+    Ok(Some(token))
+}
+
+/// Production entrypoint. Only the three explicit private read commands consult
+/// ASIMP_TOKEN; raw GET and public commands never acquire ambient authority.
+pub fn run_cli(cli: &Cli) -> CliOutput {
+    let token = match token_for_command(&cli.command, || std::env::var("ASIMP_TOKEN")) {
+        Ok(token) => token,
+        Err(message) => {
+            return CliOutput {
+                exit_code: 2,
+                stdout: String::new(),
+                stderr: format!("asimp: {message}\n"),
+            };
+        }
+    };
+    run_cli_with_fetch(cli, |url| fetch_text_authenticated(url, token.as_deref()))
 }
 
 pub const DEFAULT_ORIGIN: &str = "https://a.asimposium.org";
@@ -228,8 +311,16 @@ fn read_capped_at(reader: impl Read, max_body_bytes: u64) -> Result<String, Fetc
 
 /// GET one full URL, bounding the response body. The configured agent disables
 /// redirects: an origin-pinned face may not move the reader somewhere else.
-fn fetch_text_with_agent(agent: &Agent, url: &str) -> Result<Fetched, FetchError> {
-    let response = agent.get(url).call().map_err(|error| match error {
+fn fetch_text_with_agent(
+    agent: &Agent,
+    url: &str,
+    token: Option<&str>,
+) -> Result<Fetched, FetchError> {
+    let mut request = agent.get(url);
+    if let Some(token) = token {
+        request = request.set("authorization", &format!("Bearer {token}"));
+    }
+    let response = request.call().map_err(|error| match error {
         ureq::Error::Status(code, _) => FetchError::Status(code),
         _ => FetchError::Network,
     })?;
@@ -254,13 +345,14 @@ fn fetch_text_with_deadline(
     agent: Agent,
     url: String,
     timeout: std::time::Duration,
+    token: Option<String>,
 ) -> Result<Fetched, FetchError> {
     let started = std::time::Instant::now();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::Builder::new()
         .name("asimp-read".to_string())
         .spawn(move || {
-            let _ = sender.send(fetch_text_with_agent(&agent, &url));
+            let _ = sender.send(fetch_text_with_agent(&agent, &url, token.as_deref()));
         })
         .map_err(|_| FetchError::Network)?;
 
@@ -284,12 +376,17 @@ fn fetch_text_with_deadline(
 }
 
 pub fn fetch_text(url: &str) -> Result<Fetched, FetchError> {
+    fetch_text_authenticated(url, None)
+}
+
+fn fetch_text_authenticated(url: &str, token: Option<&str>) -> Result<Fetched, FetchError> {
     let started = std::time::Instant::now();
     let agent = agent();
     fetch_text_with_deadline(
         agent,
         url.to_string(),
         READ_TIMEOUT.saturating_sub(started.elapsed()),
+        token.map(str::to_owned),
     )
 }
 
@@ -303,7 +400,7 @@ pub fn problems_path(json: bool) -> &'static str {
 }
 
 /// Resolve one parsed invocation through an injected read seam and render its
-/// exact process-facing result. Production passes `fetch_text`; tests can
+/// exact process-facing result. Production selects the credential in `run_cli`; tests can
 /// inject a causal capped reader without opening a socket or mutating global
 /// environment state.
 pub fn run_cli_with_fetch(
@@ -322,6 +419,38 @@ pub fn run_cli_with_fetch(
     };
 
     let (path, label) = match &cli.command {
+        Command::Hello { .. } => ("/v1/hello".to_string(), "hello".to_string()),
+        Command::Session {
+            command: SessionCommand::Status { id, .. },
+        } => {
+            if !safe_session_segment(id) {
+                return invalid_session_id();
+            }
+            (format!("/v1/sessions/{id}"), "session status".to_string())
+        }
+        Command::Pack {
+            session,
+            profile,
+            max_tokens,
+            target,
+            ..
+        } => {
+            if !safe_session_segment(session) {
+                return invalid_session_id();
+            }
+            let mut parameters = url::form_urlencoded::Serializer::new(String::new());
+            parameters.append_pair("profile", profile);
+            if let Some(max_tokens) = max_tokens {
+                parameters.append_pair("max_tokens", &max_tokens.to_string());
+            }
+            if let Some(target) = target {
+                parameters.append_pair("target", target);
+            }
+            (
+                format!("/v1/sessions/{session}/pack?{}", parameters.finish()),
+                "session pack".to_string(),
+            )
+        }
         Command::Capabilities { .. } => ("/capabilities".to_string(), "/capabilities".to_string()),
         Command::Problems { json } => {
             let path = problems_path(*json).to_string();
@@ -360,6 +489,11 @@ pub fn run_cli_with_fetch(
         }
     };
 
+    let transport_hint = if cli.command.requires_token() {
+        "Retry the same read; check asimp capabilities with the same --origin if the failure persists.\n"
+    } else {
+        ""
+    };
     match fetch(&url) {
         Ok(fetched) => CliOutput {
             exit_code: 0,
@@ -382,6 +516,24 @@ pub fn run_cli_with_fetch(
                         "Run asimp capabilities with the same --origin to check this Worker's public surface.\n"
                     }
                 }
+            } else if cli.command.requires_token() {
+                match status {
+                    401 | 403 => {
+                        "Check that ASIMP_TOKEN is an active Fellow credential and that this Fellow owns the session. Use sponsor-approved enrollment to obtain a new credential if needed.\n"
+                    }
+                    400 | 422 => {
+                        "Check this command's --help and the Worker's /schemas/sessions.v1.json; pack profiles, targets and budgets are validated by the Worker.\n"
+                    }
+                    404 => {
+                        "Check the session ID and run asimp capabilities with the same --origin to inspect the deployed surface.\n"
+                    }
+                    429 | 500..=599 => {
+                        "Retry this read later with the same session ID; do not open a replacement session merely because a read failed.\n"
+                    }
+                    _ => {
+                        "Check asimp capabilities with the same --origin and recover with asimp session status.\n"
+                    }
+                }
             } else {
                 ""
             };
@@ -394,20 +546,40 @@ pub fn run_cli_with_fetch(
         Err(FetchError::Network) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
-            stderr: format!("asimp: {label} failed: network or response read error\n"),
+            stderr: format!(
+                "asimp: {label} failed: network or response read error\n{transport_hint}"
+            ),
         },
         Err(FetchError::InvalidUtf8) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
-            stderr: format!("asimp: {label} failed: response body is not valid UTF-8\n"),
+            stderr: format!(
+                "asimp: {label} failed: response body is not valid UTF-8\n{transport_hint}"
+            ),
         },
         Err(FetchError::BodyTooLarge { limit_bytes }) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
             stderr: format!(
-                "asimp: {label} failed: response exceeds the {limit_bytes}-byte limit\n"
+                "asimp: {label} failed: response exceeds the {limit_bytes}-byte limit\n{transport_hint}"
             ),
         },
+    }
+}
+
+fn safe_session_segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(['/', '?', '#', '%', '\\'])
+        && value != "."
+        && value != ".."
+}
+
+fn invalid_session_id() -> CliOutput {
+    CliOutput {
+        exit_code: 2,
+        stdout: String::new(),
+        stderr: "asimp: session ID must be one origin-relative path component, not a URL.\n"
+            .to_string(),
     }
 }
 
@@ -585,45 +757,60 @@ mod tests {
 
     #[test]
     fn the_http_agent_sends_the_required_exact_user_agent() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                assert!(count > 0, "client closed before sending complete headers");
-                request.extend_from_slice(&chunk[..count]);
-                assert!(
-                    request.len() <= 16 * 1024,
-                    "request headers exceeded test bound"
-                );
-            }
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .unwrap();
-            String::from_utf8(request).unwrap()
-        });
+        for token in [None, Some("asimp_ag_synthetic_header_canary")] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    assert!(count > 0, "client closed before sending complete headers");
+                    request.extend_from_slice(&chunk[..count]);
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "request headers exceeded test bound"
+                    );
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .unwrap();
+                String::from_utf8(request).unwrap()
+            });
 
-        let fetched = fetch_text_with_agent(
-            &agent_with_timeout(std::time::Duration::from_secs(1)),
-            &format!("http://{address}/user-agent"),
-        )
-        .unwrap();
-        let request = server.join().unwrap();
-        let user_agent = request
-            .split("\r\n")
-            .find_map(|line| {
+            let fetched = fetch_text_with_agent(
+                &agent_with_timeout(std::time::Duration::from_secs(1)),
+                &format!("http://{address}/user-agent"),
+                token,
+            )
+            .unwrap();
+            let request = server.join().unwrap();
+            let user_agent = request
+                .split("\r\n")
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("user-agent")
+                        .then_some(value.trim())
+                })
+                .expect("request must carry a User-Agent header");
+
+            assert_eq!(fetched.status, 200);
+            assert_eq!(fetched.body, "ok");
+            assert_eq!(user_agent, OUTBOUND_USER_AGENT);
+            let authorization = request.lines().find_map(|line| {
                 let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("user-agent")
+                name.eq_ignore_ascii_case("authorization")
                     .then_some(value.trim())
-            })
-            .expect("request must carry a User-Agent header");
-
-        assert_eq!(fetched.status, 200);
-        assert_eq!(fetched.body, "ok");
-        assert_eq!(user_agent, OUTBOUND_USER_AGENT);
+            });
+            assert_eq!(
+                authorization.map(str::to_owned),
+                token.map(|value| format!("Bearer {value}"))
+            );
+            assert!(!request.lines().next().unwrap().contains("asimp_ag_"));
+        }
     }
 
     #[test]
@@ -643,6 +830,7 @@ mod tests {
         let result = fetch_text_with_agent(
             &agent_with_timeout(std::time::Duration::from_millis(20)),
             &format!("http://{address}/stalled"),
+            None,
         );
         let elapsed = started.elapsed();
         server.join().unwrap();
@@ -678,6 +866,7 @@ mod tests {
             agent,
             "http://resolver-stall.invalid/read".to_string(),
             std::time::Duration::from_millis(20),
+            None,
         );
         let elapsed = started.elapsed();
 
@@ -730,35 +919,167 @@ mod tests {
 
     #[test]
     fn fetch_text_refuses_redirects_instead_of_changing_origin() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                assert!(count > 0, "client closed before sending complete headers");
-                request.extend_from_slice(&chunk[..count]);
-                assert!(
-                    request.len() <= 16 * 1024,
-                    "request headers exceeded test bound"
-                );
-            }
-            stream
+        for token in [None, Some("asimp_ag_redirect_canary")] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    assert!(count > 0, "client closed before sending complete headers");
+                    request.extend_from_slice(&chunk[..count]);
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "request headers exceeded test bound"
+                    );
+                }
+                stream
                 .write_all(
                     b"HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\nContent-Length: 31\r\nConnection: close\r\n\r\ncredential-shaped-response-body",
                 )
                 .unwrap();
-        });
+            });
 
-        let result = fetch_text(&format!("http://{address}/start"));
-        server.join().unwrap();
-        assert!(!format!("{result:?}").contains("credential-shaped-response-body"));
-        assert!(
-            matches!(result, Err(FetchError::Status(302))),
-            "expected a refused 302 response, got {result:?}"
-        );
+            let result = fetch_text_authenticated(&format!("http://{address}/start"), token);
+            server.join().unwrap();
+            assert!(!format!("{result:?}").contains("credential-shaped-response-body"));
+            assert!(
+                matches!(result, Err(FetchError::Status(302))),
+                "expected a refused 302 response, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_reads_preserve_worker_json_and_encode_pack_options() {
+        for (args, expected) in [
+            (vec!["hello", "--json"], "/v1/hello"),
+            (
+                vec!["session", "status", "S-123", "--json"],
+                "/v1/sessions/S-123",
+            ),
+            (
+                vec![
+                    "pack",
+                    "S-123",
+                    "--profile",
+                    "review",
+                    "--target",
+                    "C-1@2",
+                    "--max-tokens",
+                    "5000",
+                ],
+                "/v1/sessions/S-123/pack?profile=review&max_tokens=5000&target=C-1%402",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(
+                [vec!["asimp", "--origin", "https://example.test"], args].concat(),
+            )
+            .unwrap();
+            let body = "{\"omitted\":[{\"reason\":\"budget_exceeded\"}],\"next_actions\":[]}\n";
+            let result = run_cli_with_fetch(&cli, |url| {
+                assert_eq!(url, format!("https://example.test{expected}"));
+                Ok(Fetched {
+                    status: 200,
+                    body: body.to_string(),
+                })
+            });
+            assert_eq!(result.stdout, body);
+            assert_eq!(result.exit_code, 0);
+            assert!(result.stderr.is_empty());
+        }
+    }
+
+    #[test]
+    fn ambient_token_is_only_read_for_explicit_private_commands() {
+        for args in [
+            vec!["capabilities"],
+            vec!["problems"],
+            vec!["search", "text"],
+            vec!["get", "/v1/hello"],
+        ] {
+            let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
+            assert_eq!(
+                token_for_command(&cli.command, || panic!(
+                    "public read consulted credential environment"
+                ))
+                .unwrap(),
+                None
+            );
+        }
+        for args in [
+            vec!["hello"],
+            vec!["session", "status", "S-1"],
+            vec!["pack", "S-1"],
+        ] {
+            let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
+            assert_eq!(
+                token_for_command(&cli.command, || Ok("asimp_ag_synthetic".to_string())).unwrap(),
+                Some("asimp_ag_synthetic".to_string())
+            );
+            assert!(
+                token_for_command(&cli.command, || Err(std::env::VarError::NotPresent)).is_err()
+            );
+            for token in [
+                "",
+                "Bearer secret",
+                "secret\r\nx-header: injected",
+                "secret\t",
+                "secret☃",
+            ] {
+                let error = token_for_command(&cli.command, || Ok(token.to_string())).unwrap_err();
+                assert!(!error.contains("secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn private_read_paths_cannot_escape_the_session_component() {
+        for id in [
+            "",
+            "..",
+            "S-1/workshop",
+            "S-1?query",
+            "S-1#fragment",
+            "%2f",
+            "https://other.test",
+            "S-1\\other",
+        ] {
+            for args in [vec!["session", "status", id], vec!["pack", id]] {
+                let cli = Cli::try_parse_from(
+                    [vec!["asimp", "--origin", "https://example.test"], args].concat(),
+                )
+                .unwrap();
+                let result = run_cli_with_fetch(&cli, |_| panic!("unsafe path reached transport"));
+                assert_eq!(result.exit_code, 2);
+                assert!(result.stdout.is_empty());
+                assert!(!result.stderr.contains("other.test"));
+            }
+        }
+    }
+
+    #[test]
+    fn private_read_errors_offer_recovery_without_echoing_context() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "pack",
+            "private-session-canary",
+            "--target",
+            "private-target-canary",
+        ])
+        .unwrap();
+        for status in [400, 401, 403, 404, 422, 429, 503] {
+            let result = run_cli_with_fetch(&cli, |_| Err(FetchError::Status(status)));
+            assert_eq!(result.exit_code, 1);
+            assert!(result.stdout.is_empty());
+            assert!(result.stderr.contains(&format!("HTTP {status}")));
+            assert!(!result.stderr.contains("canary"));
+            assert!(result.stderr.lines().count() > 1);
+        }
     }
 
     #[test]

@@ -340,7 +340,19 @@ asimp problems --json
 asimp get /protocol.md
 ```
 
-Pairing, token storage, writes, offline validation, watch, and release packaging remain W11 work.
+With an existing Fellow bearer token supplied through `ASIMP_TOKEN`, the CLI also reads
+authenticated identity and session context:
+
+```bash
+asimp hello --json
+asimp session status "$SESSION_ID" --json
+asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
+```
+
+Set `SESSION_ID` to the Worker-issued session ID. These commands preserve the complete JSON
+response, including omissions and next actions. Public commands and raw `get` never send the
+environment token. Pairing, token storage, writes, offline validation, watch, and release
+packaging remain W11 work; source commands do not certify a deployed session loop.
 
 ## Installation
 

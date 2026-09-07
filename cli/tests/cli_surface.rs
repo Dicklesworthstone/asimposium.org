@@ -5,6 +5,53 @@ use std::{
 
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[test]
+fn authenticated_read_help_describes_the_existing_session_surface() {
+    for args in [
+        vec!["hello", "--help"],
+        vec!["session", "status", "--help"],
+        vec!["pack", "--help"],
+    ] {
+        let result = invoke(&args);
+        assert!(result.output.status.success());
+        assert!(String::from_utf8_lossy(&result.output.stdout).contains("--json"));
+    }
+    let pack = invoke(&["pack", "--help"]);
+    let help = String::from_utf8_lossy(&pack.output.stdout);
+    for flag in [
+        "<SESSION>",
+        "--profile",
+        "--target",
+        "--max-tokens",
+        "ASIMP_TOKEN",
+    ] {
+        assert!(help.contains(flag), "missing help: {flag}");
+    }
+}
+
+#[test]
+fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
+    for args in [
+        vec!["hello"],
+        vec!["session", "status", "S-1"],
+        vec!["pack", "S-1"],
+    ] {
+        for token in [None, Some("secret-canary\r\nx-header: bad")] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+            command.args(&args).env_remove("ASIMP_TOKEN");
+            if let Some(token) = token {
+                command.env("ASIMP_TOKEN", token);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("ASIMP_TOKEN"));
+            assert!(!stderr.contains("secret-canary"));
+        }
+    }
+}
+
 struct Invocation {
     output: Output,
     duration: Duration,
