@@ -6,6 +6,7 @@ import {
   GapFiledResponseSchema,
   GapFileRequestSchema,
   GapTransitionRequestSchema,
+  generateReviewRubricsDocument,
   HypothesisKillRequestSchema,
   HypothesisKillResponseSchema,
   HypothesisRequestSchema,
@@ -21,6 +22,7 @@ import {
   ReviewResponseSchema,
   ReviseRequestSchema,
   ReviseResponseSchema,
+  RUBRIC_DOMAINS,
   SCREENING_APPEAL_CODE,
   type ScreeningCoarseCategory,
   ScreeningCoarseCategorySchema,
@@ -1692,7 +1694,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       input: Parameters<typeof composePack>[0],
     ): Promise<Response> => {
       try {
-        return await packResponse(composePack(input));
+        let composed = composePack(input);
+        // Omission metadata can displace another tail item. Account for every
+        // newly omitted rubric before publishing the final measured face.
+        if (input.profile === "review") {
+          const omitted = [...(input.omitted ?? [])];
+          const disclosed = new Set(omitted.map((item) => item.detail));
+          while (true) {
+            const included = new Set(composed.items.map((item) => item.id));
+            const missing = input.candidates.filter(
+              (item) =>
+                item.kind === "review-rubric" && !included.has(item.id) && !disclosed.has(item.id),
+            );
+            if (missing.length === 0) break;
+            for (const item of missing) {
+              omitted.push({ reason: "budget_exceeded", detail: item.id });
+              disclosed.add(item.id);
+            }
+            composed = composePack({ ...input, omitted });
+          }
+        }
+        return await packResponse(composed);
       } catch (error) {
         if (error instanceof PackComposerError) {
           return privateNoStore(
@@ -1969,6 +1991,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
+    if (profile === "review") {
+      const rubrics = generateReviewRubricsDocument();
+      candidates.push({
+        kind: "review-rubric",
+        id: "SYS-review-rubric-catalog",
+        scope: "system",
+        tokens: 1,
+        untrusted: false,
+        body: `Review rubric catalog (${rubrics.version}). Select applicable domains; no problem domain is inferred. Report only checks actually exercised.\n${RUBRIC_DOMAINS.map((domain) => `${domain}: ${rubrics.domains[domain].items.map((item) => item.id).join(", ")}`).join("\n")}`,
+        why_included: "choose relevant checks from the canonical review rubric registry",
+        stable_prefix: 2,
+      });
+      for (const [index, domain] of RUBRIC_DOMAINS.entries()) {
+        candidates.push({
+          kind: "review-rubric",
+          id: `SYS-review-rubric-${domain}`,
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: JSON.stringify(rubrics.domains[domain]),
+          why_included: `canonical ${domain} checks and failure modes; guidance is not evidence of checks performed`,
+          stable_prefix: 100 + PACK_CLAIM_CANDIDATE_LIMIT + index,
+        });
+      }
+    }
     const ledgerSection = await readLedgerPackSection(db, session.problem_id, cursor, profile);
     candidates.push(...ledgerSection.candidates);
 
@@ -2110,7 +2157,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: ["claim-detail"],
-      review: ["rubric", "author-isolation-proof"],
+      review: ["author-isolation-proof"],
       graveyard: ["public-dead-ends", "friction-reports", "retry-predicates"],
       literature: ["citations"],
       formal: ["formal-artifacts", "friction-reports", "verification-records"],
@@ -2173,14 +2220,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
-      action_candidates:
-        auth.binding.grantedResources.eventBudget !== undefined &&
+      action_candidates: [
+        ...(profile === "review" && requestedMaxTokens <= 4000
+          ? [
+              {
+                method: "GET" as const,
+                url: `/v1/sessions/${session.session_id}/pack?profile=review&max_tokens=8000`,
+                why: "Read a larger review pack for detailed domain rubrics omitted by this budget.",
+                public_read: false,
+              },
+            ]
+          : []),
+        ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? []
           : promotionBudget?.remaining === 0
             ? [
                 {
-                  method: "POST",
+                  method: "POST" as const,
                   url: `/v1/sessions/${session.session_id}/workshop`,
                   why: "promotion rate limit reached; continue drafting in your private workshop until the window rolls over",
                   public_read: false,
@@ -2189,20 +2246,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ]
             : [
                 {
-                  method: "POST",
+                  method: "POST" as const,
                   url: `/v1/sessions/${session.session_id}/workshop`,
                   why: "push a note or draft to your private workshop as you work",
                   public_read: false,
                   requires: ["workshop:write"],
                 },
                 {
-                  method: "POST",
+                  method: "POST" as const,
                   url: `/v1/sessions/${session.session_id}/promote`,
                   why: "promote a finished object to the public ledger (runs the validator)",
                   public_read: false,
                   requires: ["promote:write"],
                 },
-              ],
+              ]),
+      ],
       omitted: [
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,

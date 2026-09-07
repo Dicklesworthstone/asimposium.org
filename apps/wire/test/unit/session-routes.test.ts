@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   ContractProblemSchema,
   GapFiledResponseSchema,
+  generateReviewRubricsDocument,
   HypothesisResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
@@ -12,6 +13,7 @@ import {
   PromoteResponseSchema,
   RelationFiledResponseSchema,
   ReviseResponseSchema,
+  RUBRIC_DOMAINS,
   ScreeningPublicationProvenanceSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
@@ -1029,6 +1031,85 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  test("review packs serve canonical rubrics with exact budget omissions and a larger read", async () => {
+    const f = await fixture();
+    const opened = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "rubric-open",
+      },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/pack`;
+    const ids = [
+      "SYS-review-rubric-catalog",
+      ...RUBRIC_DOMAINS.map((domain) => `SYS-review-rubric-${domain}`),
+    ];
+    const registry = generateReviewRubricsDocument();
+    for (const budget of [800, 1500, 2500, 4000, 8000]) {
+      const url = `${path}?profile=review&max_tokens=${budget}`;
+      const response = await f.call(url);
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      const pack = PackResponseSchema.parse(JSON.parse(text));
+      expect(pack.tokens_estimate).toBeLessThanOrEqual(budget);
+      expect(Math.ceil(new TextEncoder().encode(text).length / 4)).toBeLessThanOrEqual(
+        pack.tokens_estimate,
+      );
+      expect(pack.omitted).toContainEqual({
+        reason: "profile_section_not_composed",
+        detail: "author-isolation-proof",
+      });
+      expect(pack.omitted).not.toContainEqual({
+        reason: "profile_section_not_composed",
+        detail: "rubric",
+      });
+      for (const id of ids) {
+        const included = pack.items.some((item) => item.id === id);
+        const omitted = pack.omitted.some(
+          (item) => item.reason === "budget_exceeded" && item.detail === id,
+        );
+        expect(Number(included) + Number(omitted), id).toBe(1);
+      }
+      if (budget >= 2500) expect(pack.items.some((item) => item.id === ids[0])).toBe(true);
+      if (budget < 8000)
+        expect(pack.next_actions).toContainEqual({
+          method: "GET",
+          url: `${path}?profile=review&max_tokens=8000`,
+          why: "Read a larger review pack for detailed domain rubrics omitted by this budget.",
+        });
+      if (budget === 8000) {
+        for (const domain of RUBRIC_DOMAINS) {
+          const item = pack.items.find((item) => item.id === `SYS-review-rubric-${domain}`);
+          expect(item).toMatchObject({ scope: "system", untrusted: false });
+          expect(JSON.parse(item?.body ?? "null")).toEqual(registry.domains[domain]);
+        }
+      }
+      expect(await (await f.call(url)).text()).toBe(text);
+      const etag = response.headers.get("etag");
+      expect(etag).not.toBeNull();
+      const unchanged = await f.call(url, { headers: { "if-none-match": etag ?? "" } });
+      expect(unchanged.status).toBe(304);
+      expect(unchanged.headers.get("cache-control")).toBe("private, no-store");
+    }
+    const rounded = PackResponseSchema.parse(
+      await (await f.call(`${path}?profile=review&max_tokens=5000`)).json(),
+    );
+    expect(rounded.budget_tokens).toBe(8000);
+    expect(
+      rounded.next_actions.some(
+        (action) => action.method === "GET" && action.url.includes("max_tokens=8000"),
+      ),
+    ).toBe(false);
+    const working = PackResponseSchema.parse(
+      await (await f.call(`${path}?profile=working`)).json(),
+    );
+    expect(working.items.some((item) => item.kind === "review-rubric")).toBe(false);
+  });
+
   test("session recovery examples are valid and can reopen the closed session problem", async () => {
     const f = await fixture();
     let key = 0;

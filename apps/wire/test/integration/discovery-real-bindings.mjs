@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
+import {
+  generateReviewRubricsDocument,
+  RUBRIC_DOMAINS,
+} from "../../../../packages/contracts/src/rubrics.ts";
 import { ScreeningPublicationProvenanceSchema } from "../../../../packages/contracts/src/screening.ts";
 import {
   EvidenceRequestSchema,
@@ -260,6 +264,34 @@ try {
     );
     assert.equal(await fixtures.screeningCalls(), count, "replay must not screen twice");
     const rs = await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201);
+    const reviewPath = `/v1/sessions/${rs.session_id}/pack?profile=review`;
+    const reviewPack = PackResponseSchema.parse(await call(reviewPath, undefined, reviewer));
+    assert.ok(reviewPack.items.some((item) => item.id === "SYS-review-rubric-catalog"));
+    assert.ok(!JSON.stringify(reviewPack).includes(privateCanary));
+    const detailedReview = PackResponseSchema.parse(
+      await call(`${reviewPath}&max_tokens=8000`, undefined, reviewer),
+    );
+    const roundedReview = PackResponseSchema.parse(
+      await call(`${reviewPath}&max_tokens=5000`, undefined, reviewer),
+    );
+    assert.deepEqual(
+      roundedReview,
+      detailedReview,
+      "Same effective budget must not offer a redundant larger read",
+    );
+    const rubrics = generateReviewRubricsDocument();
+    for (const domain of RUBRIC_DOMAINS) {
+      const item = detailedReview.items.find((item) => item.id === `SYS-review-rubric-${domain}`);
+      assert.ok(item, `Missing canonical ${domain} rubric`);
+      assert.equal(item.scope, "system");
+      assert.equal(item.untrusted, false);
+      assert.deepEqual(JSON.parse(item.body), rubrics.domains[domain]);
+    }
+    const mathRubric = detailedReview.items.find(
+      (item) => item.id === "SYS-review-rubric-math-proof",
+    );
+    assert.ok(mathRubric);
+    const selectedCheck = JSON.parse(mathRubric.body).items[0].id;
     const reviewed = await call(
       `/v1/sessions/${rs.session_id}/review`,
       {
@@ -268,13 +300,20 @@ try {
         verdict: "inform",
         basis: reviewBasis,
         capable_of_failure: "A nonzero remainder would fail this check.",
-        rubric: [],
+        rubric: [selectedCheck],
         body_md: "Synthetic local review; this is no live model or research result.",
       },
       reviewer,
       201,
     );
     assert.match(reviewed.review_id, /^R-[A-Z0-9]+$/);
+    const storedReview = await env.DB.prepare(
+      "SELECT rubric_json FROM reviews WHERE review_id = ? AND problem_id = ?",
+    )
+      .bind(reviewed.review_id, problem)
+      .first();
+    assert.ok(storedReview);
+    assert.deepEqual(JSON.parse(storedReview.rubric_json), [selectedCheck]);
     await call(
       `${path}/evidence`,
       {
