@@ -560,26 +560,36 @@ export async function getRemainingBudget(
   }
 
   let sponsorCount = 0;
+  let oldestSponsorAt = now;
   if (sponsorLimit !== null && params.sponsorId) {
     if (sponsorLimit > 0) {
       const sponsorAttempts = await db
         .prepare(
-          `SELECT COUNT(*) AS attempt_count
+          `SELECT COUNT(*) AS attempt_count, MIN(reserved_at) AS oldest_reserved_at
              FROM public_write_attempt_reservations
             WHERE sponsor_id = ?
               AND reserved_at > ?`,
         )
         .bind(params.sponsorId, windowStart)
-        .first<{ attempt_count: number }>();
+        .first<{ attempt_count: number; oldest_reserved_at: number | null }>();
       sponsorCount = sponsorAttempts?.attempt_count ?? 0;
+      oldestSponsorAt = sponsorAttempts?.oldest_reserved_at ?? now;
     }
   }
 
   const remaining = Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - fellowCount);
+  const sponsorRemaining = sponsorLimit === null ? null : Math.max(0, sponsorLimit - sponsorCount);
+  const retryDelay = (oldestAt: number) =>
+    Math.max(1, Math.ceil((oldestAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000));
+  // Both dimensions must admit the write. A configured zero sponsor limit has
+  // no time-based recovery; do not invent an expiry for that operator setting.
   const retryAfterSeconds =
-    remaining === 0
-      ? Math.max(1, Math.ceil((oldestFellowAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000))
-      : undefined;
+    sponsorLimit === 0
+      ? undefined
+      : Math.max(
+          remaining === 0 ? retryDelay(oldestFellowAt) : 0,
+          sponsorRemaining === 0 ? retryDelay(oldestSponsorAt) : 0,
+        ) || undefined;
 
   return {
     limit: PROMOTION_RATE_LIMIT_PER_HOUR,
@@ -587,6 +597,6 @@ export async function getRemainingBudget(
     window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
     ...(retryAfterSeconds === undefined ? {} : { retry_after_seconds: retryAfterSeconds }),
     sponsor_limit: sponsorLimit,
-    sponsor_remaining: sponsorLimit === null ? null : Math.max(0, sponsorLimit - sponsorCount),
+    sponsor_remaining: sponsorRemaining,
   };
 }

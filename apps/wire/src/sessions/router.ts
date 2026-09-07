@@ -2250,6 +2250,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     ) {
       actionPermissions.push("promote:write");
     }
+    const promotionLimited =
+      promotionBudget?.remaining === 0 || promotionBudget?.sponsor_remaining === 0;
+    const promotionRecovery =
+      promotionBudget?.sponsor_limit === 0
+        ? "Sponsor public writes are disabled; continue drafting in your private workshop."
+        : `Promotion rate limit reached; continue drafting privately and recheck the budget after ${promotionBudget?.retry_after_seconds ?? 3600}s.`;
     return composePackResponse({
       schema: "asimposium.pack.v1",
       session: session.session_id,
@@ -2283,12 +2289,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? []
-          : promotionBudget?.remaining === 0
+          : promotionLimited
             ? [
                 {
                   method: "POST" as const,
                   url: `/v1/sessions/${session.session_id}/workshop`,
-                  why: "promotion rate limit reached; continue drafting in your private workshop until the window rolls over",
+                  why: promotionRecovery,
                   public_read: false,
                   requires: ["workshop:write"],
                 },
@@ -2319,11 +2325,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
           ? [{ reason: "event_budget_exhausted" as const, detail: "write affordances" }]
           : []),
-        ...(promotionBudget?.remaining === 0
+        ...(promotionLimited
           ? [
               {
                 reason: "promotion_rate_limited",
-                detail: `window rolls over in ${promotionBudget.retry_after_seconds ?? 3600}s`,
+                detail: promotionRecovery,
               },
             ]
           : []),

@@ -535,6 +535,39 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
 });
 
 describe("pure table/property tests: getRemainingBudget and problem formatting", () => {
+  test("sponsor retry timing follows its own window and recovers independently of Fellow allowance", async () => {
+    const db = testDb();
+    const now = 1_700_000_000_000;
+    await checkAndReserveQuota(db, {
+      fellowId: "fel_one",
+      problemId: "P-4DSP",
+      sponsorId: "spn_shared",
+      sessionId: "ses_test",
+      route: "promote",
+      idempotencyKey: "sponsor-window",
+      requestDigest: "digest",
+      sponsorLimit: 1,
+      now,
+    });
+    const query = {
+      fellowId: "fel_two",
+      problemId: "P-OTHER",
+      sponsorId: "spn_shared",
+      sponsorLimit: 1,
+    };
+    const blocked = await getRemainingBudget(db, { ...query, now: now + 60_000 });
+    expect(blocked).toMatchObject({
+      remaining: 20,
+      sponsor_remaining: 0,
+      retry_after_seconds: 3540,
+    });
+    const recovered = await getRemainingBudget(db, { ...query, now: now + 3_600_000 });
+    expect(recovered.sponsor_remaining).toBe(1);
+    expect(recovered.retry_after_seconds).toBeUndefined();
+    const disabled = await getRemainingBudget(db, { ...query, sponsorLimit: 0, now });
+    expect(disabled.sponsor_remaining).toBe(0);
+    expect(disabled.retry_after_seconds).toBeUndefined();
+  });
   test("getRemainingBudget returns accurate remaining count and reflects sponsor limit", async () => {
     const db = testDb();
     const now = 1_700_000_000_000;

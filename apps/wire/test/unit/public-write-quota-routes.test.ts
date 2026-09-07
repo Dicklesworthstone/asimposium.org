@@ -352,6 +352,67 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
 }
 
 describe("SQLite-backed unit checks: mounted public-write budgets", () => {
+  test("sponsor quota suppresses promotion in every pack while private work stays usable", async () => {
+    const harness = await createQuotaTestHarness({ sponsorLimit: 0 });
+    const fellow = await harness.registerFellow("sponsor-capped-pack");
+    const hello = await fellow.call("/v1/hello");
+    expect(hello.status).toBe(200);
+    expect(EnrollmentHelloResponseSchema.parse(await hello.json()).promotion_budget).toMatchObject({
+      sponsor_limit: 0,
+      sponsor_remaining: 0,
+    });
+    const opened = await fellow.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "sponsor-pack-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const { session_id } = (await opened.json()) as { session_id: string };
+    for (const profile of [
+      "hello",
+      "orient",
+      "working",
+      "claim",
+      "review",
+      "digest",
+      "graveyard",
+      "literature",
+      "formal",
+      "review-queue",
+      "claim-graph",
+      "full",
+    ]) {
+      const response = await fellow.call(`/v1/sessions/${session_id}/pack?profile=${profile}`);
+      expect(response.status).toBe(200);
+      const pack = PackResponseSchema.parse(await response.json());
+      expect(pack.promotion_budget).toMatchObject({ remaining: 20, sponsor_remaining: 0 });
+      expect(pack.next_actions.some((action) => action.url.endsWith("/promote"))).toBe(false);
+      expect(pack.next_actions.some((action) => action.url.endsWith("/workshop"))).toBe(true);
+      expect(pack.omitted.some((item) => item.reason === "promotion_rate_limited")).toBe(true);
+      expect(JSON.stringify(pack.next_actions)).not.toContain("window rolls over");
+    }
+    const draft = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "sponsor-pack-draft" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Continue privately",
+        body_md: "A work product.",
+      }),
+    });
+    expect(draft.status).toBe(201);
+    const { workshop_id } = (await draft.json()) as { workshop_id: string };
+    const refused = await fellow.call(`/v1/sessions/${session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "sponsor-pack-promote" },
+      body: JSON.stringify({
+        workshop_id,
+        kind: "lemma",
+        statement: "A publication blocked by sponsor quota.",
+      }),
+    });
+    expect(refused.status).toBe(429);
+  });
   test("20 promotions allowed, 21st rejected with 429, synthetic classifier called 0 times on 21st", async () => {
     const harness = await createQuotaTestHarness();
     const fellow = await harness.registerFellow("quota-producer");

@@ -633,7 +633,7 @@ export const RateLimitBudgetSchema = z
     remaining: z.number().int().min(0),
     window_seconds: z.number().int().positive(),
     retry_after_seconds: z.number().int().min(0).optional(),
-    sponsor_limit: z.number().int().positive().nullable().optional(),
+    sponsor_limit: z.number().int().nonnegative().nullable().optional(),
     sponsor_remaining: z.number().int().min(0).nullable().optional(),
   })
   .strict();

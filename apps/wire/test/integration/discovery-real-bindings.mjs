@@ -1738,6 +1738,17 @@ try {
           assert.equal(reserved.allowed, true, "Prior admission must actually reserve capacity");
         }
         const contenders = dimension === "fellow" ? [actors[0], actors[0]] : [actors[0], actors[1]];
+        for (const actor of actors) {
+          const pack = await call(
+            `/v1/sessions/${actor.sessionId}/pack?profile=working`,
+            undefined,
+            actor.token,
+          );
+          assert.ok(
+            pack.next_actions.some((action) => action.url.endsWith("/promote")),
+            "last available slot remains offered",
+          );
+        }
         const beforeCalls = await fixtures.screeningCalls();
         const requests = await Promise.all(
           contenders.map(async (actor, index) => {
@@ -1854,6 +1865,31 @@ try {
           .bind(problem, problem, problem)
           .first();
         assert.deepEqual(counts, { attempts: limit, events: 1, claims: 1 });
+        for (const actor of actors) {
+          const pack = PackResponseSchema.parse(
+            await call(
+              `/v1/sessions/${actor.sessionId}/pack?profile=working`,
+              undefined,
+              actor.token,
+            ),
+          );
+          assert.equal(
+            pack.next_actions.some((action) => action.url.endsWith("/promote")),
+            false,
+          );
+          assert.ok(pack.next_actions.some((action) => action.url.endsWith("/workshop")));
+          assert.ok(pack.omitted.some((item) => item.reason === "promotion_rate_limited"));
+          assert.ok(pack.promotion_budget.retry_after_seconds > 0);
+          if (dimension === "sponsor") assert.equal(pack.promotion_budget.sponsor_remaining, 0);
+        }
+        console.log(
+          JSON.stringify({
+            stage: "real-d1-quota-pack-actions",
+            dimension,
+            before: "promotion-offered",
+            exhausted: "workshop-only",
+          }),
+        );
         // Reload the actual Worker isolate, retaining D1. Its module-local
         // classifier counter must reset; durable replay and budgets must not.
         await server.update((options) => ({

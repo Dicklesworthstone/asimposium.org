@@ -1,5 +1,17 @@
 import { expect, test } from "bun:test";
 
+test("rate budgets represent a disabled sponsor limit but reject negative limits", () => {
+  const budget = {
+    limit: 20,
+    remaining: 20,
+    window_seconds: 3600,
+    sponsor_limit: 0,
+    sponsor_remaining: 0,
+  };
+  expect(RateLimitBudgetSchema.parse(budget)).toEqual(budget);
+  expect(RateLimitBudgetSchema.safeParse({ ...budget, sponsor_limit: -1 }).success).toBe(false);
+});
+
 import type {
   SponsorBootstrapRequest as GeneratedSponsorBootstrapRequest,
   SponsorBootstrapResponse as GeneratedSponsorBootstrapResponse,
@@ -24,6 +36,7 @@ import {
   OperatorFellowCapStateResponseSchema,
   parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
+  RateLimitBudgetSchema,
   SponsorBootstrapRequestSchema,
   SponsorCredentialRevokeRequestSchema,
   SponsorCredentialRevokeResponseSchema,
