@@ -169,6 +169,10 @@ export async function executeSearch(
   // not an authoritative empty match set. Required cursor/exact reads above
   // never enter this fallback.
   const exactItems = [...items];
+  // The exact row can also match the lexical query. Reserve its candidate slot
+  // before deduplication so it cannot crowd out another eligible result.
+  const candidateLimit = (kind: SearchResultItem["kind"]) =>
+    limit - items.length + exactItems.filter((item) => item.kind === kind).length;
   let lexicalUnavailable = false;
   const lexicalFailure = (error: unknown) => {
     if (!matchedExact) throw error;
@@ -181,7 +185,6 @@ export async function executeSearch(
     const ftsQuery = escapeFts5Query(request.q);
     if (ftsQuery.length > 0) {
       try {
-        const remainingLimit = limit - items.length;
         const ftsRows = await db
           .prepare(
             `SELECT public_claim_fts.claim_id, public_claim_fts.problem_id, public_claim_fts.statement,
@@ -192,10 +195,10 @@ export async function executeSearch(
                AND claims.problem_id = public_claim_fts.problem_id
                AND claims.statement = public_claim_fts.statement
              WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
-             ORDER BY rank ASC
+             ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC
              LIMIT ?`,
           )
-          .bind(ftsQuery, remainingLimit)
+          .bind(ftsQuery, candidateLimit("claim"))
           .all<FtsClaimRow>();
 
         for (const row of ftsRows.results) {
@@ -223,14 +226,13 @@ export async function executeSearch(
     items.length < limit &&
     (filterKind === "all" || filterKind === "problem")
   ) {
-    const remainingLimit = limit - items.length;
     const cleanPattern = `%${request.q.replace(/[%_\\]/g, "\\$&")}%`;
     try {
       const problemRows = await db
         .prepare(
-          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id LIKE ? ESCAPE '\\' LIMIT ?",
+          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id LIKE ? ESCAPE '\\' ORDER BY id ASC LIMIT ?",
         )
-        .bind(cleanPattern, remainingLimit)
+        .bind(cleanPattern, candidateLimit("problem"))
         .all<ProblemRow>();
 
       for (const row of problemRows.results) {
@@ -255,14 +257,13 @@ export async function executeSearch(
     items.length < limit &&
     (filterKind === "all" || filterKind === "fellow")
   ) {
-    const remainingLimit = limit - items.length;
     const cleanPattern = `%${request.q.replace(/[%_\\]/g, "\\$&")}%`;
     try {
       const fellowRows = await db
         .prepare(
-          "SELECT fellow_id, name, model, harness, created_at FROM enrollment_fellows WHERE name LIKE ? ESCAPE '\\' LIMIT ?",
+          "SELECT fellow_id, name, model, harness, created_at FROM enrollment_fellows WHERE name LIKE ? ESCAPE '\\' ORDER BY fellow_id ASC LIMIT ?",
         )
-        .bind(cleanPattern, remainingLimit)
+        .bind(cleanPattern, candidateLimit("fellow"))
         .all<FellowRow>();
 
       for (const row of fellowRows.results) {

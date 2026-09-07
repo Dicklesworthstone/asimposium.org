@@ -83,6 +83,77 @@ function mockEnv(db: Env["DB"]): Env {
 }
 
 describe("W6.8 Public Search Routes", () => {
+  test("fills the limit after exact-match deduplication with stable lexical tie order", async () => {
+    for (const order of [
+      ["", "-Z", "-A"],
+      ["-Z", "-A", ""],
+    ]) {
+      const { db, raw } = createMigratedDb();
+      try {
+        for (const suffix of order) {
+          raw
+            .prepare(
+              "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, 0, '2026-09-07', '2026-09-07')",
+            )
+            .run(`P-MATCH${suffix}`);
+        }
+        const exact = await executeSearch(db, { q: "P-MATCH", kind: "problem", limit: 2 });
+        expect(exact.items.map((item) => item.id)).toEqual(["P-MATCH", "P-MATCH-A"]);
+        expect(exact.items[0]?.match_type).toBe("exact_reference");
+        expect(exact.total_matches).toBe(2);
+        const lexical = await executeSearch(db, { q: "MATCH", kind: "problem", limit: 2 });
+        expect(lexical.items.map((item) => item.id)).toEqual(["P-MATCH", "P-MATCH-A"]);
+      } finally {
+        raw.close();
+      }
+    }
+  });
+
+  test("orders Fellow and equal-rank FTS results independently of insertion order", async () => {
+    for (const order of [
+      ["Z", "A", "M"],
+      ["M", "Z", "A"],
+    ]) {
+      const { db, raw } = createMigratedDb();
+      try {
+        raw
+          .prepare(
+            "INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES ('usr_search', 1, 1)",
+          )
+          .run();
+        for (const suffix of order) {
+          // Synthetic SQL projections with source content; real Workerd proof is separate.
+          raw.run(`
+            INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+            VALUES ('F-${suffix}', 'usr_search', 'shared-${suffix.toLowerCase()}', 'synthetic', 'fixture', 1);
+            INSERT INTO problems (id, public_seq, created_at, updated_at, chain_version, chain_digest)
+            VALUES ('P-TIED-${suffix}', 1, '2026-09-07', '2026-09-07', 2, 'sha256:chain');
+            INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
+            VALUES ('P-TIED-${suffix}', 'complete', 0, 2);
+            INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
+            VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture', 'sha256:body', 1, '2026-09-07');
+            INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
+            VALUES ('E-${suffix}', 'P-TIED-${suffix}', 1, 'claim.created', 'claim', 'C-1', 1, 'sha256:body', '2026-09-07', 'sha256:row', 'sha256:chain');
+            INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-${suffix}', 'sha256:body', '{}');
+            INSERT INTO public_claim_fts (claim_id, problem_id, statement)
+            VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture');
+          `);
+        }
+        expect(raw.query("SELECT name FROM enrollment_fellows ORDER BY name").all()).toEqual([
+          { name: "shared-a" },
+          { name: "shared-m" },
+          { name: "shared-z" },
+        ]);
+        const fellows = await executeSearch(db, { q: "shared", kind: "fellow", limit: 2 });
+        expect(fellows.items.map((item) => item.id)).toEqual(["F-A", "F-M"]);
+        const claims = await executeSearch(db, { q: "bounded", kind: "claim", limit: 2 });
+        expect(claims.items.map((item) => item.problem_id)).toEqual(["P-TIED-A", "P-TIED-M"]);
+      } finally {
+        raw.close();
+      }
+    }
+  });
+
   test("Markdown quotes result titles and excerpts without creating control or active markup", () => {
     const markdown = renderSearchMarkdown(
       SearchResponseSchema.parse({
