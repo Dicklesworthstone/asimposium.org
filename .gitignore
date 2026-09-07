@@ -35,3 +35,11 @@ gh_og_share_image.png
 # Wrangler local secrets (never commit)
 .dev.vars
 **/.dev.vars
+
+# Python bytecode artifacts
+__pycache__/
+*.pyc
+
+# Scratch strays
+/=
+
