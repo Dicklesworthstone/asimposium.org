@@ -13,6 +13,7 @@ import {
   RelationFiledResponseSchema,
   ReviseResponseSchema,
   ScreeningPublicationProvenanceSchema,
+  SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
   SponsorWorkshopViewSchema,
@@ -1028,6 +1029,63 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  test("session recovery examples are valid and can reopen the closed session problem", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = (path: string, body: unknown) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `recover-${++key}` },
+        body: JSON.stringify(body),
+      });
+    const note = { type: "note", title: "Recovery", body_md: "A deliberate scratch note." };
+    const missing = "/v1/sessions/S-00000000000000000000000000";
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}`;
+    const other = await addApprovedFellow(f, { suffix: "recovery-other", scopes: ["promote"] });
+    const responses = [
+      await f.call(`${missing}/pack`),
+      await post(`${missing}/workshop`, note),
+      await other.call(`${path}/workshop`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "recover-other",
+        },
+        body: JSON.stringify(note),
+      }),
+    ];
+    for (const response of responses) expect(response.status).toBe(404);
+    const closed = await post(`${path}/close`, { handback: "Resume from the next pack." });
+    expect(closed.status).toBe(201);
+    const closedResponses = [await f.call(`${path}/pack`), await post(`${path}/workshop`, note)];
+    for (const response of closedResponses) expect(response.status).toBe(409);
+    const problems = await Promise.all(
+      [...responses, ...closedResponses].map(async (response) =>
+        ContractProblemSchema.parse(await response.json()),
+      ),
+    );
+    expect(problems[0]).toEqual(problems[1]);
+    expect(problems[1]).toEqual(problems[2]);
+    const examples = problems.map((problem) => {
+      const example = problem.example;
+      if (example === null || typeof example !== "object" || Array.isArray(example)) {
+        throw new Error("Recovery must provide a structured request example");
+      }
+      const request = example as Record<string, unknown>;
+      expect(request.method).toBe("POST");
+      expect(request.path).toBe("/v1/sessions");
+      return SessionOpenRequestSchema.parse(request.body);
+    });
+    const resumed = await post("/v1/sessions", examples[3]);
+    expect(resumed.status).toBe(201);
+    expect(SessionOpenResponseSchema.parse(await resumed.json()).problem_id).toBe(
+      session.problem_id,
+    );
+  });
+
   test("status recovers open and closed sessions without loading private work", async () => {
     let readingStatus = false;
     const reads: string[] = [];

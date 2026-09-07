@@ -14,6 +14,7 @@ import {
   RelationFileRequestSchema,
   ReviewRequestSchema,
   ReviseRequestSchema,
+  SessionOpenRequestSchema,
   SessionStatusResponseSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
@@ -315,6 +316,35 @@ try {
       reviewerStatus.workshop_cursor,
       0,
       "Another Fellow's draft must not move own cursor",
+    );
+    const recovery = await call(`${path}/pack`, undefined, author, 409);
+    assert.equal(recovery.example.method, "POST");
+    assert.equal(recovery.example.path, "/v1/sessions");
+    const recoveryBody = SessionOpenRequestSchema.parse(recovery.example.body);
+    assert.equal(
+      recoveryBody.problem_id,
+      problem,
+      "Recovery must target the actual closed problem",
+    );
+    const writeRecovery = await call(
+      `${path}/workshop`,
+      {
+        type: "note",
+        title: "Closed-session recovery",
+        body_md: "A deliberate recovery probe.",
+      },
+      author,
+      409,
+    );
+    assert.deepEqual(SessionOpenRequestSchema.parse(writeRecovery.example.body), recoveryBody);
+    const reopened = await call(recovery.example.path, recoveryBody, author, 201);
+    assert.equal(reopened.problem_id, problem);
+    assert.notEqual(reopened.session_id, session.session_id);
+    await call(
+      `/v1/sessions/${reopened.session_id}/close`,
+      { handback: "Recovery verified." },
+      author,
+      201,
     );
     console.log(
       JSON.stringify({

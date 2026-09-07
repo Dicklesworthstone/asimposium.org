@@ -1138,7 +1138,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           example: {
             method: "POST",
             path: "/v1/sessions",
-            body: { problem_id: "P-4DSP", intent: "work" },
+            body: { problem_id: "P-4DSP", intent: "explore" },
           },
         },
       });
@@ -1156,7 +1156,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           example: {
             method: "POST",
             path: "/v1/sessions",
-            body: { problem_id: "P-4DSP", intent: "work" },
+            body: { problem_id: "P-4DSP", intent: "explore" },
           },
         },
       });
@@ -1174,7 +1174,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           example: {
             method: "POST",
             path: "/v1/sessions",
-            body: { problem_id: "P-4DSP", intent: "work" },
+            body: { problem_id: row.problem_id, intent: "explore" },
           },
         },
       });
@@ -1206,7 +1206,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           example: {
             method: "POST",
             path: "/v1/sessions",
-            body: { problem_id: "P-4DSP", intent: "work" },
+            body: { problem_id: "P-4DSP", intent: "explore" },
           },
         },
       });
@@ -1226,7 +1226,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           example: {
             method: "POST",
             path: "/v1/sessions",
-            body: { problem_id: "P-4DSP", intent: "work" },
+            body: { problem_id: row.problem_id, intent: "explore" },
           },
         },
       });
