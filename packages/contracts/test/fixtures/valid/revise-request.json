@@ -1,0 +1,8 @@
+{
+  "claim_id": "C-1",
+  "base_version": 1,
+  "kind": "conjecture",
+  "statement": "Every nonnegative even integer is divisible by two.",
+  "falsifier": "A nonnegative even integer with nonzero remainder modulo two.",
+  "depends_on": []
+}

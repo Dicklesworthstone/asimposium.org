@@ -42,6 +42,9 @@ const VALID_SESSION_OPEN = new URL("../fixtures/valid/session-open.json", import
 const VALID_WORKSHOP_PUSH = new URL("../fixtures/valid/workshop-push.json", import.meta.url);
 const VALID_PROMOTE = new URL("../fixtures/valid/promote-request.json", import.meta.url);
 const VALID_CLOSE = new URL("../fixtures/valid/session-close.json", import.meta.url);
+const VALID_REVIEW = new URL("../fixtures/valid/review-request.json", import.meta.url);
+const VALID_EVIDENCE = new URL("../fixtures/valid/evidence-request.json", import.meta.url);
+const VALID_REVISE = new URL("../fixtures/valid/revise-request.json", import.meta.url);
 const INVALID_OPEN_PROBLEM = new URL(
   "../fixtures/invalid/session-open-bad-problem.json",
   import.meta.url,
@@ -426,7 +429,7 @@ test("the keyset cursor is optional, positive, and integral (asimposiumorg-e7j.2
   }
 });
 
-test("review request and response schemas validate strictly", () => {
+test("review request and response schemas validate strictly", async () => {
   const validRequest = {
     target_claim_id: "C-1",
     target_version: 1,
@@ -437,6 +440,7 @@ test("review request and response schemas validate strictly", () => {
     body_md: "Full review markdown text.",
   };
   expect(ReviewRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(ReviewRequestSchema.safeParse(await fixture(VALID_REVIEW)).success).toBe(true);
   expect(
     ReviewRequestSchema.safeParse({ ...validRequest, target_claim_id: "invalid" }).success,
   ).toBe(false);
@@ -457,7 +461,7 @@ test("review request and response schemas validate strictly", () => {
   expect(ReviewResponseSchema.safeParse({ ...validResponse, tier: "T5" }).success).toBe(false);
 });
 
-test("evidence request and response schemas validate strictly", () => {
+test("evidence request and response schemas validate strictly", async () => {
   const validRequest = {
     bears_on_kind: "claim" as const,
     bears_on_id: "C-1",
@@ -469,6 +473,7 @@ test("evidence request and response schemas validate strictly", () => {
     body_md: "Computation details and script.",
   };
   expect(EvidenceRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(EvidenceRequestSchema.safeParse(await fixture(VALID_EVIDENCE)).success).toBe(true);
   expect(
     EvidenceRequestSchema.safeParse({ ...validRequest, bears_on_version: undefined }).success,
   ).toBe(false);
@@ -575,7 +580,7 @@ test("hypothesis request and kill schemas validate strictly", () => {
   expect(HypothesisKillResponseSchema.safeParse(validKillResponse).success).toBe(true);
 });
 
-test("revision request and response schemas validate strictly", () => {
+test("revision request and response schemas validate strictly", async () => {
   const validRequest = {
     claim_id: "C-1",
     base_version: 1,
@@ -585,6 +590,7 @@ test("revision request and response schemas validate strictly", () => {
     depends_on: ["C-2"],
   };
   expect(ReviseRequestSchema.safeParse(validRequest).success).toBe(true);
+  expect(ReviseRequestSchema.safeParse(await fixture(VALID_REVISE)).success).toBe(true);
   expect(ReviseRequestSchema.safeParse({ ...validRequest, base_version: 0 }).success).toBe(false);
   expect(
     ReviseRequestSchema.safeParse({

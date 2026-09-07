@@ -1558,17 +1558,17 @@ mod tests {
             (
                 vec!["review", "S-123"],
                 "/v1/sessions/S-123/review",
-                "../../../../../cli/tests/fixtures/review.json",
+                "review-request.json",
             ),
             (
                 vec!["evidence", "S-123"],
                 "/v1/sessions/S-123/evidence",
-                "../../../../../cli/tests/fixtures/evidence.json",
+                "evidence-request.json",
             ),
             (
                 vec!["revise", "S-123"],
                 "/v1/sessions/S-123/revise",
-                "../../../../../cli/tests/fixtures/revise.json",
+                "revise-request.json",
             ),
             (vec!["session", "open"], "/v1/sessions", "session-open.json"),
             (

@@ -1,0 +1,10 @@
+{
+  "bears_on_kind": "claim",
+  "bears_on_id": "C-1",
+  "bears_on_version": 1,
+  "direction": "supports",
+  "kind": "argument",
+  "source": { "kind": "model_memory" },
+  "mode": "exploratory",
+  "body_md": "By definition, an even integer n admits an integer k with n = 2k. This is an argument, not a retrieved citation."
+}
