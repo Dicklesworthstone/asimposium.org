@@ -46,7 +46,7 @@ import {
 } from "../../src/krater/outbox-do.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import type { PublicationScreeningObservation } from "../../src/screening/workers-ai.ts";
-import { readLedgerPackSection } from "../../src/sessions/ledger-pack.ts";
+import { readLedgerPackSection, readTargetClaimPack } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
@@ -1031,6 +1031,215 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  test("targeted packs pin public claim records and exclude private resume context", async () => {
+    const reads: string[] = [];
+    const f = await fixture({
+      beforeRead: async (read) => {
+        reads.push(read.sql);
+      },
+    });
+    let key = 0;
+    const post = async (path: string, body: unknown, caller = f.call) => {
+      const response = await caller(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `target-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return response;
+    };
+    const opened = SessionOpenResponseSchema.parse(
+      await (
+        await post("/v1/sessions", {
+          problem_id: "P-4DSP",
+          intent: "prove",
+        })
+      ).json(),
+    );
+    const path = `/v1/sessions/${opened.session_id}`;
+    const draft = WorkshopPushResponseSchema.parse(
+      await (
+        await post(`${path}/workshop`, {
+          type: "draft",
+          title: "Target",
+          body_md: "PRIVATE-TARGET-WORKSHOP",
+        })
+      ).json(),
+    );
+    await post(`${path}/promote`, {
+      workshop_id: draft.workshop_id,
+      kind: "conjecture",
+      statement: "Version one has a bounded witness.",
+      falsifier: "A missing bounded witness.",
+    });
+    const reviewer = await addApprovedFellow(f, { suffix: "target-reviewer", scopes: ["review"] });
+    const rs = SessionOpenResponseSchema.parse(
+      await (
+        await post(
+          "/v1/sessions",
+          {
+            problem_id: "P-4DSP",
+            intent: "review",
+          },
+          reviewer.call,
+        )
+      ).json(),
+    );
+    await post(
+      `/v1/sessions/${rs.session_id}/review`,
+      {
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "inform",
+        basis: "A synthetic version-one check.",
+        capable_of_failure: "No witness would fail.",
+        rubric: [],
+        body_md: "VERSION-ONE-REVIEW",
+      },
+      reviewer.call,
+    );
+    const evidence = (version: number) => ({
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: version,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: `VERSION-${version}-EVIDENCE`,
+    });
+    await post(`${path}/evidence`, evidence(1));
+    await post(`${path}/revise`, {
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Version two needs a different witness.",
+      falsifier: "No different witness.",
+    });
+    await post(`${path}/evidence`, evidence(2));
+    const oversized = (await (
+      await post(`${path}/evidence`, {
+        ...evidence(2),
+        body_md: "A large evidence record. ".repeat(1000),
+      })
+    ).json()) as { evidence_id: string };
+    const expanded = (await (
+      await post(`${path}/evidence`, {
+        ...evidence(2),
+        body_md: "<!--asimp:item-->".repeat(1000),
+      })
+    ).json()) as { evidence_id: string };
+    await post(`${path}/close`, { handback: "PRIVATE-TARGET-HANDBACK" });
+    const resumed = SessionOpenResponseSchema.parse(
+      await (
+        await post("/v1/sessions", {
+          problem_id: "P-4DSP",
+          intent: "review",
+        })
+      ).json(),
+    );
+    const packPath = `/v1/sessions/${resumed.session_id}/pack`;
+    reads.length = 0;
+    const get = async (query: string) => {
+      const response = await f.call(`${packPath}?${query}`);
+      expect(response.status).toBe(200);
+      return { response, pack: PackResponseSchema.parse(await response.clone().json()) };
+    };
+    const { response, pack } = await get("profile=review&target=C-1@1&max_tokens=8000");
+    const text = await response.text();
+    expect(text).toContain("Version one has a bounded witness.");
+    expect(text).toContain("VERSION-1-EVIDENCE");
+    expect(text).toContain("VERSION-ONE-REVIEW");
+    expect(text).not.toContain("VERSION-2-EVIDENCE");
+    expect(text).not.toContain("Version two needs");
+    expect(text).not.toContain("PRIVATE-TARGET");
+    expect(pack.items.every((item) => item.scope !== "workshop")).toBe(true);
+    expect(pack.items.find((item) => item.kind === "claim-detail")?.id).toBe("C-1@1");
+    expect(pack.omitted).toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "version-pinned-dependencies",
+    });
+    expect(
+      await (await f.call(`${packPath}?profile=review&target=C-1@1&max_tokens=8000`)).text(),
+    ).toBe(text);
+    expect(
+      (
+        await f.call(`${packPath}?profile=review&target=C-1@1&max_tokens=8000`, {
+          headers: { "if-none-match": response.headers.get("etag") ?? "" },
+        })
+      ).status,
+    ).toBe(304);
+    for (const budget of [800, 1500, 2500, 4000]) {
+      const small = (await get(`profile=claim&target=C-1@1&max_tokens=${budget}`)).pack;
+      expect(small.tokens_estimate).toBeLessThanOrEqual(budget);
+      for (const item of pack.items.filter((item) => item.kind.startsWith("claim-")))
+        expect(
+          Number(small.items.some((candidate) => candidate.id === item.id)) +
+            Number(small.omitted.some((entry) => entry.detail === item.id)),
+        ).toBe(1);
+      expect(
+        small.next_actions.some(
+          (action) => action.method === "GET" && action.url.endsWith("&target=C-1@1"),
+        ),
+      ).toBe(true);
+    }
+    const second = (await get("profile=claim&target=C-1@2&max_tokens=8000")).pack;
+    expect(JSON.stringify(second)).toContain("VERSION-2-EVIDENCE");
+    expect(JSON.stringify(second)).not.toContain("VERSION-ONE-REVIEW");
+    expect(second.omitted).toContainEqual({
+      reason: "item_too_large",
+      detail: oversized.evidence_id,
+    });
+    expect(JSON.stringify(second)).not.toContain("A large evidence record.");
+    expect(second.omitted).toContainEqual({
+      reason: "item_too_large",
+      detail: expanded.evidence_id,
+    });
+    const missing = (await get("profile=review&target=C-1@99")).pack;
+    expect(missing.omitted).toContainEqual({ reason: "content_unavailable", detail: "C-1@99" });
+    expect(missing.items.some((item) => item.kind.startsWith("claim-"))).toBe(false);
+    for (const query of [
+      "profile=working&target=C-1@1",
+      "profile=review&target=C-1",
+      "profile=review&target=C-1@0",
+      "profile=review&target=C-1@1&target=C-2@1",
+    ]) {
+      const refused = await f.call(`${packPath}?${query}`);
+      expect(refused.status).toBe(400);
+      expect(ContractProblemSchema.parse(await refused.json()).code).toBe("SCHEMA_INVALID");
+    }
+    const atCreation = await readTargetClaimPack(f.db, "P-4DSP", 1, "C-1@1");
+    expect(atCreation.candidates.some((item) => item.kind === "claim-evidence")).toBe(false);
+    expect(atCreation.candidates.some((item) => item.kind === "claim-review")).toBe(false);
+    expect(reads.some((sql) => /\b(handback|workshop_objects)\b/i.test(sql))).toBe(false);
+    const evidenceId = pack.items.find((item) => item.kind === "claim-evidence")?.id;
+    expect(evidenceId).toBeDefined();
+    await f.db
+      .prepare(`UPDATE event_content SET payload_json = '{}',
+      redaction_reason = 'synthetic evidence redaction', redacted_at = '2026-09-07T00:00:00Z'
+      WHERE event_id IN (SELECT source_event_id FROM evidence WHERE problem_id = 'P-4DSP' AND evidence_id = ?)`)
+      .bind(evidenceId)
+      .run();
+    const evidenceRedacted = (await get("profile=claim&target=C-1@1&max_tokens=8000")).pack;
+    expect(evidenceRedacted.omitted).toContainEqual({
+      reason: "content_unavailable",
+      detail: evidenceId,
+    });
+    expect(JSON.stringify(evidenceRedacted)).not.toContain("VERSION-1-EVIDENCE");
+    expect(JSON.stringify(evidenceRedacted)).toContain("VERSION-ONE-REVIEW");
+    await f.db
+      .prepare(
+        "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic targeted read test', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND object_id = 'C-1' AND object_version = 1)",
+      )
+      .run();
+    const redacted = (await get("profile=review&target=C-1@1&max_tokens=8000")).pack;
+    expect(redacted.omitted).toContainEqual({ reason: "content_unavailable", detail: "C-1@1" });
+    expect(redacted.items.some((item) => item.kind.startsWith("claim-"))).toBe(false);
+  });
+
   test("review packs serve canonical rubrics with exact budget omissions and a larger read", async () => {
     const f = await fixture();
     const opened = await f.call("/v1/sessions", {

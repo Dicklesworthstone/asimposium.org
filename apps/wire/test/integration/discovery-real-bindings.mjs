@@ -264,7 +264,7 @@ try {
     );
     assert.equal(await fixtures.screeningCalls(), count, "replay must not screen twice");
     const rs = await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201);
-    const reviewPath = `/v1/sessions/${rs.session_id}/pack?profile=review`;
+    const reviewPath = `/v1/sessions/${rs.session_id}/pack?profile=review&target=C-1@1`;
     const reviewPack = PackResponseSchema.parse(await call(reviewPath, undefined, reviewer));
     assert.ok(reviewPack.items.some((item) => item.id === "SYS-review-rubric-catalog"));
     assert.ok(!JSON.stringify(reviewPack).includes(privateCanary));
@@ -292,11 +292,25 @@ try {
     );
     assert.ok(mathRubric);
     const selectedCheck = JSON.parse(mathRubric.body).items[0].id;
+    const selectedClaim = JSON.parse(
+      detailedReview.items.find((item) => item.kind === "claim-detail").body,
+    );
+    assert.equal(selectedClaim.problem, problem);
+    assert.equal(
+      selectedClaim.statement,
+      promotion.statement.replace("<!-- asimp:item", "&lt;!-- asimp:item"),
+    );
+    assert.ok(
+      detailedReview.items
+        .find((item) => item.kind === "claim-detail")
+        .neutralized.some((entry) => entry.marker === "asimp-control-comment"),
+    );
+    assert.equal(selectedClaim.falsifier, promotion.falsifier);
     const reviewed = await call(
       `/v1/sessions/${rs.session_id}/review`,
       {
-        target_claim_id: "C-1",
-        target_version: 1,
+        target_claim_id: selectedClaim.claim_id,
+        target_version: selectedClaim.version,
         verdict: "inform",
         basis: reviewBasis,
         capable_of_failure: "A nonzero remainder would fail this check.",
@@ -379,6 +393,22 @@ try {
     const reopened = await call(recovery.example.path, recoveryBody, author, 201);
     assert.equal(reopened.problem_id, problem);
     assert.notEqual(reopened.session_id, session.session_id);
+    const targetPack = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${reopened.session_id}/pack?profile=claim&target=C-1@1&max_tokens=8000`,
+        undefined,
+        author,
+      ),
+    );
+    assert.ok(targetPack.items.some((item) => item.kind === "claim-evidence"));
+    assert.ok(targetPack.items.some((item) => item.kind === "claim-review"));
+    assert.ok(targetPack.items.every((item) => item.scope !== "workshop"));
+    assert.ok(!JSON.stringify(targetPack).includes("Synthetic local proof completed"));
+    assert.ok(!JSON.stringify(targetPack).includes(privateCanary));
+    assert.equal(
+      JSON.parse(targetPack.items.find((item) => item.kind === "claim-detail").body).problem,
+      problem,
+    );
     await call(
       `/v1/sessions/${reopened.session_id}/close`,
       { handback: "Recovery verified." },
@@ -976,6 +1006,26 @@ try {
       );
     }
     const revisedBody = candidates[1][3];
+    const pinnedPacks = [];
+    for (const version of [1, 2]) {
+      const pack = PackResponseSchema.parse(
+        await call(
+          `/v1/sessions/${policyReviewer.session_id}/pack?profile=review&target=C-1@${version}&max_tokens=8000`,
+          undefined,
+          reviewer,
+        ),
+      );
+      const claim = JSON.parse(pack.items.find((item) => item.kind === "claim-detail").body);
+      assert.equal(claim.version, version);
+      assert.equal(claim.problem, "P-DISC-POL");
+      assert.equal(claim.statement === revisedBody.statement, version === 2);
+      assert.equal(
+        pack.items.some((item) => item.kind === "claim-review"),
+        version === 1,
+      );
+      pinnedPacks.push(pack);
+    }
+    assert.notDeepEqual(pinnedPacks[0], pinnedPacks[1]);
     const policyEvents = await readEvents(env.DB, "P-DISC-POL", 0, 100);
     assert.equal(
       await eventChainMatches(policyEvents),
@@ -1189,6 +1239,12 @@ try {
       redactionReader,
     );
     assert.ok(JSON.stringify(originalPack).includes(redactedClaimText));
+    const targetRedactionPath = `/v1/sessions/${redactionSession.session_id}/pack?profile=claim&target=C-1@1&max_tokens=8000`;
+    const originalTarget = await worker.fetch(`${origin}${targetRedactionPath}`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${redactionReader}` },
+    });
+    assert.equal(originalTarget.status, 200);
+    assert.ok((await originalTarget.text()).includes(redactedClaimText));
     const publicReadPaths = [
       "/p/P-DISC-A.json",
       "/p/P-DISC-A.md",
@@ -1319,6 +1375,22 @@ try {
         );
       }
     }
+    const redactedTarget = await worker.fetch(`${origin}${targetRedactionPath}`, {
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${redactionReader}`,
+        "if-none-match": originalTarget.headers.get("etag"),
+      },
+    });
+    assert.equal(redactedTarget.status, 200);
+    assert.notEqual(redactedTarget.headers.get("etag"), originalTarget.headers.get("etag"));
+    const redactedTargetPack = PackResponseSchema.parse(await redactedTarget.json());
+    assert.ok(
+      redactedTargetPack.omitted.some(
+        (item) => item.reason === "content_unavailable" && item.detail === "C-1@1",
+      ),
+    );
+    assert.ok(redactedTargetPack.items.every((item) => !item.kind.startsWith("claim-")));
     assert.ok(JSON.stringify(await call("/p/P-DISC-B.json")).includes(survivingClaimText));
     assert.deepEqual(
       redactionFailures,

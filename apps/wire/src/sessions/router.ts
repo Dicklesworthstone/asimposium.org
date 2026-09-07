@@ -13,6 +13,7 @@ import {
   HypothesisResponseSchema,
   type PackProfile,
   PackResponseSchema,
+  PackTargetQuerySchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
   type RateLimitBudget,
@@ -101,7 +102,7 @@ import {
   rejectAuthoritativeFields,
   sha256Hex,
 } from "../split/policy";
-import { readLedgerPackSection } from "./ledger-pack";
+import { readLedgerPackSection, readTargetClaimPack } from "./ledger-pack";
 import {
   checkAndReserveQuota,
   getRemainingBudget,
@@ -1662,6 +1663,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
     const profile = profileParam as PackProfile;
+    const targetParam = url.searchParams.get("target");
+    if (
+      targetParam !== null &&
+      (url.searchParams.getAll("target").length !== 1 ||
+        !PackTargetQuerySchema.safeParse({ profile, target: targetParam }).success)
+    ) {
+      return privateNoStore(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid pack target",
+          detail: "A target must select one problem-local claim version on a claim or review pack.",
+          fixHint:
+            "Use profile=claim or profile=review with one target=C-1@1. The problem is your session's problem.",
+          rule: "P9",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              method: "GET",
+              path: `/v1/sessions/${session.session_id}/pack?profile=review&target=C-1@1`,
+            },
+          },
+        }),
+      );
+    }
     const requestedMaxTokens = packBudgetOrRefusal(url.searchParams.get("max_tokens"), profile);
     if (requestedMaxTokens instanceof Response) return privateNoStore(requestedMaxTokens);
 
@@ -1696,15 +1722,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       try {
         let composed = composePack(input);
         // Omission metadata can displace another tail item. Account for every
-        // newly omitted rubric before publishing the final measured face.
-        if (input.profile === "review") {
+        // newly omitted rubric/target record before publishing the measured face.
+        if (input.profile === "review" || targetParam !== null) {
           const omitted = [...(input.omitted ?? [])];
           const disclosed = new Set(omitted.map((item) => item.detail));
           while (true) {
             const included = new Set(composed.items.map((item) => item.id));
             const missing = input.candidates.filter(
               (item) =>
-                item.kind === "review-rubric" && !included.has(item.id) && !disclosed.has(item.id),
+                (item.kind === "review-rubric" ||
+                  (targetParam !== null && item.kind.startsWith("claim-"))) &&
+                !included.has(item.id) &&
+                !disclosed.has(item.id),
             );
             if (missing.length === 0) break;
             for (const item of missing) {
@@ -1788,7 +1817,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       stable_prefix: 0,
     });
 
-    if (profile !== "hello") {
+    const targetSection =
+      targetParam === null
+        ? { candidates: [], omitted: [] }
+        : await readTargetClaimPack(db, session.problem_id, cursor, targetParam);
+    candidates.push(...targetSection.candidates);
+    if (targetParam !== null)
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-review-target",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        body: `Selected ${session.problem_id}#${targetParam}. P1: an author cannot review their own claim. P12: this target path reads only public ledger records; no private workshop or handback is included. A recorded review is a claim about checks, not proof.`,
+        why_included: "pin review context and its limits before reading ledger content",
+        stable_prefix: 2,
+      });
+
+    if (profile !== "hello" && targetParam === null) {
       const claims = await db
         .prepare(
           `SELECT id,
@@ -2156,7 +2202,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // omitted[] rather than serving a silent thin pack (§7.3's mandatory
     // omission disclosure).
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
-      claim: ["claim-detail"],
+      claim: targetParam === null ? ["claim-detail"] : [],
       review: ["author-isolation-proof"],
       graveyard: ["public-dead-ends", "friction-reports", "retry-predicates"],
       literature: ["citations"],
@@ -2221,12 +2267,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
-        ...(profile === "review" && requestedMaxTokens <= 4000
+        ...((profile === "review" || targetParam !== null) && requestedMaxTokens <= 4000
           ? [
               {
                 method: "GET" as const,
-                url: `/v1/sessions/${session.session_id}/pack?profile=review&max_tokens=8000`,
-                why: "Read a larger review pack for detailed domain rubrics omitted by this budget.",
+                url: `/v1/sessions/${session.session_id}/pack?profile=${profile}&max_tokens=8000${targetParam === null ? "" : `&target=${targetParam}`}`,
+                why:
+                  targetParam === null
+                    ? "Read a larger review pack for detailed domain rubrics omitted by this budget."
+                    : "Read a larger pack for this same claim version, including whole records omitted by the smaller budget.",
                 public_read: false,
               },
             ]
@@ -2262,6 +2311,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ]),
       ],
       omitted: [
+        ...targetSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
         ...graveyardOmissions,

@@ -132,6 +132,7 @@ import {
   type PackNeutralizationMarker,
   type PackProfile,
   type PackResponse,
+  type PackTargetQuery,
   type ProblemId,
   type PromoteRequest,
   type PromoteResponse,
@@ -501,6 +502,7 @@ function generatedSessionsTypes(): string {
     "PackNeutralizationMarker",
     "PackProfile",
     "PackResponse",
+    "PackTargetQuery",
     "ProblemId",
     "PromoteRequest",
     "PromoteResponse",
@@ -530,6 +532,7 @@ function generatedSessionsTypes(): string {
     PackNeutralizationMarker: PackNeutralizationMarker;
     PackProfile: PackProfile;
     PackResponse: PackResponse;
+    PackTargetQuery: PackTargetQuery;
     ProblemId: ProblemId;
     PromoteRequest: PromoteRequest;
     PromoteResponse: PromoteResponse;

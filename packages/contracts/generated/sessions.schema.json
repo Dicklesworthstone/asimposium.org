@@ -2274,6 +2274,28 @@
         }
       ]
     },
+    "pack_target_query": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "claim",
+            "review"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^C-[0-9]+@[1-9][0-9]{0,14}$"
+        }
+      },
+      "required": [
+        "profile",
+        "target"
+      ],
+      "additionalProperties": false
+    },
     "workshop_push_request": {
       "type": "object",
       "properties": {
@@ -3427,6 +3449,7 @@
     "session_open_response",
     "session_status_response",
     "pack_response",
+    "pack_target_query",
     "workshop_push_request",
     "workshop_push_response",
     "sponsor_workshop_request",

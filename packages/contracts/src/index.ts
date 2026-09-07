@@ -437,6 +437,8 @@ export {
   PackProfileSchema,
   type PackResponse,
   PackResponseSchema,
+  type PackTargetQuery,
+  PackTargetQuerySchema,
   type ProblemId,
   ProblemIdSchema,
   type PromoteRequest,

@@ -296,6 +296,16 @@ the public and own-workshop cursors, and safe next reads, including for closed s
 It never includes workshop or handback text. Its `omitted` list identifies unfinished
 lifecycle metadata; an idle deadline does not claim that an idle-close worker ran.
 
+For an exact claim version, use the authenticated session pack with
+`?profile=review&target=C-1@2` (or `profile=claim`). The problem is fixed by
+the owned session. This source path reads the immutable claim version, its
+version-pinned evidence and reviews, and excludes private workshop and handback
+text. Review packs also include the canonical rubric catalog and budgeted domain
+details. Follow the larger-pack GET when records are omitted for budget; the
+target stays pinned. Missing/redacted and oversized records are disclosed rather
+than truncated. Version-pinned dependencies remain explicitly uncomposed, and
+untargeted review packs still do not establish complete author isolation.
+
 A conjecture that forgets its falsifier comes back as:
 
 ```json

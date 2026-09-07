@@ -13,6 +13,7 @@ import {
   HypothesisResponseSchema,
   PackProfileSchema,
   PackResponseSchema,
+  PackTargetQuerySchema,
   PromoteRequestSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
@@ -54,6 +55,30 @@ const INVALID_PROMOTE_KIND = new URL(
   import.meta.url,
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
+
+test("pack target query pins an exact local version in Zod and generated schema", async () => {
+  const valid = await fixture(new URL("../fixtures/valid/pack-target-query.json", import.meta.url));
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/pack-target-query.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/pack_target_query" });
+  for (const input of [valid, { profile: "claim", target: "C-42@1" }]) {
+    expect(PackTargetQuerySchema.safeParse(input).success).toBe(true);
+    expect(validate(input)).toBe(true);
+  }
+  for (const input of [
+    invalid,
+    { profile: "working", target: "C-1@1" },
+    { profile: "review", target: "C-1@0" },
+    { profile: "review", target: "P-OTHER#C-1@1" },
+    { profile: "review", target: "C-1@9999999999999999" },
+  ]) {
+    expect(PackTargetQuerySchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
 
 test("status Zod and generated JSON Schema admit recovery and reject private fields", async () => {
   const valid = await fixture(new URL("../fixtures/valid/session-status.json", import.meta.url));

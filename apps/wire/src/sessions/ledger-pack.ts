@@ -1,5 +1,5 @@
 import type { PackProfile } from "@asimposium/contracts";
-import type { PackCandidate } from "@asimposium/render";
+import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { Env } from "../env";
 
 // One extra row proves truncation. The shared composer applies the tighter
@@ -46,6 +46,130 @@ interface RelationRow extends ProvenanceRow {
 export interface LedgerPackSection {
   candidates: PackCandidate[];
   omitted: { reason: string; detail: string }[];
+}
+
+/** Exact-version read, exclusively from the public ledger. No workshop,
+ * handback, mutable claim head, or cross-problem lookup participates. */
+export async function readTargetClaimPack(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  target: string,
+): Promise<LedgerPackSection> {
+  const [claimId, versionText] = target.split("@");
+  const version = Number(versionText);
+  type TargetRow = { id: string; body: string | null };
+  const results = await db.batch([
+    db
+      .prepare(`
+      SELECT v.claim_id || '@' || v.version AS id,
+        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+          'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
+          'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
+          'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,
+          'fellow', e.actor_fellow_id, 'sponsor', e.actor_sponsor_id,
+          'session', e.actor_session_id, 'model_self_declared', e.model_string_self_declared,
+          'harness_self_declared', e.harness) END AS body
+      FROM claim_versions v JOIN events e
+        ON e.problem_id = v.problem_id AND e.object_id = v.claim_id
+       AND e.object_version = v.version AND e.object_kind = 'claim'
+       AND e.type IN ('claim.created', 'claim.revised')
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      WHERE v.problem_id = ? AND v.claim_id = ? AND v.version = ? AND e.seq <= ?
+      ORDER BY e.seq ASC LIMIT 1
+    `)
+      .bind(problemId, claimId, version, cursor),
+    db
+      .prepare(`
+      SELECT x.evidence_id AS id,
+        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+          'problem', x.problem_id, 'target', x.bears_on_id || '@' || x.bears_on_version,
+          'kind', x.kind, 'direction', x.direction, 'computed_class', x.computed_class,
+          'coercion_flags', json(x.coercion_flags_json), 'mode', x.mode,
+          'source_kind', x.source_kind, 'locator', x.locator, 'excerpt', x.excerpt,
+          'computation_domain_or_floor', x.computation_domain_or_floor,
+          'reproduction', json(x.reproduction_json), 'selected_hypothesis_id', x.selected_hypothesis_id,
+          'body_md', x.body_md, 'cas_hash', x.cas_hash,
+          'event', e.id, 'seq', e.seq, 'fellow', e.actor_fellow_id,
+          'sponsor', e.actor_sponsor_id, 'session', e.actor_session_id,
+          'model_self_declared', e.model_string_self_declared, 'harness_self_declared', e.harness
+        ) END AS body
+      FROM evidence x JOIN events e ON e.id = x.source_event_id
+        AND e.problem_id = x.problem_id AND e.object_id = x.evidence_id
+        AND e.object_kind = 'evidence' AND e.type = 'evidence.created' AND e.seq = x.source_seq
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      WHERE x.problem_id = ? AND x.bears_on_kind = 'claim' AND x.bears_on_id = ?
+        AND x.bears_on_version = ? AND e.seq <= ?
+      ORDER BY e.seq ASC, e.id ASC LIMIT ?
+    `)
+      .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
+    db
+      .prepare(`
+      SELECT x.review_id AS id,
+        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+          'problem', x.problem_id, 'target', x.target_claim_id || '@' || x.target_version,
+          'tier', x.tier, 'verdict', x.verdict, 'basis', x.basis,
+          'capable_of_failure', x.capable_of_failure, 'rubric', json(x.rubric_json),
+          'body_md', x.body_md, 'cas_hash', x.cas_hash,
+          'event', e.id, 'seq', e.seq, 'fellow', e.actor_fellow_id,
+          'sponsor', e.actor_sponsor_id, 'session', e.actor_session_id,
+          'model_self_declared', e.model_string_self_declared, 'harness_self_declared', e.harness
+        ) END AS body
+      FROM reviews x JOIN events e ON e.id = x.source_event_id
+        AND e.problem_id = x.problem_id AND e.object_id = x.review_id
+        AND e.object_kind = 'review' AND e.type = 'review.created' AND e.seq = x.source_seq
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      WHERE x.problem_id = ? AND x.target_claim_id = ? AND x.target_version = ? AND e.seq <= ?
+      ORDER BY e.seq ASC, e.id ASC LIMIT ?
+    `)
+      .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
+  ]);
+  const section: LedgerPackSection = {
+    candidates: [],
+    omitted: [{ reason: "profile_section_not_composed", detail: "version-pinned-dependencies" }],
+  };
+  const claim = results[0]?.results[0] as TargetRow | undefined;
+  if (claim?.body == null) {
+    section.omitted.push({ reason: "content_unavailable", detail: target });
+    return section;
+  }
+  for (const [index, kind] of ["claim-detail", "claim-evidence", "claim-review"].entries()) {
+    const rows = (results[index]?.results ?? []) as TargetRow[];
+    if (rows.length > LEDGER_PACK_CANDIDATE_LIMIT)
+      section.omitted.push({ reason: "candidate_limit", detail: `${target}:${kind}` });
+    for (const [position, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
+      if (row.body === null) {
+        section.omitted.push({ reason: "content_unavailable", detail: row.id });
+      } else if (row.body.length > 18000 || neutralizeUntrustedBody(row.body).text.length > 18000) {
+        // Check both original and neutralized size; escaping can expand hostile
+        // markers. Never let one record break the pack or truncate the object.
+        section.omitted.push({ reason: "item_too_large", detail: row.id });
+      } else {
+        section.candidates.push({
+          kind,
+          id: row.id,
+          scope: "ledger",
+          untrusted: true,
+          tokens: 1,
+          body: row.body,
+          why_included: `public record for ${problemId}#${target} at the pack cursor`,
+          stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
+        });
+      }
+    }
+    if (rows.length === 0)
+      section.candidates.push({
+        kind: "standing-context",
+        id: `SYS-${kind}-empty`,
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        body: `No recorded ${kind} for ${target} at this cursor.`,
+        why_included: "state the exact-version baseline without inventing support",
+        stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT,
+      });
+  }
+  return section;
 }
 
 /** Public ledger only. Call after session ownership and membership checks.

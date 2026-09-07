@@ -81,6 +81,18 @@ export const PackProfileSchema = z.enum([
 ]);
 export type PackProfile = z.infer<typeof PackProfileSchema>;
 
+/** Explicit problem-local claim version; never infer a head or another problem. */
+export const PackTargetQuerySchema = z
+  .object({
+    profile: z.enum(["claim", "review"]),
+    target: z
+      .string()
+      .max(64)
+      .regex(/^C-[0-9]+@[1-9][0-9]{0,14}$/),
+  })
+  .strict();
+export type PackTargetQuery = z.infer<typeof PackTargetQuerySchema>;
+
 /** §7.3: budgets are bucketized so pack caching stays sane. */
 export const PackBudgetSchema = z.union([
   z.literal(800),
@@ -820,6 +832,7 @@ export const SessionsContractsSchema = z
     session_open_response: SessionOpenResponseSchema,
     session_status_response: SessionStatusResponseSchema,
     pack_response: PackResponseSchema,
+    pack_target_query: PackTargetQuerySchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
