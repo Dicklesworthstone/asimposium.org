@@ -299,8 +299,11 @@ export type S2CostReceiptPublication = z.infer<typeof S2CostReceiptPublicationSc
 export type S2CostReceiptPublicationCommit = z.infer<typeof S2CostReceiptPublicationCommitSchema>;
 
 export class S2CostReceiptContractError extends Error {
-  constructor(readonly code: "S2_COST_RECEIPT_INVALID" | "S2_COST_RECEIPT_TOO_LARGE") {
+  readonly code: "S2_COST_RECEIPT_INVALID" | "S2_COST_RECEIPT_TOO_LARGE";
+
+  constructor(code: "S2_COST_RECEIPT_INVALID" | "S2_COST_RECEIPT_TOO_LARGE") {
     super(code);
+    this.code = code;
     this.name = "S2CostReceiptContractError";
   }
 }
