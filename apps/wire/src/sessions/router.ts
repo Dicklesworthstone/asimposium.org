@@ -3324,6 +3324,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    const dependencyCycleProblem = () =>
+      validatedProblem({
+        status: 422,
+        code: "CYCLE_IN_DEPENDENCIES",
+        title: "The dependency would close a cycle",
+        detail:
+          "A proposed dependency reaches back to the claim being revised. No revision was published.",
+        fixHint:
+          "Remove the proposed dependency that leads back to this claim and retry with a new Idempotency-Key.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { depends_on: [] },
+        },
+      });
     const resolvedDeps = [...new Set(parsed.data.depends_on)];
     if (resolvedDeps.includes(parsed.data.claim_id)) {
       return validatedProblem({
@@ -3363,6 +3378,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
+    }
+
+    if (resolvedDeps.length > 0) {
+      const cycle = await db
+        .prepare(`
+        WITH RECURSIVE reachable(claim_id) AS (
+          VALUES ${resolvedDeps.map(() => "(?)").join(", ")}
+          UNION
+          SELECT d.depends_on_claim_id FROM claim_deps d
+          JOIN reachable r ON d.claim_id = r.claim_id WHERE d.problem_id = ?
+        )
+        SELECT 1 AS cycle FROM reachable WHERE claim_id = ? LIMIT 1
+      `)
+        .bind(...resolvedDeps, session.problem_id, parsed.data.claim_id)
+        .first();
+      if (cycle !== null && cycle !== undefined) return dependencyCycleProblem();
     }
 
     // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
@@ -3532,7 +3563,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      SELECT p.id, ?, ?, ?
                      FROM problems p
                      JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
+                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?
+                     ON CONFLICT(problem_id, claim_id, depends_on_claim_id) DO NOTHING`,
                   )
                   .bind(
                     settlement.claimId,
@@ -3582,6 +3614,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message)) {
+        return dependencyCycleProblem();
+      }
       if (error instanceof Error && /claim_versions/.test(error.message)) {
         // The stale-base backstop: a concurrent revision minted @base+1 first,
         // so this batch died on the claim_versions primary key without

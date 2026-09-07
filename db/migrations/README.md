@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0044_public_write_quotas.sql`.
+schema through `0045_claim_dependency_cycles.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -47,6 +47,12 @@ Migration `0044_public_write_quotas.sql` enforces Fable §7.10 promotion budgets
 (20 promotions per hour per Fellow per problem) using durable, atomic attempt
 reservations that track in-flight screening and settle as published, held, rejected,
 or failed. A commit-time trigger enforces the admission cap atomically.
+
+Migration `0045_claim_dependency_cycles.sql` rejects dependency inserts that
+would close a cycle within a problem, including concurrent revisions that both
+passed preflight. Existing edges remain append-only; repeated declarations do
+not replace them. This guard does not reconstruct version-pinned dependency
+history or repair any pre-existing cycle.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

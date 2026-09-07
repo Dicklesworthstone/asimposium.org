@@ -1184,6 +1184,132 @@ try {
       storageToken,
       201,
     );
+    {
+      const problem = "P-DISC-DEPS";
+      await fixtures.seedProblem(problem);
+      const token = await enroll("dependency-revisions", "usr_dependency_revisions");
+      const session = await call(
+        "/v1/sessions",
+        { problem_id: problem, intent: "prove" },
+        token,
+        201,
+      );
+      const path = `/v1/sessions/${session.session_id}`;
+      for (let index = 1; index <= 3; index++) {
+        const statement = `Dependency fixture fact number ${index}.`;
+        const draft = await call(
+          `${path}/workshop`,
+          { type: "draft", title: statement, body_md: statement },
+          token,
+          201,
+        );
+        await call(
+          `${path}/promote`,
+          {
+            workshop_id: draft.workshop_id,
+            kind: "lemma",
+            statement,
+            depends_on: index === 2 ? ["C-1"] : [],
+          },
+          token,
+          201,
+        );
+      }
+      const revision = (claim, deps, base = 1) => ({
+        claim_id: claim,
+        base_version: base,
+        kind: "lemma",
+        statement: `Revised dependency fixture ${claim} version ${base + 1}.`,
+        depends_on: deps,
+      });
+      const existing = await env.DB.prepare(
+        "SELECT * FROM claim_deps WHERE problem_id = ? AND claim_id = 'C-2'",
+      )
+        .bind(problem)
+        .first();
+      const retained = revision("C-2", ["C-1", "C-1"]);
+      const published = await call(`${path}/revise`, retained, token, 201, "dependency-retain");
+      assert.equal(published.version, 2);
+      assert.deepEqual(
+        await call(`${path}/revise`, retained, token, 200, "dependency-retain"),
+        published,
+      );
+      assert.deepEqual(
+        await env.DB.prepare("SELECT * FROM claim_deps WHERE problem_id = ? AND claim_id = 'C-2'")
+          .bind(problem)
+          .first(),
+        existing,
+      );
+      const beforeKnownCycle = await publicState();
+      const beforeKnownScreens = await fixtures.screeningCalls();
+      const cycle = await call(`${path}/revise`, revision("C-1", ["C-2"]), token, 422);
+      assert.equal(cycle.code, "CYCLE_IN_DEPENDENCIES");
+      assert.equal(cycle.rule, "P10");
+      assert.deepEqual(await publicState(), beforeKnownCycle);
+      assert.equal(await fixtures.screeningCalls(), beforeKnownScreens);
+      const sendRevision = (claim, deps) =>
+        worker.fetch(`${origin}${path}/revise`, {
+          method: "POST",
+          headers: {
+            "User-Agent": userAgent,
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "idempotency-key": `dependency-race-${claim}`,
+          },
+          body: JSON.stringify(revision(claim, deps)),
+        });
+      await fixtures.pauseScreening();
+      let responses;
+      try {
+        responses = await Promise.all([sendRevision("C-1", ["C-3"]), sendRevision("C-3", ["C-1"])]);
+      } finally {
+        await fixtures.resumeScreening();
+      }
+      assert.equal(
+        await fixtures.screeningCalls(),
+        beforeKnownScreens + 2,
+        "both revisions must pass preflight before the commit race",
+      );
+      assert.deepEqual(responses.map((response) => response.status).sort(), [201, 422]);
+      const refused = await responses.find((response) => response.status === 422).json();
+      assert.equal(refused.code, "CYCLE_IN_DEPENDENCIES");
+      assert.equal(refused.rule, "P10");
+      const afterRace = await publicState();
+      assert.deepEqual(
+        afterRace,
+        {
+          ...beforeKnownCycle,
+          events: beforeKnownCycle.events + 1,
+          screening_publications: beforeKnownCycle.screening_publications + 1,
+          outbox: beforeKnownCycle.outbox + 1,
+          versions: beforeKnownCycle.versions + 1,
+          claim_versions_sum: beforeKnownCycle.claim_versions_sum + 2,
+          cursor: beforeKnownCycle.cursor + 1,
+        },
+        "losing revision must leave no partial public effects",
+      );
+      const edges = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id = ?",
+      )
+        .bind(problem)
+        .first();
+      assert.equal(edges.n, 2);
+      const events = await readEvents(env.DB, problem, 0, 100);
+      assert.equal(events.length, 5);
+      assert.equal(await eventChainMatches(events), true);
+      console.log(
+        JSON.stringify({
+          stage: "real-d1-dependency-revisions",
+          retained_edge: "pass",
+          replay: "pass",
+          preflight_cycle: "refused-before-screening",
+          concurrent_screens: 2,
+          concurrent_results: [201, 422],
+          atomic_rollback: "pass",
+          event_chain: "pass",
+        }),
+      );
+    }
     await verifyQuotaRaces();
     // Plant a real D1 write failure after screening. No source event may survive
     // without its evidence. This trigger belongs only to this disposable database.

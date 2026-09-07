@@ -1031,6 +1031,158 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  async function dependencyRevisionFixture(options: LocalD1Options = {}) {
+    const f = await fixture(options);
+    let key = 0;
+    const post = (path: string, body: unknown, suppliedKey?: string) =>
+      f.call(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": suppliedKey ?? `dep-rev-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}`;
+    for (const [index, statement] of [
+      "A foundational fact.",
+      "A consequence of the foundational fact.",
+      "An independent auxiliary fact.",
+    ].entries()) {
+      const draft = WorkshopPushResponseSchema.parse(
+        await (
+          await post(`${path}/workshop`, {
+            type: "draft",
+            title: statement,
+            body_md: statement,
+          })
+        ).json(),
+      );
+      const response = await post(`${path}/promote`, {
+        workshop_id: draft.workshop_id,
+        kind: "lemma",
+        statement,
+        depends_on: index === 1 ? ["C-1"] : [],
+      });
+      expect(response.status).toBe(201);
+    }
+    const revise = (id: string, deps: string[], version = 1, key?: string) =>
+      post(
+        `${path}/revise`,
+        {
+          claim_id: id,
+          base_version: version,
+          kind: "lemma",
+          statement: `Revised ${id} at version ${version + 1}, with a precise bound.`,
+          depends_on: deps,
+        },
+        key,
+      );
+    return { ...f, revise };
+  }
+
+  test("revision dependencies retain repeated edges while adding new ones exactly once", async () => {
+    const f = await dependencyRevisionFixture();
+    const before = await f.db
+      .prepare("SELECT * FROM claim_deps WHERE problem_id = 'P-4DSP' AND claim_id = 'C-2'")
+      .all();
+    const response = await f.revise("C-2", ["C-1", "C-3", "C-1"], 1, "retain-deps");
+    expect(response.status, await response.clone().text()).toBe(201);
+    expect(ReviseResponseSchema.parse(await response.json()).version).toBe(2);
+    const after = await f.db
+      .prepare(
+        "SELECT * FROM claim_deps WHERE problem_id = 'P-4DSP' AND claim_id = 'C-2' ORDER BY depends_on_claim_id",
+      )
+      .all();
+    expect(after.results).toHaveLength(2);
+    expect(after.results[0]).toEqual(before.results[0]);
+    expect((await f.revise("C-2", ["C-1", "C-3", "C-1"], 1, "retain-deps")).status).toBe(200);
+    expect((await f.revise("C-2", ["C-1"], 1)).status).toBe(409);
+    expect(
+      await f.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM claim_versions WHERE problem_id='P-4DSP' AND claim_id='C-2'",
+        )
+        .first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id='P-4DSP'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 4 });
+  });
+
+  test("revision dependencies refuse a longer cycle before screening", async () => {
+    let screens = 0;
+    const f = await dependencyRevisionFixture({
+      screeningAttestation: (observation) => {
+        screens += 1;
+        return observation;
+      },
+    });
+    expect((await f.revise("C-3", ["C-2"])).status).toBe(201);
+    const baseline = screens;
+    const refused = await f.revise("C-1", ["C-3"]);
+    expect(refused.status).toBe(422);
+    expect(ContractProblemSchema.parse(await refused.json())).toMatchObject({
+      code: "CYCLE_IN_DEPENDENCIES",
+      rule: "P10",
+    });
+    expect(screens).toBe(baseline);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id='P-4DSP'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 4 });
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id='P-4DSP'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+  });
+
+  test("revision dependencies atomically refuse concurrent opposite edges", async () => {
+    let armed = false;
+    let arrived = 0;
+    const gate = Promise.withResolvers<void>();
+    const f = await dependencyRevisionFixture({
+      screenPromotion: async () => {
+        if (armed) {
+          if (++arrived === 2) gate.resolve();
+          await gate.promise;
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    armed = true;
+    const responses = await Promise.all([f.revise("C-1", ["C-3"]), f.revise("C-3", ["C-1"])]);
+    expect(arrived).toBe(2);
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 422]);
+    const refused = responses.find((response) => response.status === 422);
+    if (refused === undefined) throw new Error("The cyclic revision was not refused");
+    expect(ContractProblemSchema.parse(await refused.json())).toMatchObject({
+      code: "CYCLE_IN_DEPENDENCIES",
+      rule: "P10",
+    });
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id='P-4DSP'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 4 });
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM claim_versions WHERE problem_id='P-4DSP'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 4 });
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id='P-4DSP'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+  });
+
   test("targeted packs pin public claim records and exclude private resume context", async () => {
     const reads: string[] = [];
     const f = await fixture({
