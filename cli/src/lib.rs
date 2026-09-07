@@ -138,11 +138,29 @@ pub enum SessionCommand {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkshopCommand {
-    /// Send a complete WorkshopPushRequest JSON object; does not publish it.
+    /// Push Markdown with metadata or a complete JSON request; does not publish it.
     Push {
         session: String,
+        /// Complete WorkshopPushRequest JSON file, instead of Markdown inputs.
+        #[arg(long, required_unless_present = "body_file", value_name = "JSON_FILE")]
+        file: Option<std::path::PathBuf>,
+        /// UTF-8 Markdown draft; preserved exactly inside the JSON request.
+        #[arg(long, required_unless_present = "file", conflicts_with = "file", requires_all = ["kind", "title"], value_name = "MARKDOWN_FILE")]
+        body_file: Option<std::path::PathBuf>,
+        /// Workshop type (e.g. draft, note, computation); validated by the Worker.
+        #[arg(long = "type", requires = "body_file", conflicts_with = "file")]
+        kind: Option<String>,
+        /// Workshop title; validated by the Worker.
+        #[arg(long, requires = "body_file", conflicts_with = "file")]
+        title: Option<String>,
+        /// Related object reference; repeat this flag for multiple references.
+        #[arg(long, requires = "body_file", conflicts_with = "file")]
+        relates_to: Vec<String>,
+        /// Explicit note override; the Worker still applies screening and permissions.
+        #[arg(long, requires = "body_file", conflicts_with = "file")]
+        force_note: bool,
         #[command(flatten)]
-        request: JsonWriteArgs,
+        options: WriteOptions,
     },
 }
 
@@ -167,6 +185,13 @@ pub struct WriteOptions {
 
 enum WriteBody<'a> {
     File(&'a std::path::Path),
+    Workshop {
+        path: &'a std::path::Path,
+        kind: &'a str,
+        title: &'a str,
+        relates_to: &'a [String],
+        force_note: bool,
+    },
     Open {
         problem: &'a str,
         intent: Option<&'a str>,
@@ -217,12 +242,31 @@ impl Command {
                 },
             }),
             Self::Workshop {
-                command: WorkshopCommand::Push { session, request },
+                command:
+                    WorkshopCommand::Push {
+                        session,
+                        file,
+                        body_file,
+                        kind,
+                        title,
+                        relates_to,
+                        force_note,
+                        options,
+                    },
             } => Some(WriteRequest {
                 session: Some(session),
                 action: "workshop",
-                options: &request.options,
-                body: WriteBody::File(&request.file),
+                options,
+                body: match file {
+                    Some(file) => WriteBody::File(file),
+                    None => WriteBody::Workshop {
+                        path: body_file.as_deref()?,
+                        kind: kind.as_deref()?,
+                        title: title.as_deref()?,
+                        relates_to,
+                        force_note: *force_note,
+                    },
+                },
             }),
             Self::Promote { session, request } => Some(WriteRequest {
                 session: Some(session),
@@ -308,6 +352,22 @@ impl WriteBody<'_> {
     ) -> Result<String, String> {
         let value = match self {
             Self::File(path) => return read(path).map_err(str::to_owned),
+            Self::Workshop {
+                path,
+                kind,
+                title,
+                relates_to,
+                force_note,
+            } => {
+                let body = read(path).map_err(str::to_owned)?;
+                let mut value = serde_json::json!({
+                    "type": kind, "title": title, "body_md": body, "relates_to": relates_to,
+                });
+                if force_note {
+                    value["force_note"] = serde_json::json!(true);
+                }
+                value
+            }
             Self::Open { problem, intent } => {
                 let mut value = serde_json::json!({"problem_id": problem});
                 if let Some(intent) = intent {
@@ -355,16 +415,17 @@ fn ecmascript_whitespace(character: char) -> bool {
 
 fn read_request_file(path: &std::path::Path) -> Result<String, &'static str> {
     let metadata = std::fs::metadata(path)
-        .map_err(|_| "Cannot read --file; supply an accessible regular JSON file.")?;
+        .map_err(|_| "Cannot read --file/--body-file; supply an accessible regular UTF-8 file.")?;
     if !metadata.is_file() {
         return Err(
-            "--file must name a regular JSON file; stdin and special devices are unsupported.",
+            "--file/--body-file must name a regular UTF-8 file; stdin and special devices are unsupported.",
         );
     }
-    let file =
-        std::fs::File::open(path).map_err(|_| "Cannot open --file; check its permissions.")?;
-    read_capped_at(file, MAX_REQUEST_BYTES)
-        .map_err(|_| "Cannot read --file as UTF-8 within 512 KiB; check its encoding and size.")
+    let file = std::fs::File::open(path)
+        .map_err(|_| "Cannot open --file/--body-file; check its permissions.")?;
+    read_capped_at(file, MAX_REQUEST_BYTES).map_err(
+        |_| "Cannot read --file/--body-file as UTF-8 within 512 KiB; check its encoding and size.",
+    )
 }
 
 fn input_error(message: &str) -> CliOutput {
@@ -939,6 +1000,148 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn markdown_workshop_preserves_text_and_encodes_metadata_without_a_second_schema() {
+        for extra in [
+            vec![],
+            vec![
+                "--relates-to",
+                "C-1",
+                "--relates-to",
+                "H-2\",\"admin\":true",
+                "--force-note",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(
+                [
+                    vec![
+                        "asimp",
+                        "--origin",
+                        "https://example.test",
+                        "workshop",
+                        "push",
+                        "S-123",
+                        "--body-file",
+                        "draft.md",
+                        "--type",
+                        "future-kind",
+                        "--title",
+                        "Quoted \"title\"\n😀",
+                        "--idempotency-key",
+                        "retained-key",
+                    ],
+                    extra.clone(),
+                ]
+                .concat(),
+            )
+            .unwrap();
+            assert!(cli.command.requires_token());
+            let draft = "\u{feff}  # Draft\r\n\nA \\\"quote\\\" 😀\u{0001}\n  ";
+            let result = run_cli_write(
+                &cli,
+                |path| {
+                    assert_eq!(path, std::path::Path::new("draft.md"));
+                    Ok(draft.to_owned())
+                },
+                |url, key, body| {
+                    assert_eq!(url, "https://example.test/v1/sessions/S-123/workshop");
+                    assert_eq!(key, "retained-key");
+                    let mut expected = serde_json::json!({"type":"future-kind", "title":"Quoted \"title\"\n😀", "body_md":draft, "relates_to":[]});
+                    if !extra.is_empty() {
+                        expected["relates_to"] = serde_json::json!(["C-1", "H-2\",\"admin\":true"]);
+                        expected["force_note"] = serde_json::json!(true);
+                    }
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                        expected
+                    );
+                    // Unknown types deliberately reach the canonical Worker validator.
+                    Err(FetchError::Status(422))
+                },
+            );
+            assert_eq!(result.exit_code, 1);
+            assert!(result.stdout.is_empty());
+            assert!(!result.stderr.contains("Quoted"));
+        }
+    }
+
+    #[test]
+    fn markdown_workshop_requires_complete_exclusive_inputs() {
+        for args in [
+            vec![],
+            vec!["--body-file", "draft.md"],
+            vec!["--body-file", "draft.md", "--type", "draft"],
+            vec!["--body-file", "draft.md", "--title", "Title"],
+            vec![
+                "--file",
+                "request.json",
+                "--body-file",
+                "draft.md",
+                "--type",
+                "draft",
+                "--title",
+                "Title",
+            ],
+            vec!["--file", "request.json", "--type", "draft"],
+            vec!["--file", "request.json", "--title", "Title"],
+            vec!["--file", "request.json", "--relates-to", "C-1"],
+            vec!["--file", "request.json", "--force-note"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    [
+                        vec![
+                            "asimp",
+                            "workshop",
+                            "push",
+                            "S-123",
+                            "--idempotency-key",
+                            "retained-key"
+                        ],
+                        args.clone()
+                    ]
+                    .concat()
+                )
+                .is_err(),
+                "accepted incompatible/incomplete input: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_workshop_read_failure_and_encoded_size_limit_stop_before_network() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "workshop",
+            "push",
+            "S-123",
+            "--body-file",
+            "private-canary.md",
+            "--type",
+            "draft",
+            "--title",
+            "Title",
+            "--idempotency-key",
+            "retained-key",
+        ])
+        .unwrap();
+        for read in [
+            Err("Cannot read input file."),
+            Ok("\u{0001}".repeat(100_000)),
+        ] {
+            let output = run_cli_write(
+                &cli,
+                |_| read,
+                |_, _, _| panic!("failed/oversized input reached network"),
+            );
+            assert_eq!(output.exit_code, 2);
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.contains("canary"));
+        }
+    }
+
+    #[test]
     fn inline_session_inputs_encode_exact_json_without_reading_files() {
         for (args, path, expected) in [
             (
@@ -1074,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_open_and_close_match_existing_contract_fixtures() {
+    fn typed_writes_match_existing_contract_fixtures() {
         let open: serde_json::Value = serde_json::from_str(include_str!(
             "../../packages/contracts/test/fixtures/valid/session-open.json"
         ))
@@ -1098,6 +1301,29 @@ mod tests {
             .unwrap();
         let result: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(result, serde_json::json!({"handback": close["handback"]}));
+        let workshop: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packages/contracts/test/fixtures/valid/workshop-push.json"
+        ))
+        .unwrap();
+        let refs: Vec<String> = workshop["relates_to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect();
+        let encoded = WriteBody::Workshop {
+            path: std::path::Path::new("draft.md"),
+            kind: workshop["type"].as_str().unwrap(),
+            title: workshop["title"].as_str().unwrap(),
+            relates_to: &refs,
+            force_note: false,
+        }
+        .encode(|_| Ok(workshop["body_md"].as_str().unwrap().to_owned()))
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            workshop
+        );
     }
 
     #[test]
@@ -1108,6 +1334,19 @@ mod tests {
                 vec!["workshop", "push", "S-123"],
                 "/v1/sessions/S-123/workshop",
                 "workshop-push.json",
+            ),
+            (
+                vec![
+                    "workshop",
+                    "push",
+                    "S-123",
+                    "--type",
+                    "draft",
+                    "--title",
+                    "Markdown draft",
+                ],
+                "/v1/sessions/S-123/workshop",
+                "../../../../../cli/README.md",
             ),
             (
                 vec!["promote", "S-123"],
@@ -1124,9 +1363,10 @@ mod tests {
             let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../packages/contracts/test/fixtures/valid")
                 .join(fixture);
+            let markdown = args.contains(&"--type");
             let mut args = [vec!["asimp", "--origin", "https://example.test"], args].concat();
             args.extend([
-                "--file",
+                if markdown { "--body-file" } else { "--file" },
                 file.to_str().unwrap(),
                 "--idempotency-key",
                 "retained-operation-1",
@@ -1134,7 +1374,12 @@ mod tests {
             ]);
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(cli.command.requires_token());
-            let expected_body = std::fs::read_to_string(&file).unwrap();
+            let source = std::fs::read_to_string(&file).unwrap();
+            let expected_body = if markdown {
+                serde_json::to_string(&serde_json::json!({"type":"draft", "title":"Markdown draft", "body_md":source, "relates_to":[]})).unwrap()
+            } else {
+                source
+            };
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             // This server records requests, not D1 commits: it proves transport

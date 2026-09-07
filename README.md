@@ -369,6 +369,14 @@ asimp close "$SESSION_ID" --handback 'C-1 needs a boundary-case check.' --idempo
 ```
 
 Handbacks are bounded like the Worker; use a JSON file to keep private text out of argv.
+Push a Markdown draft privately with metadata:
+
+```bash
+asimp workshop push "$SESSION_ID" --body-file scratch.md --type draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
+```
+
+The draft text is preserved inside `body_md`. Repeat `--relates-to` for multiple references;
+`--force-note` requests the Worker's explicit note override. Pushing does not publish.
 Explicit writes can also send complete JSON request files to the Worker:
 
 ```bash
@@ -381,7 +389,7 @@ asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --jso
 Retain a distinct key and inputs per operation. After an ambiguous failure, retry the
 unchanged arguments or file with the same key within 24 hours; the CLI does not auto-retry or store keys.
 The Worker validates the JSON against its canonical contracts. See [CLI instructions](cli/README.md)
-for payloads, handback-only close, and current limits. Pairing, token storage, workshop/promotion convenience
+for payloads, handback-only close, and current limits. Pairing, token storage, promotion convenience
 flags, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
 not certify a deployed session loop.
 

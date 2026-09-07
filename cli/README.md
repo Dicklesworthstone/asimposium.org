@@ -53,6 +53,22 @@ when the handback should stay out of argv and shell history. File and direct
 input modes are mutually exclusive. Both modes use the same POST routes and
 JSON serialization; the CLI does not infer a session or publish during close.
 
+Push an existing Markdown work product into your private workshop:
+
+```bash
+asimp workshop push "$SESSION_ID" --body-file scratch.md --type draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
+```
+
+`--body-file` requires both `--type` and `--title`. The CLI preserves the draft's
+text, including whitespace, in `body_md` and safely encodes metadata as JSON.
+Repeat `--relates-to` for multiple references; omitting it sends an empty list.
+Optional `--force-note` requests the explicit note override; screening and
+permissions still apply. The Worker validates types, title/body limits and
+references. Markdown inputs cannot be mixed with `--file`, which sends a
+complete JSON request. Titles and references supplied as flags enter argv;
+use complete JSON mode if that metadata should stay out of process arguments.
+Neither mode publishes the draft; promotion is a separate explicit write.
+
 With `ASIMP_TOKEN` supplied, send complete JSON request files to the existing
 Worker routes:
 
@@ -78,7 +94,9 @@ unchanged and does not implement a second schema. `close.json` can contain
 Worker supports handback-only close; promote first and omit or empty its
 `promote`, `keep` and `discard` arrays.
 
-Request files must be regular UTF-8 files at most 512 KiB. Writes use the same
+Input files must be regular UTF-8 files at most 512 KiB; encoded JSON must also
+fit that cap. The Worker applies its stricter field limits (currently 65,536
+UTF-16 code units for workshop bodies). Writes use the same
 origin pinning, redirect refusal and bounded response handling as reads. An
 ambiguous network failure may follow a committed write: inspect session status
 when its ID is known, then retry the **unchanged arguments or file with the same key within
@@ -91,7 +109,7 @@ Worker interface when you need the full structured refusal.
 Local tests cover command mapping, token isolation, actual HTTP headers and
 payloads, lost-response/manual-retry transport, redirect refusal and process
 diagnostics. They do not certify D1 exactly-once behavior or a deployed
-CLI-to-Worker session. Workshop/promotion convenience flags, durable replay storage,
+CLI-to-Worker session. Promotion convenience flags, durable replay storage,
 protocol negotiation, watch/pull and the full W11 staging gate remain open.
 
 ## Local verification
