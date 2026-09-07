@@ -4,7 +4,7 @@
 //!
 //! OPS.1 kept this crate a deliberate stub. The W11.1 slice starts the real
 //! scaffold with the reads that need no credentials: `/capabilities`,
-//! `/problems.md|json`, and a validated raw `get`. Curl remains sufficient —
+//! `/problems.md|json`, public search, and a validated raw `get`. Curl remains sufficient —
 //! this CLI is a convenience, never a requirement (Fable §1).
 
 use clap::Parser;
@@ -39,6 +39,20 @@ pub enum Command {
         /// Prefer the JSON face over Markdown.
         #[arg(long)]
         json: bool,
+    },
+    /// Search the public ledger. Quote the query; local claim IDs need P-ID#C-n.
+    Search {
+        /// Literal text or a public reference, e.g. "P-EXAMPLE#C-1".
+        query: String,
+        /// Print the complete JSON face, including omissions and next actions.
+        #[arg(long)]
+        json: bool,
+        /// Filter by kind: all, problem, claim, or fellow (validated by the Worker).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Requested page size; the Worker validates its supported bounds.
+        #[arg(long)]
+        limit: Option<u32>,
     },
     /// GET an origin-relative path and print the body verbatim.
     Get { path: String },
@@ -310,6 +324,24 @@ pub fn run_cli_with_fetch(
             let label = path.clone();
             (path, label)
         }
+        Command::Search {
+            query,
+            json,
+            kind,
+            limit,
+        } => {
+            let face = if *json { "/search.json" } else { "/search.md" };
+            let mut parameters = url::form_urlencoded::Serializer::new(String::new());
+            parameters.append_pair("q", query);
+            if let Some(kind) = kind {
+                parameters.append_pair("kind", kind);
+            }
+            if let Some(limit) = limit {
+                parameters.append_pair("limit", &limit.to_string());
+            }
+            // Never use the query-bearing path as a diagnostic label.
+            (format!("{face}?{}", parameters.finish()), face.to_string())
+        }
         Command::Get { path } => (path.clone(), "GET request".to_string()),
     };
 
@@ -330,11 +362,31 @@ pub fn run_cli_with_fetch(
             stdout: fetched.body,
             stderr: String::new(),
         },
-        Err(FetchError::Status(status)) => CliOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: format!("asimp: {label} returned HTTP {status}\n"),
-        },
+        Err(FetchError::Status(status)) => {
+            let hint = if matches!(&cli.command, Command::Search { .. }) {
+                match status {
+                    400 | 422 => {
+                        "Use a non-empty query, qualify local claim IDs as P-ID#C-n, and check filters with asimp search --help.\n"
+                    }
+                    404 => {
+                        "This Worker does not serve search. Run asimp capabilities with the same --origin to inspect its deployed surface.\n"
+                    }
+                    429 | 500..=599 => {
+                        "Retry this read later; asimp problems may still be available on the same origin.\n"
+                    }
+                    _ => {
+                        "Run asimp capabilities with the same --origin to check this Worker's public surface.\n"
+                    }
+                }
+            } else {
+                ""
+            };
+            CliOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!("asimp: {label} returned HTTP {status}\n{hint}"),
+            }
+        }
         Err(FetchError::Network) => CliOutput {
             exit_code: 2,
             stdout: String::new(),
@@ -679,5 +731,121 @@ mod tests {
     fn problems_path_tracks_the_json_flag() {
         assert_eq!(problems_path(false), "/problems.md");
         assert_eq!(problems_path(true), "/problems.json");
+    }
+
+    #[test]
+    fn search_encodes_literal_queries_and_preserves_the_complete_face() {
+        for query in [
+            "P-EXAMPLE#C-1",
+            "∀x ∈ ℝ: x² ≥ 0",
+            "C++ & 50% + a/b?kind=fellow#fragment",
+            "x\n\tOR NOT y",
+            "https://elsewhere.test/?q=x&limit=999",
+        ] {
+            for (json_flag, face, body) in [
+                (
+                    false,
+                    "/search.md",
+                    "# Search\n\nSynthetic result\n\nOmitted: workshop\n",
+                ),
+                (
+                    true,
+                    "/search.json",
+                    "{\"items\":[],\"omitted\":[{\"reason\":\"private\"}],\"next_actions\":[]}\n",
+                ),
+            ] {
+                let mut args = vec!["asimp", "--origin", "https://example.test", "search", query];
+                if json_flag {
+                    args.push("--json");
+                }
+                let cli = Cli::try_parse_from(args).unwrap();
+                let output = run_cli_with_fetch(&cli, |url| {
+                    let url = Url::parse(url).unwrap();
+                    assert_eq!(url.origin().ascii_serialization(), "https://example.test");
+                    assert_eq!(url.path(), face);
+                    assert_eq!(url.fragment(), None);
+                    let pairs: Vec<_> = url.query_pairs().collect();
+                    assert_eq!(pairs.len(), 1);
+                    assert_eq!(pairs[0].0, "q");
+                    assert_eq!(pairs[0].1, query);
+                    Ok(Fetched {
+                        status: 200,
+                        body: body.to_string(),
+                    })
+                });
+                assert_eq!(output.exit_code, 0);
+                assert_eq!(output.stdout, body);
+                assert!(output.stderr.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn search_forwards_filters_without_inventing_a_second_contract() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "search",
+            "bounded proof",
+            "--kind",
+            "future-kind&limit=999",
+            "--limit",
+            "7",
+            "--json",
+        ])
+        .unwrap();
+        let output = run_cli_with_fetch(&cli, |url| {
+            assert_eq!(
+                url,
+                "https://example.test/search.json?q=bounded+proof&kind=future-kind%26limit%3D999&limit=7"
+            );
+            // The canonical Worker, not a duplicate CLI enum, owns kind validation.
+            Err(FetchError::Status(400))
+        });
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            "asimp: /search.json returned HTTP 400\nUse a non-empty query, qualify local claim IDs as P-ID#C-n, and check filters with asimp search --help.\n"
+        );
+    }
+
+    #[test]
+    fn search_failures_never_reflect_query_text() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "search",
+            "QUERY_CANARY_7f2",
+        ])
+        .unwrap();
+        for (error, expected_code) in [
+            (FetchError::Status(404), 1),
+            (FetchError::Status(503), 1),
+            (FetchError::Network, 2),
+            (FetchError::InvalidUtf8, 2),
+            (
+                FetchError::BodyTooLarge {
+                    limit_bytes: MAX_BODY_BYTES,
+                },
+                2,
+            ),
+        ] {
+            let output = run_cli_with_fetch(&cli, |_| Err(error));
+            assert_eq!(output.exit_code, expected_code);
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.starts_with("asimp: /search.md"));
+            assert!(!output.stderr.contains("QUERY_CANARY_7f2"));
+        }
+        let invalid = Cli {
+            origin: Some("http://example.test".to_string()),
+            ..cli
+        };
+        let output = run_cli_with_fetch(&invalid, |_| panic!("invalid origin must not fetch"));
+        assert_eq!(output.exit_code, 2);
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.contains("QUERY_CANARY_7f2"));
     }
 }

@@ -124,3 +124,28 @@ fn invalid_origin_refusal_does_not_echo_credentials() {
     assert!(!stderr.contains("credential-shaped-value"), "{context}");
     assert!(!stderr.contains("example.test"), "{context}");
 }
+
+#[test]
+fn search_help_exposes_working_public_options() {
+    let invocation = invoke(&["search", "--help"]);
+    let stdout = String::from_utf8_lossy(&invocation.output.stdout);
+    assert!(invocation.output.status.success());
+    assert!(invocation.output.stderr.is_empty());
+    for expected in ["<QUERY>", "--json", "--kind", "--limit", "P-EXAMPLE#C-1"] {
+        assert!(stdout.contains(expected), "missing help: {expected}");
+    }
+    assert!(
+        !stdout.contains("--cursor"),
+        "Worker pagination is not implemented"
+    );
+}
+
+#[test]
+fn search_requires_a_query_before_attempting_network_io() {
+    let invocation = invoke(&["search", "--json"]);
+    let stderr = String::from_utf8_lossy(&invocation.output.stderr);
+    assert_eq!(invocation.output.status.code(), Some(2));
+    assert!(invocation.output.stdout.is_empty());
+    assert!(stderr.contains("<QUERY>"));
+    assert!(stderr.contains("--help"));
+}

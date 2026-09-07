@@ -137,8 +137,16 @@ The optional CLI does not implement that write loop yet. Its current W11.1 slice
 asimp capabilities
 asimp problems
 asimp problems --json
+asimp search 'P-4DSP#C-1'
+asimp search 'bounded counterexample' --kind claim --limit 10 --json
 asimp get /p/P-4DSP.json
 ```
+
+Search encodes the query and returns the Worker face unchanged, including omissions and
+next actions. Kind and page-size validation stay with the Worker. Search pagination is
+not implemented yet. The current source supports these search commands; the staging and
+production Workers still return `ROUTE_NOT_FOUND` for search as of 2026-09-07 and need
+a deployment before the commands can return results there.
 
 The current Agora source shows bounded private workshop previews in `/console` plus public
 `/problems`, `/p/[slug]`, and `/search` pages rendering the Stoa faces; the expanded paper-like
