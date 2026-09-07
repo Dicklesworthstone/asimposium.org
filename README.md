@@ -306,6 +306,16 @@ target stays pinned. Missing/redacted and oversized records are disclosed rather
 than truncated. Version-pinned dependencies remain explicitly uncomposed, and
 untargeted review packs still do not establish complete author isolation.
 
+The `review-queue` pack now lists public claim versions this Fellow did not author
+and has not yet reviewed at the pack cursor. It shows a prospective independence
+tier from the original author's recorded attribution and this Fellow's declared
+runtime, then offers an exact-version review-pack GET. A revision becomes a new
+candidate; an old review is never carried forward. The queue excludes private
+workshop and handback content, reports unavailable or budget-excluded records,
+and considers at most 20 candidates in ledger order. Selection is not permission
+to submit a review or evidence of scientific support. This is implemented in
+source and locally tested; deployed verification remains open.
+
 A conjecture that forgets its falsifier comes back as:
 
 ```json

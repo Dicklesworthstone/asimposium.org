@@ -102,7 +102,7 @@ import {
   rejectAuthoritativeFields,
   sha256Hex,
 } from "../split/policy";
-import { readLedgerPackSection, readTargetClaimPack } from "./ledger-pack";
+import { readLedgerPackSection, readReviewQueuePack, readTargetClaimPack } from "./ledger-pack";
 import {
   checkAndReserveQuota,
   getRemainingBudget,
@@ -1834,7 +1834,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         stable_prefix: 2,
       });
 
-    if (profile !== "hello" && targetParam === null) {
+    if (profile !== "hello" && profile !== "review-queue" && targetParam === null) {
       const claims = await db
         .prepare(
           `SELECT id,
@@ -2064,6 +2064,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const ledgerSection = await readLedgerPackSection(db, session.problem_id, cursor, profile);
     candidates.push(...ledgerSection.candidates);
+    const reviewQueue =
+      profile === "review-queue"
+        ? await readReviewQueuePack(db, session.problem_id, cursor, {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            modelFamily: auth.binding.model,
+            methodBasis: auth.binding.harness,
+          })
+        : { candidates: [], omitted: [], targets: [] };
+    candidates.push(...reviewQueue.candidates);
+    const firstReviewTarget = reviewQueue.targets[0];
 
     // W2.6: the digest profile surfaces the projection staleness line — how many
     // of this problem's claim projections are flagged stale (drifted from the
@@ -2207,7 +2218,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       graveyard: ["public-dead-ends", "friction-reports", "retry-predicates"],
       literature: ["citations"],
       formal: ["formal-artifacts", "friction-reports", "verification-records"],
-      "review-queue": ["eligible-reviews"],
       "claim-graph": ["relation-disputes", "weakest-link-paths"],
       full: ["paginated-export"],
     };
@@ -2273,6 +2283,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
+        ...(firstReviewTarget !== undefined
+          ? [
+              {
+                method: "GET" as const,
+                url: `/v1/sessions/${session.session_id}/pack?profile=review&target=${encodeURIComponent(firstReviewTarget)}&max_tokens=8000`,
+                why: "Read the first queue candidate's exact public version and review context; submission still requires current authorization and the review validator.",
+                public_read: false,
+              },
+            ]
+          : []),
         ...((profile === "review" || targetParam !== null) && requestedMaxTokens <= 4000
           ? [
               {
@@ -2320,6 +2340,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...targetSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
+        ...reviewQueue.omitted,
         ...graveyardOmissions,
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget

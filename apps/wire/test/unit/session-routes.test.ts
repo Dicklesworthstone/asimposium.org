@@ -46,7 +46,11 @@ import {
 } from "../../src/krater/outbox-do.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import type { PublicationScreeningObservation } from "../../src/screening/workers-ai.ts";
-import { readLedgerPackSection, readTargetClaimPack } from "../../src/sessions/ledger-pack.ts";
+import {
+  readLedgerPackSection,
+  readReviewQueuePack,
+  readTargetClaimPack,
+} from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { sha256Hex } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
@@ -159,6 +163,177 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
 }
 
 describe("producer-backed ledger pack sections (ceq.5)", () => {
+  test("review-queue pins public heads, excludes self and reviewed versions, and keeps historical cuts", async () => {
+    const f = await ledgerPackFixture();
+    const reviewer = await addApprovedFellow(f, { suffix: "queue-reader", scopes: ["review"] });
+    let key = 0;
+    const post = async (path: string, body: unknown) => {
+      const response = await reviewer.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `queue-${++key}` },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return (await response.json()) as Record<string, string | number>;
+    };
+    const rs = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" });
+    const path = `/v1/sessions/${rs.session_id}`;
+    const attribution = {
+      fellowId: reviewer.binding.fellowId,
+      sponsorId: reviewer.binding.sponsorId,
+      modelFamily: reviewer.binding.model,
+      methodBasis: reviewer.binding.harness,
+    };
+    const cut = Number(f.relation.seq);
+    const before = await readReviewQueuePack(f.db, "P-4DSP", cut, attribution);
+    expect(before.targets).toEqual(["C-1@1"]);
+    const first = before.candidates[0];
+    if (first === undefined) throw new Error("expected a review candidate");
+    expect(JSON.parse(first.body).prospective_independence_tier).toBe("T0");
+    for (const [modelFamily, methodBasis, tier] of [
+      [f.binding.model, f.binding.harness, "T1"],
+      ["another-model", f.binding.harness, "T2"],
+      ["another-model", "another-method", "T3"],
+    ] as const) {
+      const queue = await readReviewQueuePack(f.db, "P-4DSP", cut, {
+        ...attribution,
+        sponsorId: "another-sponsor",
+        modelFamily,
+        methodBasis,
+      });
+      const candidate = queue.candidates[0];
+      if (candidate === undefined) throw new Error("expected an independence candidate");
+      expect(JSON.parse(candidate.body).prospective_independence_tier).toBe(tier);
+    }
+    const response = await reviewer.call(`${path}/pack?profile=review-queue&max_tokens=8000`);
+    const bytes = await response.text();
+    const pack = PackResponseSchema.parse(JSON.parse(bytes));
+    expect(pack.items.some((item) => item.kind === "review-candidate" && item.id === "C-1@1")).toBe(
+      true,
+    );
+    expect(pack.items.some((item) => item.scope === "workshop")).toBe(false);
+    expect(bytes).not.toContain("PRIVATE-PACK-SOURCE");
+    expect(pack.omitted).not.toContainEqual({
+      reason: "profile_section_not_composed",
+      detail: "eligible-reviews",
+    });
+    const action = pack.next_actions.find((item) => item.url.includes("target=C-1%401"));
+    expect(action?.method).toBe("GET");
+    if (action === undefined) throw new Error("expected an exact-version review action");
+    const target = PackResponseSchema.parse(await (await reviewer.call(action.url)).json());
+    expect(target.items.some((item) => item.kind === "claim-detail" && item.id === "C-1@1")).toBe(
+      true,
+    );
+    expect(
+      await (await reviewer.call(`${path}/pack?profile=review-queue&max_tokens=8000`)).text(),
+    ).toBe(bytes);
+    const own = PackResponseSchema.parse(
+      await (await f.call(`${f.path}/pack?profile=review-queue`)).json(),
+    );
+    expect(own.items.some((item) => item.kind === "review-candidate")).toBe(false);
+    expect(own.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(true);
+    await post(`${path}/review`, {
+      target_claim_id: "C-1",
+      target_version: 1,
+      verdict: "inform",
+      basis: "Checked parity.",
+      capable_of_failure: "An odd value would fail.",
+      body_md: "A bounded synthetic review.",
+    });
+    expect((await readReviewQueuePack(f.db, "P-4DSP", 1000, attribution)).targets).toEqual([]);
+    expect(await readReviewQueuePack(f.db, "P-4DSP", cut, attribution)).toEqual(before);
+    const revised = await f.post(`${f.path}/revise`, {
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Four is even.",
+      falsifier: "Four is odd.",
+    });
+    expect(
+      (await readReviewQueuePack(f.db, "P-4DSP", Number(revised.seq), attribution)).targets,
+    ).toEqual(["C-1@2"]);
+    expect(await readReviewQueuePack(f.db, "P-4DSP", cut, attribution)).toEqual(before);
+    expect((await readReviewQueuePack(f.db, "P-OTHER", 1000, attribution)).targets).toEqual([]);
+    expect((await readReviewQueuePack(f.db, "P-4DSP", 0, attribution)).targets).toEqual([]);
+    await f.db
+      .prepare(
+        "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic queue withdrawal', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND type = 'claim.revised')",
+      )
+      .run();
+    const withdrawn = await readReviewQueuePack(f.db, "P-4DSP", 1000, attribution);
+    expect(withdrawn.targets).toEqual([]);
+    expect(withdrawn.omitted).toContainEqual({
+      reason: "content_unavailable",
+      detail: "eligible-reviews:C-1@2",
+    });
+    expect(JSON.stringify(withdrawn)).not.toContain("Four is even");
+  });
+
+  test("review-queue reports candidate limits and budget omissions for real published claims", async () => {
+    const f = await fixture();
+    const second = await addApprovedFellow(f, {
+      suffix: "queue-second-author",
+      scopes: ["promote"],
+    });
+    let key = 0;
+    for (const [authorIndex, call] of [f.call, second.call].entries()) {
+      const post = async (path: string, body: unknown) => {
+        const response = await call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `queue-many-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return (await response.json()) as Record<string, string | number>;
+      };
+      const session = await post("/v1/sessions", { problem_id: "P-4DSP" });
+      for (let index = 0; index < (authorIndex === 0 ? 11 : 10); index++) {
+        const draft = await post(`/v1/sessions/${session.session_id}/workshop`, {
+          type: "draft",
+          title: "Queue test",
+          body_md: "PRIVATE-QUEUE-MANY",
+        });
+        await post(`/v1/sessions/${session.session_id}/promote`, {
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: `Synthetic candidate ${authorIndex}-${index} has a bounded witness.`,
+          falsifier: "A missing witness.",
+        });
+      }
+    }
+    const reviewer = await addApprovedFellow(f, {
+      suffix: "queue-many-reader",
+      scopes: ["review"],
+    });
+    const section = await readReviewQueuePack(f.db, "P-4DSP", 1000, {
+      fellowId: reviewer.binding.fellowId,
+      sponsorId: reviewer.binding.sponsorId,
+      modelFamily: reviewer.binding.model,
+      methodBasis: reviewer.binding.harness,
+    });
+    expect(section.targets).toHaveLength(20);
+    expect(section.targets[0]).toBe("C-1@1");
+    expect(section.targets.at(-1)).toBe("C-20@1");
+    expect(section.omitted).toContainEqual({
+      reason: "candidate_limit",
+      detail: "eligible-reviews",
+    });
+    const opened = await reviewer.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "queue-reader-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const response = await reviewer.call(
+      `/v1/sessions/${session.session_id}/pack?profile=review-queue&max_tokens=1500`,
+    );
+    const pack = PackResponseSchema.parse(await response.json());
+    expect(pack.items.some((item) => item.kind === "review-candidate")).toBe(true);
+    expect(pack.omitted.some((item) => item.reason === "budget_exceeded")).toBe(true);
+    expect(pack.omitted).toContainEqual({ reason: "candidate_limit", detail: "eligible-reviews" });
+    expect(pack.tokens_estimate).toBeLessThanOrEqual(1500);
+  });
+
   test("formal, graveyard and graph show real objects before unrelated claims", async () => {
     const f = await ledgerPackFixture();
     for (const [profile, kind, section, text] of [

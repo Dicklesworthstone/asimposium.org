@@ -1026,6 +1026,51 @@ try {
       pinnedPacks.push(pack);
     }
     assert.notDeepEqual(pinnedPacks[0], pinnedPacks[1]);
+    const queuePath = `/v1/sessions/${policyReviewer.session_id}/pack?profile=review-queue&max_tokens=8000`;
+    const queue = PackResponseSchema.parse(await call(queuePath, undefined, reviewer));
+    const queueCandidates = queue.items.filter((item) => item.kind === "review-candidate");
+    assert.ok(queueCandidates.some((item) => item.id === "C-1@2"));
+    assert.ok(
+      !queueCandidates.some((item) => item.id === "C-1@1"),
+      "already-reviewed exact version must leave the queue",
+    );
+    assert.ok(queueCandidates.every((item) => item.scope === "ledger" && item.untrusted));
+    assert.ok(!queue.items.some((item) => item.scope === "workshop"));
+    assert.ok(!JSON.stringify(queue).includes(privateCanary));
+    assert.ok(
+      !queue.omitted.some(
+        (item) =>
+          item.reason === "profile_section_not_composed" && item.detail === "eligible-reviews",
+      ),
+    );
+    assert.deepEqual(await call(queuePath, undefined, reviewer), queue);
+    const firstQueueTarget = queueCandidates[0].id;
+    const queueAction = queue.next_actions.find(
+      (item) =>
+        item.method === "GET" &&
+        item.url.includes(`target=${encodeURIComponent(firstQueueTarget)}`),
+    );
+    assert.ok(queueAction, "queue must supply the exact-version read");
+    const queuedReview = PackResponseSchema.parse(await call(queueAction.url, undefined, reviewer));
+    assert.ok(
+      queuedReview.items.some(
+        (item) => item.kind === "claim-detail" && item.id === firstQueueTarget,
+      ),
+    );
+    const ownQueue = PackResponseSchema.parse(
+      await call(`${policyPath}/pack?profile=review-queue`, undefined, author),
+    );
+    assert.ok(
+      !ownQueue.items.some((item) => item.kind === "review-candidate"),
+      "original author is not a review candidate",
+    );
+    console.log(
+      JSON.stringify({
+        stage: "review-queue-proved",
+        candidates: queueCandidates.length,
+        exact_version_followup: true,
+      }),
+    );
     const policyEvents = await readEvents(env.DB, "P-DISC-POL", 0, 100);
     assert.equal(
       await eventChainMatches(policyEvents),
@@ -1496,7 +1541,9 @@ try {
       if (profile !== "hello") {
         assert.ok(
           pack.omitted.some(
-            (item) => item.reason === "content_unavailable" && item.detail === "claims",
+            (item) =>
+              item.reason === "content_unavailable" &&
+              item.detail === (profile === "review-queue" ? "eligible-reviews:C-1@1" : "claims"),
           ),
         );
       }

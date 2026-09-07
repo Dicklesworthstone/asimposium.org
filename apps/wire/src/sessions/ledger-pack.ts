@@ -1,6 +1,7 @@
 import type { PackProfile } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { Env } from "../env";
+import { independenceTier, type ReviewAttribution } from "../ledger/review-independence";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -46,6 +47,133 @@ interface RelationRow extends ProvenanceRow {
 export interface LedgerPackSection {
   candidates: PackCandidate[];
   omitted: { reason: string; detail: string }[];
+}
+
+/** Candidate selection, not permission to submit or a claim of review quality.
+ * Use original immutable authorship and heads/reviews at the captured cut.
+ * Present-day content withdrawal still wins over historical visibility. */
+export async function readReviewQueuePack(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  reviewer: ReviewAttribution & { fellowId: string },
+): Promise<LedgerPackSection & { targets: string[] }> {
+  const result = await db
+    .prepare(`
+    WITH claim_heads AS (
+      SELECT object_id, MAX(seq) AS head_seq,
+        MIN(CASE WHEN type = 'claim.created' AND object_version = 1 THEN seq END) AS author_seq
+      FROM events WHERE problem_id = ? AND seq <= ? AND object_kind = 'claim'
+        AND type IN ('claim.created', 'claim.revised')
+      GROUP BY object_id
+    )
+    SELECT h.object_id || '@' || h.object_version AS id,
+      v.kind, v.statement, v.falsifier, h.id AS event_id, h.seq,
+      a.actor_fellow_id AS fellow_id, a.actor_sponsor_id AS sponsor_id,
+      a.actor_session_id AS session_id, a.model_string_self_declared AS model,
+      a.harness, a.id AS author_event_id,
+      (c.event_id IS NOT NULL AND c.redacted_at IS NULL
+       AND ac.event_id IS NOT NULL AND ac.redacted_at IS NULL) AS content_available
+    FROM claim_heads pins JOIN events h ON h.problem_id = ? AND h.seq = pins.head_seq
+    JOIN claim_versions v
+      ON v.problem_id = h.problem_id AND v.claim_id = h.object_id AND v.version = h.object_version
+    JOIN events a ON a.problem_id = h.problem_id AND a.seq = pins.author_seq
+    LEFT JOIN event_content c ON c.event_id = h.id AND c.payload_sha256 = h.payload_sha256
+    LEFT JOIN event_content ac ON ac.event_id = a.id AND ac.payload_sha256 = a.payload_sha256
+    WHERE a.actor_fellow_id <> ?
+      AND NOT EXISTS (SELECT 1 FROM reviews r JOIN events re ON re.id = r.source_event_id
+        AND re.problem_id = r.problem_id AND re.object_id = r.review_id
+        AND re.object_kind = 'review' AND re.type = 'review.created' AND re.seq = r.source_seq
+        WHERE r.problem_id = h.problem_id AND r.target_claim_id = h.object_id
+          AND r.target_version = h.object_version AND r.reviewer_fellow_id = ? AND re.seq <= ?)
+    ORDER BY h.seq ASC, h.object_id ASC LIMIT ?
+  `)
+    .bind(
+      problemId,
+      cursor,
+      problemId,
+      reviewer.fellowId,
+      reviewer.fellowId,
+      cursor,
+      LEDGER_PACK_CANDIDATE_LIMIT + 1,
+    )
+    .all<
+      ProvenanceRow & {
+        kind: string;
+        statement: string;
+        falsifier: string | null;
+        author_event_id: string;
+      }
+    >();
+  const section: LedgerPackSection & { targets: string[] } = {
+    candidates: [],
+    omitted: [],
+    targets: [],
+  };
+  if (result.results.length > LEDGER_PACK_CANDIDATE_LIMIT)
+    section.omitted.push({ reason: "candidate_limit", detail: "eligible-reviews" });
+  for (const [index, row] of result.results.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
+    if (
+      !row.content_available ||
+      row.sponsor_id === null ||
+      row.model === null ||
+      row.harness === null
+    ) {
+      section.omitted.push({ reason: "content_unavailable", detail: `eligible-reviews:${row.id}` });
+      continue;
+    }
+    const body = JSON.stringify({
+      problem: problemId,
+      target: row.id,
+      kind: row.kind,
+      statement: row.statement,
+      falsifier: row.falsifier,
+      prospective_independence_tier: independenceTier(
+        {
+          sponsorId: row.sponsor_id,
+          modelFamily: row.model,
+          methodBasis: row.harness,
+        },
+        reviewer,
+      ),
+      author_fellow: row.fellow_id,
+      author_sponsor: row.sponsor_id,
+      author_session: row.session_id,
+      author_event: row.author_event_id,
+      author_model_self_declared: row.model,
+      author_harness_self_declared: row.harness,
+      version_event: row.event_id,
+      version_seq: row.seq,
+    });
+    if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
+      section.omitted.push({ reason: "item_too_large", detail: `eligible-reviews:${row.id}` });
+      continue;
+    }
+    section.targets.push(row.id);
+    section.candidates.push({
+      kind: "review-candidate",
+      id: row.id,
+      scope: "ledger",
+      untrusted: true,
+      tokens: 1,
+      body,
+      why_included:
+        "non-author public version without this Fellow's recorded review at the pack cursor; tier is prospective, not quality or write permission",
+      stable_prefix: 3 + index,
+    });
+  }
+  if (result.results.length === 0)
+    section.candidates.push({
+      kind: "standing-context",
+      id: "SYS-review-queue-empty",
+      scope: "system",
+      untrusted: false,
+      tokens: 1,
+      body: "No non-author public claim versions without your recorded review are available at this cursor. This is a queue baseline, not a statement about scientific support.",
+      why_included: "state the reviewer-specific queue baseline",
+      stable_prefix: 3,
+    });
+  return section;
 }
 
 /** Exact-version read, exclusively from the public ledger. No workshop,
