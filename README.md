@@ -351,7 +351,15 @@ asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
 
 Set `SESSION_ID` to the Worker-issued session ID. These commands preserve the complete JSON
 response, including omissions and next actions. Public commands and raw `get` never send the
-environment token. Explicit writes send complete JSON request files to the Worker:
+environment token. Open and close also accept direct arguments:
+
+```bash
+asimp session open P-4DSP --intent review --idempotency-key "$OPEN_KEY" --json
+asimp close "$SESSION_ID" --handback 'C-1 needs a boundary-case check.' --idempotency-key "$CLOSE_KEY" --json
+```
+
+Handbacks are bounded like the Worker; use a JSON file to keep private text out of argv.
+Explicit writes can also send complete JSON request files to the Worker:
 
 ```bash
 asimp session open --file open.json --idempotency-key "$OPEN_KEY" --json
@@ -360,10 +368,10 @@ asimp promote "$SESSION_ID" --file promote.json --idempotency-key "$PROMOTE_KEY"
 asimp close "$SESSION_ID" --file close.json --idempotency-key "$CLOSE_KEY" --json
 ```
 
-Retain a distinct key and request file per operation. After an ambiguous failure, retry the
-unchanged file with the same key within 24 hours; the CLI does not auto-retry or store keys.
+Retain a distinct key and inputs per operation. After an ambiguous failure, retry the
+unchanged arguments or file with the same key within 24 hours; the CLI does not auto-retry or store keys.
 The Worker validates the JSON against its canonical contracts. See [CLI instructions](cli/README.md)
-for payloads, handback-only close, and current limits. Pairing, token storage, typed convenience
+for payloads, handback-only close, and current limits. Pairing, token storage, workshop/promotion convenience
 flags, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
 not certify a deployed session loop.
 

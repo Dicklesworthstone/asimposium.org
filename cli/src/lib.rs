@@ -19,7 +19,7 @@ use url::Url;
     version,
     arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
-    long_about = "Optional ASImposium command-line companion. Reads public faces and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN. Writes send JSON files with an explicit retained idempotency key. Curl remains sufficient."
+    long_about = "Optional ASImposium command-line companion. Reads public faces and operates your session on a.asimposium.org. Private commands use ASIMP_TOKEN. Writes send JSON with an explicit retained idempotency key; open and close also accept direct arguments. Curl remains sufficient."
 )]
 pub struct Cli {
     /// Override the agent origin (default: ASIMP_ORIGIN env, else production).
@@ -54,11 +54,17 @@ pub enum Command {
         #[command(flatten)]
         request: JsonWriteArgs,
     },
-    /// Close a session with a handback JSON file (ASIMP_TOKEN required).
+    /// Close a session with a handback or JSON file (ASIMP_TOKEN required).
     Close {
         session: String,
+        /// Deliberate handback, bounded like the Worker; use --file for private text off argv.
+        #[arg(long, required_unless_present = "file", conflicts_with = "file")]
+        handback: Option<String>,
+        /// Complete SessionCloseRequest JSON file, instead of --handback.
+        #[arg(long, required_unless_present = "handback", value_name = "JSON_FILE")]
+        file: Option<std::path::PathBuf>,
         #[command(flatten)]
-        request: JsonWriteArgs,
+        options: WriteOptions,
     },
     /// Read a budgeted session pack, preserving omitted and next_actions (ASIMP_TOKEN required).
     Pack {
@@ -108,10 +114,19 @@ pub enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SessionCommand {
-    /// Open/resume from JSON matching the Worker's SessionOpenRequest schema.
+    /// Open/resume a problem session, or send a complete SessionOpenRequest JSON file.
     Open {
+        /// Existing public problem ID; validated by the Worker.
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        problem: Option<String>,
+        /// Intent hint, validated by the Worker (e.g. explore, prove, refute, review).
+        #[arg(long, requires = "problem", conflicts_with = "file")]
+        intent: Option<String>,
+        /// Complete SessionOpenRequest JSON file, instead of a problem argument.
+        #[arg(long, required_unless_present = "problem", value_name = "JSON_FILE")]
+        file: Option<std::path::PathBuf>,
         #[command(flatten)]
-        request: JsonWriteArgs,
+        options: WriteOptions,
     },
     /// Read lifecycle, cursors and safe next actions for a session you own.
     Status {
@@ -136,12 +151,34 @@ pub struct JsonWriteArgs {
     /// UTF-8 JSON request file (up to 512 KiB); the Worker validates its schema.
     #[arg(long, value_name = "JSON_FILE")]
     file: std::path::PathBuf,
-    /// Unique key for this operation. Retain it and the unchanged file for retries within 24h.
+    #[command(flatten)]
+    options: WriteOptions,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WriteOptions {
+    /// Unique key for this operation. Retain it and unchanged inputs for retries within 24h.
     #[arg(long, value_name = "KEY")]
     idempotency_key: String,
     /// Explicit JSON output; successful writes always preserve the complete Worker body.
     #[arg(long)]
     json: bool,
+}
+
+enum WriteBody<'a> {
+    File(&'a std::path::Path),
+    Open {
+        problem: &'a str,
+        intent: Option<&'a str>,
+    },
+    Handback(&'a str),
+}
+
+struct WriteRequest<'a> {
+    session: Option<&'a str>,
+    action: &'static str,
+    options: &'a WriteOptions,
+    body: WriteBody<'a>,
 }
 
 impl Command {
@@ -157,16 +194,56 @@ impl Command {
         )
     }
 
-    fn write_request(&self) -> Option<(Option<&str>, &'static str, &JsonWriteArgs)> {
+    fn write_request(&self) -> Option<WriteRequest<'_>> {
         match self {
             Self::Session {
-                command: SessionCommand::Open { request },
-            } => Some((None, "", request)),
+                command:
+                    SessionCommand::Open {
+                        problem,
+                        intent,
+                        file,
+                        options,
+                    },
+            } => Some(WriteRequest {
+                session: None,
+                action: "",
+                options,
+                body: match file {
+                    Some(file) => WriteBody::File(file),
+                    None => WriteBody::Open {
+                        problem: problem.as_deref()?,
+                        intent: intent.as_deref(),
+                    },
+                },
+            }),
             Self::Workshop {
                 command: WorkshopCommand::Push { session, request },
-            } => Some((Some(session), "workshop", request)),
-            Self::Promote { session, request } => Some((Some(session), "promote", request)),
-            Self::Close { session, request } => Some((Some(session), "close", request)),
+            } => Some(WriteRequest {
+                session: Some(session),
+                action: "workshop",
+                options: &request.options,
+                body: WriteBody::File(&request.file),
+            }),
+            Self::Promote { session, request } => Some(WriteRequest {
+                session: Some(session),
+                action: "promote",
+                options: &request.options,
+                body: WriteBody::File(&request.file),
+            }),
+            Self::Close {
+                session,
+                handback,
+                file,
+                options,
+            } => Some(WriteRequest {
+                session: Some(session),
+                action: "close",
+                options,
+                body: match file {
+                    Some(file) => WriteBody::File(file),
+                    None => WriteBody::Handback(handback.as_deref()?),
+                },
+            }),
             _ => None,
         }
     }
@@ -222,7 +299,59 @@ pub fn run_cli(cli: &Cli) -> CliOutput {
 }
 
 const MAX_REQUEST_BYTES: u64 = 512 * 1024;
-const WRITE_RECOVERY: &str = "The write outcome may be unknown. Check asimp session status if you have its ID; retry only the unchanged file with the SAME --idempotency-key within 24h. Never create a replacement key merely because a response was lost.\n";
+const WRITE_RECOVERY: &str = "The write outcome may be unknown. Check asimp session status if you have its ID; retry only the unchanged arguments or file with the SAME --idempotency-key within 24h. Never create a replacement key merely because a response was lost.\n";
+
+impl WriteBody<'_> {
+    fn encode(
+        self,
+        read: impl FnOnce(&std::path::Path) -> Result<String, &'static str>,
+    ) -> Result<String, String> {
+        let value = match self {
+            Self::File(path) => return read(path).map_err(str::to_owned),
+            Self::Open { problem, intent } => {
+                let mut value = serde_json::json!({"problem_id": problem});
+                if let Some(intent) = intent {
+                    value["intent"] = serde_json::json!(intent);
+                }
+                value
+            }
+            Self::Handback(text) => {
+                // Zod .trim() uses ECMAScript whitespace, and .max() measures
+                // UTF-16 code units. Rust str::trim/chars count differs for BOM,
+                // NEL, and supplementary characters; match the Worker here.
+                let text = text.trim_matches(ecmascript_whitespace);
+                let count = text.encode_utf16().count();
+                let schema: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../packages/contracts/generated/sessions.schema.json"
+                ))
+                .map_err(|_| {
+                    "Bundled session contract is unreadable; rebuild asimp from a valid checkout."
+                        .to_owned()
+                })?;
+                let property =
+                    &schema["properties"]["session_close_request"]["properties"]["handback"];
+                let min = property["minLength"].as_u64();
+                let max = property["maxLength"].as_u64();
+                let (Some(min), Some(max)) = (min, max) else {
+                    return Err("Bundled handback limits are unavailable; rebuild asimp from a valid checkout.".to_owned());
+                };
+                if (count as u64) < min || (count as u64) > max {
+                    return Err(format!(
+                        "--handback has {count} UTF-16 code units after trimming; the Worker contract requires {min}–{max}. Shorten or supply a non-empty handback; its text was not sent."
+                    ));
+                }
+                serde_json::json!({"handback": text})
+            }
+        };
+        serde_json::to_string(&value)
+            .map_err(|_| "Cannot encode the write body as JSON.".to_owned())
+    }
+}
+
+fn ecmascript_whitespace(character: char) -> bool {
+    matches!(character, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
 
 fn read_request_file(path: &std::path::Path) -> Result<String, &'static str> {
     let metadata = std::fs::metadata(path)
@@ -251,16 +380,22 @@ fn run_cli_write(
     read: impl FnOnce(&std::path::Path) -> Result<String, &'static str>,
     send: impl FnOnce(&str, &str, String) -> Result<Fetched, FetchError>,
 ) -> CliOutput {
-    let Some((session, action, request)) = cli.command.write_request() else {
+    let Some(WriteRequest {
+        session,
+        action,
+        options,
+        body,
+    }) = cli.command.write_request()
+    else {
         return input_error("Expected an explicit session write command.");
     };
     if session.is_some_and(|id| !safe_session_segment(id)) {
         return invalid_session_id();
     }
     // Header transport only; the Worker owns the canonical replay-key grammar.
-    if request.idempotency_key.is_empty()
-        || request.idempotency_key.len() > 4096
-        || !request
+    if options.idempotency_key.is_empty()
+        || options.idempotency_key.len() > 4096
+        || !options
             .idempotency_key
             .bytes()
             .all(|byte| (33..=126).contains(&byte))
@@ -278,11 +413,14 @@ fn run_cli_write(
         Ok(url) => url,
         Err(error) => return input_error(&error),
     };
-    let body = match read(&request.file) {
+    let body = match body.encode(read) {
         Ok(body) => body,
-        Err(error) => return input_error(error),
+        Err(error) => return input_error(&error),
     };
-    match send(&url, &request.idempotency_key, body) {
+    if body.len() as u64 > MAX_REQUEST_BYTES {
+        return input_error("Encoded request exceeds 512 KiB; shorten the inputs before retrying.");
+    }
+    match send(&url, &options.idempotency_key, body) {
         Ok(fetched) => CliOutput {
             exit_code: 0,
             stdout: fetched.body,
@@ -799,6 +937,168 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn inline_session_inputs_encode_exact_json_without_reading_files() {
+        for (args, path, expected) in [
+            (
+                vec!["session", "open", "P-4DSP"],
+                "/v1/sessions",
+                serde_json::json!({"problem_id":"P-4DSP"}),
+            ),
+            (
+                vec!["session", "open", "P-4DSP", "--intent", "review"],
+                "/v1/sessions",
+                serde_json::json!({"problem_id":"P-4DSP", "intent":"review"}),
+            ),
+            (
+                vec![
+                    "close",
+                    "S-123",
+                    "--handback",
+                    "  C-1: inspect \"x\\y\"\nNext: 😀\u{0007}  ",
+                ],
+                "/v1/sessions/S-123/close",
+                serde_json::json!({"handback":"C-1: inspect \"x\\y\"\nNext: 😀\u{0007}"}),
+            ),
+            // No duplicate intent/ID schema: unknown values reach the Worker,
+            // but JSON metacharacters cannot add fields or alter the endpoint.
+            (
+                vec![
+                    "session",
+                    "open",
+                    "P-X\",\"admin\":true",
+                    "--intent",
+                    "future\nintent",
+                ],
+                "/v1/sessions",
+                serde_json::json!({"problem_id":"P-X\",\"admin\":true", "intent":"future\nintent"}),
+            ),
+        ] {
+            let cli = Cli::try_parse_from(
+                [
+                    vec!["asimp", "--origin", "https://example.test"],
+                    args,
+                    vec!["--idempotency-key", "same-operation", "--json"],
+                ]
+                .concat(),
+            )
+            .unwrap();
+            let mut attempts = Vec::new();
+            for _ in 0..2 {
+                let result = run_cli_write(
+                    &cli,
+                    |_| panic!("inline input must not read a file"),
+                    |url, key, body| {
+                        assert_eq!(url, format!("https://example.test{path}"));
+                        assert_eq!(key, "same-operation");
+                        assert_eq!(
+                            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                            expected
+                        );
+                        attempts.push(body);
+                        Ok(Fetched {
+                            status: 201,
+                            body: "{\"session_id\":\"S-123\"}\n".to_owned(),
+                        })
+                    },
+                );
+                assert_eq!(result.exit_code, 0);
+                assert_eq!(result.stdout, "{\"session_id\":\"S-123\"}\n");
+                assert!(result.stderr.is_empty());
+            }
+            assert_eq!(
+                attempts[0], attempts[1],
+                "unchanged input must retain exact replay bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn handback_limits_match_worker_utf16_and_ecmascript_trimming() {
+        for (input, expected) in [
+            ("😀".repeat(1000), Some("😀".repeat(1000))),
+            ("😀".repeat(1001), None),
+            (
+                format!("{}😀", "x".repeat(1998)),
+                Some(format!("{}😀", "x".repeat(1998))),
+            ),
+            (format!("{}😀", "x".repeat(1999)), None),
+            (
+                format!("\u{feff} {} \u{feff}", "x".repeat(2000)),
+                Some("x".repeat(2000)),
+            ),
+            ("\u{feff}\t\r\n\u{00a0}\u{2028}\u{3000}".to_owned(), None),
+            // NEL is Rust whitespace but is deliberately NOT JS .trim() whitespace.
+            ("\u{0085}".to_owned(), Some("\u{0085}".to_owned())),
+            ("".to_owned(), None),
+        ] {
+            let cli = Cli::try_parse_from([
+                "asimp",
+                "--origin",
+                "https://example.test",
+                "close",
+                "S-123",
+                "--handback",
+                &input,
+                "--idempotency-key",
+                "op-unicode",
+            ])
+            .unwrap();
+            let mut sent = false;
+            let result = run_cli_write(
+                &cli,
+                |_| panic!("inline handback read a file"),
+                |_, _, body| {
+                    sent = true;
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                        serde_json::json!({"handback":expected.as_ref().unwrap()})
+                    );
+                    Ok(Fetched {
+                        status: 200,
+                        body: "{}".to_owned(),
+                    })
+                },
+            );
+            assert_eq!(sent, expected.is_some());
+            if expected.is_some() {
+                assert_eq!(result.exit_code, 0);
+            } else {
+                assert_eq!(result.exit_code, 2);
+                assert!(result.stdout.is_empty());
+                assert!(result.stderr.contains("UTF-16 code units after trimming"));
+                assert!(!result.stderr.contains('😀'));
+            }
+        }
+    }
+
+    #[test]
+    fn typed_open_and_close_match_existing_contract_fixtures() {
+        let open: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packages/contracts/test/fixtures/valid/session-open.json"
+        ))
+        .unwrap();
+        let close: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packages/contracts/test/fixtures/valid/session-close.json"
+        ))
+        .unwrap();
+        let encoded = WriteBody::Open {
+            problem: open["problem_id"].as_str().unwrap(),
+            intent: open["intent"].as_str(),
+        }
+        .encode(|_| panic!("not a file"))
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            open
+        );
+        let encoded = WriteBody::Handback(close["handback"].as_str().unwrap())
+            .encode(|_| panic!("not a file"))
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(result, serde_json::json!({"handback": close["handback"]}));
+    }
 
     #[test]
     fn write_commands_send_exact_json_and_retain_the_key_on_manual_retry() {

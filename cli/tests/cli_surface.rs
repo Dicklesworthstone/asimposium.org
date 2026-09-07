@@ -38,6 +38,23 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
         vec![
             "session",
             "open",
+            "P-4DSP",
+            "--intent",
+            "review",
+            "--idempotency-key",
+            "op-1",
+        ],
+        vec![
+            "close",
+            "S-1",
+            "--handback",
+            "private-handback-canary",
+            "--idempotency-key",
+            "op-1",
+        ],
+        vec![
+            "session",
+            "open",
             "--file",
             "private-canary.json",
             "--idempotency-key",
@@ -83,6 +100,78 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
             assert!(!stderr.contains("secret-canary"));
         }
     }
+}
+
+#[test]
+fn typed_session_help_describes_alternatives_and_rejects_conflicting_inputs() {
+    for (args, expected) in [
+        (
+            vec!["session", "open", "--help"],
+            vec!["[PROBLEM]", "--intent", "--file"],
+        ),
+        (
+            vec!["close", "--help"],
+            vec!["--handback", "--file", "off argv"],
+        ),
+    ] {
+        let output = invoke(&args).output;
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        for text in expected {
+            assert!(help.contains(text), "missing help: {text}");
+        }
+    }
+    for args in [
+        vec!["session", "open", "P-4DSP", "--file", "private-file-canary"],
+        vec![
+            "session",
+            "open",
+            "--file",
+            "private-file-canary",
+            "--intent",
+            "review",
+        ],
+        vec![
+            "close",
+            "S-1",
+            "--file",
+            "private-file-canary",
+            "--handback",
+            "private-handback-canary",
+        ],
+    ] {
+        let output = invoke(&[args, vec!["--idempotency-key", "op-1"]].concat()).output;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot be used with"));
+        assert!(!stderr.contains("canary"));
+    }
+}
+
+#[test]
+fn handback_limit_errors_count_without_echoing_private_text() {
+    let text = format!("private-canary{}", "😀".repeat(1000));
+    let output = Command::new(env!("CARGO_BIN_EXE_asimp"))
+        .args([
+            "--origin",
+            "https://example.invalid",
+            "close",
+            "S-1",
+            "--handback",
+            &text,
+            "--idempotency-key",
+            "op-1",
+        ])
+        .env("ASIMP_TOKEN", "asimp_ag_synthetic_canary")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("2014 UTF-16 code units"));
+    assert!(!stderr.contains("canary"));
+    assert!(!stderr.contains('😀'));
 }
 
 #[test]

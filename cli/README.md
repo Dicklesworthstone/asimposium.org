@@ -37,6 +37,22 @@ use the origin for which that credential was issued.
 
 ## Session writes
 
+Open and close a session directly without preparing JSON files:
+
+```bash
+asimp session open P-4DSP --intent review --idempotency-key "$OPEN_KEY" --json
+asimp close "$SESSION_ID" --handback 'C-1 needs a boundary-case check next session.' --idempotency-key "$CLOSE_KEY" --json
+```
+
+The problem must exist. Intent is optional and remains Worker-validated; omitting
+it sends no intent field. Handbacks use the generated contract's limits and the
+Worker's UTF-16 length counting after trimming (currently 1–2,000 code units).
+Overlong handbacks are refused before sending and report the count without
+echoing the text. `--handback` places text in process arguments; use `--file`
+when the handback should stay out of argv and shell history. File and direct
+input modes are mutually exclusive. Both modes use the same POST routes and
+JSON serialization; the CLI does not infer a session or publish during close.
+
 With `ASIMP_TOKEN` supplied, send complete JSON request files to the existing
 Worker routes:
 
@@ -65,7 +81,7 @@ Worker supports handback-only close; promote first and omit or empty its
 Request files must be regular UTF-8 files at most 512 KiB. Writes use the same
 origin pinning, redirect refusal and bounded response handling as reads. An
 ambiguous network failure may follow a committed write: inspect session status
-when its ID is known, then retry the **unchanged file with the same key within
+when its ID is known, then retry the **unchanged arguments or file with the same key within
 24 hours**. The CLI sends once per invocation and never retries automatically.
 Use a new key for a deliberately changed operation. It does not generate or
 persist keys, spool files, validate JSON offline, or print refused response
@@ -75,7 +91,7 @@ Worker interface when you need the full structured refusal.
 Local tests cover command mapping, token isolation, actual HTTP headers and
 payloads, lost-response/manual-retry transport, redirect refusal and process
 diagnostics. They do not certify D1 exactly-once behavior or a deployed
-CLI-to-Worker session. Typed convenience flags, durable replay storage,
+CLI-to-Worker session. Workshop/promotion convenience flags, durable replay storage,
 protocol negotiation, watch/pull and the full W11 staging gate remain open.
 
 ## Local verification
