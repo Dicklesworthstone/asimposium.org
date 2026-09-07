@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import type { RateLimitBudget } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
@@ -56,11 +55,6 @@ export type QuotaCheckResult =
       readonly allowed: false;
       readonly reason: "IDEMPOTENCY_CONFLICT";
     };
-
-function timingSafeStringEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
 
 /**
  * Parse and validate configured sponsor promotion rate limit.
@@ -250,35 +244,10 @@ export async function checkAndReserveQuota(
     .first<{ reservation_id: string; request_digest: string; expires_at: number }>();
 
   if (inflight !== null && inflight !== undefined) {
-    if (timingSafeStringEqual(inflight.request_digest, params.requestDigest)) {
-      return {
-        allowed: true,
-        reservation: {
-          reservationId: inflight.reservation_id,
-          fellowId: params.fellowId,
-          problemId: params.problemId,
-          sponsorId: params.sponsorId,
-          sessionId: params.sessionId,
-          route: params.route,
-          idempotencyKey: params.idempotencyKey,
-          requestDigest: params.requestDigest,
-          reservedAt: now,
-          expiresAt: inflight.expires_at,
-          status: "reserved",
-        },
-        budget: {
-          limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-          remaining: Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - fellowCount),
-          window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-          sponsor_limit: sponsorLimit,
-          sponsor_remaining:
-            sponsorLimit === null ? null : Math.max(0, sponsorLimit - sponsorCount),
-        },
-      };
-    } else {
-      // In-flight reservation with same key but different body
-      return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
-    }
+    // Only the request that inserted this reservation may enter paid screening.
+    // Completed results replay before quota admission; an unfinished retry must
+    // never turn one charged reservation into arbitrarily many provider calls.
+    return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
   }
 
   if (fellowCount >= PROMOTION_RATE_LIMIT_PER_HOUR) {
@@ -454,32 +423,54 @@ export async function checkAndReserveQuota(
 export function promotionRateLimitedProblem(decision: {
   readonly retryAfterSeconds: number;
   readonly budget: RateLimitBudget;
+  readonly dimension?: "fellow_problem" | "sponsor";
 }): Response {
+  const isSponsor =
+    decision.dimension === "sponsor" &&
+    decision.budget.sponsor_limit !== null &&
+    decision.budget.sponsor_limit !== undefined;
+  const limit = isSponsor
+    ? (decision.budget.sponsor_limit ?? decision.budget.limit)
+    : decision.budget.limit;
+  const remaining = isSponsor
+    ? (decision.budget.sponsor_remaining ?? 0)
+    : decision.budget.remaining;
+  const sponsorPaused = isSponsor && limit === 0;
+  const detail = sponsorPaused
+    ? "Sponsor promotion limit is configured to zero. Keep using the workshop."
+    : isSponsor
+      ? `Sponsor promotion rate limit of ${limit} promotions per hour reached across Fellows. Keep using the workshop.`
+      : `Promotion rate limit of ${limit} promotions per hour per Fellow per problem reached. Keep using the workshop.`;
+  const fixHint = sponsorPaused
+    ? "Keep using the workshop (POST /v1/sessions/:id/workshop); ask your sponsor to check the operator-configured promotion limit."
+    : isSponsor
+      ? "Keep using the workshop (POST /v1/sessions/:id/workshop) until the sponsor promotion window rolls over."
+      : "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.";
+
   const response = validatedProblem({
     status: 429,
     code: "PROMOTION_RATE_LIMITED",
     title: "Promotion rate limit reached",
-    detail:
-      "Promotion rate limit of 20 promotions per hour per Fellow per problem reached. Keep using the workshop.",
-    fixHint:
-      "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.",
+    detail,
+    fixHint,
     rule: "A5",
     extensions: {
       schema: "https://a.asimposium.org/schemas/sessions.v1.json",
       retry_after_seconds: decision.retryAfterSeconds,
-      limit: decision.budget.limit,
-      remaining: decision.budget.remaining,
+      limit,
+      remaining,
       window_seconds: decision.budget.window_seconds,
       example: {
-        workshop_id: "W-4DSP-01JXYZ",
-        kind: "note",
-        body: "Continuing investigation in workshop...",
+        type: "draft",
+        title: "Continuing investigation in workshop",
+        body_md: "Continuing investigation in workshop while awaiting quota window reset.",
+        relates_to: [],
       },
     },
   });
   response.headers.set("retry-after", String(decision.retryAfterSeconds));
-  response.headers.set("ratelimit-limit", String(decision.budget.limit));
-  response.headers.set("ratelimit-remaining", String(decision.budget.remaining));
+  response.headers.set("ratelimit-limit", String(limit));
+  response.headers.set("ratelimit-remaining", String(remaining));
   response.headers.set("ratelimit-reset", String(decision.retryAfterSeconds));
   response.headers.set("cache-control", "private, no-store");
   return response;

@@ -246,8 +246,8 @@ const generalContractProblem = z
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),
     /** Remaining retry wait in seconds, present only on PROMOTION_RATE_LIMITED. */
     retry_after_seconds: z.number().int().positive().optional(),
-    /** Quota limit, present only on rate-limited refusals. */
-    limit: z.number().int().positive().optional(),
+    /** Quota limit; zero permits an operator-configured pause on promotions. */
+    limit: z.number().int().min(0).optional(),
     /** Remaining quota, present only on rate-limited refusals. */
     remaining: z.number().int().min(0).optional(),
     /** Window duration in seconds, present only on rate-limited refusals. */

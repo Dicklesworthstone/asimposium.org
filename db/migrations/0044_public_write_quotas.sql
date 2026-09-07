@@ -34,9 +34,9 @@ CREATE INDEX public_write_reservations_fellow_status_expires_idx
   ON public_write_attempt_reservations (fellow_id, expires_at)
   WHERE status = 'reserved';
 
--- Fast lookup for in-flight reservation with identical request digest.
-CREATE INDEX public_write_reservations_inflight_key_idx
-  ON public_write_attempt_reservations (fellow_id, route, idempotency_key, request_digest)
+-- One in-flight admission per caller key, even when concurrent reads see no row.
+CREATE UNIQUE INDEX public_write_reservations_inflight_key_idx
+  ON public_write_attempt_reservations (fellow_id, route, idempotency_key)
   WHERE status = 'reserved';
 
 -- Atomic admission trigger (fellow + problem): refuses when attempts in rolling 1-hour window >= 20.

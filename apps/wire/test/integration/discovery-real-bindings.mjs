@@ -23,6 +23,13 @@ assert.equal(process.versions.bun, undefined, "This lane requires genuine Node")
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const screenMode = process.argv[2];
+assert.ok(
+  ["positive", "reject", "quarantine", "unavailable", "wrong-digest", "wrong-context"].includes(
+    screenMode,
+  ),
+  "Run the discovery integration test dispatcher to exercise all five isolated screening modes",
+);
 const server = createTestHarness({
   root,
   workers: [
@@ -54,6 +61,8 @@ const server = createTestHarness({
         vars: {
           STOA_ORIGIN: origin,
           AGORA_ORIGIN: "https://staging.asimposium.org",
+          // Synthetic local policy, not a proposed deployment default.
+          SPONSOR_PROMOTION_RATE_LIMIT: "21",
           ENROLLMENT_REPLAY_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString(
             "base64url",
           ),
@@ -69,8 +78,8 @@ try {
   const worker = server.getWorker();
   await worker.applyD1Migrations("DB");
   console.log(JSON.stringify({ stage: "d1-migrated" }));
-  const fixtures = await worker.getExport();
-  const env = await worker.getEnv();
+  let fixtures = await worker.getExport();
+  let env = await worker.getEnv();
   let key = 0;
   async function call(path, body, token, expected = 200, idempotencyKey) {
     const response = await worker.fetch(`${origin}${path}`, {
@@ -653,7 +662,10 @@ try {
     "gap-close": GapTransitionRequestSchema,
     relation: RelationFileRequestSchema,
   };
-  for (const mode of ["reject", "quarantine", "unavailable", "wrong-digest", "wrong-context"]) {
+  // Each mode gets a fresh real database through the parent test. Together the
+  // five runs retain every screening case without bypassing the hourly quota.
+  let additionalScreeningRefusals = 0;
+  for (const mode of screenMode === "positive" ? [] : [screenMode]) {
     await fixtures.setScreenMode(mode);
     for (const [suffix, kind, token, body] of candidates) {
       const path =
@@ -693,6 +705,41 @@ try {
         `${kind}/${mode}: refused write changed public state`,
       );
     }
+    const candidate = candidates.find(([, kind]) => kind === "conjecture");
+    assert.ok(candidate);
+    const [suffix, , token, body] = candidate;
+    let exhausted = false;
+    for (let index = 0; index < 21; index++) {
+      const before = await fixtures.screeningCalls();
+      const response = await worker.fetch(`${origin}${policyPath}/${suffix}`, {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "idempotency-key": `screening-saturation-${index}`,
+        },
+        body: JSON.stringify(body),
+      });
+      const result = await response.json();
+      if (response.status === 429) {
+        assert.equal(result.code, "PROMOTION_RATE_LIMITED");
+        assert.equal(result.remaining, 0);
+        assert.equal(await fixtures.screeningCalls(), before);
+        exhausted = true;
+        break;
+      }
+      assert.equal(response.status, mode === "reject" ? 403 : 202);
+      assert.equal(result.code, mode === "reject" ? "POLICY_DENIED" : "SCREENING_HOLD");
+      assert.equal(await fixtures.screeningCalls(), before + 1);
+      additionalScreeningRefusals++;
+    }
+    assert.ok(
+      additionalScreeningRefusals > 0,
+      "Repeated held/denied attempts must reach screening",
+    );
+    assert.ok(exhausted, "Held/denied attempts must exhaust a finite budget");
+    assert.deepEqual(await publicState(), beforePolicy);
   }
   assert.deepEqual(
     (await env.ARTIFACTS.list()).objects.map((object) => object.key).sort(),
@@ -702,643 +749,1158 @@ try {
     (await env.PUBLIC_ARTIFACTS.list()).objects.map((object) => object.key).sort(),
     publicKeysBefore,
   );
-  await fixtures.setScreenMode("pass");
-  console.log(
-    JSON.stringify({ stage: "screening-refusals-proved", routes: candidates.length, modes: 5 }),
-  );
-  // Keep version and target preconditions valid while exercising each positive path.
-  for (const index of [0, 2, 3, 5, 6, 8, 7, 4, 1]) {
-    const [suffix, kind, token, body] = candidates[index];
-    const path =
-      kind === "review"
-        ? `/v1/sessions/${policyReviewer.session_id}/review`
-        : `${policyPath}/${suffix}`;
-    const before = await publicState();
-    const headBefore = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-      .bind("P-DISC-POL")
-      .first();
-    const calls = await fixtures.screeningCalls();
-    const response = await call(
-      path,
-      body,
-      token,
-      kind === "hypothesis-kill" ? 200 : 201,
-      `positive-${kind}`,
+  if (screenMode !== "positive") {
+    console.log(
+      JSON.stringify({
+        kind: "discovery-screening-real-bindings",
+        status: "pass",
+        screening_mode: screenMode,
+        screening_refusals: candidates.length,
+        additional_screening_refusals: additionalScreeningRefusals,
+        screening_saturation: "pass",
+        boundary: "local Workerd/D1/R2; fixture classifier and sponsor setup; no live-model claim",
+      }),
     );
-    assert.equal((await publicState()).events, before.events + 1, `${kind}: one accepted event`);
-    assert.equal(
-      (await publicState()).screening_publications,
-      before.screening_publications + 1,
-      `${kind}: one retained decision`,
-    );
-    const newEvents = await readEvents(env.DB, "P-DISC-POL", headBefore.public_seq, 2);
-    assert.equal(
-      newEvents.length,
-      1,
-      `${kind}: exactly one source event after the captured cursor`,
-    );
-    const retained =
-      await env.DB.prepare(`SELECT s.provenance_json, s.request_digest, e.actor_fellow_id, e.actor_session_id
+  } else {
+    await fixtures.setScreenMode("pass");
+    // Keep version and target preconditions valid while exercising each positive path.
+    for (const index of [0, 2, 3, 5, 6, 8, 7, 4, 1]) {
+      const [suffix, kind, token, body] = candidates[index];
+      const path =
+        kind === "review"
+          ? `/v1/sessions/${policyReviewer.session_id}/review`
+          : `${policyPath}/${suffix}`;
+      const before = await publicState();
+      const headBefore = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+        .bind("P-DISC-POL")
+        .first();
+      const calls = await fixtures.screeningCalls();
+      const response = await call(
+        path,
+        body,
+        token,
+        kind === "hypothesis-kill" ? 200 : 201,
+        `positive-${kind}`,
+      );
+      assert.equal((await publicState()).events, before.events + 1, `${kind}: one accepted event`);
+      assert.equal(
+        (await publicState()).screening_publications,
+        before.screening_publications + 1,
+        `${kind}: one retained decision`,
+      );
+      const newEvents = await readEvents(env.DB, "P-DISC-POL", headBefore.public_seq, 2);
+      assert.equal(
+        newEvents.length,
+        1,
+        `${kind}: exactly one source event after the captured cursor`,
+      );
+      const retained =
+        await env.DB.prepare(`SELECT s.provenance_json, s.request_digest, e.actor_fellow_id, e.actor_session_id
       FROM screening_publications s JOIN events e ON e.id = s.event_id
       WHERE e.problem_id = ? AND e.seq = ?`)
-        .bind("P-DISC-POL", newEvents[0].seq)
-        .first();
-    assert.ok(retained, `${kind}: publication must retain its decision in the event transaction`);
-    const provenance = ScreeningPublicationProvenanceSchema.parse(
-      JSON.parse(retained.provenance_json),
-    );
-    assert.equal(provenance.model_version, "synthetic-local-model:v1");
-    assert.equal(provenance.policy_version, "synthetic-local-policy:v1");
-    assert.equal(provenance.principal, "platform:symposiarch");
-    assert.equal(
-      retained.actor_fellow_id,
-      token === reviewer ? reviewCard.fellow_id : authorCard.fellow_id,
-    );
-    assert.equal(
-      retained.actor_session_id,
-      kind === "review" ? policyReviewer.session_id : policySession.session_id,
-    );
-    const parsed = requestSchemas[kind].parse(body);
-    const screenedBody = JSON.stringify({
-      kind,
-      statement: kind === "conjecture" ? parsed.statement : JSON.stringify(parsed),
-      falsifier: ["conjecture", "revise", "hypotheses"].includes(kind) ? parsed.falsifier : null,
-    });
-    const bodyDigest = createHash("sha256").update(screenedBody).digest("hex");
-    assert.equal(
-      provenance.input_digest,
-      bodyDigest,
-      `${kind}: independently reconstructed candidate binding`,
-    );
-    assert.equal(
-      provenance.context_digest,
-      createHash("sha256")
-        .update(
-          JSON.stringify({
-            scope: "promotion-direct-v1",
-            problem_id: "P-DISC-POL",
-            fellow_id: retained.actor_fellow_id,
-            body_digest: `sha256:${bodyDigest}`,
-          }),
-        )
-        .digest("hex"),
-    );
-    assert.ok(!retained.provenance_json.includes(privateCanary));
-    assert.ok(
-      !retained.provenance_json.includes(author) && !retained.provenance_json.includes(reviewer),
-    );
-    assert.equal(await fixtures.screeningCalls(), calls + 1);
-    assert.deepEqual(await call(path, body, token, 200, `positive-${kind}`), response);
-    assert.equal((await publicState()).events, before.events + 1, `${kind}: replay cannot append`);
-    assert.equal(
-      (await publicState()).screening_publications,
-      before.screening_publications + 1,
-      `${kind}: replay cannot mint evidence`,
-    );
-    assert.equal(await fixtures.screeningCalls(), calls + 1, `${kind}: replay cannot screen again`);
-  }
-  const revisedBody = candidates[1][3];
-  const policyEvents = await readEvents(env.DB, "P-DISC-POL", 0, 100);
-  assert.equal(
-    await eventChainMatches(policyEvents),
-    true,
-    "attribution must remain bound to the real D1 chain",
-  );
-  const attributedWrites = policyEvents.filter(
-    (event) => event.type.startsWith("gap.") || event.type === "relation.asserted",
-  );
-  assert.deepEqual([...new Set(attributedWrites.map((event) => event.type))].sort(), [
-    "gap.filed",
-    "gap.withdrawn",
-    "relation.asserted",
-  ]);
-  for (const event of attributedWrites) {
-    assert.equal(event.actorFellowId, authorCard.fellow_id);
-    assert.equal(event.actorSponsorId, authorCard.current_sponsor_id);
-    assert.equal(event.actorSessionId, policySession.session_id);
-    assert.equal(event.modelStringSelfDeclared, authorCard.model);
-    assert.equal(event.harness, authorCard.harness);
-    assert.equal(typeof event.writerCredentialId, "string");
-  }
-  // ceq.5: a different Fellow consumes the author's recorded negative
-  // knowledge and obligations through production packs, not a fixture read API.
-  for (const [profile, itemKind, section, expectedText] of [
-    ["formal", "proof-gap", "proof-gaps", "An additional synthetic obligation."],
-    ["graveyard", "killed-hypothesis", "killed-hypotheses", "Induct on path length"],
-    ["claim-graph", "claim-relation", "typed-relations", "Version pins: superseded"],
-  ]) {
-    const path = `/v1/sessions/${policyReviewer.session_id}/pack?profile=${profile}&max_tokens=8000`;
-    const headers = { authorization: `Bearer ${reviewer}`, "User-Agent": userAgent };
-    const response = await worker.fetch(`${origin}${path}`, { headers });
-    assert.equal(response.status, 200, `${profile}: producer-backed pack must be readable`);
-    const body = await response.text();
-    const pack = PackResponseSchema.parse(JSON.parse(body));
-    const items = pack.items.filter((item) => item.kind === itemKind);
-    assert.ok(items.length > 0, `${profile}: real public objects reach the reader`);
-    assert.ok(items.some((item) => item.body.includes(expectedText)));
-    assert.ok(items.every((item) => item.scope === "ledger" && item.untrusted));
-    assert.equal(pack.items[0].id, "SYS-inoculation");
-    assert.equal(pack.items.find((item) => item.id === "SYS-identity").untrusted, true);
-    assert.ok(
-      !pack.omitted.some(
-        (item) => item.reason === "profile_section_not_composed" && item.detail === section,
-      ),
-    );
-    assert.ok(!body.includes(privateCanary));
-    assert.ok(!body.includes(author));
-    assert.ok(!body.includes(reviewer));
-    assert.ok(!pack.items.some((item) => item.scope === "workshop"));
-    const repeated = await worker.fetch(`${origin}${path}`, { headers });
-    assert.equal(await repeated.text(), body);
-    const conditional = await worker.fetch(`${origin}${path}`, {
-      headers: { ...headers, "if-none-match": response.headers.get("etag") },
-    });
-    assert.equal(conditional.status, 304);
-  }
-  console.log(JSON.stringify({ stage: "cross-fellow-ledger-packs-proved", profiles: 3 }));
-  const beforeConflict = await publicState();
-  const callsBeforeConflict = await fixtures.screeningCalls();
-  const changed = await call(
-    `${policyPath}/revise`,
-    { ...revisedBody, statement: "Changed bytes under a used key." },
-    author,
-    409,
-    "positive-revise",
-  );
-  assert.equal(changed.code, "IDEMPOTENCY_CONFLICT");
-  const stale = await call(`${policyPath}/revise`, revisedBody, author, 409, "stale-revise");
-  assert.equal(stale.code, "OBJECT_VERSION_CONFLICT");
-  assert.deepEqual(await publicState(), beforeConflict);
-  assert.equal(await fixtures.screeningCalls(), callsBeforeConflict);
-  for (const [kind, token, path, body] of [
-    [
-      "review",
-      reviewer,
-      `/v1/sessions/${policyReviewer.session_id}/review`,
-      { ...candidates[2][3], target_version: 2 },
-    ],
-    [
-      "revise",
-      author,
-      `${policyPath}/revise`,
-      {
-        ...revisedBody,
-        base_version: 2,
-        statement: "Revocation during screening must stop publication.",
-      },
-    ],
-  ]) {
-    const before = await publicState();
-    const calls = await fixtures.screeningCalls();
-    await fixtures.revokeOnNextScreen();
-    const result = await call(path, body, token, 403, `revoke-during-${kind}`);
-    assert.equal(result.code, "WRITE_REFUSED");
-    assert.equal(await fixtures.screeningCalls(), calls + 1);
-    assert.deepEqual(
-      await publicState(),
-      before,
-      `${kind}: concurrent revoke must roll back the public transaction`,
-    );
-    const retry = await call(path, body, token, 401, `revoke-during-${kind}`);
-    assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
-    assert.equal(await fixtures.screeningCalls(), calls + 1);
-  }
-  // These routes formerly used a separate replay companion without a
-  // commit-time credential guard. Each race uses a fresh, genuinely enrolled
-  // Fellow; a revoked credential is never restored to manufacture another case.
-  for (const [index, suffix] of ["gaps", "gaps/close", "relations"].entries()) {
-    const token = await enroll(`discovery-race-${index}`, `usr_discoveryrace${index}`);
-    const session = await call(
-      "/v1/sessions",
-      { problem_id: "P-DISC-POL", intent: "prove" },
-      token,
-      201,
-    );
-    const path = `/v1/sessions/${session.session_id}`;
-    const gapBody = {
-      target_claim_id: "C-1",
-      target_version: 2,
-      obligation: `Synthetic race obligation ${index}.`,
-      closes_what: "A recorded missing step.",
-    };
-    let body = gapBody;
-    if (suffix !== "gaps") {
-      const target = await call(`${path}/gaps`, gapBody, token, 201);
-      body =
-        suffix === "gaps/close"
-          ? { gap_id: target.gap_id, outcome: "withdrawn" }
-          : {
-              kind: "addresses-gap",
-              source_claim_id: "C-1",
-              source_version: 2,
-              target: target.gap_id,
-            };
+          .bind("P-DISC-POL", newEvents[0].seq)
+          .first();
+      assert.ok(retained, `${kind}: publication must retain its decision in the event transaction`);
+      const provenance = ScreeningPublicationProvenanceSchema.parse(
+        JSON.parse(retained.provenance_json),
+      );
+      assert.equal(provenance.model_version, "synthetic-local-model:v1");
+      assert.equal(provenance.policy_version, "synthetic-local-policy:v1");
+      assert.equal(provenance.principal, "platform:symposiarch");
+      assert.equal(
+        retained.actor_fellow_id,
+        token === reviewer ? reviewCard.fellow_id : authorCard.fellow_id,
+      );
+      assert.equal(
+        retained.actor_session_id,
+        kind === "review" ? policyReviewer.session_id : policySession.session_id,
+      );
+      const parsed = requestSchemas[kind].parse(body);
+      const screenedBody = JSON.stringify({
+        kind,
+        statement: kind === "conjecture" ? parsed.statement : JSON.stringify(parsed),
+        falsifier: ["conjecture", "revise", "hypotheses"].includes(kind) ? parsed.falsifier : null,
+      });
+      const bodyDigest = createHash("sha256").update(screenedBody).digest("hex");
+      assert.equal(
+        provenance.input_digest,
+        bodyDigest,
+        `${kind}: independently reconstructed candidate binding`,
+      );
+      assert.equal(
+        provenance.context_digest,
+        createHash("sha256")
+          .update(
+            JSON.stringify({
+              scope: "promotion-direct-v1",
+              problem_id: "P-DISC-POL",
+              fellow_id: retained.actor_fellow_id,
+              body_digest: `sha256:${bodyDigest}`,
+            }),
+          )
+          .digest("hex"),
+      );
+      assert.ok(!retained.provenance_json.includes(privateCanary));
+      assert.ok(
+        !retained.provenance_json.includes(author) && !retained.provenance_json.includes(reviewer),
+      );
+      assert.equal(await fixtures.screeningCalls(), calls + 1);
+      assert.deepEqual(await call(path, body, token, 200, `positive-${kind}`), response);
+      assert.equal(
+        (await publicState()).events,
+        before.events + 1,
+        `${kind}: replay cannot append`,
+      );
+      assert.equal(
+        (await publicState()).screening_publications,
+        before.screening_publications + 1,
+        `${kind}: replay cannot mint evidence`,
+      );
+      assert.equal(
+        await fixtures.screeningCalls(),
+        calls + 1,
+        `${kind}: replay cannot screen again`,
+      );
     }
-    const before = await publicState();
-    const calls = await fixtures.screeningCalls();
-    await fixtures.revokeOnNextScreen();
-    const result = await call(`${path}/${suffix}`, body, token, 403, `race-${index}`);
-    assert.equal(result.code, "WRITE_REFUSED");
-    assert.equal(await fixtures.screeningCalls(), calls + 1);
-    assert.deepEqual(
-      await publicState(),
-      before,
-      `${suffix}: revoked authority must not append, project or advance a cursor`,
+    const revisedBody = candidates[1][3];
+    const policyEvents = await readEvents(env.DB, "P-DISC-POL", 0, 100);
+    assert.equal(
+      await eventChainMatches(policyEvents),
+      true,
+      "attribution must remain bound to the real D1 chain",
     );
-    const retry = await call(`${path}/${suffix}`, body, token, 401, `race-${index}`);
-    assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
-    assert.equal(await fixtures.screeningCalls(), calls + 1);
-  }
-  const storageToken = await enroll("discovery-storage-failure", "usr_discoverystorage");
-  const storageSession = await call(
-    "/v1/sessions",
-    { problem_id: "P-DISC-POL", intent: "prove" },
-    storageToken,
-    201,
-  );
-  // Plant a real D1 write failure after screening. No source event may survive
-  // without its evidence. This trigger belongs only to this disposable database.
-  await env.DB.prepare(
-    "CREATE TRIGGER synthetic_publication_storage_failure BEFORE INSERT ON screening_publications BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_PUBLICATION_STORAGE_FAILURE'); END",
-  ).run();
-  const beforeStorageFailure = await publicState();
-  const storageFailure = await worker.fetch(
-    `${origin}/v1/sessions/${storageSession.session_id}/gaps`,
-    {
-      method: "POST",
-      headers: {
-        "User-Agent": userAgent,
-        authorization: `Bearer ${storageToken}`,
-        "content-type": "application/json",
-        "idempotency-key": "provenance-storage-failure",
-      },
-      body: JSON.stringify({
+    const attributedWrites = policyEvents.filter(
+      (event) => event.type.startsWith("gap.") || event.type === "relation.asserted",
+    );
+    assert.deepEqual([...new Set(attributedWrites.map((event) => event.type))].sort(), [
+      "gap.filed",
+      "gap.withdrawn",
+      "relation.asserted",
+    ]);
+    for (const event of attributedWrites) {
+      assert.equal(event.actorFellowId, authorCard.fellow_id);
+      assert.equal(event.actorSponsorId, authorCard.current_sponsor_id);
+      assert.equal(event.actorSessionId, policySession.session_id);
+      assert.equal(event.modelStringSelfDeclared, authorCard.model);
+      assert.equal(event.harness, authorCard.harness);
+      assert.equal(typeof event.writerCredentialId, "string");
+    }
+    // ceq.5: a different Fellow consumes the author's recorded negative
+    // knowledge and obligations through production packs, not a fixture read API.
+    for (const [profile, itemKind, section, expectedText] of [
+      ["formal", "proof-gap", "proof-gaps", "An additional synthetic obligation."],
+      ["graveyard", "killed-hypothesis", "killed-hypotheses", "Induct on path length"],
+      ["claim-graph", "claim-relation", "typed-relations", "Version pins: superseded"],
+    ]) {
+      const path = `/v1/sessions/${policyReviewer.session_id}/pack?profile=${profile}&max_tokens=8000`;
+      const headers = { authorization: `Bearer ${reviewer}`, "User-Agent": userAgent };
+      const response = await worker.fetch(`${origin}${path}`, { headers });
+      assert.equal(response.status, 200, `${profile}: producer-backed pack must be readable`);
+      const body = await response.text();
+      const pack = PackResponseSchema.parse(JSON.parse(body));
+      const items = pack.items.filter((item) => item.kind === itemKind);
+      assert.ok(items.length > 0, `${profile}: real public objects reach the reader`);
+      assert.ok(items.some((item) => item.body.includes(expectedText)));
+      assert.ok(items.every((item) => item.scope === "ledger" && item.untrusted));
+      assert.equal(pack.items[0].id, "SYS-inoculation");
+      assert.equal(pack.items.find((item) => item.id === "SYS-identity").untrusted, true);
+      assert.ok(
+        !pack.omitted.some(
+          (item) => item.reason === "profile_section_not_composed" && item.detail === section,
+        ),
+      );
+      assert.ok(!body.includes(privateCanary));
+      assert.ok(!body.includes(author));
+      assert.ok(!body.includes(reviewer));
+      assert.ok(!pack.items.some((item) => item.scope === "workshop"));
+      const repeated = await worker.fetch(`${origin}${path}`, { headers });
+      assert.equal(await repeated.text(), body);
+      const conditional = await worker.fetch(`${origin}${path}`, {
+        headers: { ...headers, "if-none-match": response.headers.get("etag") },
+      });
+      assert.equal(conditional.status, 304);
+    }
+    console.log(JSON.stringify({ stage: "cross-fellow-ledger-packs-proved", profiles: 3 }));
+    const beforeConflict = await publicState();
+    const callsBeforeConflict = await fixtures.screeningCalls();
+    const changed = await call(
+      `${policyPath}/revise`,
+      { ...revisedBody, statement: "Changed bytes under a used key." },
+      author,
+      409,
+      "positive-revise",
+    );
+    assert.equal(changed.code, "IDEMPOTENCY_CONFLICT");
+    const stale = await call(`${policyPath}/revise`, revisedBody, author, 409, "stale-revise");
+    assert.equal(stale.code, "OBJECT_VERSION_CONFLICT");
+    assert.deepEqual(await publicState(), beforeConflict);
+    assert.equal(await fixtures.screeningCalls(), callsBeforeConflict);
+    for (const [kind, token, path, body] of [
+      [
+        "review",
+        reviewer,
+        `/v1/sessions/${policyReviewer.session_id}/review`,
+        { ...candidates[2][3], target_version: 2 },
+      ],
+      [
+        "revise",
+        author,
+        `${policyPath}/revise`,
+        {
+          ...revisedBody,
+          base_version: 2,
+          statement: "Revocation during screening must stop publication.",
+        },
+      ],
+    ]) {
+      const before = await publicState();
+      const calls = await fixtures.screeningCalls();
+      await fixtures.revokeOnNextScreen();
+      const result = await call(path, body, token, 403, `revoke-during-${kind}`);
+      assert.equal(result.code, "WRITE_REFUSED");
+      assert.equal(await fixtures.screeningCalls(), calls + 1);
+      assert.deepEqual(
+        await publicState(),
+        before,
+        `${kind}: concurrent revoke must roll back the public transaction`,
+      );
+      const retry = await call(path, body, token, 401, `revoke-during-${kind}`);
+      assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
+      assert.equal(await fixtures.screeningCalls(), calls + 1);
+    }
+    // These routes formerly used a separate replay companion without a
+    // commit-time credential guard. Each race uses a fresh, genuinely enrolled
+    // Fellow; a revoked credential is never restored to manufacture another case.
+    for (const [index, suffix] of ["gaps", "gaps/close", "relations"].entries()) {
+      const token = await enroll(`discovery-race-${index}`, `usr_discoveryrace${index}`);
+      const session = await call(
+        "/v1/sessions",
+        { problem_id: "P-DISC-POL", intent: "prove" },
+        token,
+        201,
+      );
+      const path = `/v1/sessions/${session.session_id}`;
+      const gapBody = {
         target_claim_id: "C-1",
         target_version: 2,
-        obligation: "Storage failure must roll back this gap.",
-        closes_what: "The missing proof step.",
-      }),
-    },
-  );
-  assert.equal(storageFailure.status, 500);
-  const storageFailureBody = await storageFailure.text();
-  assert.ok(!storageFailureBody.includes("SYNTHETIC_PUBLICATION_STORAGE_FAILURE"));
-  assert.ok(!storageFailureBody.includes(storageToken));
-  assert.deepEqual(
-    await publicState(),
-    beforeStorageFailure,
-    "real D1 evidence failure must roll back publication",
-  );
+        obligation: `Synthetic race obligation ${index}.`,
+        closes_what: "A recorded missing step.",
+      };
+      let body = gapBody;
+      if (suffix !== "gaps") {
+        const target = await call(`${path}/gaps`, gapBody, token, 201);
+        body =
+          suffix === "gaps/close"
+            ? { gap_id: target.gap_id, outcome: "withdrawn" }
+            : {
+                kind: "addresses-gap",
+                source_claim_id: "C-1",
+                source_version: 2,
+                target: target.gap_id,
+              };
+      }
+      const before = await publicState();
+      const calls = await fixtures.screeningCalls();
+      await fixtures.revokeOnNextScreen();
+      const result = await call(`${path}/${suffix}`, body, token, 403, `race-${index}`);
+      assert.equal(result.code, "WRITE_REFUSED");
+      assert.equal(await fixtures.screeningCalls(), calls + 1);
+      assert.deepEqual(
+        await publicState(),
+        before,
+        `${suffix}: revoked authority must not append, project or advance a cursor`,
+      );
+      const retry = await call(`${path}/${suffix}`, body, token, 401, `race-${index}`);
+      assert.equal(retry.code, "FELLOW_TOKEN_INVALID");
+      assert.equal(await fixtures.screeningCalls(), calls + 1);
+    }
+    const storageToken = await enroll("discovery-storage-failure", "usr_discoverystorage");
+    const storageSession = await call(
+      "/v1/sessions",
+      { problem_id: "P-DISC-POL", intent: "prove" },
+      storageToken,
+      201,
+    );
+    await verifyQuotaRaces();
+    // Plant a real D1 write failure after screening. No source event may survive
+    // without its evidence. This trigger belongs only to this disposable database.
+    await env.DB.prepare(
+      "CREATE TRIGGER synthetic_publication_storage_failure BEFORE INSERT ON screening_publications BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_PUBLICATION_STORAGE_FAILURE'); END",
+    ).run();
+    const beforeStorageFailure = await publicState();
+    const storageFailure = await worker.fetch(
+      `${origin}/v1/sessions/${storageSession.session_id}/gaps`,
+      {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          authorization: `Bearer ${storageToken}`,
+          "content-type": "application/json",
+          "idempotency-key": "provenance-storage-failure",
+        },
+        body: JSON.stringify({
+          target_claim_id: "C-1",
+          target_version: 2,
+          obligation: "Storage failure must roll back this gap.",
+          closes_what: "The missing proof step.",
+        }),
+      },
+    );
+    assert.equal(storageFailure.status, 500);
+    const storageFailureBody = await storageFailure.text();
+    assert.ok(!storageFailureBody.includes("SYNTHETIC_PUBLICATION_STORAGE_FAILURE"));
+    assert.ok(!storageFailureBody.includes(storageToken));
+    assert.deepEqual(
+      await publicState(),
+      beforeStorageFailure,
+      "real D1 evidence failure must roll back publication",
+    );
 
-  // ADR23: redaction must win over every retained projection and FTS copy.
-  // Publish through the production routes above, then apply the existing
-  // operator-owned content control directly to this disposable real D1.
-  const redactedClaimText = "Synthetic P-DISC-A: integer 2 is even.";
-  const survivingClaimText = "Synthetic P-DISC-B: integer 2 is even.";
-  // Earlier race cases revoke the original author. Use a freshly enrolled
-  // reader so an expected auth refusal cannot masquerade as redaction proof.
-  const redactionReader = await enroll("discovery-redaction-reader", "usr_discoveryredaction");
-  const redactionSession = await call(
-    "/v1/sessions",
-    { problem_id: "P-DISC-A", intent: "review" },
-    redactionReader,
-    201,
-  );
-  const originalPack = await call(
-    `/v1/sessions/${redactionSession.session_id}/pack?profile=working`,
-    undefined,
-    redactionReader,
-  );
-  assert.ok(JSON.stringify(originalPack).includes(redactedClaimText));
-  const publicReadPaths = [
-    "/p/P-DISC-A.json",
-    "/p/P-DISC-A.md",
-    "/a/discovery-author.json",
-    "/a/discovery-author.md",
-    "/a/discovery-author.html",
-    "/a/discovery-reviewer.json",
-    "/a/discovery-reviewer.md",
-    "/a/discovery-reviewer.html",
-    "/search.json?q=P-DISC-A%23C-1",
-    "/search.md?q=P-DISC-A%23C-1",
-    "/search.json?q=Synthetic&kind=claim&limit=50",
-    "/search.md?q=Synthetic&kind=claim&limit=50",
-  ];
-  const beforeRedaction = new Map();
-  for (const path of publicReadPaths) {
-    const response = await worker.fetch(`${origin}${path}`, {
-      headers: { "User-Agent": userAgent },
-    });
-    assert.equal(response.status, 200, path);
-    const etag = response.headers.get("etag");
-    assert.ok(etag, path);
-    beforeRedaction.set(path, { etag, body: await response.text() });
-  }
-  assert.ok(beforeRedaction.get("/p/P-DISC-A.json").body.includes(redactedClaimText));
-  assert.ok(
-    beforeRedaction
-      .get("/search.json?q=Synthetic&kind=claim&limit=50")
-      .body.includes(redactedClaimText),
-  );
-  const envelopeBefore = await env.DB.prepare(
-    "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
-  )
-    .bind("P-DISC-A")
-    .all();
-  await env.DB.prepare(
-    `UPDATE event_content SET payload_json = '{"control":"redacted"}',
-       redacted_at = '2026-09-05T00:00:00.000Z', redaction_reason = 'privacy'
-     WHERE event_id IN (SELECT id FROM events WHERE problem_id = ?
-       AND type IN ('claim.created', 'review.created'))`,
-  )
-    .bind("P-DISC-A")
-    .run();
-  assert.deepEqual(
-    (
-      await env.DB.prepare(
-        "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
-      )
-        .bind("P-DISC-A")
-        .all()
-    ).results,
-    envelopeBefore.results,
-  );
-  // The unsafe copies really remain; a pass cannot come from deleting the fixture.
-  assert.ok(
-    (
-      await env.DB.prepare("SELECT statement FROM claims WHERE problem_id = ? AND id = 'C-1'")
-        .bind("P-DISC-A")
-        .first()
-    ).statement.includes(redactedClaimText),
-  );
-  assert.ok(
-    (
-      await env.DB.prepare(
-        "SELECT statement FROM public_claim_fts WHERE problem_id = ? AND claim_id = 'C-1'",
-      )
-        .bind("P-DISC-A")
-        .first()
-    ).statement.includes(redactedClaimText),
-  );
-  const redactionFailures = [];
-  for (const path of publicReadPaths) {
-    const response = await worker.fetch(`${origin}${path}`, {
-      headers: { "User-Agent": userAgent, "if-none-match": beforeRedaction.get(path).etag },
-    });
-    if (response.status === 304) redactionFailures.push(`${path}: stale conditional response`);
-    assert.equal(response.status, 200, `${path}: redaction must return a successful fresh face`);
-    const etag = response.headers.get("etag");
-    assert.ok(etag, path);
-    assert.notEqual(etag, beforeRedaction.get(path).etag, path);
-    const body = await response.text();
-    if (path === "/p/P-DISC-A.json") {
-      const face = JSON.parse(body);
-      assert.equal(face.items.length, 0);
-      assert.ok(face.omitted.some((item) => item.reason === "content_unavailable"));
-    }
-    if (body.includes(redactedClaimText)) redactionFailures.push(`${path}: retained claim text`);
-    if (path === "/a/discovery-reviewer.json" && response.status === 200) {
-      const card = JSON.parse(body);
-      if (card.reviews.some((review) => review.problem_id === "P-DISC-A"))
-        redactionFailures.push(`${path}: retained review text`);
-      assert.ok(card.reviews.some((review) => review.problem_id === "P-DISC-B"));
-    }
-    if (path === "/a/discovery-author.json" && response.status === 200)
-      assert.ok(body.includes(survivingClaimText));
-    const unchanged = await worker.fetch(`${origin}${path}`, {
-      headers: { "User-Agent": userAgent, "if-none-match": etag },
-    });
-    assert.equal(unchanged.status, 304, `${path}: fresh validator remains usable`);
-    assert.equal(await unchanged.text(), "");
-  }
-  for (const profile of [
-    "hello",
-    "orient",
-    "working",
-    "claim",
-    "review",
-    "digest",
-    "graveyard",
-    "literature",
-    "formal",
-    "review-queue",
-    "claim-graph",
-    "full",
-  ]) {
-    const pack = await call(
-      `/v1/sessions/${redactionSession.session_id}/pack?profile=${profile}`,
+    // ADR23: redaction must win over every retained projection and FTS copy.
+    // Publish through the production routes above, then apply the existing
+    // operator-owned content control directly to this disposable real D1.
+    const redactedClaimText = "Synthetic P-DISC-A: integer 2 is even.";
+    const survivingClaimText = "Synthetic P-DISC-B: integer 2 is even.";
+    // Earlier race cases revoke the original author. Use a freshly enrolled
+    // reader so an expected auth refusal cannot masquerade as redaction proof.
+    const redactionReader = await enroll("discovery-redaction-reader", "usr_discoveryredaction");
+    const redactionSession = await call(
+      "/v1/sessions",
+      { problem_id: "P-DISC-A", intent: "review" },
+      redactionReader,
+      201,
+    );
+    const originalPack = await call(
+      `/v1/sessions/${redactionSession.session_id}/pack?profile=working`,
       undefined,
       redactionReader,
     );
-    if (JSON.stringify(pack).includes(redactedClaimText))
-      redactionFailures.push(`pack:${profile}: retained claim text`);
-    if (profile !== "hello") {
-      assert.ok(
-        pack.omitted.some(
-          (item) => item.reason === "content_unavailable" && item.detail === "claims",
-        ),
-      );
-    }
-  }
-  assert.ok(JSON.stringify(await call("/p/P-DISC-B.json")).includes(survivingClaimText));
-  assert.deepEqual(
-    redactionFailures,
-    [],
-    "redacted content must not return through public projections",
-  );
-  // Lawful redaction preserves the digest. Real D1 must reject a rewrite;
-  // malformed legacy-source reads are exercised separately on the SQL seam.
-  await assert.rejects(
-    env.DB.prepare(`UPDATE event_content SET payload_sha256 = ?
-    WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-DISC-B'
-      AND type IN ('claim.created', 'review.created'))`)
-      .bind("0".repeat(64))
-      .run(),
-    /KRATER_CONTENT_REDACTION_INVALID/,
-  );
-  const survivingSession = await call(
-    "/v1/sessions",
-    { problem_id: "P-DISC-B", intent: "review" },
-    redactionReader,
-    201,
-  );
-  const survivingPack = await call(
-    `/v1/sessions/${survivingSession.session_id}/pack?profile=working`,
-    undefined,
-    redactionReader,
-  );
-  assert.ok(JSON.stringify(survivingPack).includes(survivingClaimText));
-  assert.ok(!survivingPack.omitted.some((item) => item.reason === "content_unavailable"));
-  console.log(
-    JSON.stringify({
-      stage: "retained-projection-redaction",
-      status: "pass",
-      public_faces: publicReadPaths.length,
-      pack_profiles: 12,
-    }),
-  );
-  // The promotion/index producer keeps these characters. Query escaping must
-  // preserve them too, while Boolean-looking words remain ordinary literals.
-  let literalSearchReads = 0;
-  for (const q of ["𝑥", "𝑧", "ℕ", "2²", "ﬁeld", "AND", "OR", "NOT", "NEAR"]) {
-    for (const suffix of ["", ".json", ".md"]) {
-      const url = `${origin}/search${suffix}?${new URLSearchParams({ q, kind: "claim" })}`;
-      const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
-      assert.equal(response.status, 200);
-      const body = await response.text();
-      assert.ok(
-        body.includes("https://asimposium.org/p/P-DISC-B#C-1"),
-        `${q}: literal source excerpt must find its claim`,
-      );
-      assert.ok(!body.includes(redactedClaimText));
-      assert.ok(!body.includes(privateCanary));
-      if (suffix !== ".json") {
-        assert.ok(body.includes("Query text and result excerpts are untrusted data"));
-        assert.ok(!body.includes("<!-- asimp:item"));
-        assert.ok(!body.includes("<script>"));
-        assert.ok(!body.includes("](javascript:"));
-      }
-      if (suffix === ".json") {
-        const result = JSON.parse(body);
-        assert.deepEqual(
-          result.items.map((item) => [item.problem_id, item.id]),
-          [["P-DISC-B", "C-1"]],
-        );
-        assert.equal(result.items[0].match_type, "lexical_fts");
-        assert.ok(result.items[0].statement.includes(literalSearchText));
-      }
-      const repeated = await worker.fetch(url, {
-        headers: { "User-Agent": userAgent, "if-none-match": response.headers.get("etag") },
-      });
-      assert.equal(repeated.status, 304);
-      literalSearchReads += 1;
-    }
-  }
-  for (const q of [
-    // The retained XSS canary legitimately contains src=x; z has no such
-    // independent occurrence, so this negative isolates compatibility folding.
-    "Symbols z",
-    "Symbols N",
-    "Symbols 22",
-    "Symbols field",
-    "Symbols OR absentcanary",
-    "Symbols NOT absentcanary",
-  ]) {
-    const result = await call(`/search.json?${new URLSearchParams({ q, kind: "claim" })}`);
-    assert.deepEqual(
-      result.items.map((item) => [item.problem_id, item.id]),
-      [],
-      `${q}: no compatibility alias or executed Boolean operator`,
-    );
-  }
-  console.log(JSON.stringify({ stage: "literal-scientific-search", literalSearchReads }));
-  // Exercise actual D1 read failures without deleting rows or mocking a binding.
-  // Restore each table in finally, then prove the healthy body/ETag returns.
-  let unavailableReads = 0;
-  let exactFallbackReads = 0;
-  for (const [table, q, kind] of [
-    ["public_cursor", "Synthetic", "claim"],
-    ["claims", "Synthetic", "claim"],
-    ["public_claim_fts", "Synthetic", "claim"],
-    ["problems", "DISC", "problem"],
-    ["enrollment_fellows", "discovery", "fellow"],
-  ]) {
-    const suffixes = ["", ".json", ".md"];
-    const healthy = new Map();
-    for (const suffix of suffixes) {
-      const path = `/search${suffix}?${new URLSearchParams({ q, kind })}`;
+    assert.ok(JSON.stringify(originalPack).includes(redactedClaimText));
+    const publicReadPaths = [
+      "/p/P-DISC-A.json",
+      "/p/P-DISC-A.md",
+      "/a/discovery-author.json",
+      "/a/discovery-author.md",
+      "/a/discovery-author.html",
+      "/a/discovery-reviewer.json",
+      "/a/discovery-reviewer.md",
+      "/a/discovery-reviewer.html",
+      "/search.json?q=P-DISC-A%23C-1",
+      "/search.md?q=P-DISC-A%23C-1",
+      "/search.json?q=Synthetic&kind=claim&limit=50",
+      "/search.md?q=Synthetic&kind=claim&limit=50",
+    ];
+    const beforeRedaction = new Map();
+    for (const path of publicReadPaths) {
       const response = await worker.fetch(`${origin}${path}`, {
         headers: { "User-Agent": userAgent },
       });
       assert.equal(response.status, 200, path);
-      const body = await response.text();
-      assert.ok(!body.includes("No public ledger objects matched"), path);
-      if (suffix === ".json") {
-        const search = JSON.parse(body);
-        assert.ok(search.items.length > 0, path);
-        assert.ok(search.source_cursor > 0, path);
-      }
-      assert.ok(response.headers.get("etag"), path);
-      healthy.set(path, { body, etag: response.headers.get("etag") });
+      const etag = response.headers.get("etag");
+      assert.ok(etag, path);
+      beforeRedaction.set(path, { etag, body: await response.text() });
     }
-    await env.DB.prepare(`ALTER TABLE ${table} RENAME TO retained_search_source`).run();
-    try {
-      for (const [path, previous] of healthy) {
-        for (const method of ["GET", "HEAD"]) {
-          const response = await worker.fetch(`${origin}${path}`, {
-            method,
-            headers: { "User-Agent": userAgent, "if-none-match": previous.etag },
-          });
-          assert.equal(response.status, 503, `${table}: ${method} ${path}`);
-          assert.equal(response.headers.get("cache-control"), "no-store");
-          assert.equal(response.headers.get("etag"), null);
-          const body = await response.text();
-          if (method === "HEAD") assert.equal(body, "");
-          else {
-            assert.equal(JSON.parse(body).code, "INTERNAL_ERROR");
-            assert.ok(!body.includes("retained_search_source"));
-            assert.ok(!body.includes("no such table"));
-            assert.ok(!body.includes(q));
-          }
-          unavailableReads += 1;
-        }
+    assert.ok(beforeRedaction.get("/p/P-DISC-A.json").body.includes(redactedClaimText));
+    assert.ok(
+      beforeRedaction
+        .get("/search.json?q=Synthetic&kind=claim&limit=50")
+        .body.includes(redactedClaimText),
+    );
+    const envelopeBefore = await env.DB.prepare(
+      "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
+    )
+      .bind("P-DISC-A")
+      .all();
+    await env.DB.prepare(
+      `UPDATE event_content SET payload_json = '{"control":"redacted"}',
+       redacted_at = '2026-09-05T00:00:00.000Z', redaction_reason = 'privacy'
+     WHERE event_id IN (SELECT id FROM events WHERE problem_id = ?
+       AND type IN ('claim.created', 'review.created'))`,
+    )
+      .bind("P-DISC-A")
+      .run();
+    assert.deepEqual(
+      (
+        await env.DB.prepare(
+          "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
+        )
+          .bind("P-DISC-A")
+          .all()
+      ).results,
+      envelopeBefore.results,
+    );
+    // The unsafe copies really remain; a pass cannot come from deleting the fixture.
+    assert.ok(
+      (
+        await env.DB.prepare("SELECT statement FROM claims WHERE problem_id = ? AND id = 'C-1'")
+          .bind("P-DISC-A")
+          .first()
+      ).statement.includes(redactedClaimText),
+    );
+    assert.ok(
+      (
+        await env.DB.prepare(
+          "SELECT statement FROM public_claim_fts WHERE problem_id = ? AND claim_id = 'C-1'",
+        )
+          .bind("P-DISC-A")
+          .first()
+      ).statement.includes(redactedClaimText),
+    );
+    const redactionFailures = [];
+    for (const path of publicReadPaths) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, "if-none-match": beforeRedaction.get(path).etag },
+      });
+      if (response.status === 304) redactionFailures.push(`${path}: stale conditional response`);
+      assert.equal(response.status, 200, `${path}: redaction must return a successful fresh face`);
+      const etag = response.headers.get("etag");
+      assert.ok(etag, path);
+      assert.notEqual(etag, beforeRedaction.get(path).etag, path);
+      const body = await response.text();
+      if (path === "/p/P-DISC-A.json") {
+        const face = JSON.parse(body);
+        assert.equal(face.items.length, 0);
+        assert.ok(face.omitted.some((item) => item.reason === "content_unavailable"));
       }
-      if (table === "public_claim_fts") {
-        for (const suffix of suffixes) {
+      if (body.includes(redactedClaimText)) redactionFailures.push(`${path}: retained claim text`);
+      if (path === "/a/discovery-reviewer.json" && response.status === 200) {
+        const card = JSON.parse(body);
+        if (card.reviews.some((review) => review.problem_id === "P-DISC-A"))
+          redactionFailures.push(`${path}: retained review text`);
+        assert.ok(card.reviews.some((review) => review.problem_id === "P-DISC-B"));
+      }
+      if (path === "/a/discovery-author.json" && response.status === 200)
+        assert.ok(body.includes(survivingClaimText));
+      const unchanged = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, "if-none-match": etag },
+      });
+      assert.equal(unchanged.status, 304, `${path}: fresh validator remains usable`);
+      assert.equal(await unchanged.text(), "");
+    }
+    for (const profile of [
+      "hello",
+      "orient",
+      "working",
+      "claim",
+      "review",
+      "digest",
+      "graveyard",
+      "literature",
+      "formal",
+      "review-queue",
+      "claim-graph",
+      "full",
+    ]) {
+      const pack = await call(
+        `/v1/sessions/${redactionSession.session_id}/pack?profile=${profile}`,
+        undefined,
+        redactionReader,
+      );
+      if (JSON.stringify(pack).includes(redactedClaimText))
+        redactionFailures.push(`pack:${profile}: retained claim text`);
+      if (profile !== "hello") {
+        assert.ok(
+          pack.omitted.some(
+            (item) => item.reason === "content_unavailable" && item.detail === "claims",
+          ),
+        );
+      }
+    }
+    assert.ok(JSON.stringify(await call("/p/P-DISC-B.json")).includes(survivingClaimText));
+    assert.deepEqual(
+      redactionFailures,
+      [],
+      "redacted content must not return through public projections",
+    );
+    // Lawful redaction preserves the digest. Real D1 must reject a rewrite;
+    // malformed legacy-source reads are exercised separately on the SQL seam.
+    await assert.rejects(
+      env.DB.prepare(`UPDATE event_content SET payload_sha256 = ?
+    WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-DISC-B'
+      AND type IN ('claim.created', 'review.created'))`)
+        .bind("0".repeat(64))
+        .run(),
+      /KRATER_CONTENT_REDACTION_INVALID/,
+    );
+    const survivingSession = await call(
+      "/v1/sessions",
+      { problem_id: "P-DISC-B", intent: "review" },
+      redactionReader,
+      201,
+    );
+    const survivingPack = await call(
+      `/v1/sessions/${survivingSession.session_id}/pack?profile=working`,
+      undefined,
+      redactionReader,
+    );
+    assert.ok(JSON.stringify(survivingPack).includes(survivingClaimText));
+    assert.ok(!survivingPack.omitted.some((item) => item.reason === "content_unavailable"));
+    console.log(
+      JSON.stringify({
+        stage: "retained-projection-redaction",
+        status: "pass",
+        public_faces: publicReadPaths.length,
+        pack_profiles: 12,
+      }),
+    );
+    // The promotion/index producer keeps these characters. Query escaping must
+    // preserve them too, while Boolean-looking words remain ordinary literals.
+    let literalSearchReads = 0;
+    for (const q of ["𝑥", "𝑧", "ℕ", "2²", "ﬁeld", "AND", "OR", "NOT", "NEAR"]) {
+      for (const suffix of ["", ".json", ".md"]) {
+        const url = `${origin}/search${suffix}?${new URLSearchParams({ q, kind: "claim" })}`;
+        const response = await worker.fetch(url, { headers: { "User-Agent": userAgent } });
+        assert.equal(response.status, 200);
+        const body = await response.text();
+        assert.ok(
+          body.includes("https://asimposium.org/p/P-DISC-B#C-1"),
+          `${q}: literal source excerpt must find its claim`,
+        );
+        assert.ok(!body.includes(redactedClaimText));
+        assert.ok(!body.includes(privateCanary));
+        if (suffix !== ".json") {
+          assert.ok(body.includes("Query text and result excerpts are untrusted data"));
+          assert.ok(!body.includes("<!-- asimp:item"));
+          assert.ok(!body.includes("<script>"));
+          assert.ok(!body.includes("](javascript:"));
+        }
+        if (suffix === ".json") {
+          const result = JSON.parse(body);
+          assert.deepEqual(
+            result.items.map((item) => [item.problem_id, item.id]),
+            [["P-DISC-B", "C-1"]],
+          );
+          assert.equal(result.items[0].match_type, "lexical_fts");
+          assert.ok(result.items[0].statement.includes(literalSearchText));
+        }
+        const repeated = await worker.fetch(url, {
+          headers: { "User-Agent": userAgent, "if-none-match": response.headers.get("etag") },
+        });
+        assert.equal(repeated.status, 304);
+        literalSearchReads += 1;
+      }
+    }
+    for (const q of [
+      // The retained XSS canary legitimately contains src=x; z has no such
+      // independent occurrence, so this negative isolates compatibility folding.
+      "Symbols z",
+      "Symbols N",
+      "Symbols 22",
+      "Symbols field",
+      "Symbols OR absentcanary",
+      "Symbols NOT absentcanary",
+    ]) {
+      const result = await call(`/search.json?${new URLSearchParams({ q, kind: "claim" })}`);
+      assert.deepEqual(
+        result.items.map((item) => [item.problem_id, item.id]),
+        [],
+        `${q}: no compatibility alias or executed Boolean operator`,
+      );
+    }
+    console.log(JSON.stringify({ stage: "literal-scientific-search", literalSearchReads }));
+    // Exercise actual D1 read failures without deleting rows or mocking a binding.
+    // Restore each table in finally, then prove the healthy body/ETag returns.
+    let unavailableReads = 0;
+    let exactFallbackReads = 0;
+    for (const [table, q, kind] of [
+      ["public_cursor", "Synthetic", "claim"],
+      ["claims", "Synthetic", "claim"],
+      ["public_claim_fts", "Synthetic", "claim"],
+      ["problems", "DISC", "problem"],
+      ["enrollment_fellows", "discovery", "fellow"],
+    ]) {
+      const suffixes = ["", ".json", ".md"];
+      const healthy = new Map();
+      for (const suffix of suffixes) {
+        const path = `/search${suffix}?${new URLSearchParams({ q, kind })}`;
+        const response = await worker.fetch(`${origin}${path}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200, path);
+        const body = await response.text();
+        assert.ok(!body.includes("No public ledger objects matched"), path);
+        if (suffix === ".json") {
+          const search = JSON.parse(body);
+          assert.ok(search.items.length > 0, path);
+          assert.ok(search.source_cursor > 0, path);
+        }
+        assert.ok(response.headers.get("etag"), path);
+        healthy.set(path, { body, etag: response.headers.get("etag") });
+      }
+      await env.DB.prepare(`ALTER TABLE ${table} RENAME TO retained_search_source`).run();
+      try {
+        for (const [path, previous] of healthy) {
           for (const method of ["GET", "HEAD"]) {
-            const response = await worker.fetch(
-              `${origin}/search${suffix}?q=P-DISC-B%23C-1&kind=claim`,
-              { method, headers: { "User-Agent": userAgent, "if-none-match": "*" } },
-            );
-            assert.equal(response.status, 200, "exact lookup survives lexical outage");
+            const response = await worker.fetch(`${origin}${path}`, {
+              method,
+              headers: { "User-Agent": userAgent, "if-none-match": previous.etag },
+            });
+            assert.equal(response.status, 503, `${table}: ${method} ${path}`);
             assert.equal(response.headers.get("cache-control"), "no-store");
+            assert.equal(response.headers.get("etag"), null);
             const body = await response.text();
             if (method === "HEAD") assert.equal(body, "");
             else {
-              assert.ok(body.includes("lexical_search_unavailable"));
-              assert.ok(body.includes(survivingClaimText));
-              assert.ok(!body.includes(redactedClaimText));
-              if (suffix === ".json") {
-                const search = JSON.parse(body);
-                assert.equal(search.items.length, 1);
-                assert.equal(search.items[0].match_type, "exact_reference");
-              }
+              assert.equal(JSON.parse(body).code, "INTERNAL_ERROR");
+              assert.ok(!body.includes("retained_search_source"));
+              assert.ok(!body.includes("no such table"));
+              assert.ok(!body.includes(q));
             }
-            exactFallbackReads += 1;
+            unavailableReads += 1;
           }
         }
+        if (table === "public_claim_fts") {
+          for (const suffix of suffixes) {
+            for (const method of ["GET", "HEAD"]) {
+              const response = await worker.fetch(
+                `${origin}/search${suffix}?q=P-DISC-B%23C-1&kind=claim`,
+                { method, headers: { "User-Agent": userAgent, "if-none-match": "*" } },
+              );
+              assert.equal(response.status, 200, "exact lookup survives lexical outage");
+              assert.equal(response.headers.get("cache-control"), "no-store");
+              const body = await response.text();
+              if (method === "HEAD") assert.equal(body, "");
+              else {
+                assert.ok(body.includes("lexical_search_unavailable"));
+                assert.ok(body.includes(survivingClaimText));
+                assert.ok(!body.includes(redactedClaimText));
+                if (suffix === ".json") {
+                  const search = JSON.parse(body);
+                  assert.equal(search.items.length, 1);
+                  assert.equal(search.items[0].match_type, "exact_reference");
+                }
+              }
+              exactFallbackReads += 1;
+            }
+          }
+        }
+      } finally {
+        await env.DB.prepare(`ALTER TABLE retained_search_source RENAME TO ${table}`).run();
       }
-    } finally {
-      await env.DB.prepare(`ALTER TABLE retained_search_source RENAME TO ${table}`).run();
+      for (const [path, previous] of healthy) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200, `${table}: recovered ${path}`);
+        assert.equal(await response.text(), previous.body);
+        assert.equal(response.headers.get("etag"), previous.etag);
+        const unchanged = await worker.fetch(`${origin}${path}`, {
+          headers: { "User-Agent": userAgent, "if-none-match": previous.etag },
+        });
+        assert.equal(unchanged.status, 304);
+      }
     }
-    for (const [path, previous] of healthy) {
-      const response = await worker.fetch(`${origin}${path}`, {
-        headers: { "User-Agent": userAgent },
+    console.log(
+      JSON.stringify({ stage: "search-failure-recovery", unavailableReads, exactFallbackReads }),
+    );
+    async function verifyQuotaRaces() {
+      for (const dimension of ["fellow", "sponsor"]) {
+        const problem = dimension === "fellow" ? "P-QUOTA-FELLOW" : "P-QUOTA-SPONSOR";
+        const sponsor = `usr_quota_${dimension}`;
+        const limit = dimension === "fellow" ? 20 : 21;
+        const actors = [];
+        await fixtures.seedProblem(problem);
+        for (let index = 0; index < (dimension === "fellow" ? 1 : 2); index++) {
+          const token = await enroll(`quota-${dimension}-${index}`, sponsor);
+          const hello = await call("/v1/hello", undefined, token);
+          const session = await call(
+            "/v1/sessions",
+            { problem_id: problem, intent: "prove" },
+            token,
+            201,
+          );
+          actors.push({ token, fellowId: hello.fellow.fellow_id, sessionId: session.session_id });
+        }
+        // These are real durable admission reservations representing uncertain
+        // prior attempts. They are not presented as paid classifier calls.
+        for (let index = 0; index < limit - 1; index++) {
+          const actor = actors[Math.floor(index / 19)];
+          const reserved = await fixtures.reserveQuota({
+            fellowId: actor.fellowId,
+            sponsorId: sponsor,
+            sessionId: actor.sessionId,
+            problemId: problem,
+            route: "/v1/sessions/{id}/promote",
+            idempotencyKey: `prior-${dimension}-${index}`,
+            requestDigest: createHash("sha256").update(`prior-${dimension}-${index}`).digest("hex"),
+          });
+          assert.equal(reserved.allowed, true, "Prior admission must actually reserve capacity");
+        }
+        const contenders = dimension === "fellow" ? [actors[0], actors[0]] : [actors[0], actors[1]];
+        const beforeCalls = await fixtures.screeningCalls();
+        const requests = await Promise.all(
+          contenders.map(async (actor, index) => {
+            const draft = await call(
+              `/v1/sessions/${actor.sessionId}/workshop`,
+              {
+                type: "draft",
+                title: "Quota contender",
+                body_md: "Synthetic quota work product.",
+                relates_to: [],
+              },
+              actor.token,
+              201,
+            );
+            return {
+              actor,
+              key: `last-${dimension}-${index}`,
+              body: PromoteRequestSchema.parse({
+                workshop_id: draft.workshop_id,
+                kind: "conjecture",
+                statement: `Synthetic ${dimension} quota contender ${index}: integer two is even.`,
+                falsifier: "An integer remainder of one after division by two.",
+                relates_to: [],
+              }),
+            };
+          }),
+        );
+        const send = (request) =>
+          worker.fetch(`${origin}/v1/sessions/${request.actor.sessionId}/promote`, {
+            method: "POST",
+            headers: {
+              "User-Agent": userAgent,
+              authorization: `Bearer ${request.actor.token}`,
+              "content-type": "application/json",
+              "idempotency-key": request.key,
+            },
+            body: JSON.stringify(request.body),
+          });
+        const responses = await Promise.all(requests.map(send));
+        if (responses.some((response) => response.status >= 500)) {
+          const state = await env.DB.prepare(
+            `SELECT status, COUNT(*) AS n FROM public_write_attempt_reservations WHERE problem_id = ? GROUP BY status`,
+          )
+            .bind(problem)
+            .all();
+          console.log(
+            JSON.stringify({
+              stage: "quota-failure-state",
+              classifier_calls: (await fixtures.screeningCalls()) - beforeCalls,
+              reservations: state.results,
+            }),
+          );
+          // Runtime messages may contain credentials; expose only source frames
+          // and fixed, known constraint names from this fixture's failure.
+          for (const log of server.getLogs().filter((entry) => entry.level === "error")) {
+            console.log(
+              JSON.stringify({
+                stage: "quota-runtime-failure",
+                frames: [
+                  ...log.message.matchAll(/\bat ([A-Za-z0-9_.$<>]+) \([^\n]*:(\d+):(\d+)\)/g),
+                ].map((match) => `${match[1]}:${match[2]}:${match[3]}`),
+                constraints: [
+                  "PROMOTION_RATE_LIMIT_EXCEEDED",
+                  "RESERVATION_IMMUTABLE",
+                  "SETTLED_RESERVATION_IMMUTABLE",
+                  "SYNTHETIC_PUBLICATION_STORAGE_FAILURE",
+                  "FOREIGN KEY",
+                  "NOT NULL",
+                  "UNIQUE",
+                  "no such table",
+                  "no such column",
+                  "CHECK constraint",
+                  "Too many",
+                  "D1_TYPE_ERROR",
+                ].filter((code) => log.message.includes(code)),
+              }),
+            );
+          }
+        }
+        const diagnoses = await Promise.all(
+          responses.map(async (response) => {
+            try {
+              const body = await response.clone().json();
+              return `${response.status}:${body.code ?? "none"}`;
+            } catch {
+              return `${response.status}:non-JSON`;
+            }
+          }),
+        );
+        assert.deepEqual(
+          responses.map((response) => response.status).sort(),
+          [201, 429],
+          `${dimension} last-slot outcomes: ${diagnoses.join(", ")}`,
+        );
+        assert.equal(await fixtures.screeningCalls(), beforeCalls + 1);
+        const winner = responses.findIndex((response) => response.status === 201);
+        const original = await responses[winner].json();
+        const refusal = responses[1 - winner];
+        const refusedBody = await refusal.json();
+        assert.equal(refusedBody.code, "PROMOTION_RATE_LIMITED");
+        assert.equal(refusedBody.limit, limit);
+        assert.equal(refusedBody.remaining, 0);
+        assert.equal(refusal.headers.get("ratelimit-limit"), String(limit));
+        assert.equal(refusal.headers.get("ratelimit-remaining"), "0");
+        assert.ok(Number(refusal.headers.get("retry-after")) > 0);
+        const replay = await send(requests[winner]);
+        assert.equal(replay.status, 200);
+        assert.deepEqual(await replay.json(), original);
+        assert.equal(await fixtures.screeningCalls(), beforeCalls + 1);
+        const counts = await env.DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM public_write_attempt_reservations WHERE problem_id = ?) AS attempts,
+        (SELECT COUNT(*) FROM events WHERE problem_id = ?) AS events,
+        (SELECT COUNT(*) FROM claims WHERE problem_id = ?) AS claims`)
+          .bind(problem, problem, problem)
+          .first();
+        assert.deepEqual(counts, { attempts: limit, events: 1, claims: 1 });
+        // Reload the actual Worker isolate, retaining D1. Its module-local
+        // classifier counter must reset; durable replay and budgets must not.
+        await server.update((options) => ({
+          ...options,
+          workers: options.workers.map((entry) => ({
+            ...entry,
+            config: {
+              ...entry.config,
+              vars: { ...entry.config.vars, QUOTA_TEST_RELOAD: dimension },
+            },
+          })),
+        }));
+        fixtures = await worker.getExport();
+        env = await worker.getEnv();
+        assert.equal(await fixtures.screeningCalls(), 0, "Worker module state must restart");
+        const restartedReplay = await send(requests[winner]);
+        assert.equal(restartedReplay.status, 200);
+        assert.deepEqual(await restartedReplay.json(), original);
+        const restartedRefusal = await send(requests[1 - winner]);
+        assert.equal(restartedRefusal.status, 429);
+        assert.equal(await fixtures.screeningCalls(), 0);
+        const retained = await env.DB.prepare(
+          "SELECT COUNT(*) AS attempts FROM public_write_attempt_reservations WHERE problem_id = ?",
+        )
+          .bind(problem)
+          .first();
+        assert.equal(retained.attempts, limit);
+        const latest = await env.DB.prepare(
+          "SELECT MAX(reserved_at) AS reserved_at FROM public_write_attempt_reservations WHERE problem_id = ?",
+        )
+          .bind(problem)
+          .first();
+        // Exercise the production reservation function against retained D1 with
+        // its explicit clock input. This is store-level time control, not a
+        // claim that the mounted HTTP path has waited an hour.
+        for (const [index, actor] of actors.entries()) {
+          const recovered = await fixtures.reserveQuota({
+            fellowId: actor.fellowId,
+            sponsorId: sponsor,
+            sessionId: actor.sessionId,
+            problemId: problem,
+            route: "/v1/sessions/{id}/promote",
+            idempotencyKey: `recovery-${dimension}-${index}`,
+            requestDigest: createHash("sha256")
+              .update(`recovery-${dimension}-${index}`)
+              .digest("hex"),
+            now: latest.reserved_at + 60001,
+          });
+          assert.equal(recovered.allowed, false, "Uncertain expired attempts must remain charged");
+          assert.equal(recovered.reason, "RATE_LIMITED");
+        }
+        const recoveredCount = await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE problem_id = ? AND status = 'recovered'",
+        )
+          .bind(problem)
+          .first();
+        assert.equal(recoveredCount.n, limit - 1);
+        const actor = actors[0];
+        const refilled = await fixtures.reserveQuota({
+          fellowId: actor.fellowId,
+          sponsorId: sponsor,
+          sessionId: actor.sessionId,
+          problemId: problem,
+          route: "/v1/sessions/{id}/promote",
+          idempotencyKey: `refill-${dimension}`,
+          requestDigest: createHash("sha256").update(`refill-${dimension}`).digest("hex"),
+          now: latest.reserved_at + 3600000,
+        });
+        assert.equal(refilled.allowed, true, "Capacity must refill at the rolling-window boundary");
+        assert.equal(refilled.budget.remaining, 19);
+        assert.equal(refilled.budget.sponsor_remaining, 20);
+        assert.equal(await fixtures.screeningCalls(), 0);
+        console.log(
+          JSON.stringify({
+            stage: "real-d1-quota-last-slot",
+            dimension,
+            synthetic_prior_reservations: limit - 1,
+            contenders: 2,
+            published: 1,
+            classifier_calls: 1,
+            replay_charges: 0,
+            worker_reload_replay: "pass",
+            worker_reload_exhaustion: "pass",
+            d1_expiry_retains_charge: "pass",
+            d1_clock_controlled_refill: "pass",
+          }),
+        );
+      }
+      const refillProblem = "P-QUOTA-REFILL";
+      await fixtures.seedProblem(refillProblem);
+      const refillToken = await enroll("quota-refill", "usr_quota_refill");
+      const refillHello = await call("/v1/hello", undefined, refillToken);
+      const refillSession = await call(
+        "/v1/sessions",
+        {
+          problem_id: refillProblem,
+          intent: "prove",
+        },
+        refillToken,
+        201,
+      );
+      const refillDraft = await call(
+        `/v1/sessions/${refillSession.session_id}/workshop`,
+        {
+          type: "draft",
+          title: "Refill after restart",
+          body_md: "Synthetic historical attempts.",
+          relates_to: [],
+        },
+        refillToken,
+        201,
+      );
+      const historicalTime = Date.now() - 3601000;
+      const refillParams = {
+        fellowId: refillHello.fellow.fellow_id,
+        sponsorId: "usr_quota_refill",
+        sessionId: refillSession.session_id,
+        problemId: refillProblem,
+        route: "promote",
+        requestDigest: createHash("sha256").update("historical-refill-attempt").digest("hex"),
+      };
+      for (let index = 0; index < 20; index++) {
+        const admitted = await fixtures.reserveQuota({
+          ...refillParams,
+          idempotencyKey: `historical-${index}`,
+          now: historicalTime,
+        });
+        assert.equal(admitted.allowed, true);
+      }
+      const beforeBoundary = await fixtures.reserveQuota({
+        ...refillParams,
+        idempotencyKey: "before-refill",
+        now: historicalTime + 3599999,
       });
-      assert.equal(response.status, 200, `${table}: recovered ${path}`);
-      assert.equal(await response.text(), previous.body);
-      assert.equal(response.headers.get("etag"), previous.etag);
-      const unchanged = await worker.fetch(`${origin}${path}`, {
-        headers: { "User-Agent": userAgent, "if-none-match": previous.etag },
+      assert.equal(beforeBoundary.allowed, false);
+      await server.update((options) => ({
+        ...options,
+        workers: options.workers.map((entry) => ({
+          ...entry,
+          config: { ...entry.config, vars: { ...entry.config.vars, QUOTA_TEST_RELOAD: "refill" } },
+        })),
+      }));
+      fixtures = await worker.getExport();
+      env = await worker.getEnv();
+      assert.equal(await fixtures.screeningCalls(), 0);
+      await call(
+        `/v1/sessions/${refillSession.session_id}/promote`,
+        {
+          workshop_id: refillDraft.workshop_id,
+          kind: "conjecture",
+          statement: "Integer two is even.",
+          falsifier: "An odd remainder after division by two.",
+          relates_to: [],
+        },
+        refillToken,
+        201,
+      );
+      assert.equal(await fixtures.screeningCalls(), 1);
+      const refillEffects = await env.DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM public_write_attempt_reservations WHERE problem_id = ? AND status = 'recovered') AS recovered,
+        (SELECT COUNT(*) FROM events WHERE problem_id = ?) AS events`)
+        .bind(refillProblem, refillProblem)
+        .first();
+      assert.deepEqual(refillEffects, { recovered: 20, events: 1 });
+      console.log(
+        JSON.stringify({
+          stage: "real-d1-quota-mounted-refill",
+          historical_attempts: 20,
+          before_boundary: "refused",
+          after_reload: "published",
+          classifier_calls: 1,
+          clock_boundary: "historical fixture reservations; HTTP uses actual Worker time",
+        }),
+      );
+      const sameKeyProblem = "P-QUOTA-SAME-KEY";
+      await fixtures.seedProblem(sameKeyProblem);
+      const sameKeyToken = await enroll("quota-same-key", "usr_quota_same_key");
+      const sameKeySession = await call(
+        "/v1/sessions",
+        {
+          problem_id: sameKeyProblem,
+          intent: "prove",
+        },
+        sameKeyToken,
+        201,
+      );
+      const sameKeyDraft = await call(
+        `/v1/sessions/${sameKeySession.session_id}/workshop`,
+        {
+          type: "draft",
+          title: "Same caller key",
+          body_md: "Synthetic concurrent admission.",
+          relates_to: [],
+        },
+        sameKeyToken,
+        201,
+      );
+      const sendSameKey = () =>
+        worker.fetch(`${origin}/v1/sessions/${sameKeySession.session_id}/promote`, {
+          method: "POST",
+          headers: {
+            "User-Agent": userAgent,
+            authorization: `Bearer ${sameKeyToken}`,
+            "content-type": "application/json",
+            "idempotency-key": "same-key-screening",
+          },
+          body: JSON.stringify({
+            workshop_id: sameKeyDraft.workshop_id,
+            kind: "conjecture",
+            statement: "Integer two is even.",
+            falsifier: "An odd remainder after division by two.",
+            relates_to: [],
+          }),
+        });
+      const initialCalls = await fixtures.screeningCalls();
+      await fixtures.pauseScreening();
+      const firstPending = sendSameKey();
+      try {
+        const deadline = Date.now() + 5000;
+        while ((await fixtures.screeningCalls()) === initialCalls && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.equal(await fixtures.screeningCalls(), initialCalls + 1);
+        const duplicates = await Promise.all(Array.from({ length: 4 }, sendSameKey));
+        assert.deepEqual(
+          duplicates.map((response) => response.status),
+          [409, 409, 409, 409],
+        );
+        assert.equal(await fixtures.screeningCalls(), initialCalls + 1);
+      } finally {
+        await fixtures.resumeScreening();
+      }
+      const firstPublished = await firstPending;
+      assert.equal(firstPublished.status, 201);
+      const sameKeyReplay = await sendSameKey();
+      assert.equal(sameKeyReplay.status, 200);
+      assert.deepEqual(await sameKeyReplay.json(), await firstPublished.json());
+      const sameKeyEffects = await env.DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM public_write_attempt_reservations WHERE problem_id = ?) AS attempts,
+        (SELECT COUNT(*) FROM events WHERE problem_id = ?) AS events`)
+        .bind(sameKeyProblem, sameKeyProblem)
+        .first();
+      assert.deepEqual(sameKeyEffects, { attempts: 1, events: 1 });
+      assert.equal(await fixtures.screeningCalls(), initialCalls + 1);
+      const sameKeyHello = await call("/v1/hello", undefined, sameKeyToken);
+      const freshReservation = {
+        fellowId: sameKeyHello.fellow.fellow_id,
+        sponsorId: "usr_quota_same_key",
+        sessionId: sameKeySession.session_id,
+        problemId: sameKeyProblem,
+        route: "promote",
+        idempotencyKey: "simultaneous-new-key",
+        requestDigest: createHash("sha256").update("simultaneous-new-key").digest("hex"),
+      };
+      const admissions = await Promise.all([
+        fixtures.reserveQuota(freshReservation),
+        fixtures.reserveQuota(freshReservation),
+      ]);
+      assert.deepEqual(admissions.map((result) => result.allowed).sort(), [false, true]);
+      console.log(
+        JSON.stringify({
+          stage: "real-d1-quota-same-key",
+          concurrent_retries: 4,
+          classifier_calls: 1,
+          reservations: 1,
+          public_events: 1,
+          completed_replay: "pass",
+        }),
+      );
+      const problem = "P-QUOTA-OUTAGE";
+      await fixtures.seedProblem(problem);
+      const token = await enroll("quota-outage", "usr_quota_outage");
+      const session = await call(
+        "/v1/sessions",
+        { problem_id: problem, intent: "prove" },
+        token,
+        201,
+      );
+      const draft = await call(
+        `/v1/sessions/${session.session_id}/workshop`,
+        {
+          type: "draft",
+          title: "Quota storage outage",
+          body_md: "Synthetic failure case.",
+          relates_to: [],
+        },
+        token,
+        201,
+      );
+      // A scoped real D1 write failure; do not remove the trigger or affect
+      // unrelated positive flows that run after this quota proof.
+      await env.DB.prepare(`CREATE TRIGGER synthetic_quota_storage_failure
+        BEFORE INSERT ON public_write_attempt_reservations
+        WHEN NEW.problem_id = 'P-QUOTA-OUTAGE'
+        BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_QUOTA_STORAGE_UNAVAILABLE'); END`).run();
+      const before = await fixtures.screeningCalls();
+      const failed = await worker.fetch(`${origin}/v1/sessions/${session.session_id}/promote`, {
+        method: "POST",
+        headers: {
+          "User-Agent": userAgent,
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "idempotency-key": "quota-outage-promotion",
+        },
+        body: JSON.stringify({
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: "Integer two is even.",
+          falsifier: "An odd remainder after division by two.",
+          relates_to: [],
+        }),
       });
-      assert.equal(unchanged.status, 304);
+      assert.equal(failed.status, 500);
+      assert.equal((await failed.json()).code, "INTERNAL_ERROR");
+      assert.equal(await fixtures.screeningCalls(), before);
+      const effects = await env.DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM public_write_attempt_reservations WHERE problem_id = ?) AS attempts,
+        (SELECT COUNT(*) FROM events WHERE problem_id = ?) AS events,
+        (SELECT COUNT(*) FROM claims WHERE problem_id = ?) AS claims`)
+        .bind(problem, problem, problem)
+        .first();
+      assert.deepEqual(effects, { attempts: 0, events: 0, claims: 0 });
+      await call("/v1/hello", undefined, token);
+      await call(
+        `/v1/sessions/${session.session_id}/workshop`,
+        {
+          type: "draft",
+          title: "Continue during outage",
+          body_md: "Private work remains available.",
+          relates_to: [],
+        },
+        token,
+        201,
+      );
+      console.log(
+        JSON.stringify({
+          stage: "real-d1-quota-storage-failure",
+          classifier_calls: 0,
+          public_events: 0,
+          authenticated_hello: "pass",
+          private_workshop: "pass",
+        }),
+      );
     }
+    console.log(
+      JSON.stringify({
+        kind: "discovery-real-bindings",
+        status: "pass",
+        runtime: `node ${process.version}`,
+        public_events: rawEvents.results.length,
+        private_r2_objects: privateObjects.objects.length,
+        screening_refusals: 0,
+        screening_mode: screenMode,
+        boundary:
+          "local Workerd/D1/R2; fixture classifier and sponsor setup; no staging, OAuth or live-model claim",
+      }),
+    );
   }
-  console.log(
-    JSON.stringify({ stage: "search-failure-recovery", unavailableReads, exactFallbackReads }),
-  );
-  console.log(
-    JSON.stringify({
-      kind: "discovery-real-bindings",
-      status: "pass",
-      runtime: `node ${process.version}`,
-      public_events: rawEvents.results.length,
-      private_r2_objects: privateObjects.objects.length,
-      screening_refusals: candidates.length * 5,
-      boundary:
-        "local Workerd/D1/R2; fixture classifier and sponsor setup; no staging, OAuth or live-model claim",
-    }),
-  );
 } finally {
   await server.close();
 }

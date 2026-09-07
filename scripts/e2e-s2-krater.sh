@@ -249,6 +249,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
+  apps/wire/src/sessions/quota.ts
   apps/wire/src/sessions/ledger-pack.ts
   apps/wire/src/split/policy.ts
   apps/wire/src/search/router.ts

@@ -572,6 +572,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   }
 
+  const quotaReplayContracts = {
+    promote: ["promote", PromoteResponseSchema],
+    revise: ["revise", ReviseResponseSchema],
+    gaps: ["gaps", GapFiledResponseSchema],
+    "gaps/close": ["gaps", GapClosedResponseSchema],
+    relations: ["relations", RelationFiledResponseSchema],
+    review: ["review", ReviewResponseSchema],
+    hypotheses: ["hypotheses", HypothesisResponseSchema],
+    "hypothesis-kill": ["hypothesis-kill", HypothesisKillResponseSchema],
+    evidence: ["evidence", EvidenceResponseSchema],
+  } as const;
+
   async function screenWithQuota(
     env: Env,
     quotaParams: {
@@ -579,7 +591,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       readonly problemId: string;
       readonly sponsorId: string;
       readonly sessionId: string;
-      readonly route: string;
+      readonly route: keyof typeof quotaReplayContracts;
+      readonly replayTarget: string;
       readonly idempotencyKey: string;
       readonly requestDigest: string;
     },
@@ -588,14 +601,64 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | { readonly error: Response }
     | { readonly screening: ScreenedPublication; readonly reservation: QuotaReservation }
   > {
-    const sponsorLimit = parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT);
-    const quotaResult = await checkAndReserveQuota(env.DB, {
-      ...quotaParams,
-      sponsorLimit,
-    });
+    let quotaResult: Awaited<ReturnType<typeof checkAndReserveQuota>>;
+    try {
+      const sponsorLimit = parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT);
+      quotaResult = await checkAndReserveQuota(env.DB, { ...quotaParams, sponsorLimit });
+    } catch {
+      return {
+        error: validatedProblem({
+          status: 500,
+          code: "INTERNAL_ERROR",
+          title: "Promotion admission is unavailable",
+          detail: "The Worker could not reserve promotion capacity. No screening was started.",
+          fixHint:
+            "Keep using the private workshop and retry this promotion later with the same key.",
+        }),
+      };
+    }
     if (!quotaResult.allowed) {
       if (quotaResult.reason === "RATE_LIMITED") {
         return { error: promotionRateLimitedProblem(quotaResult) };
+      }
+      if (quotaResult.reason === "IN_FLIGHT_CONFLICT") {
+        const [scope, schema] = quotaReplayContracts[quotaParams.route];
+        // Give an already-running writer a short, bounded chance to publish
+        // its sealed replay. Never re-enter screening while waiting.
+        for (let attempt = 0; attempt < 12; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          try {
+            const replay = await replayResponseBeforeMutablePreconditions(
+              env.DB,
+              scope,
+              quotaParams.fellowId,
+              quotaParams.idempotencyKey,
+              quotaParams.requestDigest,
+              quotaParams.replayTarget,
+              (raw) => schema.parse(JSON.parse(raw)),
+            );
+            if (replay) return { error: replay };
+          } catch (error) {
+            if (error instanceof ReplayConflictError)
+              return { error: idempotencyConflictProblem() };
+            throw error;
+          }
+        }
+        const pending = validatedProblem({
+          status: 409,
+          code: "IDEMPOTENCY_CONFLICT",
+          title: "This Idempotency-Key already has a promotion in progress",
+          detail:
+            "Another request owns the active reservation. This retry did not start screening.",
+          fixHint: "Wait briefly, then retry the same request with the same Idempotency-Key.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { headers: { "Idempotency-Key": "same-request-key" } },
+          },
+        });
+        pending.headers.set("retry-after", "1");
+        return { error: privateNoStore(pending) };
       }
       return { error: idempotencyConflictProblem() };
     }
@@ -2524,6 +2587,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "promote",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -3116,6 +3180,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "revise",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -3514,6 +3579,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "gaps",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -3785,6 +3851,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "gaps/close",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -4076,6 +4143,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "relations",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -4380,6 +4448,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "review",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -4603,6 +4672,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "hypotheses",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -4909,6 +4979,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "hypothesis-kill",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },
@@ -5235,6 +5306,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
         route: "evidence",
+        replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
       },

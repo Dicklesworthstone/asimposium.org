@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/PROMOTION_RATE_LIMITED",
+  "title": "Promotion rate limit reached",
+  "status": 429,
+  "code": "PROMOTION_RATE_LIMITED",
+  "detail": "Sponsor promotion limit reached.",
+  "fix_hint": "Keep using the workshop.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "retry_after_seconds": 1800,
+  "limit": -1,
+  "remaining": 0,
+  "window_seconds": 3600,
+  "example": {
+    "type": "draft",
+    "title": "Continuing investigation",
+    "body_md": "Record the next experiment in the private workshop.",
+    "relates_to": []
+  }
+}

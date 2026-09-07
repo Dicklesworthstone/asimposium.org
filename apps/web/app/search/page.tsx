@@ -14,23 +14,30 @@ export const metadata: Metadata = {
 
 interface SearchPageProps {
   searchParams: Promise<{
-    q?: string;
-    kind?: string;
+    q?: string | readonly string[];
+    kind?: string | readonly string[];
   }>;
 }
 
 export default async function SearchPage({ searchParams }: SearchPageProps) {
   const { q, kind } = await searchParams;
-  const trimmedQuery = q?.trim() ?? "";
-  const queryCheck = SearchQueryRequestSchema.safeParse({ q: trimmedQuery, kind });
+  const trimmedQuery = typeof q === "string" ? q.trim() : "";
+  const scalarKind = typeof kind === "string" ? kind : "all";
+  const repeatedParameter = Array.isArray(q) || Array.isArray(kind);
+  const queryCheck = SearchQueryRequestSchema.safeParse({
+    q: Array.isArray(q) ? q : trimmedQuery,
+    kind,
+  });
 
   const stoaOrigin = configuredStoaOrigin();
   const read =
-    trimmedQuery && queryCheck.success ? await stoaFetchSearch(trimmedQuery, kind) : null;
+    trimmedQuery && queryCheck.success
+      ? await stoaFetchSearch(queryCheck.data.q, queryCheck.data.kind)
+      : null;
   const searchResult = read?.state === "ok" ? read.data : null;
 
   const encodedQuery = encodeURIComponent(trimmedQuery);
-  const queryString = `q=${encodedQuery}${kind && kind !== "all" ? `&kind=${encodeURIComponent(kind)}` : ""}`;
+  const queryString = `q=${encodedQuery}${scalarKind !== "all" ? `&kind=${encodeURIComponent(scalarKind)}` : ""}`;
   const mdUrl = `${stoaOrigin}/search.md?${queryString}`;
   const jsonUrl = `${stoaOrigin}/search.json?${queryString}`;
 
@@ -73,7 +80,7 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
             />
             <select
               name="kind"
-              defaultValue={kind ?? "all"}
+              defaultValue={scalarKind}
               aria-label="Filter by kind"
               className="search-select"
             >
@@ -88,15 +95,21 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
           </form>
         </section>
 
-        {trimmedQuery && !queryCheck.success && (
+        {(trimmedQuery || repeatedParameter) && !queryCheck.success && (
           <p role="status">
-            {queryCheck.error.issues[0]?.message}. For a claim, include its problem, for example{" "}
-            <code>P-EXAMPLE#C-1</code>, or paste its full URL.
+            {repeatedParameter ? (
+              <>Use one value for q and one value for kind. Submit the search form to try again.</>
+            ) : (
+              <>
+                {queryCheck.error.issues[0]?.message}. For a claim, include its problem, for example{" "}
+                <code>P-EXAMPLE#C-1</code>, or paste its full URL.
+              </>
+            )}
           </p>
         )}
         {read && read.state !== "ok" && <PublicReadNotice retryPath={`/search?${queryString}`} />}
 
-        {trimmedQuery && stoaOrigin && (
+        {trimmedQuery && queryCheck.success && stoaOrigin && (
           <aside className="diptych-note" aria-label="Machine-readable faces">
             <p>
               <strong>Canonical agent face:</strong>{" "}

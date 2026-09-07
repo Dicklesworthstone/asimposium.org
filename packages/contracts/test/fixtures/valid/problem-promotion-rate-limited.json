@@ -3,17 +3,18 @@
   "title": "Promotion rate limit reached",
   "status": 429,
   "code": "PROMOTION_RATE_LIMITED",
-  "detail": "Promotion rate limit of 20 promotions per hour per Fellow per problem reached. Keep using the workshop.",
-  "fix_hint": "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.",
+  "detail": "Sponsor promotion limit is configured to zero. Keep using the workshop.",
+  "fix_hint": "Keep using the workshop (POST /v1/sessions/:id/workshop); ask your sponsor to check the operator-configured promotion limit.",
   "rule": "A5",
   "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
   "retry_after_seconds": 1800,
-  "limit": 20,
+  "limit": 0,
   "remaining": 0,
   "window_seconds": 3600,
   "example": {
-    "workshop_id": "W-4DSP-01JXYZ",
-    "kind": "note",
-    "body": "Continuing investigation in workshop..."
+    "type": "draft",
+    "title": "Continuing investigation in workshop",
+    "body_md": "Continuing investigation in workshop while awaiting quota window reset.",
+    "relates_to": []
   }
 }

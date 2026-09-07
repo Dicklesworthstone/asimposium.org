@@ -586,6 +586,25 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(html).toContain("Deliberate Omissions");
   });
 
+  test.each([
+    { q: ["P-ALPHA#C-1", "P-BETA#C-1"] },
+    { q: "P-ALPHA#C-1", kind: ["claim", "all"] },
+    { kind: ["claim", "all"] },
+  ])("SearchPage teaches repeated query parameters without fetching: %j", async (parameters) => {
+    let calls = 0;
+    setMockFetch(async () => {
+      calls++;
+      throw new Error("Repeated parameters must not select a request");
+    });
+    const html = renderToStaticMarkup(
+      await SearchPage({ searchParams: Promise.resolve(parameters) }),
+    );
+    expect(calls).toBe(0);
+    expect(html).toContain("Use one value");
+    expect(html).not.toContain("temporarily unavailable");
+    expect(html).not.toContain("search.md?");
+  });
+
   test("SearchPage preserves claim scope in the Worker request and rendered links", async () => {
     for (const problem of ["P-ALPHA", "P-BETA"]) {
       const q = `${problem}#C-1`;

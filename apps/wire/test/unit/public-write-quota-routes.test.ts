@@ -1,9 +1,12 @@
+// In-process SQLite/router coverage. Actual Workerd/D1 admission races are
+// exercised separately in discovery-real-bindings.test.ts.
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EnrollmentHelloResponseSchema, PackResponseSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
+import { createEnrollmentRouter } from "../../src/enrollment/router";
 import {
   AesGcmEnrollmentReplayProtector,
   EnrollmentService,
@@ -126,6 +129,7 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
     store,
     replayProtector,
   });
+  const enrollmentRouter = createEnrollmentRouter({ service });
 
   const screenPromotion = async (input: any) => {
     classifierInvocations++;
@@ -347,7 +351,7 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
   };
 }
 
-describe("integration: mounted public-write rate limiting with durable budgets", () => {
+describe("SQLite-backed unit checks: mounted public-write budgets", () => {
   test("20 promotions allowed, 21st rejected with 429, synthetic classifier called 0 times on 21st", async () => {
     const harness = await createQuotaTestHarness();
     const fellow = await harness.registerFellow("quota-producer");

@@ -153,17 +153,36 @@ const wrappedDatabaseByBinding = new WeakMap<object, Env["DB"]>();
 
 function sessionReplayScope(sql: string): SessionReplayScope | undefined {
   if (!sql.includes("INSERT INTO session_write_replays")) return undefined;
+  // Promote is admission-gated at public_write_attempt_reservations before screening;
+  // it races at quota reservation, not at the post-screening replay batch.
+  if (sql.includes("'promote'")) return undefined;
   return SESSION_REPLAY_SCOPES.find((scope) => sql.includes(`'${scope}'`));
+}
+
+function isPromoteQuotaAdmission(sql: string): boolean {
+  return (
+    sql.includes("public_write_attempt_reservations") &&
+    sql.includes("SELECT COUNT(*) AS attempt_count")
+  );
 }
 
 function wrappedStatement(
   statement: HarnessPreparedStatement,
   scope: SessionReplayScope | undefined,
+  isPromoteAdmission = false,
 ): HarnessPreparedStatement {
   const wrapper = new Proxy(statement, {
     get(target, property) {
       if (property === "bind") {
-        return (...values: unknown[]) => wrappedStatement(target.bind(...values), scope);
+        return (...values: unknown[]) =>
+          wrappedStatement(target.bind(...values), scope, isPromoteAdmission);
+      }
+      if (property === "first" && isPromoteAdmission) {
+        return async (...args: unknown[]) => {
+          await sessionReplayBarrier.awaitBatch("promote");
+          const firstFn = Reflect.get(target, "first", target);
+          return typeof firstFn === "function" ? firstFn.apply(target, args) : target.first();
+        };
       }
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -180,7 +199,12 @@ function sessionReplayDatabase(binding: Env["DB"]): Env["DB"] {
   const wrapper = new Proxy(binding, {
     get(target, property) {
       if (property === "prepare") {
-        return (sql: string) => wrappedStatement(target.prepare(sql), sessionReplayScope(sql));
+        return (sql: string) =>
+          wrappedStatement(
+            target.prepare(sql),
+            sessionReplayScope(sql),
+            isPromoteQuotaAdmission(sql),
+          );
       }
       if (property === "batch") {
         return async (statements: readonly HarnessPreparedStatement[]) => {

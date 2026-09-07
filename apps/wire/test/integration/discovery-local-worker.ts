@@ -15,11 +15,13 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
+import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
 
 let screenCalls = 0;
+let screeningDelayMs = 0;
 let revokeDuringNextScreen = false;
 type ScreenMode =
   | "pass"
@@ -33,6 +35,10 @@ let lastScreen: { kind: string; problemId: string; fellowId: string; digest: str
 const app = createApp({
   screenPromotion: async (input, env) => {
     screenCalls += 1;
+    // Keep the timer in this request's Workerd I/O context.
+    if (screeningDelayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, screeningDelayMs));
+    }
     const digest = await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(
@@ -140,6 +146,23 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   screeningCalls(): number {
     return screenCalls;
+  }
+
+  pauseScreening(): void {
+    screeningDelayMs = 2000;
+  }
+
+  resumeScreening(): void {
+    screeningDelayMs = 0;
+  }
+
+  // Synthetic prior attempts through the real accounting function and D1,
+  // used to reach the last slot without fabricating classifier invocations.
+  reserveQuota(params: Parameters<typeof checkAndReserveQuota>[1]) {
+    return checkAndReserveQuota(this.env.DB, {
+      ...params,
+      sponsorLimit: parseSponsorLimit(this.env.SPONSOR_PROMOTION_RATE_LIMIT),
+    });
   }
 
   setScreenMode(mode: ScreenMode): void {

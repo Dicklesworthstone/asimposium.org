@@ -1683,7 +1683,9 @@ describe("session protocol routes", () => {
         .first<{ count: number }>(),
     ).toEqual({ count: 1 });
 
-    barrier.arm([/FROM session_write_replays/, /SELECT public_seq, chain_digest.*FROM problems/]);
+    // Both callers can race admission; only its winner may reach paid screening
+    // and the ledger read. Keep the exact replay/event oracle below unchanged.
+    barrier.arm([/FROM session_write_replays/, /FROM public_write_attempt_reservations/]);
     const promoted = await race(
       `/v1/sessions/${String(sessionId)}/promote`,
       "race-promote",
@@ -1696,6 +1698,11 @@ describe("session protocol routes", () => {
       }),
     );
     expect(promoted).toMatchObject({ claim_id: "C-1", seq: 1 });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM public_write_attempt_reservations")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
     expect(
       await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
     ).toEqual({ count: 1 });

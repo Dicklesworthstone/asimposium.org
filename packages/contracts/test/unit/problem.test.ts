@@ -256,6 +256,13 @@ test("promotion rate limit is a teaching contract refusal with retry and quota f
   expect(
     ProblemDocumentSchema.safeParse(await fixture(INVALID_PROMOTION_RATE_LIMITED_UNTAUGHT)).success,
   ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/problem-promotion-negative-limit.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
   if (!parsed.success) return;
   expect(parsed.data).toMatchObject({
     code: "PROMOTION_RATE_LIMITED",
@@ -263,7 +270,7 @@ test("promotion rate limit is a teaching contract refusal with retry and quota f
     rule: "A5",
     schema: "https://a.asimposium.org/schemas/sessions.v1.json",
     retry_after_seconds: 1800,
-    limit: 20,
+    limit: 0,
     remaining: 0,
     window_seconds: 3600,
   });

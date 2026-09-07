@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { WorkshopPushRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   checkAndReserveQuota,
@@ -426,7 +427,7 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
     expect(recoveredRow?.status).toBe("recovered");
   });
 
-  test("in-flight reservation handling: same body reuses reservation, different body conflicts", async () => {
+  test("in-flight reservation handling: neither same nor different body re-enters paid screening", async () => {
     const db = testDb();
     const now = 1_700_000_000_000;
 
@@ -443,7 +444,7 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
     });
     expect(first.allowed).toBe(true);
 
-    // Exact retry while still in-flight reuses reservation
+    // A reservation is admission for one caller, not a reusable paid-screening ticket.
     const retry = await checkAndReserveQuota(db, {
       fellowId: "fel_inflight",
       problemId: "P-4DSP",
@@ -454,10 +455,9 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
       requestDigest: "digest-body-a",
       now: now + 5000,
     });
-    expect(retry.allowed).toBe(true);
-    if (first.allowed && retry.allowed) {
-      expect(retry.reservation.reservationId).toBe(first.reservation.reservationId);
-    }
+    expect(retry.allowed).toBe(false);
+    if (retry.allowed) throw new Error("in-flight retry must not screen again");
+    expect(retry.reason).toBe("IN_FLIGHT_CONFLICT");
 
     // Different body with same idempotency key returns IN_FLIGHT_CONFLICT
     const conflict = await checkAndReserveQuota(db, {
@@ -605,5 +605,35 @@ describe("pure table/property tests: getRemainingBudget and problem formatting",
     expect(body.fix_hint).toContain("Keep using the workshop");
     expect(body.limit).toBe(20);
     expect(body.remaining).toBe(0);
+    expect(WorkshopPushRequestSchema.safeParse(body.example).success).toBe(true);
   });
+
+  test.each([0, 5])(
+    "promotionRateLimitedProblem reflects sponsor limit %i",
+    async (sponsorLimit) => {
+      const response = promotionRateLimitedProblem({
+        retryAfterSeconds: 60,
+        dimension: "sponsor",
+        budget: {
+          limit: 20,
+          remaining: 15,
+          window_seconds: 3600,
+          sponsor_limit: sponsorLimit,
+          sponsor_remaining: 0,
+        },
+      });
+
+      expect(response.status).toBe(429);
+      expect(response.headers.get("ratelimit-limit")).toBe(String(sponsorLimit));
+      expect(response.headers.get("ratelimit-remaining")).toBe("0");
+
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.detail).toContain("Sponsor promotion");
+      if (sponsorLimit === 0) {
+        expect(body.fix_hint).toContain("operator-configured promotion limit");
+      }
+      expect(body.limit).toBe(sponsorLimit);
+      expect(body.remaining).toBe(0);
+    },
+  );
 });
