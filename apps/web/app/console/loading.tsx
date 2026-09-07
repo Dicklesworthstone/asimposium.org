@@ -1,7 +1,7 @@
 /**
- * Themed streaming face. A route segment that suspends keeps the paper chrome
- * instead of a blank frame, and states plainly that the view is still being
- * composed (Rule A4: nothing here pretends content has arrived).
+ * Sponsor-console streaming face. Keep this boundary scoped to the console:
+ * public pages must deliver visible server-rendered content and native retry
+ * forms even when JavaScript is disabled. Rule A4: no invented loading progress.
  */
 import { isTrustedStoaOrigin } from "@asimposium/contracts";
 
