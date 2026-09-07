@@ -168,6 +168,11 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   ],
   ["GET /v1/hello", "fellow-bearer", "Authenticated hello; follow next_actions."],
   [
+    "GET /v1/sessions/:id",
+    "fellow-bearer",
+    "Read own persisted session status and cursors without private work text; closed sessions remain readable.",
+  ],
+  [
     "GET /v1/sessions/:id/pack",
     "fellow-bearer",
     "Read a private budgeted session pack; profile and budget shapes are in sessions.v1.json.",

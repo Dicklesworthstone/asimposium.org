@@ -141,6 +141,7 @@ import {
   type SessionIntent,
   type SessionOpenRequest,
   type SessionOpenResponse,
+  type SessionStatusResponse,
   type SessionsContracts,
   SessionsContractsSchema,
   type SponsorWorkshopObject,
@@ -509,6 +510,7 @@ function generatedSessionsTypes(): string {
     "SessionIntent",
     "SessionOpenRequest",
     "SessionOpenResponse",
+    "SessionStatusResponse",
     "SponsorWorkshopObject",
     "SponsorWorkshopRequest",
     "SponsorWorkshopView",
@@ -537,6 +539,7 @@ function generatedSessionsTypes(): string {
     SessionIntent: SessionIntent;
     SessionOpenRequest: SessionOpenRequest;
     SessionOpenResponse: SessionOpenResponse;
+    SessionStatusResponse: SessionStatusResponse;
     SponsorWorkshopObject: SponsorWorkshopObject;
     SponsorWorkshopRequest: SponsorWorkshopRequest;
     SponsorWorkshopView: SponsorWorkshopView;

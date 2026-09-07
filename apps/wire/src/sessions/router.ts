@@ -33,6 +33,7 @@ import {
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
+  SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorIdSchema,
@@ -1165,7 +1166,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         status: 409,
         code: "SESSION_CLOSED",
         title: "The session is closed",
-        detail: "A closed session accepts no reads or writes. Its handback is in the next pack.",
+        detail: "A closed session accepts no packs or writes. Its status remains readable.",
         fixHint: "Open a new session on the same problem; your previous handback is included.",
         rule: "A5",
         extensions: {
@@ -1217,7 +1218,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         status: 409,
         code: "SESSION_CLOSED",
         title: "The session is closed",
-        detail: "A closed session accepts no reads or writes. Its handback is in the next pack.",
+        detail: "A closed session accepts no packs or writes. Its status remains readable.",
         fixHint: "Open a new session on the same problem; your previous handback is included.",
         rule: "A5",
         extensions: {
@@ -1277,6 +1278,93 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     });
   }
+  // A recovery read deliberately includes closed sessions. Keep ownership in
+  // the SQL predicate and never load the handback or workshop bodies.
+  app.get("/v1/sessions/:id", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return privateNoStore(auth.response);
+    try {
+      const row = await c.env.DB.prepare(
+        `SELECT s.session_id, s.problem_id, s.intent, s.opened_at,
+           s.idle_close_at, s.closed_at, p.public_seq AS public_cursor,
+           COALESCE((SELECT MAX(w.workshop_seq) FROM workshop_objects w
+             WHERE w.problem_id = s.problem_id AND w.fellow_id = s.fellow_id), 0)
+             AS workshop_cursor
+         FROM sessions s JOIN problems p ON p.id = s.problem_id
+         WHERE s.session_id = ? AND s.fellow_id = ?`,
+      )
+        .bind(c.req.param("id"), auth.binding.fellowId)
+        .first<{
+          session_id: string;
+          problem_id: string;
+          intent: string | null;
+          opened_at: string;
+          idle_close_at: string;
+          closed_at: string | null;
+          public_cursor: number;
+          workshop_cursor: number;
+        }>();
+      if (row === null)
+        return privateNoStore(
+          validatedProblem({
+            status: 404,
+            code: "SESSION_NOT_FOUND",
+            title: "No such session",
+            detail: "No session is available to this credential with this id.",
+            fixHint:
+              "Use the session_id returned by POST /v1/sessions with its owning Fellow credential.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                method: "POST",
+                path: "/v1/sessions",
+                body: { problem_id: "P-4DSP", intent: "explore" },
+              },
+            },
+          }),
+        );
+      const body = SessionStatusResponseSchema.parse({
+        ...row,
+        next_actions:
+          row.closed_at === null
+            ? [
+                {
+                  method: "GET",
+                  url: `/v1/sessions/${row.session_id}/pack?profile=working`,
+                  why: "Read the current pack before continuing this open session.",
+                },
+              ]
+            : [
+                {
+                  method: "GET",
+                  url: "/v1/hello",
+                  why: "This session is closed. Check current identity and available actions before opening another session.",
+                },
+              ],
+        omitted: [
+          "close_reason",
+          "session_identity_metadata",
+          "protocol_policy_ack",
+          "idle_enforcement",
+          "leases",
+          "effective_permissions",
+        ],
+      });
+      return c.json(body, 200, { "cache-control": "private, no-store" });
+    } catch {
+      return privateNoStore(
+        validatedProblem({
+          status: 500,
+          code: "INTERNAL_ERROR",
+          title: "Session status unavailable",
+          detail: "The session status could not be read safely.",
+          fixHint:
+            "Retry this authenticated GET. A failed status read does not mean the session is absent or closed.",
+        }),
+      );
+    }
+  });
   // --- POST /v1/sessions -------------------------------------------------
   app.post("/v1/sessions", async (c) => {
     const auth = await authenticate(c.req.raw);

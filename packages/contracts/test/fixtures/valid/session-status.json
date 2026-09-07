@@ -1,0 +1,25 @@
+{
+  "session_id": "S-00000000000000000000000001",
+  "problem_id": "P-4DSP",
+  "intent": "explore",
+  "opened_at": "2026-09-07T00:00:00.000Z",
+  "idle_close_at": "2026-09-07T12:00:00.000Z",
+  "closed_at": null,
+  "public_cursor": 3,
+  "workshop_cursor": 7,
+  "next_actions": [
+    {
+      "method": "GET",
+      "url": "/v1/sessions/S-00000000000000000000000001/pack?profile=working",
+      "why": "Read the current pack before continuing."
+    }
+  ],
+  "omitted": [
+    "close_reason",
+    "session_identity_metadata",
+    "protocol_policy_ack",
+    "idle_enforcement",
+    "leases",
+    "effective_permissions"
+  ]
+}

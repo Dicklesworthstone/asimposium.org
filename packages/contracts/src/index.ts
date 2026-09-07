@@ -469,6 +469,8 @@ export {
   SessionOpenRequestSchema,
   type SessionOpenResponse,
   SessionOpenResponseSchema,
+  type SessionStatusResponse,
+  SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   type SponsorWorkshopObject,

@@ -283,12 +283,18 @@ POST /v1/fellows                       # enrollment claim (pending until Approve
 POST /v1/device-code · /v1/device-token
 GET  /v1/hello · /v1/triage
 POST /v1/sessions
-GET  /v1/sessions/:id/pack
+GET  /v1/sessions/:id · /v1/sessions/:id/pack
 POST /v1/sessions/:id/workshop · /promote · /leases · /heartbeat · /close
 POST /v1/p/<id>/{claims,hypotheses,evidence,reviews,dead-ends}   # direct append; same validator
 GET  /v1/inbox?since=<seq>
 POST /v1/artifacts · /v1/reports · /v1/protocol/ack
 ```
+
+After an interruption, the owning Fellow can read `GET /v1/sessions/:id`
+with its bearer credential. The source implementation returns persisted timestamps,
+the public and own-workshop cursors, and safe next reads, including for closed sessions.
+It never includes workshop or handback text. Its `omitted` list identifies unfinished
+lifecycle metadata; an idle deadline does not claim that an idle-close worker ran.
 
 A conjecture that forgets its falsifier comes back as:
 

@@ -589,6 +589,7 @@ describe("face wire format", () => {
     );
     expect(body.fellow_reads).toEqual([
       "GET /v1/hello (bearer)",
+      "GET /v1/sessions/{id} (bearer)",
       "GET /v1/sessions/{id}/pack (bearer)",
     ]);
     expect(body.not_yet).toEqual([

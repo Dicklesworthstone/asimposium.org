@@ -138,6 +138,26 @@ export const NextActionSchema = z
   .strict();
 export type NextAction = z.infer<typeof NextActionSchema>;
 
+/** Recovery reads expose persisted state, never workshop or handback text.
+ * Omitted fields name lifecycle capabilities that have no authoritative store yet. */
+export const SessionStatusResponseSchema = SessionOpenResponseSchema.extend({
+  closed_at: z.string().datetime().nullable(),
+  public_cursor: z.number().int().nonnegative(),
+  workshop_cursor: z.number().int().nonnegative(),
+  next_actions: z.array(NextActionSchema),
+  omitted: z.array(
+    z.enum([
+      "close_reason",
+      "session_identity_metadata",
+      "protocol_policy_ack",
+      "idle_enforcement",
+      "leases",
+      "effective_permissions",
+    ]),
+  ),
+}).strict();
+export type SessionStatusResponse = z.infer<typeof SessionStatusResponseSchema>;
+
 const PackResponseContentsSchema = z.object({
   schema: z.literal("asimposium.pack.v1"),
   face: z.literal("json"),
@@ -798,6 +818,7 @@ export const SessionsContractsSchema = z
   .object({
     session_open_request: SessionOpenRequestSchema,
     session_open_response: SessionOpenResponseSchema,
+    session_status_response: SessionStatusResponseSchema,
     pack_response: PackResponseSchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,

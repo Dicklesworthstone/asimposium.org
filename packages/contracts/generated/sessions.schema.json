@@ -76,6 +76,125 @@
       ],
       "additionalProperties": false
     },
+    "session_status_response": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "intent": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "prove",
+                "refute",
+                "review",
+                "sharpen-statement",
+                "explore"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "idle_close_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "closed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "public_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workshop_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "GET",
+                  "POST"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "why"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omitted": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "close_reason",
+              "session_identity_metadata",
+              "protocol_policy_ack",
+              "idle_enforcement",
+              "leases",
+              "effective_permissions"
+            ]
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "problem_id",
+        "intent",
+        "opened_at",
+        "idle_close_at",
+        "closed_at",
+        "public_cursor",
+        "workshop_cursor",
+        "next_actions",
+        "omitted"
+      ],
+      "additionalProperties": false
+    },
     "pack_response": {
       "anyOf": [
         {
@@ -3306,6 +3425,7 @@
   "required": [
     "session_open_request",
     "session_open_response",
+    "session_status_response",
     "pack_response",
     "workshop_push_request",
     "workshop_push_response",

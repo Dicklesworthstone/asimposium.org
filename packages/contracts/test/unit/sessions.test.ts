@@ -22,6 +22,7 @@ import {
   ReviseResponseSchema,
   SessionCloseRequestSchema,
   SessionOpenRequestSchema,
+  SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
@@ -53,6 +54,24 @@ const INVALID_PROMOTE_KIND = new URL(
   import.meta.url,
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
+
+test("status Zod and generated JSON Schema admit recovery and reject private fields", async () => {
+  const valid = await fixture(new URL("../fixtures/valid/session-status.json", import.meta.url));
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/session-status-private-field.json", import.meta.url),
+  );
+  const generated = await fixture(GENERATED_SESSIONS_SCHEMA);
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema(generated as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/session_status_response" });
+  expect(SessionStatusResponseSchema.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  const rejected = SessionStatusResponseSchema.safeParse(invalid);
+  expect(rejected.success).toBe(false);
+  if (!rejected.success) expect(rejected.error.issues[0]?.code).toBe("unrecognized_keys");
+  expect(validate(invalid)).toBe(false);
+  expect(validate.errors?.[0]?.keyword).toBe("additionalProperties");
+});
 
 test("session loop contracts pin the golden fixtures", async () => {
   expect(SessionOpenRequestSchema.safeParse(await fixture(VALID_SESSION_OPEN)).success).toBe(true);

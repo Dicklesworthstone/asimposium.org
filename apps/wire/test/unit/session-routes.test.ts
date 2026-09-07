@@ -14,6 +14,7 @@ import {
   ReviseResponseSchema,
   ScreeningPublicationProvenanceSchema,
   SessionOpenResponseSchema,
+  SessionStatusResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -1027,6 +1028,114 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  test("status recovers open and closed sessions without loading private work", async () => {
+    let readingStatus = false;
+    const reads: string[] = [];
+    const f = await fixture({
+      beforeRead: async (read) => {
+        if (readingStatus) reads.push(read.sql);
+      },
+    });
+    let key = 0;
+    const post = async (path: string, body: unknown) => {
+      const response = await f.call(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `status-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      return response.json();
+    };
+    const session = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }),
+    );
+    const path = `/v1/sessions/${session.session_id}`;
+    const status = async () => {
+      readingStatus = true;
+      const response = await f.call(path);
+      readingStatus = false;
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      const text = await response.text();
+      expect(text).not.toContain("PRIVATE-STATUS-CANARY");
+      return SessionStatusResponseSchema.parse(JSON.parse(text));
+    };
+    expect(await status()).toMatchObject({
+      ...session,
+      closed_at: null,
+      public_cursor: 0,
+      workshop_cursor: 0,
+    });
+    await post(`${path}/workshop`, {
+      type: "note",
+      title: "Private draft",
+      body_md: "PRIVATE-STATUS-CANARY",
+    });
+    const pushed = await status();
+    expect(pushed.workshop_cursor).toBe(1);
+    expect(pushed.public_cursor).toBe(0);
+    expect(pushed.next_actions[0]?.url).toBe(`${path}/pack?profile=working`);
+    await post(`${path}/close`, { handback: "PRIVATE-STATUS-CANARY", promote: [] });
+    const closed = await status();
+    expect(closed.closed_at).not.toBeNull();
+    expect(closed.next_actions).toMatchObject([{ method: "GET", url: "/v1/hello" }]);
+    expect(closed.omitted).toContain("idle_enforcement");
+    expect(closed.omitted).toContain("effective_permissions");
+    expect(reads.length).toBe(3);
+    for (const query of reads) {
+      expect(query).not.toMatch(/\b(handback|body_md)\b|SELECT\s+\*/i);
+      expect(query).toContain("w.fellow_id = s.fellow_id");
+      expect(query).toContain("s.fellow_id = ?");
+    }
+    const other = await addApprovedFellow(f, { suffix: "status-other", scopes: ["promote"] });
+    const denied = await other.call(path);
+    const absent = await other.call("/v1/sessions/S-00000000000000000000000000");
+    expect(denied.status).toBe(404);
+    expect(absent.status).toBe(404);
+    expect(denied.headers.get("cache-control")).toBe("private, no-store");
+    expect(await denied.text()).toBe(await absent.text());
+    const unauthorized = await f.call(path, { headers: { authorization: "" } });
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("cache-control")).toBe("private, no-store");
+    await f.service.transitionFellow(
+      f.sponsor,
+      {
+        fellow_id: f.binding.fellowId,
+        status: "revoked",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      },
+      { idempotencyKey: "status-revoke" },
+    );
+    const revoked = await f.call(path);
+    expect(revoked.status).toBe(401);
+    expect(revoked.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  test("status storage failure is private and never masquerades as an absent session", async () => {
+    const f = await fixture();
+    const response = await f.router.fetch(
+      new Request("https://example.test/v1/sessions/S-00000000000000000000000000", {
+        headers: { authorization: `Bearer ${f.token}` },
+      }),
+      {
+        DB: {
+          prepare() {
+            throw new Error("PRIVATE-DB-CANARY");
+          },
+        },
+      } as unknown as Env,
+    );
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const text = await response.text();
+    expect(text).not.toContain("PRIVATE-DB-CANARY");
+    expect(JSON.parse(text)).toMatchObject({ code: "INTERNAL_ERROR" });
+  });
+
   test("each mounted authenticated Fellow write maps an over-cap body to the opaque 413", async () => {
     const { call } = await fixture();
     const oversized = " ".repeat(MAX_SESSION_REQUEST_BODY_BYTES + 1);

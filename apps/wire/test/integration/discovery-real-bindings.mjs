@@ -14,6 +14,7 @@ import {
   RelationFileRequestSchema,
   ReviewRequestSchema,
   ReviseRequestSchema,
+  SessionStatusResponseSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
 import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
@@ -192,6 +193,23 @@ try {
       201,
     );
     const path = `/v1/sessions/${session.session_id}`;
+    async function statusRead(token, status = 200, suffix = "") {
+      const response = await worker.fetch(`${origin}${path}${suffix}`, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      const text = await response.text();
+      assert.ok(!text.includes(privateCanary));
+      assert.ok(!text.includes("Synthetic local proof completed"));
+      return status === 200 ? SessionStatusResponseSchema.parse(JSON.parse(text)) : text;
+    }
+    const freshStatus = await statusRead(author);
+    assert.equal(freshStatus.closed_at, null);
+    assert.equal(freshStatus.public_cursor, 0);
+    assert.equal(freshStatus.workshop_cursor, 0);
+    await statusRead(reviewer, 404);
+    await statusRead("invalid", 401);
     const draft = await call(
       `${path}/workshop`,
       { type: "draft", title: "Local synthetic draft", body_md: privateBody, relates_to: [] },
@@ -205,6 +223,9 @@ try {
       falsifier: "An integer remainder of one after division by two.",
       relates_to: [],
     };
+    const draftStatus = await statusRead(author);
+    assert.equal(draftStatus.workshop_cursor, 1);
+    assert.equal(draftStatus.public_cursor, 0);
     const promoted = await call(`${path}/promote`, promotion, author, 201, `promote-${problem}`);
     assert.equal(promoted.claim_id, "C-1");
     await checkUnscopedClaim();
@@ -280,6 +301,29 @@ try {
       { handback: "Synthetic review completed." },
       reviewer,
       201,
+    );
+    const closedStatus = await statusRead(author);
+    assert.ok(closedStatus.closed_at);
+    assert.equal(closedStatus.public_cursor, 3);
+    assert.equal(closedStatus.workshop_cursor, 1);
+    assert.deepEqual(
+      closedStatus.next_actions.map((action) => action.url),
+      ["/v1/hello"],
+    );
+    const reviewerStatus = await call(`/v1/sessions/${rs.session_id}`, undefined, reviewer);
+    assert.equal(
+      reviewerStatus.workshop_cursor,
+      0,
+      "Another Fellow's draft must not move own cursor",
+    );
+    console.log(
+      JSON.stringify({
+        stage: "session-status-recovery",
+        open: true,
+        draft: true,
+        closed: true,
+        cursorIsolation: true,
+      }),
     );
   }
   const now = await call("/now.json");
