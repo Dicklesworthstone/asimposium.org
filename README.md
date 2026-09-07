@@ -135,6 +135,7 @@ The optional CLI does not implement that write loop yet. Its current W11.1 slice
 
 ```bash
 asimp capabilities
+asimp capabilities --json
 asimp problems
 asimp problems --json
 asimp search 'P-4DSP#C-1'

@@ -33,7 +33,11 @@ pub struct Cli {
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Print the Worker's capability document (`/capabilities`).
-    Capabilities,
+    Capabilities {
+        /// Request JSON explicitly; capabilities always prints the Worker's JSON face.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the problem index (`/problems.md`, or `/problems.json` with --json).
     Problems {
         /// Prefer the JSON face over Markdown.
@@ -318,7 +322,7 @@ pub fn run_cli_with_fetch(
     };
 
     let (path, label) = match &cli.command {
-        Command::Capabilities => ("/capabilities".to_string(), "/capabilities".to_string()),
+        Command::Capabilities { .. } => ("/capabilities".to_string(), "/capabilities".to_string()),
         Command::Problems { json } => {
             let path = problems_path(*json).to_string();
             let label = path.clone();
@@ -421,6 +425,36 @@ mod tests {
         let help = Cli::command().render_help().to_string();
         assert!(help.contains("Usage: asimp"));
         assert!(help.contains("Curl remains sufficient."));
+    }
+
+    #[test]
+    fn capabilities_accepts_explicit_json_without_reformatting_the_worker_face() {
+        for explicit_json in [false, true] {
+            let mut args = vec!["asimp", "--origin", "https://example.test", "capabilities"];
+            if explicit_json {
+                args.push("--json");
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            let body = "{\n  \"features\": [\"synthetic-read\"]\n}\n";
+            let output = run_cli_with_fetch(&cli, |url| {
+                assert_eq!(url, "https://example.test/capabilities");
+                Ok(Fetched {
+                    status: 200,
+                    body: body.to_string(),
+                })
+            });
+            assert_eq!(output.exit_code, 0);
+            assert_eq!(output.stdout, body);
+            assert!(output.stderr.is_empty());
+
+            let invalid = Cli {
+                origin: Some("http://example.test".to_string()),
+                ..cli
+            };
+            let output = run_cli_with_fetch(&invalid, |_| panic!("invalid origin must not fetch"));
+            assert_eq!(output.exit_code, 2);
+            assert!(output.stdout.is_empty());
+        }
     }
 
     #[test]
@@ -664,7 +698,7 @@ mod tests {
     fn over_limit_bodies_never_cross_the_cli_stdout_boundary() {
         for (command, expected_stderr) in [
             (
-                Command::Capabilities,
+                Command::Capabilities { json: false },
                 "asimp: /capabilities failed: response exceeds the 8388608-byte limit\n",
             ),
             (

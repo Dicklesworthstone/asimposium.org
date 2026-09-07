@@ -149,3 +149,11 @@ fn search_requires_a_query_before_attempting_network_io() {
     assert!(stderr.contains("<QUERY>"));
     assert!(stderr.contains("--help"));
 }
+
+#[test]
+fn capabilities_help_advertises_explicit_json() {
+    let invocation = invoke(&["capabilities", "--help"]);
+    assert!(invocation.output.status.success());
+    assert!(invocation.output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&invocation.output.stdout).contains("--json"));
+}
