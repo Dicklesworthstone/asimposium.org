@@ -178,10 +178,9 @@ function wrappedStatement(
           wrappedStatement(target.bind(...values), scope, isPromoteAdmission);
       }
       if (property === "first" && isPromoteAdmission) {
-        return async (...args: unknown[]) => {
+        return async (column?: string) => {
           await sessionReplayBarrier.awaitBatch("promote");
-          const firstFn = Reflect.get(target, "first", target);
-          return typeof firstFn === "function" ? firstFn.apply(target, args) : target.first();
+          return column === undefined ? target.first() : target.first(column);
         };
       }
       const value = Reflect.get(target, property, target);
