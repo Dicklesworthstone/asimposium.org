@@ -6,6 +6,55 @@ use std::{
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[test]
+fn ledger_followup_commands_require_files_keys_and_authenticated_sessions() {
+    for verb in ["review", "evidence", "revise"] {
+        let help = invoke(&[verb, "--help"]);
+        assert!(help.output.status.success());
+        let stdout = String::from_utf8_lossy(&help.output.stdout);
+        for flag in [
+            "<SESSION>",
+            "--file",
+            "--idempotency-key",
+            "--json",
+            "ASIMP_TOKEN",
+        ] {
+            assert!(stdout.contains(flag), "missing {flag} in {verb} help");
+        }
+        for missing in [
+            vec![verb, "S-1"],
+            vec![verb, "S-1", "--file", "request.json"],
+            vec![verb, "S-1", "--idempotency-key", "op-1"],
+        ] {
+            let output = invoke(&missing).output;
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+        }
+        for token in [None, Some("secret-canary\r\nx-header: bad")] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+            command
+                .args([
+                    verb,
+                    "S-1",
+                    "--file",
+                    "private-canary.json",
+                    "--idempotency-key",
+                    "op-1",
+                ])
+                .env_remove("ASIMP_TOKEN");
+            if let Some(token) = token {
+                command.env("ASIMP_TOKEN", token);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("ASIMP_TOKEN"));
+            assert!(!stderr.contains("canary"));
+        }
+    }
+}
+
+#[test]
 fn authenticated_read_help_describes_the_existing_session_surface() {
     for args in [
         vec!["hello", "--help"],

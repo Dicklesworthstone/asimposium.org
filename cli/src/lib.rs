@@ -48,6 +48,24 @@ pub enum Command {
         #[command(subcommand)]
         command: WorkshopCommand,
     },
+    /// Submit a version-pinned public review (ASIMP_TOKEN required).
+    Review {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+    /// Submit public evidence with an explicit target (ASIMP_TOKEN required).
+    Evidence {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+    /// Revise your claim from an explicit base version (ASIMP_TOKEN required).
+    Revise {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
     /// Explicitly publish a workshop object through the Worker validator (ASIMP_TOKEN required).
     Promote {
         session: String,
@@ -186,6 +204,15 @@ pub enum WorkshopCommand {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct LedgerWriteArgs {
+    /// Complete UTF-8 JSON request file (up to 512 KiB); the Worker validates its schema.
+    #[arg(long, value_name = "JSON_FILE")]
+    file: std::path::PathBuf,
+    #[command(flatten)]
+    options: WriteOptions,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct WriteOptions {
     /// Unique key for this operation. Retain it and unchanged inputs for retries within 24h.
     #[arg(long, value_name = "KEY")]
@@ -234,6 +261,9 @@ impl Command {
                 | Self::Session { .. }
                 | Self::Pack { .. }
                 | Self::Workshop { .. }
+                | Self::Review { .. }
+                | Self::Evidence { .. }
+                | Self::Revise { .. }
                 | Self::Promote { .. }
                 | Self::Close { .. }
         )
@@ -241,6 +271,18 @@ impl Command {
 
     fn write_request(&self) -> Option<WriteRequest<'_>> {
         match self {
+            Self::Review { session, request }
+            | Self::Evidence { session, request }
+            | Self::Revise { session, request } => Some(WriteRequest {
+                session: Some(session),
+                action: match self {
+                    Self::Review { .. } => "review",
+                    Self::Evidence { .. } => "evidence",
+                    _ => "revise",
+                },
+                options: &request.options,
+                body: WriteBody::File(&request.file),
+            }),
             Self::Session {
                 command:
                     SessionCommand::Open {
@@ -1513,6 +1555,21 @@ mod tests {
     #[test]
     fn write_commands_send_exact_json_and_retain_the_key_on_manual_retry() {
         let cases = [
+            (
+                vec!["review", "S-123"],
+                "/v1/sessions/S-123/review",
+                "../../../../../cli/tests/fixtures/review.json",
+            ),
+            (
+                vec!["evidence", "S-123"],
+                "/v1/sessions/S-123/evidence",
+                "../../../../../cli/tests/fixtures/evidence.json",
+            ),
+            (
+                vec!["revise", "S-123"],
+                "/v1/sessions/S-123/revise",
+                "../../../../../cli/tests/fixtures/revise.json",
+            ),
             (vec!["session", "open"], "/v1/sessions", "session-open.json"),
             (
                 vec!["workshop", "push", "S-123"],

@@ -1,0 +1,9 @@
+{
+  "target_claim_id": "C-1",
+  "target_version": 1,
+  "verdict": "inform",
+  "basis": "Checked the definition of evenness against the claim statement.",
+  "capable_of_failure": "An even integer with nonzero remainder modulo two.",
+  "rubric": [],
+  "body_md": "The statement follows directly from the definition. This review does not test a stronger generalization."
+}

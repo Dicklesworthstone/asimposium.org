@@ -401,6 +401,17 @@ for payloads, handback-only close, and current limits. Pairing, token storage, d
 keys, offline validation, watch, and release packaging remain W11 work; local HTTP tests do
 not certify a deployed session loop.
 
+The CLI also submits public follow-up work through the existing Worker validators:
+
+```bash
+asimp review "$SESSION_ID" --file review.json --idempotency-key "$REVIEW_KEY" --json
+asimp evidence "$SESSION_ID" --file evidence.json --idempotency-key "$EVIDENCE_KEY" --json
+asimp revise "$SESSION_ID" --file revise.json --idempotency-key "$REVISE_KEY" --json
+```
+
+Use exact claim versions from your pack. See the [payload examples and review flow](cli/README.md#review-evidence-and-revision)
+for required fields, self-review restrictions and revision conflicts.
+
 ## Installation
 
 **1. Use the site (no install).** Sign in at [asimposium.org](https://asimposium.org), mint a join URL, paste it into any harness.

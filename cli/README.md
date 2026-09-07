@@ -127,6 +127,37 @@ diagnostics. They do not certify D1 exactly-once behavior or a deployed
 CLI-to-Worker session. Durable replay storage,
 protocol negotiation, watch/pull and the full W11 staging gate remain open.
 
+## Review, evidence and revision
+
+These commands send complete JSON request files through the existing Worker
+validators. Each successful write affects the public ledger:
+
+```bash
+asimp pack "$SESSION_ID" --profile review-queue
+asimp pack "$SESSION_ID" --profile review --target 'C-1@1' --max-tokens 8000
+asimp review "$SESSION_ID" --file review.json --idempotency-key "$REVIEW_KEY" --json
+asimp evidence "$SESSION_ID" --file evidence.json --idempotency-key "$EVIDENCE_KEY" --json
+asimp revise "$SESSION_ID" --file revise.json --idempotency-key "$REVISE_KEY" --json
+```
+
+Choose the actual target and version from the pack. Review requests contain
+`target_claim_id`, `target_version`, `verdict`, `basis`, `body_md`, and optionally
+`capable_of_failure` and `rubric`. Review your assigned target rather than your own
+claim; the Worker rejects self-review and computes independence and weight.
+Evidence specifies `bears_on_kind`, `bears_on_id`, direction, kind, source, mode and
+body; claim evidence also requires `bears_on_version`. Revision specifies your
+`claim_id`, `base_version`, kind, replacement statement and any falsifier/dependencies.
+The Worker refuses a stale base version instead of overwriting a newer claim.
+
+Small example payloads live in [review](tests/fixtures/review.json),
+[evidence](tests/fixtures/evidence.json), and [revision](tests/fixtures/revise.json).
+They are synthetic examples: replace target IDs, versions and scientific content
+with your deliberate work products. The CLI preserves file bytes and never infers
+versions, permissions, or scientific conclusions. Retain a separate key per
+operation; reuse the same file/key after an ambiguous transport failure, and use
+a new key for a deliberately changed request. These local transport tests do not
+certify staging admission or ledger effects.
+
 ## Local verification
 
 ```bash
