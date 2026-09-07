@@ -51,8 +51,29 @@ pub enum Command {
     /// Explicitly publish a workshop object through the Worker validator (ASIMP_TOKEN required).
     Promote {
         session: String,
+        /// Workshop object to publish; use --file for a complete JSON request.
+        #[arg(required_unless_present = "file", conflicts_with = "file", requires_all = ["kind", "statement"])]
+        workshop: Option<String>,
+        /// Claim kind (e.g. conjecture); validated by the Worker.
+        #[arg(long, requires = "workshop", conflicts_with = "file")]
+        kind: Option<String>,
+        /// Public claim statement; use --file to keep input text out of argv.
+        #[arg(long, requires = "workshop", conflicts_with = "file")]
+        statement: Option<String>,
+        /// Concrete falsifier; requirements depend on the Worker-validated kind.
+        #[arg(long, requires = "workshop", conflicts_with = "file")]
+        falsifier: Option<String>,
+        /// Related object reference; repeat for multiple references.
+        #[arg(long, requires = "workshop", conflicts_with = "file")]
+        relates_to: Vec<String>,
+        /// Dependency claim reference; the Worker checks existence and cycles.
+        #[arg(long, requires = "workshop", conflicts_with = "file")]
+        depends_on: Vec<String>,
+        /// Complete PromoteRequest JSON file, instead of direct claim arguments.
+        #[arg(long, required_unless_present = "workshop", value_name = "JSON_FILE")]
+        file: Option<std::path::PathBuf>,
         #[command(flatten)]
-        request: JsonWriteArgs,
+        options: WriteOptions,
     },
     /// Close a session with a handback or JSON file (ASIMP_TOKEN required).
     Close {
@@ -165,15 +186,6 @@ pub enum WorkshopCommand {
 }
 
 #[derive(Debug, clap::Args)]
-pub struct JsonWriteArgs {
-    /// UTF-8 JSON request file (up to 512 KiB); the Worker validates its schema.
-    #[arg(long, value_name = "JSON_FILE")]
-    file: std::path::PathBuf,
-    #[command(flatten)]
-    options: WriteOptions,
-}
-
-#[derive(Debug, clap::Args)]
 pub struct WriteOptions {
     /// Unique key for this operation. Retain it and unchanged inputs for retries within 24h.
     #[arg(long, value_name = "KEY")]
@@ -185,6 +197,14 @@ pub struct WriteOptions {
 
 enum WriteBody<'a> {
     File(&'a std::path::Path),
+    Promote {
+        workshop: &'a str,
+        kind: &'a str,
+        statement: &'a str,
+        falsifier: Option<&'a str>,
+        relates_to: &'a [String],
+        depends_on: &'a [String],
+    },
     Workshop {
         path: &'a std::path::Path,
         kind: &'a str,
@@ -268,11 +288,21 @@ impl Command {
                     },
                 },
             }),
-            Self::Promote { session, request } => Some(WriteRequest {
+            Self::Promote { session, workshop, kind, statement, falsifier, relates_to, depends_on, file, options } => Some(WriteRequest {
                 session: Some(session),
                 action: "promote",
-                options: &request.options,
-                body: WriteBody::File(&request.file),
+                options,
+                body: match file {
+                    Some(file) => WriteBody::File(file),
+                    None => WriteBody::Promote {
+                        workshop: workshop.as_deref()?,
+                        kind: kind.as_deref()?,
+                        statement: statement.as_deref()?,
+                        falsifier: falsifier.as_deref(),
+                        relates_to,
+                        depends_on,
+                    },
+                },
             }),
             Self::Close {
                 session,
@@ -352,6 +382,16 @@ impl WriteBody<'_> {
     ) -> Result<String, String> {
         let value = match self {
             Self::File(path) => return read(path).map_err(str::to_owned),
+            Self::Promote { workshop, kind, statement, falsifier, relates_to, depends_on } => {
+                let mut value = serde_json::json!({
+                    "workshop_id": workshop, "kind": kind, "statement": statement,
+                    "relates_to": relates_to, "depends_on": depends_on,
+                });
+                if let Some(falsifier) = falsifier {
+                    value["falsifier"] = serde_json::json!(falsifier);
+                }
+                value
+            }
             Self::Workshop {
                 path,
                 kind,
@@ -1145,6 +1185,16 @@ mod tests {
     fn inline_session_inputs_encode_exact_json_without_reading_files() {
         for (args, path, expected) in [
             (
+                vec!["promote", "S-123", "W-abcdefghijklmnopqrstuvwxyz", "--kind", "conjecture", "--statement", "  Every even integer is divisible by two.  "],
+                "/v1/sessions/S-123/promote",
+                serde_json::json!({"workshop_id":"W-abcdefghijklmnopqrstuvwxyz", "kind":"conjecture", "statement":"  Every even integer is divisible by two.  ", "relates_to":[], "depends_on":[]}),
+            ),
+            (
+                vec!["promote", "S-123", "W-X\",\"admin\":true", "--kind", "future-kind", "--statement", "Claim \"x\\y\"\n😀", "--falsifier", "Counterexample\n😀", "--relates-to", "C-1", "--relates-to", "H-2", "--depends-on", "C-3", "--depends-on", "C-4\",\"admin\":true"],
+                "/v1/sessions/S-123/promote",
+                serde_json::json!({"workshop_id":"W-X\",\"admin\":true", "kind":"future-kind", "statement":"Claim \"x\\y\"\n😀", "falsifier":"Counterexample\n😀", "relates_to":["C-1","H-2"], "depends_on":["C-3","C-4\",\"admin\":true"]}),
+            ),
+            (
                 vec!["session", "open", "P-4DSP"],
                 "/v1/sessions",
                 serde_json::json!({"problem_id":"P-4DSP"}),
@@ -1324,6 +1374,49 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
             workshop
         );
+        let mut promote: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packages/contracts/test/fixtures/valid/promote-request.json"
+        )).unwrap();
+        let refs: Vec<String> = promote["relates_to"].as_array().unwrap().iter()
+            .map(|value| value.as_str().unwrap().to_owned()).collect();
+        let encoded = WriteBody::Promote {
+            workshop: promote["workshop_id"].as_str().unwrap(),
+            kind: promote["kind"].as_str().unwrap(),
+            statement: promote["statement"].as_str().unwrap(),
+            falsifier: promote["falsifier"].as_str(),
+            relates_to: &refs,
+            depends_on: &[],
+        }.encode(|_| panic!("typed promote read a file")).unwrap();
+        // The canonical fixture omits depends_on; its schema default is [].
+        promote["depends_on"] = serde_json::json!([]);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&encoded).unwrap(), promote);
+    }
+
+    #[test]
+    fn typed_promotion_rejects_incomplete_or_mixed_inputs() {
+        for args in [
+            vec![], vec!["W-1"], vec!["W-1", "--kind", "conjecture"],
+            vec!["W-1", "--statement", "Claim"],
+            vec!["--file", "request.json", "W-1", "--kind", "conjecture", "--statement", "Claim"],
+            vec!["--file", "request.json", "--kind", "conjecture"],
+            vec!["--file", "request.json", "--statement", "Claim"],
+            vec!["--file", "request.json", "--falsifier", "Counterexample"],
+            vec!["--file", "request.json", "--relates-to", "C-1"],
+            vec!["--file", "request.json", "--depends-on", "C-2"],
+        ] {
+            assert!(Cli::try_parse_from([vec!["asimp", "promote", "S-123", "--idempotency-key", "op-1"], args.clone()].concat()).is_err(), "accepted incomplete/mixed promotion: {args:?}");
+        }
+    }
+
+    #[test]
+    fn typed_promotion_size_failure_never_sends_or_echoes_claim() {
+        let statement = format!("private-canary{}", "\u{0001}".repeat(100_000));
+        let cli = Cli::try_parse_from(["asimp", "--origin", "https://example.test", "promote", "S-123", "W-1", "--kind", "conjecture", "--statement", &statement, "--idempotency-key", "op-1"]).unwrap();
+        let result = run_cli_write(&cli, |_| panic!("typed promote read a file"), |_, _, _| panic!("oversized promotion reached network"));
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.contains("Encoded request exceeds 512 KiB"));
+        assert!(!result.stderr.contains("canary"));
     }
 
     #[test]
@@ -1354,6 +1447,11 @@ mod tests {
                 "promote-request.json",
             ),
             (
+                vec!["promote", "S-123", "W-abcdefghijklmnopqrstuvwxyz", "--kind", "conjecture", "--statement", "Every even integer is divisible by two.", "--falsifier", "An even integer with nonzero remainder modulo two."],
+                "/v1/sessions/S-123/promote",
+                "promote-request.json",
+            ),
+            (
                 vec!["close", "S-123"],
                 "/v1/sessions/S-123/close",
                 "session-close.json",
@@ -1364,10 +1462,12 @@ mod tests {
                 .join("../packages/contracts/test/fixtures/valid")
                 .join(fixture);
             let markdown = args.contains(&"--type");
+            let typed_promote = args.contains(&"--kind");
             let mut args = [vec!["asimp", "--origin", "https://example.test"], args].concat();
+            if !typed_promote {
+                args.extend([if markdown { "--body-file" } else { "--file" }, file.to_str().unwrap()]);
+            }
             args.extend([
-                if markdown { "--body-file" } else { "--file" },
-                file.to_str().unwrap(),
                 "--idempotency-key",
                 "retained-operation-1",
                 "--json",
@@ -1375,7 +1475,9 @@ mod tests {
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(cli.command.requires_token());
             let source = std::fs::read_to_string(&file).unwrap();
-            let expected_body = if markdown {
+            let expected_body = if typed_promote {
+                serde_json::to_string(&serde_json::json!({"workshop_id":"W-abcdefghijklmnopqrstuvwxyz", "kind":"conjecture", "statement":"Every even integer is divisible by two.", "falsifier":"An even integer with nonzero remainder modulo two.", "relates_to":[], "depends_on":[]})).unwrap()
+            } else if markdown {
                 serde_json::to_string(&serde_json::json!({"type":"draft", "title":"Markdown draft", "body_md":source, "relates_to":[]})).unwrap()
             } else {
                 source
