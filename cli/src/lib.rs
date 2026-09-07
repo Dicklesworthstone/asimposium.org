@@ -66,6 +66,22 @@ pub enum Command {
         #[command(flatten)]
         request: LedgerWriteArgs,
     },
+    /// Propose a public research route or record its evidential defeat (ASIMP_TOKEN required).
+    Hypothesis {
+        #[command(subcommand)]
+        command: HypothesisCommand,
+    },
+    /// File or settle a public proof obligation (ASIMP_TOKEN required).
+    Gap {
+        #[command(subcommand)]
+        command: GapCommand,
+    },
+    /// Assert a version-pinned claim relation (ASIMP_TOKEN required).
+    Relation {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
     /// Explicitly publish a workshop object through the Worker validator (ASIMP_TOKEN required).
     Promote {
         session: String,
@@ -222,6 +238,39 @@ pub struct WriteOptions {
     json: bool,
 }
 
+#[derive(Debug, clap::Subcommand)]
+pub enum HypothesisCommand {
+    /// Propose a public route with mechanism and falsifier (ASIMP_TOKEN required).
+    Create {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+    /// Record refuting evidence; JSON hypothesis_id must match HYPOTHESIS (ASIMP_TOKEN required).
+    Kill {
+        session: String,
+        hypothesis: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum GapCommand {
+    /// File a public obligation against an exact claim version (ASIMP_TOKEN required).
+    Open {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+    /// Close by a cited claim/evidence or withdraw the obligation (ASIMP_TOKEN required).
+    Close {
+        session: String,
+        #[command(flatten)]
+        request: LedgerWriteArgs,
+    },
+}
+
 enum WriteBody<'a> {
     File(&'a std::path::Path),
     Promote {
@@ -249,6 +298,7 @@ enum WriteBody<'a> {
 struct WriteRequest<'a> {
     session: Option<&'a str>,
     action: &'static str,
+    hypothesis_to_kill: Option<&'a str>,
     options: &'a WriteOptions,
     body: WriteBody<'a>,
 }
@@ -264,6 +314,9 @@ impl Command {
                 | Self::Review { .. }
                 | Self::Evidence { .. }
                 | Self::Revise { .. }
+                | Self::Hypothesis { .. }
+                | Self::Gap { .. }
+                | Self::Relation { .. }
                 | Self::Promote { .. }
                 | Self::Close { .. }
         )
@@ -273,13 +326,46 @@ impl Command {
         match self {
             Self::Review { session, request }
             | Self::Evidence { session, request }
-            | Self::Revise { session, request } => Some(WriteRequest {
+            | Self::Revise { session, request }
+            | Self::Relation { session, request }
+            | Self::Hypothesis {
+                command: HypothesisCommand::Create { session, request },
+            }
+            | Self::Gap {
+                command: GapCommand::Open { session, request },
+            }
+            | Self::Gap {
+                command: GapCommand::Close { session, request },
+            } => Some(WriteRequest {
                 session: Some(session),
+                hypothesis_to_kill: None,
                 action: match self {
                     Self::Review { .. } => "review",
                     Self::Evidence { .. } => "evidence",
+                    Self::Relation { .. } => "relations",
+                    Self::Hypothesis { .. } => "hypotheses",
+                    Self::Gap {
+                        command: GapCommand::Open { .. },
+                    } => "gaps",
+                    Self::Gap {
+                        command: GapCommand::Close { .. },
+                    } => "gaps/close",
                     _ => "revise",
                 },
+                options: &request.options,
+                body: WriteBody::File(&request.file),
+            }),
+            Self::Hypothesis {
+                command:
+                    HypothesisCommand::Kill {
+                        session,
+                        hypothesis,
+                        request,
+                    },
+            } => Some(WriteRequest {
+                session: Some(session),
+                action: "hypotheses",
+                hypothesis_to_kill: Some(hypothesis),
                 options: &request.options,
                 body: WriteBody::File(&request.file),
             }),
@@ -294,6 +380,7 @@ impl Command {
             } => Some(WriteRequest {
                 session: None,
                 action: "",
+                hypothesis_to_kill: None,
                 options,
                 body: match file {
                     Some(file) => WriteBody::File(file),
@@ -318,6 +405,7 @@ impl Command {
             } => Some(WriteRequest {
                 session: Some(session),
                 action: "workshop",
+                hypothesis_to_kill: None,
                 options,
                 body: match file {
                     Some(file) => WriteBody::File(file),
@@ -343,6 +431,7 @@ impl Command {
             } => Some(WriteRequest {
                 session: Some(session),
                 action: "promote",
+                hypothesis_to_kill: None,
                 options,
                 body: match file {
                     Some(file) => WriteBody::File(file),
@@ -364,6 +453,7 @@ impl Command {
             } => Some(WriteRequest {
                 session: Some(session),
                 action: "close",
+                hypothesis_to_kill: None,
                 options,
                 body: match file {
                     Some(file) => WriteBody::File(file),
@@ -543,6 +633,7 @@ fn run_cli_write(
     let Some(WriteRequest {
         session,
         action,
+        hypothesis_to_kill,
         options,
         body,
     }) = cli.command.write_request()
@@ -551,6 +642,9 @@ fn run_cli_write(
     };
     if session.is_some_and(|id| !safe_session_segment(id)) {
         return invalid_session_id();
+    }
+    if hypothesis_to_kill.is_some_and(|id| !safe_session_segment(id)) {
+        return input_error("Hypothesis ID must be one origin-relative path component, not a URL.");
     }
     // Header transport only; the Worker owns the canonical replay-key grammar.
     if options.idempotency_key.is_empty()
@@ -566,7 +660,10 @@ fn run_cli_write(
     }
     let path = session.map_or_else(
         || "/v1/sessions".to_owned(),
-        |id| format!("/v1/sessions/{id}/{action}"),
+        |id| match hypothesis_to_kill {
+            Some(hypothesis) => format!("/v1/sessions/{id}/{action}/{hypothesis}/kill"),
+            None => format!("/v1/sessions/{id}/{action}"),
+        },
     );
     let url = match resolve_origin(cli.origin.as_ref()).and_then(|origin| build_url(&origin, &path))
     {
@@ -1556,6 +1653,31 @@ mod tests {
     fn write_commands_send_exact_json_and_retain_the_key_on_manual_retry() {
         let cases = [
             (
+                vec!["hypothesis", "create", "S-123"],
+                "/v1/sessions/S-123/hypotheses",
+                "../../../../../cli/tests/fixtures/hypothesis.json",
+            ),
+            (
+                vec!["hypothesis", "kill", "S-123", "H-1"],
+                "/v1/sessions/S-123/hypotheses/H-1/kill",
+                "../../../../../cli/tests/fixtures/hypothesis-kill.json",
+            ),
+            (
+                vec!["gap", "open", "S-123"],
+                "/v1/sessions/S-123/gaps",
+                "../../../../../cli/tests/fixtures/gap-open.json",
+            ),
+            (
+                vec!["gap", "close", "S-123"],
+                "/v1/sessions/S-123/gaps/close",
+                "../../../../../cli/tests/fixtures/gap-close.json",
+            ),
+            (
+                vec!["relation", "S-123"],
+                "/v1/sessions/S-123/relations",
+                "../../../../../cli/tests/fixtures/relation.json",
+            ),
+            (
                 vec!["review", "S-123"],
                 "/v1/sessions/S-123/review",
                 "review-request.json",
@@ -1747,6 +1869,46 @@ mod tests {
                 &cli,
                 |_| panic!("invalid invocation read private file"),
                 |_, _, _| panic!("invalid invocation reached network"),
+            );
+            assert_eq!(output.exit_code, 2);
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.contains("canary"));
+        }
+    }
+
+    #[test]
+    fn hypothesis_kill_rejects_unsafe_route_ids_before_file_or_network() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "H-1/close",
+            "../private-canary",
+            "H-1?x=canary",
+            "H-1#canary",
+            "%48-1",
+            "H-1\\kill",
+            "H-1\r\ncanary",
+            "H 1",
+        ] {
+            let cli = Cli::try_parse_from([
+                "asimp",
+                "--origin",
+                "https://example.test",
+                "hypothesis",
+                "kill",
+                "S-123",
+                id,
+                "--file",
+                "private-canary.json",
+                "--idempotency-key",
+                "op-1",
+            ])
+            .unwrap();
+            let output = run_cli_write(
+                &cli,
+                |_| panic!("unsafe route read a file"),
+                |_, _, _| panic!("unsafe route reached network"),
             );
             assert_eq!(output.exit_code, 2);
             assert!(output.stdout.is_empty());

@@ -1,0 +1,7 @@
+{
+  "route": "Prove the bound by induction on path length.",
+  "mechanism": "Remove the final vertex and extend a labeling of the shorter path.",
+  "falsifier": "A valid shorter-path labeling with no admissible extension.",
+  "origin": "proposed",
+  "body_md": "Check the extension step before attempting the general induction."
+}

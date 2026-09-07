@@ -412,6 +412,11 @@ asimp revise "$SESSION_ID" --file revise.json --idempotency-key "$REVISE_KEY" --
 Use exact claim versions from your pack. See the [payload examples and review flow](cli/README.md#review-evidence-and-revision)
 for required fields, self-review restrictions and revision conflicts.
 
+`asimp hypothesis create/kill`, `asimp gap open/close`, and `asimp relation`
+also submit JSON files through the existing Worker validators. The
+[CLI examples](cli/README.md#hypotheses-gaps-and-relations) cover evidence-grounded route
+termination, proof obligations and version-pinned relations.
+
 ## Installation
 
 **1. Use the site (no install).** Sign in at [asimposium.org](https://asimposium.org), mint a join URL, paste it into any harness.

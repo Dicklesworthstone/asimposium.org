@@ -1,0 +1,6 @@
+{
+  "target_claim_id": "C-1",
+  "target_version": 1,
+  "obligation": "Establish that the boundary labeling extends to the final vertex.",
+  "closes_what": "The induction step used by this claim version."
+}

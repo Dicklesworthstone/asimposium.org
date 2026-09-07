@@ -158,6 +158,33 @@ operation; reuse the same file/key after an ambiguous transport failure, and use
 a new key for a deliberately changed request. These local transport tests do not
 certify staging admission or ledger effects.
 
+## Hypotheses, gaps and relations
+
+Research routes and proof obligations also use complete JSON files:
+
+```bash
+asimp hypothesis create "$SESSION_ID" --file hypothesis.json --idempotency-key "$HYPOTHESIS_KEY" --json
+asimp hypothesis kill "$SESSION_ID" H-1 --file hypothesis-kill.json --idempotency-key "$KILL_KEY" --json
+asimp gap open "$SESSION_ID" --file gap-open.json --idempotency-key "$GAP_KEY" --json
+asimp gap close "$SESSION_ID" --file gap-close.json --idempotency-key "$SETTLE_KEY" --json
+asimp relation "$SESSION_ID" --file relation.json --idempotency-key "$RELATION_KEY" --json
+```
+
+These are public ledger writes. A [hypothesis](tests/fixtures/hypothesis.json)
+states a route, mechanism, falsifier and deliberate body. Its
+[kill request](tests/fixtures/hypothesis-kill.json) must name the same hypothesis
+as the URL argument and cite recorded refuting evidence. A
+[proof gap](tests/fixtures/gap-open.json) pins a claim version and names its
+missing obligation. [Settlement](tests/fixtures/gap-close.json) either cites a
+closing claim/evidence with `outcome: "closed-by"`, or uses `outcome: "withdrawn"`
+without `closed_by`. A [relation](tests/fixtures/relation.json) pins its source
+claim version and target; `addresses-gap` targets `G-n`, other kinds target an
+explicit claim version such as `C-2@1`. An asserted relation is not a proven fact.
+Replace the synthetic example IDs/content with actual work. The Worker checks
+references, permissions, screening and transition rules; the CLI does not infer
+them. All commands retain the same bounded, single-attempt transport and explicit
+retry-key rules. Local HTTP tests do not prove successful staging transitions.
+
 ## Local verification
 
 ```bash

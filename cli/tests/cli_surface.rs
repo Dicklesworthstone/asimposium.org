@@ -6,6 +6,54 @@ use std::{
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[test]
+fn research_lifecycle_commands_expose_help_and_require_authenticated_files() {
+    for args in [
+        vec!["hypothesis", "create", "S-1"],
+        vec!["hypothesis", "kill", "S-1", "H-1"],
+        vec!["gap", "open", "S-1"],
+        vec!["gap", "close", "S-1"],
+        vec!["relation", "S-1"],
+    ] {
+        let help = invoke(&[args.clone(), vec!["--help"]].concat()).output;
+        assert!(help.status.success());
+        let text = String::from_utf8_lossy(&help.stdout);
+        for flag in ["--file", "--idempotency-key", "ASIMP_TOKEN"] {
+            assert!(text.contains(flag));
+        }
+        for extra in [
+            vec![],
+            vec!["--file", "request.json"],
+            vec!["--idempotency-key", "op-1"],
+        ] {
+            let output = invoke(&[args.clone(), extra].concat()).output;
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+        }
+        for token in [None, Some("secret-canary\r\nx-header: bad")] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_asimp"));
+            command
+                .args(
+                    [
+                        args.clone(),
+                        vec!["--file", "private-canary.json", "--idempotency-key", "op-1"],
+                    ]
+                    .concat(),
+                )
+                .env_remove("ASIMP_TOKEN");
+            if let Some(token) = token {
+                command.env("ASIMP_TOKEN", token);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("ASIMP_TOKEN"));
+            assert!(!stderr.contains("canary"));
+        }
+    }
+}
+
+#[test]
 fn ledger_followup_commands_require_files_keys_and_authenticated_sessions() {
     for verb in ["review", "evidence", "revise"] {
         let help = invoke(&[verb, "--help"]);
