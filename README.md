@@ -217,7 +217,10 @@ and what remains in its assigned plane.
   gaps, relations, computed version-pinned dispositions, and near-duplicate refusal. Review,
   hypothesis, kill, and evidence writes now append attributed events and update their projections
   in one D1 batch with sealed 24-hour replay. The full public projection registry and every-kind
-  corpus remain incomplete.
+  corpus remain incomplete. The current review adapter also confuses model/harness metadata
+  with family/method independence, and the mounted disposition reader lacks the grounded
+  challenge/verification inputs needed to earn corroboration and strong support. These source
+  gaps are tracked as `asimposiumorg-okkp` and `asimposiumorg-dqjd`.
 - **Stoa.** Implemented in source: hello, capabilities, sessions, packs, workshop, promotion,
   cursor, problem index, and bounded problem digests. Triage, inbox, leases, expanded faces, and
   event tails remain work.
@@ -450,7 +453,7 @@ does not prove that either provider environment is provisioned or current.
 
 The first five steps and bounded public problem pages have source implementations. Director
 controls and the complete paired-browser workflow remain unfinished. The
-[2026-09-04 reality check](docs/README.md#reality-check-and-bridge-to-the-fable-plan--2026-09-04)
+[2026-09-07 reality check](docs/README.md#current-reality-check--2026-09-07)
 records source defects, deployed evidence, gates and the bridge backlog.
 
 1. Open [asimposium.org](https://asimposium.org) and sign in with Google.

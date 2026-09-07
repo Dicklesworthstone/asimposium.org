@@ -271,7 +271,7 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
-As of the 2026-09-06 reality check, only **S-5 and S-6 are closed**. The spike ledger
+As of the 2026-09-07 reality check, only **S-5 and S-6 are closed**. The spike ledger
 (per `br`, the authority — run `br stats` for live counts):
 
 - **S-1 Capsule** (`asimposiumorg-mn7`, open) — source implemented; three fresh harness
@@ -286,13 +286,18 @@ As of the 2026-09-06 reality check, only **S-5 and S-6 are closed**. The spike l
   `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
 
 The backlog is wide (≈130 open, most dependency-blocked) but nearly starved at the tip.
-Both production and staging answered public probes on September 6; their capabilities
-still omit the per-problem digests implemented in source. Do not provision duplicate
+Both production and staging answered public probes on September 7; their capabilities
+remain byte-identical to September 4/6, and digest/search routes implemented in source
+return `ROUTE_NOT_FOUND`. Do not provision duplicate
 resources based on an old “environment absent” label. OPS.3 must reconcile deployment
 revision, migration lineage and binding roles before S-1/S-2/S-4/S-7 can provide their
-required evidence. Locally startable repairs include `asimposiumorg-irg.1` (budgets
-before paid screening) and `asimposiumorg-r8w.1` (require problem scope for claim
-references). Confirm current ownership and `br ready` before starting.
+required evidence. `asimposiumorg-irg.1`, `asimposiumorg-irg.2` and
+`asimposiumorg-r8w.1` are now closed; do not keep selecting them as unfinished repairs.
+Locally startable work is `asimposiumorg-okkp` (raw model strings/harnesses currently
+manufacture review independence) and `asimposiumorg-dqjd` (connect grounded challenges
+and verification to reachable scientific dispositions). Their mounted journey proof is
+`asimposiumorg-epyf`. Parent `irg` still needs accepted sponsor-window policy and deployed
+configuration/evidence. Confirm current ownership and `br ready` before starting.
 
 **S-6 is CLOSED (`asimposiumorg-vw3`, 2026-08-24).** `scripts/e2e-s6-cross-plane-auth.sh`
 is a finished spike's self-test: **do not keep polishing it.** In the 171 commits after that
@@ -307,7 +312,11 @@ Local gates you can run now, with no credentials:
 `verify:cost` deliberately ends **blocked (exit 78, `S2_COST_MEASUREMENT_UNAVAILABLE`)** until
 the retained S-2 measurement receipt exists — blocked is its honest state, not a pass and not a
 regression. Earlier shellcheck absence is no longer current on this workstation:
-the September 6 source check passed all eight root typecheck/lint/test gate groups.
+the fresh September 7 source check passed all eight root typecheck/lint/test gate groups
+(1,756 Worker tests); the separate contract gate also passes. The security aggregate
+is blocked on Agora browser coverage; Rust tests were blocked before execution by the
+required RCH workers failing preflight. See the current report in `docs/README.md` for
+the exact scope of each check.
 Those root groups do not certify the optional Rust CLI or deployed product gates.
 Check actual tool availability rather than carrying forward the old RCH cargo-shim
 or shellcheck diagnosis; `asimposiumorg-gate-unavailable-not-fail-63gs` preserves the
