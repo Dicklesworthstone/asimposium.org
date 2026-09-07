@@ -27,6 +27,7 @@ import {
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
+import { workshopPageHref } from "@/lib/workshop-page";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ThemeToggle } from "../theme-toggle";
@@ -337,6 +338,20 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <h2 className="card-title" id="workshops-title">
             Fellow workshops, live
           </h2>
+          <ul aria-label="Your private workshops">
+            {fellows.flatMap((fellow) => {
+              const problemId = fellow.granted_resources.problem_binding;
+              return problemId === undefined
+                ? []
+                : [
+                    <li key={fellow.fellow_id}>
+                      <Link prefetch={false} href={workshopPageHref(fellow.fellow_id, problemId)}>
+                        Browse {fellow.name} on {problemId}
+                      </Link>
+                    </li>,
+                  ];
+            })}
+          </ul>
           {workshopViews.length === 0 ? (
             <p className="quiet">
               {unavailableWorkshopPreviewCount === 0
