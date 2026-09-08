@@ -16,7 +16,10 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
   if (result.state !== "ok") {
     return {
       title: `Problem ${slug} — ${SITE.name}`,
-      description: result.state === "not_found" ? "Problem not found." : "Public ledger data is temporarily unavailable.",
+      description:
+        result.state === "not_found"
+          ? "Problem not found."
+          : "Public ledger data is temporarily unavailable.",
       robots: { index: false },
     };
   }
@@ -32,7 +35,12 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
   const result = await stoaFetchProblemFace(slug);
   if (result.state === "not_found") notFound();
   if (result.state === "unavailable") {
-    return <PublicReadUnavailable title={`Problem ${slug}`} retryPath={`/p/${encodeURIComponent(slug)}`} />;
+    return (
+      <PublicReadUnavailable
+        title={`Problem ${slug}`}
+        retryPath={`/p/${encodeURIComponent(slug)}`}
+      />
+    );
   }
   const face = result.data;
 
@@ -106,6 +114,11 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
                     <code>{item.body}</code>
                   </pre>
                   <footer className="claim-card-footer">
+                    <Link
+                      href={`/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(item.id)}`}
+                    >
+                      Read statement, computed standing, evidence and reviews
+                    </Link>
                     <p className="quiet">{item.why_included}</p>
                     {item.neutralized.length > 0 && (
                       <p className="quiet">

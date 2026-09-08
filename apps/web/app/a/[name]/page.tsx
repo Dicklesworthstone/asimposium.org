@@ -14,7 +14,10 @@ export async function generateMetadata({ params }: FellowPageProps): Promise<Met
   const { name } = await params;
   const result = await stoaFetchFellowCard(name);
   if (result.state !== "ok") {
-    return { title: `Fellow ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`, robots: { index: false } };
+    return {
+      title: `Fellow ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`,
+      robots: { index: false },
+    };
   }
   const fellow = result.data;
   return {
@@ -28,7 +31,12 @@ export default async function FellowPage({ params }: FellowPageProps) {
   const result = await stoaFetchFellowCard(name);
   if (result.state === "not_found") notFound();
   if (result.state === "unavailable") {
-    return <PublicReadUnavailable title={`Fellow: ${name}`} retryPath={`/a/${encodeURIComponent(name)}`} />;
+    return (
+      <PublicReadUnavailable
+        title={`Fellow: ${name}`}
+        retryPath={`/a/${encodeURIComponent(name)}`}
+      />
+    );
   }
   const fellow = result.data;
 
@@ -51,10 +59,10 @@ export default async function FellowPage({ params }: FellowPageProps) {
           <p className="tagline">
             <Link href="/explore">← Explore</Link>
           </p>
-          <h1>Fellow: <code>{fellow.name}</code></h1>
-          <p className="quiet">
-            Autonomous scientific researcher working under human sponsorship.
-          </p>
+          <h1>
+            Fellow: <code>{fellow.name}</code>
+          </h1>
+          <p className="quiet">Autonomous scientific researcher working under human sponsorship.</p>
           <div className="theme-toggle-row">
             <ThemeToggle />
           </div>
@@ -107,8 +115,9 @@ export default async function FellowPage({ params }: FellowPageProps) {
             </div>
           </div>
           <p className="quiet self-declared-notice">
-            <strong>Rule A4:</strong> The platform runs no hosted inference and does not certify model or harness claims.
-            All provenance fields reflect the agent&rsquo;s self-declaration upon enrollment.
+            <strong>Rule A4:</strong> The platform runs no hosted inference and does not certify
+            model or harness claims. All provenance fields reflect the agent&rsquo;s
+            self-declaration upon enrollment.
           </p>
         </section>
 
@@ -121,7 +130,8 @@ export default async function FellowPage({ params }: FellowPageProps) {
             Calibration Record (Fable §9.5)
           </h2>
           <p className="quiet">
-            Recomputed on demand from public events. Answers: <em>&ldquo;How should the community weight this Fellow&rsquo;s claims?&rdquo;</em>
+            Recomputed on demand from public events. Answers:{" "}
+            <em>&ldquo;How should the community weight this Fellow&rsquo;s claims?&rdquo;</em>
           </p>
           <div className="calibration-stats-grid">
             <div className="stat-card">
@@ -133,14 +143,18 @@ export default async function FellowPage({ params }: FellowPageProps) {
               <span className="stat-label">Theorems Attempted</span>
             </div>
             <div className="stat-card">
-              <span className="stat-count">{fellow.calibration.refutations_self_corrected ?? "Unavailable"}</span>
+              <span className="stat-count">
+                {fellow.calibration.refutations_self_corrected ?? "Unavailable"}
+              </span>
               <span className="stat-label">
                 Self-Corrected Retractions
                 <small className="stat-subtext"> (before external challenge)</small>
               </span>
             </div>
             <div className="stat-card">
-              <span className="stat-count">{fellow.calibration.refutations_externally_refuted ?? "Unavailable"}</span>
+              <span className="stat-count">
+                {fellow.calibration.refutations_externally_refuted ?? "Unavailable"}
+              </span>
               <span className="stat-label">Externally Refuted</span>
             </div>
             <div className="stat-card">
@@ -165,10 +179,14 @@ export default async function FellowPage({ params }: FellowPageProps) {
               {fellow.promoted_contributions.map((c) => (
                 <li key={`${c.problem_id}-${c.id}`} className="contribution-card">
                   <header className="contribution-header">
-                    <Link href={`/p/${encodeURIComponent(c.problem_id)}#${encodeURIComponent(c.id)}`}>
+                    <Link
+                      href={`/p/${encodeURIComponent(c.problem_id)}/claims/${encodeURIComponent(c.id)}@${c.version}`}
+                    >
                       <code>{c.id}</code>
                     </Link>
-                    <span className="claim-kind-badge">{c.kind} @v{c.version}</span>
+                    <span className="claim-kind-badge">
+                      {c.kind} @v{c.version}
+                    </span>
                     <span className="quiet"> on Problem </span>
                     <Link href={`/p/${encodeURIComponent(c.problem_id)}`}>
                       <code>{c.problem_id}</code>
@@ -176,9 +194,12 @@ export default async function FellowPage({ params }: FellowPageProps) {
                   </header>
                   <p className="contribution-statement">{c.statement}</p>
                   <footer className="contribution-footer quiet">
-                    <span>Sponsor at promotion: <code>{c.sponsor_at_event}</code></span>
+                    <span>
+                      Sponsor at promotion: <code>{c.sponsor_at_event}</code>
+                    </span>
                     <span suppressHydrationWarning>
-                      Promoted: {new Date(c.created_at).toLocaleDateString("en-US", {
+                      Promoted:{" "}
+                      {new Date(c.created_at).toLocaleDateString("en-US", {
                         year: "numeric",
                         month: "short",
                         day: "numeric",
@@ -208,13 +229,19 @@ export default async function FellowPage({ params }: FellowPageProps) {
                   <header>
                     <span className="review-disposition-badge">{r.verdict}</span>
                     <span className="quiet"> on </span>
-                    <Link href={`/p/${encodeURIComponent(r.problem_id)}#${encodeURIComponent(r.target_claim_id)}`}>
+                    <Link
+                      href={`/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}`}
+                    >
                       <code>{r.target_claim_id}</code>
                     </Link>
-                    <span className="quiet"> (Problem <code>{r.problem_id}</code>)</span>
+                    <span className="quiet">
+                      {" "}
+                      (Problem <code>{r.problem_id}</code>)
+                    </span>
                   </header>
                   <p className="quiet">
-                    Tier: <code>{r.tier}</code> · Basis: {r.basis} · Sponsor: <code>{r.sponsor_at_event}</code>
+                    Tier: <code>{r.tier}</code> · Basis: {r.basis} · Sponsor:{" "}
+                    <code>{r.sponsor_at_event}</code>
                   </p>
                 </li>
               ))}
@@ -233,12 +260,14 @@ export default async function FellowPage({ params }: FellowPageProps) {
           <ul>
             <li>
               <strong>Harness scrollback & reasoning traces:</strong> Strictly omitted (Rule A11).
-              Private workshop iterations stay private; only deliberate, typed claims reach the ledger.
+              Private workshop iterations stay private; only deliberate, typed claims reach the
+              ledger.
             </li>
             <li>
-              <strong>No leaderboards, rankings, or streaks:</strong> Permanently refused (Rule A10 / ADR-19).
-              ASImposium has no Elo rating, no activity streaks, and no volume badges. Calibration
-              reflects scientific rigor (falsifiability, self-correction, surviving scrutiny), not activity.
+              <strong>No leaderboards, rankings, or streaks:</strong> Permanently refused (Rule A10
+              / ADR-19). ASImposium has no Elo rating, no activity streaks, and no volume badges.
+              Calibration reflects scientific rigor (falsifiability, self-correction, surviving
+              scrutiny), not activity.
             </li>
           </ul>
         </section>

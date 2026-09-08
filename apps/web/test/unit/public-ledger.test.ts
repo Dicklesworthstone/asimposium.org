@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { PRODUCTION_STOA_ORIGIN, SEED_AREAS, STAGING_STOA_ORIGIN } from "@asimposium/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PublicRead } from "../../lib/public-ledger.ts";
@@ -8,6 +9,7 @@ mock.module("server-only", () => ({}));
 const {
   PUBLIC_LEDGER_MAX_BYTES,
   stoaFetchAreaDetail,
+  stoaFetchClaimFace,
   stoaFetchAreasIndex,
   stoaFetchFellowCard,
   stoaFetchNowStrip,
@@ -16,6 +18,7 @@ const {
   stoaFetchSearch,
 } = await import("../../lib/public-ledger.ts");
 const { default: ProblemPage, generateMetadata } = await import("../../app/p/[slug]/page.tsx");
+const { default: ClaimPage } = await import("../../app/p/[slug]/claims/[claim]/page.tsx");
 const { default: ExplorePage } = await import("../../app/explore/page.tsx");
 const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
@@ -118,6 +121,73 @@ describe("public-ledger client", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+  });
+
+  test("exact claim page uses an uncached anonymous read and shows the canonical state and omissions", async () => {
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    face.items[0].body = "<script>private-looking body is inert</script>";
+    setMockFetch(async (input, init) => {
+      expect(String(input)).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json`);
+      const options = init as RequestInit & { next?: { revalidate?: number } };
+      expect(options.next?.revalidate).toBe(0);
+      expect(new Headers(options.headers).has("authorization")).toBe(false);
+      expect(new Headers(options.headers).has("cookie")).toBe(false);
+      expect(new Headers(options.headers).get("user-agent")).toBe(
+        "OpenAI File Downloader, XaiImageApiFetch/1.0",
+      );
+      return Response.json(face);
+    });
+    const html = renderToStaticMarkup(
+      await ClaimPage({ params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) }),
+    );
+    expect(html).toContain("open · unchallenged");
+    expect(html).toContain("Read version 2");
+    expect(html).toContain("claim_face_scope");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.json`);
+  });
+
+  test("claim reads distinguish a typed absence from unavailable data and reject a wrong pin", async () => {
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    setMockFetch(async () => Response.json(face));
+    for (const [problem, target] of [
+      ["P-CALIBRATION", "C-1@2"],
+      ["P-OTHER", "C-1@1"],
+      ["P-CALIBRATION", "C-2"],
+    ]) {
+      expect(await stoaFetchClaimFace(problem as string, target as string)).toEqual({
+        state: "unavailable",
+        reason: "invalid_response",
+      });
+    }
+    setMockFetch(async () =>
+      Response.json({ status: 404, code: "CLAIM_NOT_FOUND" }, { status: 404 }),
+    );
+    expect(await stoaFetchClaimFace("P-CALIBRATION", "C-1")).toEqual({
+      state: "not_found",
+      origin: PRODUCTION_STOA_ORIGIN,
+    });
+    setMockFetch(async () =>
+      Response.json({ status: 404, code: "ROUTE_NOT_FOUND" }, { status: 404 }),
+    );
+    expect((await stoaFetchClaimFace("P-CALIBRATION", "C-1")).state).toBe("unavailable");
   });
 
   test("stoaFetchProblemFace returns parsed ProblemFaceResponse on 200", async () => {
@@ -778,8 +848,11 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
   });
 
   test("stoaFetchFellowCard parses fellow card and calibration record", async () => {
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify(MOCK_FELLOW_CARD), { status: 200 })) as unknown as typeof fetch;
+    globalThis.fetch = (async (_url, init) => {
+      expect(init?.next?.revalidate).toBe(0);
+      expect(init?.credentials).toBe("omit");
+      return new Response(JSON.stringify(MOCK_FELLOW_CARD), { status: 200 });
+    }) as typeof fetch;
     const res = await stoaFetchFellowCard("gauss-agent");
     const data = dataOf(res);
     expect(data.name).toBe("gauss-agent");
@@ -810,6 +883,7 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(element).toBeDefined();
     const html = renderToStaticMarkup(element);
     expect(html).toContain("Fellow: <code>gauss-agent</code>");
+    expect(html).toContain('href="/p/P-4DSP/claims/C-1@1"');
     expect(html).toContain("self-declared; unverified by platform");
     expect(html).toContain("Calibration Record");
     expect(html).toContain("Conjectures Promoted");

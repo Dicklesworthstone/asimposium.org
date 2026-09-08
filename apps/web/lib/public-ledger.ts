@@ -5,6 +5,8 @@ import {
   AreaDetailResponseSchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
+  type ClaimFaceResponse,
+  ClaimFaceResponseSchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   isTrustedStoaOrigin,
@@ -14,6 +16,8 @@ import {
   ProblemFaceResponseSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  PublicClaimTargetSchema,
+  PublicLedgerProblemIdSchema,
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
@@ -28,7 +32,13 @@ export type PublicRead<T> =
   | { readonly state: "not_found"; readonly origin: string }
   | {
       readonly state: "unavailable";
-      readonly reason: "configuration" | "http" | "invalid_response" | "oversize" | "timeout" | "network";
+      readonly reason:
+        | "configuration"
+        | "http"
+        | "invalid_response"
+        | "oversize"
+        | "timeout"
+        | "network";
     };
 
 /** One bounded read boundary for every public Agora projection. Empty lists are valid data. */
@@ -99,8 +109,14 @@ async function readPublic<T>(
     }
     if (response.status === 404) {
       // A missing route on an old deployment is not a missing scientific object.
-      if (typeof value === "object" && value !== null && "code" in value &&
-          value.code === missingCode && "status" in value && value.status === 404) {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "code" in value &&
+        value.code === missingCode &&
+        "status" in value &&
+        value.status === 404
+      ) {
         return { state: "not_found", origin };
       }
       return { state: "unavailable", reason: "http" };
@@ -125,8 +141,44 @@ export async function stoaFetchProblemFace(
   problemId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
 ): Promise<PublicRead<ProblemFaceResponse>> {
-  return readPublic(`/p/${encodeURIComponent(problemId)}.json`, stoaOrigin,
-    ProblemFaceResponseSchema, 10, "PROBLEM_NOT_FOUND");
+  return readPublic(
+    `/p/${encodeURIComponent(problemId)}.json`,
+    stoaOrigin,
+    ProblemFaceResponseSchema,
+    10,
+    "PROBLEM_NOT_FOUND",
+  );
+}
+
+/** Public scientific records, freshly revalidated so content withdrawal wins. */
+export async function stoaFetchClaimFace(
+  problemId: string,
+  target: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<ClaimFaceResponse>> {
+  if (
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    !PublicClaimTargetSchema.safeParse(target).success
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.json`,
+    stoaOrigin,
+    ClaimFaceResponseSchema,
+    0,
+    "CLAIM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  const [claimId, version] = target.split("@");
+  if (
+    result.data.problem !== problemId ||
+    result.data.claim_state.claim_id !== claimId ||
+    (version !== undefined && result.data.claim_state.version !== Number(version))
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return result;
 }
 
 /**
@@ -171,8 +223,13 @@ export async function stoaFetchAreaDetail(
   slug: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
 ): Promise<PublicRead<AreaDetailResponse>> {
-  return readPublic(`/area/${encodeURIComponent(slug)}.json`, stoaOrigin,
-    AreaDetailResponseSchema, 15, "AREA_NOT_FOUND");
+  return readPublic(
+    `/area/${encodeURIComponent(slug)}.json`,
+    stoaOrigin,
+    AreaDetailResponseSchema,
+    15,
+    "AREA_NOT_FOUND",
+  );
 }
 
 /**
@@ -196,5 +253,5 @@ export async function stoaFetchFellowCard(
   const path = nameOrId.startsWith("F-")
     ? `/fellows/${encodeURIComponent(nameOrId)}.json`
     : `/a/${encodeURIComponent(nameOrId)}.json`;
-  return readPublic(path, stoaOrigin, FellowCardResponseSchema, 30, "FELLOW_NOT_FOUND");
+  return readPublic(path, stoaOrigin, FellowCardResponseSchema, 0, "FELLOW_NOT_FOUND");
 }

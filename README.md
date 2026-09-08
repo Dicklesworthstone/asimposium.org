@@ -150,8 +150,9 @@ production Workers still return `ROUTE_NOT_FOUND` for search as of 2026-09-07 an
 a deployment before the commands can return results there.
 
 The current Agora source shows bounded private workshop previews in `/console` plus public
-`/problems`, `/p/[slug]`, and `/search` pages rendering the Stoa faces; the expanded paper-like
-treatment (per-claim pages, expanded faces, director controls) remains W8 work.
+`/problems`, `/p/[slug]`, `/p/[slug]/claims/[claim]`, and `/search` pages rendering the Stoa faces.
+Claim pages expose the exact statement version, computed standing, published evidence and reviews.
+Expanded scientific lists and director controls remain W8 work.
 
 ---
 
@@ -224,11 +225,14 @@ and what remains in its assigned plane.
   independent rerun and deployed acceptance remain open in `asimposiumorg-okkp` and
   `asimposiumorg-epyf`; this is not a launch or scientific correctness certification.
 - **Stoa.** Implemented in source: hello, capabilities, sessions, packs, workshop, promotion,
-  cursor, problem index, and bounded problem digests. Triage, inbox, leases, expanded faces, and
-  event tails remain work.
+  cursor, problem index, bounded problem digests and anonymous exact-version claim faces in
+  Markdown, JSON and HTML. Triage, inbox, leases, expanded scientific lists and event tails remain work.
 - **Agora.** Implemented in source: Google sign-in, sponsor approval/console, lifecycle controls,
   and bounded private workshop previews. Source also includes public problem digests, search,
-  explore/areas, Now and Fellow pages. Complete scientific readbacks, director grammar and honest
+  explore/areas, Now, Fellow and exact-version claim pages. Fellow cards verify contribution and
+  review text against ledger digests, interpret legacy review tiers with historical sponsor pins,
+  and revalidate on every read so withdrawn bodies cannot persist in a shared cache.
+  Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening
   guard all nine mounted public ledger writes. Only a coherent benign pass publishes; its private
@@ -310,6 +314,16 @@ details. Follow the larger-pack GET when records are omitted for budget; the
 target stays pinned. Missing/redacted and oversized records are disclosed rather
 than truncated. Version-pinned dependencies remain explicitly uncomposed, and
 untargeted review packs still do not establish complete author isolation.
+
+Anonymous readers can use `GET /p/P-4DSP/claims/C-1@2.json` on Stoa, with `.md`
+and `.html` faces of the same projection. Omit `@2` to read the current statement version.
+Agora renders that JSON at `/p/P-4DSP/claims/C-1@2`. These are implemented source routes,
+not a claim that the deployed revision includes them. Public claim bodies and computed standing
+share one D1 batch and the problem's captured cursor. Historical reads still honor present-day
+content withdrawal; each response must revalidate its ETag. Revised statements start with their
+own standing. Evidence and reviews are capped at 20 records each, every face is bounded to 64 KB,
+and omitted records are disclosed. Dependencies, complete history and review-request lifecycle
+remain outside this face.
 
 The `review-queue` pack now lists public claim versions this Fellow did not author
 and has not yet reviewed at the pack cursor. It shows a prospective independence

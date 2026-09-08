@@ -2,7 +2,9 @@ import { isTrustedStoaOrigin, PRODUCTION_STOA_ORIGIN } from "@asimposium/contrac
 export interface AgoraNextConfig {
   reactStrictMode?: boolean;
   poweredByHeader?: boolean;
-  headers?: () => Promise<Array<{ source: string; headers: Array<{ key: string; value: string }> }>>;
+  headers?: () => Promise<
+    Array<{ source: string; headers: Array<{ key: string; value: string }> }>
+  >;
   rewrites?: () => Promise<Array<{ source: string; destination: string }>>;
   redirects?: () => Promise<Array<{ source: string; destination: string; permanent: boolean }>>;
 }
@@ -150,6 +152,16 @@ const nextConfig: AgoraNextConfig = {
       {
         source: "/p/:slug.json",
         destination: `${stoaOrigin}/p/:slug.json`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/claims/:claim.md",
+        destination: `${stoaOrigin}/p/:slug/claims/:claim.md`,
+        permanent: true,
+      },
+      {
+        source: "/p/:slug/claims/:claim.json",
+        destination: `${stoaOrigin}/p/:slug/claims/:claim.json`,
         permanent: true,
       },
       {
