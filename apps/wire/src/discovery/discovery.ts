@@ -125,6 +125,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/claims/:target":
+    "Public claim head or exact version with computed standing, evidence and reviews; target ends in .md, .json or .html.",
   "GET /search": "Public lexical search (negotiated face).",
   "GET /search.md": "Public lexical search (Markdown face).",
   "GET /search.json": "Public lexical search (JSON face).",
@@ -410,10 +412,22 @@ function responseFor(
     : openApiPath.endsWith(".html")
       ? "text/html; charset=utf-8"
       : "application/json";
+  const content =
+    openApiPath === "/p/{id}/claims/{target}"
+      ? {
+          "application/json": {
+            schema: {
+              $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_response`,
+            },
+          },
+          "text/markdown": {},
+          "text/html": {},
+        }
+      : { [media]: {} };
   return {
     "200": {
       description: "Success.",
-      content: { [media]: {} },
+      content,
     },
     default: {
       description:

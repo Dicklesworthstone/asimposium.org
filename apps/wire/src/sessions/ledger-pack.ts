@@ -1,7 +1,19 @@
 import type { PackProfile } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
+import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
 import { scientificIndependence } from "../ledger/review-independence";
+import {
+  checkedScientificPayload,
+  recordedReviewIndependence,
+  ScientificInputError,
+} from "../ledger/scientific-checks";
+import {
+  foldScientificRows,
+  prepareScientificDispositions,
+  type ScientificDisposition,
+  type ScientificRow,
+} from "../ledger/scientific-disposition";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -193,13 +205,45 @@ export async function readTargetClaimPack(
   cursor: number,
   target: string,
 ): Promise<LedgerPackSection> {
+  return composeTargetClaimPack(
+    await db.batch(targetClaimStatements(db, problemId, cursor, target)),
+    problemId,
+    target,
+  );
+}
+
+export async function readPublicClaimSnapshot(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  claimId: string,
+  version: number,
+): Promise<{ section: LedgerPackSection; fold: ScientificDisposition }> {
+  const target = `${claimId}@${version}`;
+  const results = await db.batch([
+    ...targetClaimStatements(db, problemId, cursor, target),
+    prepareScientificDispositions(db, problemId, cursor, 1, { claimId, version }),
+  ]);
+  const rows = results[3]?.results as ScientificRow[] | undefined;
+  if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
+  return {
+    section: await composeTargetClaimPack(results.slice(0, 3), problemId, target),
+    fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
+  };
+}
+
+function targetClaimStatements(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  target: string,
+): D1PreparedStatement[] {
   const [claimId, versionText] = target.split("@");
   const version = Number(versionText);
-  type TargetRow = { id: string; body: string | null };
-  const results = await db.batch([
+  return [
     db
       .prepare(`
-      SELECT v.claim_id || '@' || v.version AS id,
+      SELECT v.claim_id || '@' || v.version AS id, e.payload_sha256, c.payload_json,
         CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
           'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
           'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
@@ -219,7 +263,7 @@ export async function readTargetClaimPack(
       .bind(problemId, claimId, version, cursor),
     db
       .prepare(`
-      SELECT x.evidence_id AS id,
+      SELECT x.evidence_id AS id, e.payload_sha256, c.payload_json,
         CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
           'problem', x.problem_id, 'target', x.bears_on_id || '@' || x.bears_on_version,
           'kind', x.kind, 'direction', x.direction, 'computed_class', x.computed_class,
@@ -246,7 +290,7 @@ export async function readTargetClaimPack(
       .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
     db
       .prepare(`
-      SELECT x.review_id AS id,
+      SELECT x.review_id AS id, e.payload_sha256, c.payload_json,
         CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
           'problem', x.problem_id, 'target', x.target_claim_id || '@' || x.target_version,
           'tier', x.tier, 'verdict', x.verdict, 'basis', x.basis,
@@ -267,7 +311,20 @@ export async function readTargetClaimPack(
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
       .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
-  ]);
+  ];
+}
+
+async function composeTargetClaimPack(
+  results: D1Result[],
+  problemId: string,
+  target: string,
+): Promise<LedgerPackSection> {
+  type TargetRow = {
+    id: string;
+    body: string | null;
+    payload_sha256: string;
+    payload_json: string | null;
+  };
   const section: LedgerPackSection = {
     candidates: [],
     omitted: [{ reason: "profile_section_not_composed", detail: "version-pinned-dependencies" }],
@@ -277,14 +334,87 @@ export async function readTargetClaimPack(
     section.omitted.push({ reason: "content_unavailable", detail: target });
     return section;
   }
+  const [claimId, versionText] = target.split("@");
+  const version = Number(versionText);
+  const claimBody = JSON.parse(claim.body) as Record<string, unknown>;
   for (const [index, kind] of ["claim-detail", "claim-evidence", "claim-review"].entries()) {
     const rows = (results[index]?.results ?? []) as TargetRow[];
     if (rows.length > LEDGER_PACK_CANDIDATE_LIMIT)
       section.omitted.push({ reason: "candidate_limit", detail: `${target}:${kind}` });
     for (const [position, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
-      if (row.body === null) {
+      let body: string | null = null;
+      if (row.body !== null && row.payload_json !== null) {
+        try {
+          const payload = await checkedScientificPayload({
+            ...row,
+            payload_json: row.payload_json,
+          });
+          const projected = JSON.parse(row.body) as Record<string, unknown>;
+          if (kind === "claim-detail") {
+            if (payload.claim_id !== claimId || typeof payload.statement !== "string")
+              throw new ScientificInputError(
+                "Claim content does not match the requested identity.",
+              );
+            projected.statement = payload.statement;
+          } else if (kind === "claim-review") {
+            if (
+              payload.target_claim_id !== claimId ||
+              payload.target_version !== version ||
+              typeof claimBody.sponsor !== "string" ||
+              typeof projected.sponsor !== "string"
+            )
+              throw new ScientificInputError("Review content does not match its version pin.");
+            projected.tier = recordedReviewIndependence(
+              payload,
+              claimBody.sponsor,
+              projected.sponsor,
+            ).tier;
+            for (const key of [
+              "verdict",
+              "basis",
+              "capable_of_failure",
+              "rubric",
+              "body_md",
+              "scientific_provenance",
+              "verification",
+            ])
+              projected[key] = payload[key] ?? null;
+          } else {
+            if (
+              payload.bears_on_kind !== "claim" ||
+              payload.bears_on_id !== claimId ||
+              payload.bears_on_version !== version
+            )
+              throw new ScientificInputError("Evidence content does not match its version pin.");
+            for (const key of [
+              "kind",
+              "direction",
+              "computed_class",
+              "coercion_flags",
+              "mode",
+              "computation_domain_or_floor",
+              "reproduction",
+              "selected_hypothesis_id",
+              "body_md",
+            ])
+              projected[key] = payload[key] ?? null;
+            const source = payload.source;
+            if (source === null || typeof source !== "object" || Array.isArray(source))
+              throw new ScientificInputError("Evidence source provenance is unavailable.");
+            const provenance = source as Record<string, unknown>;
+            projected.source_kind = provenance.kind;
+            projected.locator = provenance.locator ?? null;
+            projected.excerpt = provenance.excerpt ?? null;
+          }
+          body = JSON.stringify(projected);
+        } catch (error) {
+          if (!(error instanceof ScientificInputError)) throw error;
+        }
+      }
+      if (body === null) {
         section.omitted.push({ reason: "content_unavailable", detail: row.id });
-      } else if (row.body.length > 18000 || neutralizeUntrustedBody(row.body).text.length > 18000) {
+        if (kind === "claim-detail") return section;
+      } else if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
         // Check both original and neutralized size; escaping can expand hostile
         // markers. Never let one record break the pack or truncate the object.
         section.omitted.push({ reason: "item_too_large", detail: row.id });
@@ -295,7 +425,7 @@ export async function readTargetClaimPack(
           scope: "ledger",
           untrusted: true,
           tokens: 1,
-          body: row.body,
+          body,
           why_included: `public record for ${problemId}#${target} at the pack cursor`,
           stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
         });

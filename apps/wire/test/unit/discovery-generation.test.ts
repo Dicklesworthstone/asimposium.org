@@ -35,6 +35,7 @@ function sampleFor(honoPath: string): string {
   return honoPath.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/gu, (_all, name) => {
     if (name === "enrollmentId") return "/join/ASIMP-EN-PROBE".slice(6);
     if (name === "problemId") return "P-4DSP";
+    if (name === "target") return "C-1@1.json";
     return name === "id" && honoPath.startsWith("/p/") ? "P-4DSP" : "PROBE";
   });
 }
@@ -140,6 +141,21 @@ describe("discovery generators (W1.6)", () => {
     const fellows = doc.paths["/v1/fellows"] as { get?: unknown; post: unknown } | undefined;
     expect(fellows?.get).toBeUndefined();
     expect(fellows?.post).toBeDefined();
+  });
+
+  test("public claim discovery identifies the canonical response and every served face", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const operation = doc.paths["/p/{id}/claims/{target}"].get;
+    expect(operation.security).toEqual([]);
+    expect(operation.responses[200].content).toEqual({
+      "application/json": {
+        schema: {
+          $ref: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_face_response",
+        },
+      },
+      "text/markdown": {},
+      "text/html": {},
+    });
   });
 
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {

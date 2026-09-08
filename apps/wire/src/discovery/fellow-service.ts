@@ -2,9 +2,16 @@ import {
   type FellowCardResponse,
   FellowCardResponseSchema,
   type FellowPromotedContribution,
+  FellowPromotedContributionSchema,
   type FellowReviewItem,
+  FellowReviewItemSchema,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import {
+  checkedScientificPayload,
+  recordedReviewIndependence,
+  ScientificInputError,
+} from "../ledger/scientific-checks";
 
 interface FellowRecord {
   fellow_id: string;
@@ -23,7 +30,8 @@ interface ContributionRow {
   id: string;
   problem_id: string;
   kind: string;
-  statement: string;
+  payload_json: string;
+  payload_sha256: string;
   version: number;
   created_at: string;
   sponsor_at_event: string;
@@ -34,9 +42,9 @@ interface ReviewRow {
   problem_id: string;
   target_claim_id: string;
   target_version: number;
-  verdict: string;
-  tier: "T0" | "T1" | "T2" | "T3";
-  basis: string;
+  payload_json: string;
+  payload_sha256: string;
+  author_sponsor_at_event: string;
   created_at: string;
   sponsor_at_event: string;
 }
@@ -72,6 +80,8 @@ export async function loadFellowCard(
 
   // Promoted contributions
   const contributions: FellowPromotedContribution[] = [];
+  let moreContributions = false;
+  let unavailableContributions = 0;
   {
     const contribRows = await db
       .prepare(
@@ -79,9 +89,10 @@ export async function loadFellowCard(
            cv.claim_id as id,
            cv.problem_id,
            cv.kind,
-           cv.statement,
+           content.payload_json,
+           e.payload_sha256,
            cv.version,
-           cv.created_at,
+           e.created_at,
            e.actor_sponsor_id as sponsor_at_event
          FROM claim_versions cv
          JOIN events e
@@ -102,21 +113,28 @@ export async function loadFellowCard(
       .bind(fellow.fellow_id)
       .all<ContributionRow>();
 
-    for (const row of contribRows.results ?? []) {
-      contributions.push({
+    moreContributions = contribRows.results.length > 50;
+    for (const row of contribRows.results.slice(0, 50)) {
+      const payload = await availablePayload(row);
+      const item = FellowPromotedContributionSchema.safeParse({
         id: row.id,
         problem_id: row.problem_id,
         kind: row.kind as FellowPromotedContribution["kind"],
-        statement: row.statement,
+        statement: payload?.statement,
         version: row.version,
         created_at: row.created_at,
         sponsor_at_event: row.sponsor_at_event,
       });
+      if (payload?.claim_id === row.id && item.success) contributions.push(item.data);
+      else unavailableContributions++;
     }
   }
 
   // Reviews given
   const reviews: FellowReviewItem[] = [];
+  let moreReviews = false;
+  let unavailableReviews = 0;
+  let legacyReviews = 0;
   {
     const reviewRows = await db
       .prepare(
@@ -125,10 +143,10 @@ export async function loadFellowCard(
            r.problem_id,
            r.target_claim_id,
            r.target_version,
-           r.verdict,
-           r.tier,
-           r.basis,
-           r.created_at,
+           content.payload_json,
+           e.payload_sha256,
+           author.actor_sponsor_id as author_sponsor_at_event,
+           e.created_at,
            e.actor_sponsor_id as sponsor_at_event
          FROM reviews r
          JOIN events e
@@ -143,6 +161,14 @@ export async function loadFellowCard(
          JOIN event_content content ON content.event_id = e.id
           AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+         JOIN events author
+           ON author.problem_id = r.problem_id
+          AND author.object_id = r.target_claim_id
+          AND author.object_version = r.target_version
+          AND author.object_kind = 'claim'
+          AND author.type IN ('claim.created', 'claim.revised')
+          AND author.seq < e.seq
+          AND author.actor_sponsor_id IS NOT NULL
          WHERE r.reviewer_fellow_id = ?
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
@@ -150,18 +176,37 @@ export async function loadFellowCard(
       .bind(fellow.fellow_id)
       .all<ReviewRow>();
 
-    for (const row of reviewRows.results ?? []) {
-      reviews.push({
+    moreReviews = reviewRows.results.length > 50;
+    for (const row of reviewRows.results.slice(0, 50)) {
+      const payload = await availablePayload(row);
+      if (
+        !payload ||
+        payload.target_claim_id !== row.target_claim_id ||
+        payload.target_version !== row.target_version
+      ) {
+        unavailableReviews++;
+        continue;
+      }
+      const { tier, legacy } = recordedReviewIndependence(
+        payload,
+        row.author_sponsor_at_event,
+        row.sponsor_at_event,
+      );
+      const item = FellowReviewItemSchema.safeParse({
         review_id: row.review_id,
         problem_id: row.problem_id,
         target_claim_id: row.target_claim_id,
         target_version: row.target_version,
-        verdict: row.verdict,
-        tier: row.tier,
-        basis: row.basis,
+        verdict: payload.verdict,
+        tier,
+        basis: payload.basis,
         created_at: row.created_at,
         sponsor_at_event: row.sponsor_at_event,
       });
+      if (item.success) {
+        reviews.push(item.data);
+        if (legacy) legacyReviews++;
+      } else unavailableReviews++;
     }
   }
 
@@ -203,8 +248,8 @@ export async function loadFellowCard(
     current_sponsor_id: fellow.sponsor_id,
     transfer_effective_at: null,
     sessions_count: sessionsCount,
-    promoted_contributions: contributions.slice(0, 50),
-    reviews: reviews.slice(0, 50),
+    promoted_contributions: contributions,
+    reviews,
     calibration: {
       conjectures_promoted: totals.conjectures,
       theorems_attempted: totals.theorems,
@@ -215,17 +260,45 @@ export async function loadFellowCard(
     },
     omitted: [
       "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
-      ...(contributions.length > 50
+      ...(moreContributions
         ? [
             "contributions beyond the latest 50 omitted; promotion totals cover all event-backed initial versions",
           ]
         : []),
-      ...(reviews.length > 50 ? ["reviews beyond the latest 50 omitted"] : []),
+      ...(moreReviews ? ["reviews beyond the latest 50 omitted"] : []),
+      ...(unavailableContributions > 0
+        ? [
+            `${unavailableContributions} contribution records in the latest window failed ledger content verification`,
+          ]
+        : []),
+      ...(unavailableReviews > 0
+        ? [
+            `${unavailableReviews} review records in the latest window failed ledger content or version-pin verification`,
+          ]
+        : []),
+      ...(legacyReviews > 0
+        ? [
+            `${legacyReviews} legacy reviews lack current independence provenance; tiers are limited to T0/T1 using sponsors at the exact reviewed version`,
+          ]
+        : []),
       "contributions and reviews without matching immutable event attribution are excluded",
       "contribution and review text with redacted, missing or mismatched event content is excluded",
+      "review tiers describe publication provenance, not subsequent evidence availability or verification survival",
       "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
       "leaderboards and ranking metrics permanently refused (Rule A10 / ADR-19)",
     ],
   });
+}
+
+async function availablePayload(row: {
+  payload_json: string;
+  payload_sha256: string;
+}): Promise<Record<string, unknown> | null> {
+  try {
+    return await checkedScientificPayload(row);
+  } catch (error) {
+    if (error instanceof ScientificInputError) return null;
+    throw error;
+  }
 }

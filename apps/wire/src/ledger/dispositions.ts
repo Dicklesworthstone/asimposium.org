@@ -17,19 +17,9 @@
 // Vocabularies
 // ---------------------------------------------------------------------------
 
-export const CLAIM_DISPOSITIONS = [
-  "draft",
-  "open",
-  "malformed",
-  "disputed",
-  "corroborated",
-  "strongly-supported",
-  "refuted",
-  "reduced-to",
-  "withdrawn",
-  "superseded",
-] as const;
-export type ClaimDisposition = (typeof CLAIM_DISPOSITIONS)[number];
+import type { ClaimDisposition } from "@asimposium/contracts";
+
+export { CLAIM_DISPOSITIONS, type ClaimDisposition } from "@asimposium/contracts";
 
 export const HYPOTHESIS_DISPOSITIONS = [
   "active",

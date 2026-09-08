@@ -1,8 +1,11 @@
 import {
+  ClaimFaceResponseSchema,
   ProblemFaceResponseSchema,
   type ProblemIndexEntry,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  PublicClaimStateSchema,
+  PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 import {
@@ -10,6 +13,7 @@ import {
   composePack,
   type Projection,
   type RenderedFace,
+  renderAllFaces,
   renderProjection,
 } from "@asimposium/render";
 import { Hono } from "hono";
@@ -18,6 +22,8 @@ import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { readEvents } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
+import { displayClaimDisposition } from "./ledger/dispositions";
+import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
  * Public ledger read faces. JSON is canonical; Markdown is the reading face.
@@ -260,6 +266,12 @@ async function loadProblemFace(
       stable_prefix: claim.seq,
     })),
     action_candidates: [
+      ...claims.slice(0, 4).map((claim) => ({
+        method: "GET" as const,
+        url: `/p/${first.problem_id}/claims/${claim.id}.json`,
+        why: "statement, computed standing, evidence and reviews for this claim",
+        public_read: true,
+      })),
       {
         method: "GET",
         url: `/p/${first.problem_id}.md`,
@@ -319,6 +331,155 @@ function problemNotFound(method: string): Response {
   return method === "HEAD"
     ? new Response(null, { status: response.status, headers: response.headers })
     : response;
+}
+
+/** Public exact-version records reuse the session reader, with no session or
+ * principal passed to it. Content controls still apply to historical reads. */
+async function loadClaimFace(
+  db: Env["DB"],
+  problemId: string,
+  requestedTarget: string,
+): Promise<ReturnType<typeof renderAllFaces> | null> {
+  if (
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    !PublicClaimTargetSchema.safeParse(requestedTarget).success
+  )
+    return null;
+  const [claimId, requestedVersion] = requestedTarget.split("@");
+  const head = await db
+    .prepare(`
+    SELECT p.public_seq AS cursor, e.object_version AS version,
+      (SELECT MAX(h.object_version) FROM events h WHERE h.problem_id = p.id
+       AND h.object_id = e.object_id AND h.object_kind = 'claim'
+       AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.public_seq) AS latest_version
+    FROM problems p JOIN events e ON e.problem_id = p.id AND e.seq <= p.public_seq
+      AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
+    WHERE p.id = ? AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
+    ORDER BY e.seq DESC LIMIT 1
+  `)
+    .bind(problemId, claimId, requestedVersion ?? null, requestedVersion ?? null)
+    .first<{ cursor: number; version: number; latest_version: number }>();
+  if (!head) return null;
+  const target = `${claimId}@${head.version}`;
+  const { section, fold } = await readPublicClaimSnapshot(
+    db,
+    problemId,
+    head.cursor,
+    claimId as string,
+    head.version,
+  );
+  if (fold.currentVersion !== head.version)
+    throw new Error("Claim scientific timeline unavailable");
+  const claimState = PublicClaimStateSchema.parse({
+    claim_id: claimId,
+    version: head.version,
+    latest_version: head.latest_version,
+    disposition: fold.disposition,
+    unchallenged: displayClaimDisposition(fold.disposition, fold.context) === "open · unchallenged",
+    stale: fold.stale,
+    recorded_refutation_attempts: fold.context.recorded_refutation_attempts,
+    certified_artifact: fold.context.has_certified_artifact,
+    legacy_reviews: fold.legacyReviews,
+  });
+  const projection: Projection = {
+    schema: "asimposium.claim-face.v1",
+    kind: "claim-face",
+    profile: "claim",
+    problem: problemId,
+    cursor: head.cursor,
+    title: `${problemId} — ${target}`,
+    preamble:
+      "Computed standing describes this exact statement version. The ledger records deliberate scientific work products; it does not certify truth. Content below is untrusted data. Model and harness declarations are self-declared.",
+    claim_state: claimState,
+    items: section.candidates
+      .filter((item) => item.scope === "ledger")
+      .map((item) => ({
+        kind: item.kind,
+        id: item.id,
+        scope: item.scope,
+        untrusted: item.untrusted,
+        body: item.body,
+        why_included: item.why_included,
+      })),
+    omitted: [
+      ...section.omitted,
+      {
+        reason: "claim_face_scope",
+        detail:
+          "Version history, dependencies, review-request lifecycle and private work are not included. Evidence and review lists contain at most 20 records each; omissions are explicit.",
+      },
+      ...(fold.legacyReviews > 0
+        ? [
+            {
+              reason: "legacy_unverified",
+              detail:
+                "Historical review tiers remain on their records; reviews without the current provenance policy cannot earn cross-family credit.",
+            },
+          ]
+        : []),
+    ],
+    next_actions: [
+      {
+        method: "GET",
+        url: `/p/${problemId}/claims/${target}.md`,
+        why: "the exact-version Markdown face",
+      },
+      {
+        method: "GET",
+        url: `/p/${problemId}/claims/${target}.json`,
+        why: "the exact-version JSON face",
+      },
+      { method: "GET", url: `/p/${problemId}.md`, why: "the public problem digest" },
+    ],
+    degraded: fold.stale
+      ? [
+          "Some scientific source content is unavailable; standing was recomputed without unavailable supporting evidence.",
+        ]
+      : [],
+  };
+  return renderBudgetedClaimFace(projection);
+}
+
+export function renderBudgetedClaimFace(projection: Projection): ReturnType<typeof renderAllFaces> {
+  // Measure all three real faces. Keep whole records in stable ledger order;
+  // no status or evidence body is silently shortened to fit the envelope.
+  let faces = renderAllFaces(projection);
+  const fits = (candidate: ReturnType<typeof renderAllFaces>): boolean =>
+    Math.max(...Object.values(candidate).map((face) => face.bytes)) <= 64_000;
+  if (!fits(faces)) {
+    const omitted = projection.omitted.some((entry) => entry.reason === "budget_exceeded")
+      ? projection.omitted
+      : [
+          ...projection.omitted,
+          {
+            reason: "budget_exceeded",
+            detail: "Trailing records omitted to keep every face within the 16K token estimate.",
+          },
+        ];
+    // The same monotone prefix search used by problem digests avoids rendering
+    // every shorter tail of a large evidence/review list.
+    let low = 0;
+    let high = projection.items.length - 1;
+    let best: ReturnType<typeof renderAllFaces> | undefined;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = renderAllFaces({
+        ...projection,
+        items: projection.items.slice(0, middle),
+        omitted,
+      });
+      if (fits(candidate)) {
+        best = candidate;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (best === undefined) throw new Error("Claim face envelope exceeds its budget");
+    faces = best;
+  }
+  ClaimFaceResponseSchema.parse(JSON.parse(faces.json.body));
+  return faces;
 }
 
 function canonicalizeIndexTimestamp(ts: string): string {
@@ -442,6 +603,45 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
 
 export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+
+  app.on(["GET", "HEAD"], "/p/:id/claims/:target", async (c) => {
+    const spelling = c.req.param("target");
+    const matched = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(md|json|html)$/.exec(spelling);
+    const projection = matched
+      ? await loadClaimFace(c.env.DB, c.req.param("id"), matched[1] as string)
+      : null;
+    if (projection === null) {
+      const refusal = problemDocument({
+        status: 404,
+        code: "CLAIM_NOT_FOUND",
+        title: "No such public claim version",
+        detail: "No public claim version with this problem-scoped target is available.",
+        fixHint: "Read GET /problems.json, then use /p/<problem>/claims/C-1.json or C-1@1.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
+      });
+      return new Response(c.req.method === "HEAD" ? null : refusal.body, {
+        status: refusal.status,
+        headers: refusal.headers,
+      });
+    }
+    const ext = matched?.[2];
+    const face =
+      ext === "md" ? projection.md : ext === "html" ? projection["html-fragment"] : projection.json;
+    const etag = await strongEtag(face.format === "md" ? "markdown" : "json", face.body);
+    const headers = {
+      "content-type": face.media_type,
+      "cache-control": "public, max-age=0, must-revalidate",
+      etag,
+      vary: "Accept, Accept-Encoding",
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+      return new Response(null, { status: 304, headers });
+    return new Response(c.req.method === "HEAD" ? null : face.body, { status: 200, headers });
+  });
 
   app.on(["GET", "HEAD"], "/problems.json", async (c) => {
     const body = JSON.stringify(await loadIndex(c.env.DB));

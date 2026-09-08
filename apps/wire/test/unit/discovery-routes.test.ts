@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -84,7 +85,11 @@ function mockEnv(db: Env["DB"]): Env {
   } as unknown as Env;
 }
 
-function seedDiscoveryData(raw: Database) {
+function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: string) {
+  const payload =
+    eventPayload ??
+    JSON.stringify({ claim_id: "C-1", kind: "claim", statement: "Every trisection has a twist." });
+  const digest = eventDigest ?? createHash("sha256").update(payload).digest("hex");
   // 1. Sponsor & Fellow
   raw.run(
     "INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES ('SPON-01', 1786800000000, 1786800000000)",
@@ -118,10 +123,12 @@ function seedDiscoveryData(raw: Database) {
   // 4. Events
   raw.run(
     `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
-     VALUES ('E-1', 'P-4DSP', 1, 'claim.created', 'claim', 'C-1', 1, 'sha256:abcd', 'sha256:row1', 'sha256:chain1', '2026-08-02T01:00:00.000Z', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', 'SPON-01')`,
+     VALUES ('E-1', 'P-4DSP', 1, 'claim.created', 'claim', 'C-1', 1, ?, 'sha256:row1', 'sha256:chain1', '2026-08-02T01:00:00.000Z', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', 'SPON-01')`,
+    [digest],
   );
   raw.run(
-    "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-1', 'sha256:abcd', '{}')",
+    "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-1', ?, ?)",
+    [digest, payload],
   );
 }
 
@@ -135,6 +142,12 @@ function seedAttributedClaim(
   at: string,
 ) {
   const fellow = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+  const payload = JSON.stringify({
+    claim_id: id,
+    kind: "claim",
+    statement: `Statement ${problemId} ${id}`,
+  });
+  const digest = createHash("sha256").update(payload).digest("hex");
   raw.run(
     "UPDATE problems SET public_seq = ?, chain_digest = 'sha256:chain', updated_at = ? WHERE id = ?",
     [seq, at, problemId],
@@ -148,16 +161,65 @@ function seedAttributedClaim(
     [id, problemId, `Statement ${problemId} ${id}`, fellow, at],
   );
   raw.run(
-    "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, 'sha256:abcd', 'sha256:row', 'sha256:chain', ?, ?, ?)",
-    [`E-${problemId}-${id}`, problemId, seq, id, at, fellow, sponsor],
+    "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'claim.created', 'claim', ?, 1, ?, 'sha256:row', 'sha256:chain', ?, ?, ?)",
+    [`E-${problemId}-${id}`, problemId, seq, id, digest, at, fellow, sponsor],
   );
-  raw.run(
-    "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, 'sha256:abcd', '{}')",
-    [`E-${problemId}-${id}`],
-  );
+  raw.run("INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)", [
+    `E-${problemId}-${id}`,
+    digest,
+    payload,
+  ]);
 }
 
 describe("discovery projection regressions on migrated SQLite (not D1 integration proof)", () => {
+  test("card text comes from verified ledger content even when a retained projection disagrees", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(
+      raw,
+      JSON.stringify({
+        claim_id: "C-1",
+        kind: "claim",
+        statement: "The actual published statement.",
+      }),
+    );
+    const card = await loadFellowCard(db, "gauss-agent");
+    expect(card?.promoted_contributions[0]?.statement).toBe("The actual published statement.");
+    expect(JSON.stringify(card)).not.toContain("Every trisection");
+  });
+
+  test.each([
+    [
+      "digest mismatch",
+      JSON.stringify({ claim_id: "C-1", statement: "CORRUPTED_BODY" }),
+      "0".repeat(64),
+    ],
+    ["invalid JSON", "{CORRUPTED_BODY", undefined],
+    ["non-object", "null", undefined],
+    ["missing statement", JSON.stringify({ claim_id: "C-1" }), undefined],
+    ["wrong claim", JSON.stringify({ claim_id: "C-2", statement: "CORRUPTED_BODY" }), undefined],
+  ])("a %s cannot republish retained claim text", async (_name, payload, digest) => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw, payload, digest);
+    const app = createApp();
+    for (const suffix of ["json", "md", "html"]) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org/a/gauss-agent.${suffix}`),
+        mockEnv(db),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain("CORRUPTED_BODY");
+      expect(body).not.toContain("Every trisection");
+      expect(body).toContain("failed ledger content verification");
+      if (suffix === "json") {
+        const card = FellowCardResponseSchema.parse(JSON.parse(body));
+        expect(card.promoted_contributions).toEqual([]);
+        // Withdrawal/corruption does not erase the historical promotion event.
+        expect(card.calibration.conjectures_promoted).toBe(1);
+      }
+    }
+  });
+
   test("colliding C-1 IDs retain each historical sponsor; global chronology ignores problem sequence magnitude", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(raw);
@@ -228,25 +290,35 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       ["P-RIEMANN-01", 2, "SPON-OLD-B", "2026-08-05T00:00:00.000Z"],
     ] as const) {
       const event = `E-REVIEW-${problem}`;
+      const payload = JSON.stringify({
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "inform",
+        tier: "T3",
+        basis: `Basis for ${problem}`,
+      });
+      const digest = createHash("sha256").update(payload).digest("hex");
       raw.run(
         "UPDATE problems SET public_seq = ?, chain_digest = 'sha256:chain', updated_at = ? WHERE id = ?",
         [seq, at, problem],
       );
       raw.run(
-        "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'review.created', 'review', 'R-1', 1, 'sha256:body', 'sha256:row', 'sha256:chain', ?, ?, ?)",
-        [event, problem, seq, at, fellow, sponsor],
+        "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id) VALUES (?, ?, ?, 'review.created', 'review', 'R-1', 1, ?, 'sha256:row', 'sha256:chain', ?, ?, ?)",
+        [event, problem, seq, digest, at, fellow, sponsor],
       );
       raw.run(
-        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, 'sha256:body', '{}')",
-        [event],
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+        [event, digest, payload],
       );
       raw.run(
         "INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq) VALUES ('R-1', ?, 'C-1', 1, ?, 'T0', 'inform', ?, 'Synthetic SQL join fixture', ?, ?, ?)",
-        [problem, fellow, `Basis for ${problem}`, at, event, seq],
+        [problem, fellow, "Incorrect projection basis", at, event, seq],
       );
     }
     const card = await loadFellowCard(db, "gauss-agent");
     expect(card?.current_sponsor_id).toBe("SPON-01");
+    expect(card?.reviews.map((review) => review.tier)).toEqual(["T1", "T1"]);
+    expect(card?.omitted.join(" ")).toContain("2 legacy reviews");
     expect(
       card?.reviews.map((review) => [
         review.review_id,
@@ -484,6 +556,8 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       '<img src=x onerror="steal()">',
       "```",
     ].join("\n");
+    const payload = JSON.stringify({ claim_id: "C-1", kind: "claim", statement: hostileStatement });
+    const digest = createHash("sha256").update(payload).digest("hex");
 
     raw.run(
       "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES ('C-1', 'P-HOSTILE', ?, 'sha256:abcdef0123456789', 1, '2026-08-02T01:00:00.000Z')",
@@ -495,10 +569,12 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     );
     raw.run(
       `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
-       VALUES ('E-1', 'P-HOSTILE', 1, 'claim.created', 'claim', 'C-1', 1, 'sha256:abcdef0123456789', 'sha256:rowH', 'sha256:chainH', '2026-08-02T01:00:00.000Z', 'F-ADVERSARIAL-01', 'SPON-02')`,
+       VALUES ('E-1', 'P-HOSTILE', 1, 'claim.created', 'claim', 'C-1', 1, ?, 'sha256:rowH', 'sha256:chainH', '2026-08-02T01:00:00.000Z', 'F-ADVERSARIAL-01', 'SPON-02')`,
+      [digest],
     );
     raw.run(
-      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-1', 'sha256:abcdef0123456789', '{}')",
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-1', ?, ?)",
+      [digest, payload],
     );
 
     // 1. Markdown face: no active control comments, fences cannot break out

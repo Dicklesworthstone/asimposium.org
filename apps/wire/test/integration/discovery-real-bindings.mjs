@@ -23,6 +23,7 @@ import {
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
 import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
+import { fellowCardHistory } from "./fellow-card-history.mjs";
 import { scientificJourney } from "./scientific-journey.mjs";
 
 // Wrangler's harness requires genuine Node: Bun can exit with unresolved startup.
@@ -166,6 +167,7 @@ async function runDiscovery() {
   assert.equal(empty.cursor, 0);
   if (screenMode === "science") {
     await scientificJourney({ call, enroll, fixtures, env, worker, origin, userAgent });
+    await fellowCardHistory({ call, enroll, fixtures, env, worker, origin, userAgent });
     return;
   }
   const author = await enroll("discovery-author", "usr_discoveryauthor");

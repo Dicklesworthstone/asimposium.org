@@ -11,6 +11,26 @@ import { sha256Hex } from "../krater/krater.ts";
 
 export const SCIENTIFIC_INDEPENDENCE_POLICY = "declared-family-and-grounded-method-v1";
 
+/** Interpret a verified publication, never the current sponsor binding or a
+ * legacy projection's tier. This is publication provenance, not a fresh check
+ * that its supporting evidence remains available. */
+export function recordedReviewIndependence(
+  payload: Record<string, unknown>,
+  authorSponsorId: string,
+  reviewerSponsorId: string,
+): { tier: "T0" | "T1" | "T2" | "T3"; legacy: boolean } {
+  if (
+    payload.independence_policy === SCIENTIFIC_INDEPENDENCE_POLICY &&
+    (payload.tier === "T0" ||
+      payload.tier === "T1" ||
+      payload.tier === "T2" ||
+      payload.tier === "T3")
+  ) {
+    return { tier: payload.tier, legacy: false };
+  }
+  return { tier: authorSponsorId === reviewerSponsorId ? "T0" : "T1", legacy: true };
+}
+
 export class ScientificInputError extends Error {}
 
 export interface ScientificContentIdentity {
@@ -46,7 +66,9 @@ type ContentRow = {
   sponsor_id: string;
 };
 
-async function checkedPayload(row: ContentRow): Promise<Record<string, unknown>> {
+export async function checkedScientificPayload(
+  row: Pick<ContentRow, "payload_sha256" | "payload_json">,
+): Promise<Record<string, unknown>> {
   if ((await sha256Hex(row.payload_json)) !== row.payload_sha256) {
     throw new ScientificInputError(
       "The referenced public content no longer matches its ledger digest.",
@@ -91,7 +113,7 @@ export async function readScientificClaim(
     .bind(problemId, claimId, version)
     .first<ContentRow & { content_digest: string; statement: string }>();
   if (!row) throw new ScientificInputError("The exact public claim version is unavailable.");
-  const payload = await checkedPayload(row);
+  const payload = await checkedScientificPayload(row);
   return {
     eventId: row.event_id,
     payloadDigest: row.payload_sha256,
@@ -128,7 +150,7 @@ export async function readScientificEvidence(
       "An evidence reference is unavailable or has a different content digest.",
     );
   }
-  const payload = await checkedPayload(row);
+  const payload = await checkedScientificPayload(row);
   if (
     payload.bears_on_kind !== "claim" ||
     payload.bears_on_id !== claim.claimId ||

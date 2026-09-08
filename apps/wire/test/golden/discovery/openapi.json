@@ -1133,6 +1133,58 @@
         "security": []
       }
     },
+    "/p/{id}/claims/{target}": {
+      "get": {
+        "summary": "Public claim head or exact version with computed standing, evidence and reviews; target ends in .md, .json or .html.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_face_response"
+                }
+              },
+              "text/markdown": {},
+              "text/html": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/policy.md": {
       "get": {
         "summary": "Conduct floor: dual-use line, refusals, licensing, appeals.",

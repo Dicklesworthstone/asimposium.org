@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { ClaimFaceResponseSchema } from "../../../../packages/contracts/src/ledger.ts";
 import { PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
 import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
 
@@ -128,6 +129,41 @@ export async function scientificJourney({
       `Expected ${claimId} standing ${expected}; actual=${item.body.slice(0, 90)}`,
     );
     assert.ok(!JSON.stringify(result).includes(privateCanary));
+    const path = `/p/${problem}/claims/${claimId}`;
+    const response = await worker.fetch(`${origin}${path}.json`, {
+      headers: { "user-agent": userAgent },
+    });
+    assert.equal(response.status, 200, "Anonymous claim face is mounted");
+    const text = await response.text();
+    assert.ok(!text.includes(privateCanary));
+    const publicFace = ClaimFaceResponseSchema.parse(JSON.parse(text));
+    const state = publicFace.claim_state;
+    const display =
+      state.disposition +
+      (state.unchallenged ? " · unchallenged" : "") +
+      (state.stale ? " · stale" : "");
+    assert.equal(display, expected, "Anonymous and session scientific folds agree");
+    assert.equal(publicFace.cursor, result.cursor);
+    assert.ok(publicFace.items.every((entry) => entry.scope === "ledger" && entry.untrusted));
+    const etag = response.headers.get("etag");
+    assert.ok(etag);
+    const unchanged = await worker.fetch(`${origin}${path}.json`, {
+      headers: { "user-agent": userAgent, "if-none-match": etag },
+    });
+    assert.equal(unchanged.status, 304);
+    for (const suffix of ["md", "html"]) {
+      const reading = await worker.fetch(`${origin}${path}.${suffix}`, {
+        headers: { "user-agent": userAgent },
+      });
+      assert.equal(reading.status, 200);
+      const body = await reading.text();
+      assert.ok(
+        body.includes(publicFace.fingerprint),
+        "Faces share the canonical projection fingerprint",
+      );
+      assert.ok(body.includes(state.disposition));
+      assert.ok(!body.includes(privateCanary));
+    }
     console.log(
       JSON.stringify({
         stage: "scientific-standing",
@@ -286,6 +322,9 @@ export async function scientificJourney({
     `Published proof absent from target pack: ${JSON.stringify(withProof.items.map(({ id, kind }) => ({ id, kind })))}`,
   );
   const proofDetail = JSON.parse(proofItem.body);
+  assert.equal(proofDetail.source_kind, "locator");
+  assert.equal(proofDetail.locator, "https://example.invalid/science/euclid");
+  assert.equal(proofDetail.excerpt, "The complete deliberate proof is in this evidence body.");
   const proofReference = { evidence_id: proof.evidence_id, digest: proofDetail.content_digest };
   assert.match(proofReference.digest, /^sha256:[0-9a-f]{64}$/);
   const borrowedMethod = await call(
@@ -537,6 +576,39 @@ export async function scientificJourney({
   assert.equal(revision.version, 2);
   assert.equal(oldReview.target_version, 1);
   await standing("open");
+  const pinnedBeforeWithdrawal = await worker.fetch(
+    `${origin}/p/${problem}/claims/${claim.claim_id}%401.json`,
+    {
+      headers: { "User-Agent": userAgent },
+    },
+  );
+  assert.equal(pinnedBeforeWithdrawal.status, 200);
+  const pinnedEtag = pinnedBeforeWithdrawal.headers.get("etag");
+  const pinned = ClaimFaceResponseSchema.parse(await pinnedBeforeWithdrawal.json());
+  assert.equal(pinned.claim_state.version, 1);
+  assert.equal(pinned.claim_state.latest_version, 2);
+  assert.equal(pinned.claim_state.disposition, "strongly-supported");
+  assert.equal(
+    JSON.parse(pinned.items.find((item) => item.kind === "claim-detail").body).content_digest,
+    detail.content_digest,
+  );
+  const publicHead = await worker.fetch(`${origin}/p/${problem}/claims/${claim.claim_id}@1.json`, {
+    method: "HEAD",
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(publicHead.status, 200);
+  assert.equal(publicHead.headers.get("etag"), pinnedEtag);
+  assert.equal(await publicHead.text(), "");
+  for (const missingPath of [
+    `/p/${problem}/claims/${claim.claim_id}@999.json`,
+    `/p/P-NO-SUCH-SCIENCE/claims/${claim.claim_id}.json`,
+  ]) {
+    const missing = await worker.fetch(`${origin}${missingPath}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(missing.status, 404);
+    assert.equal((await missing.json()).code, "CLAIM_NOT_FOUND");
+  }
   assert.deepEqual(
     await call(`${reviewer.path}/review`, writeUpReview, reviewer.token, 200, "science-write-up"),
     verified,
@@ -716,6 +788,18 @@ export async function scientificJourney({
   await standing("open · stale");
   await fixtures.redactPublicContent(proofDetail.event);
   await standing("open · stale");
+  const withdrawnPinnedResponse = await worker.fetch(
+    `${origin}/p/${problem}/claims/${claim.claim_id}@1.json`,
+    {
+      headers: { "User-Agent": userAgent, "If-None-Match": pinnedEtag },
+    },
+  );
+  assert.equal(withdrawnPinnedResponse.status, 200);
+  assert.notEqual(withdrawnPinnedResponse.headers.get("etag"), pinnedEtag);
+  const withdrawnPinned = ClaimFaceResponseSchema.parse(await withdrawnPinnedResponse.json());
+  assert.equal(withdrawnPinned.claim_state.stale, true);
+  assert.notEqual(withdrawnPinned.claim_state.disposition, "strongly-supported");
+  assert.ok(!withdrawnPinned.items.some((item) => item.id === proof.evidence_id));
 
   // Transfer is not implemented: the current schema refuses sponsor changes.
   // Retain this limitation instead of disabling its immutable-identity trigger.
@@ -750,6 +834,20 @@ export async function scientificJourney({
     .first();
   assert.deepEqual(persistedFormal, { tier: "T3", target_version: 2 });
 
+  for (const [name, published] of [
+    ["alias", aliasReview],
+    ["samesponsor", sponsorReview],
+    ["reviewer", first],
+    ["reviewer", formal],
+  ]) {
+    const card = await call(`/a/science-${name}.json`);
+    const review = card.reviews.find((item) => item.review_id === published.review_id);
+    assert.ok(review, "A published review remains discoverable on its Fellow card");
+    assert.equal(review.tier, published.tier);
+    assert.equal(card.calibration.reviews_verified_survival, null);
+    assert.ok(!JSON.stringify(card).includes(privateCanary));
+  }
+
   const privateHandback = "SCIENCE_PRIVATE_HANDBACK_NEVER_PUBLIC";
   await call(`${author.path}/close`, { handback: privateHandback }, author.token, 201);
   // Every presently mounted status-bearing profile shares the same fold.
@@ -766,6 +864,16 @@ export async function scientificJourney({
     assert.ok(!JSON.stringify(readback).includes(privateHandback));
   }
   const publicDigest = await call(`/p/${problem}.json`);
+  assert.ok(
+    publicDigest.next_actions.some(
+      (action) => action.url === `/p/${problem}/claims/${claim.claim_id}.json`,
+    ),
+  );
+  const publicFinal = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problem}/claims/${claim.claim_id}.json`),
+  );
+  assert.ok(!JSON.stringify(publicFinal).includes(privateCanary));
+  assert.ok(!JSON.stringify(publicFinal).includes(privateHandback));
   assert.ok(
     publicDigest.omitted.some(
       (item) => item.reason === "digest_fields" && item.detail.includes("disposition"),
@@ -786,6 +894,23 @@ export async function scientificJourney({
     headers: { "User-Agent": userAgent, authorization: `Bearer ${reviewer.token}` },
   });
   assert.ok([403, 404].includes(forbiddenWorkshop.status));
+  await fixtures.redactPublicContent(revisedDetail.event);
+  const hiddenStatement = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problem}/claims/${claim.claim_id}@2.json`),
+  );
+  assert.equal(hiddenStatement.claim_state.stale, true);
+  assert.equal(hiddenStatement.items.length, 0);
+  assert.ok(hiddenStatement.omitted.some((item) => item.reason === "content_unavailable"));
+  for (const suffix of ["md", "html"]) {
+    const response = await worker.fetch(
+      `${origin}/p/${problem}/claims/${claim.claim_id}@2.${suffix}`,
+      { headers: { "User-Agent": userAgent } },
+    );
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(!text.includes(statement));
+    assert.ok(text.includes("content_unavailable"));
+  }
   const eventRows = (
     await env.DB.prepare(
       "SELECT id, seq, payload_sha256 FROM events WHERE problem_id = ? ORDER BY seq",
@@ -824,6 +949,8 @@ export async function scientificJourney({
         "reference admission before screening",
         "redaction transaction rollback",
         "stale read parity",
+        "anonymous md/json/html scientific standing and privacy parity",
+        "historical version standing, withdrawal and conditional-read invalidation",
         "immutable identity refuses sponsor rewrite",
         "lost-response replay",
         "concurrent revision",

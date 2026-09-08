@@ -227,7 +227,7 @@ const capabilitiesBody = (origin: string): string =>
         "leases",
         "triage",
         "inbox",
-        "expanded per-problem faces beyond digest .md/.json (Fable §7.9)",
+        "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
         "event tails (W6.4)",
       ],
     },
@@ -816,15 +816,24 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // attestation endpoint, not an agent face.
   app.post(SCREENING_ROUTE_PATH, (c) => handleScreeningRequest(c.req.raw, c.env));
 
-  // Only the one-segment digest faces are contracted today. Hono's regex
-  // parameter can otherwise consume slashes, so a nested spelling such as
-  // /p/<id>/full.md would reach the broad digest handler and be reported as a
-  // missing problem. Refuse every nested /p path before the ledger router: the
-  // route does not exist, and deciding that must never require a D1 read.
+  // Let only contracted problem and exact-claim faces reach D1. The digest's
+  // regex parameter can consume slashes, so unknown nested paths must be
+  // refused here rather than misreported as missing scientific objects.
   app.on(["GET", "HEAD"], "/p/:id/*", async (c, next) => {
     const segments = new URL(c.req.url).pathname.split("/");
     const encodedSeparator = /%(?:2f|5c)/iu.test(segments[2] ?? "");
     if (segments.length === 3 && !encodedSeparator) {
+      await next();
+      return;
+    }
+    if (
+      !encodedSeparator &&
+      segments.length === 5 &&
+      segments[3] === "claims" &&
+      /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html)$/.test(
+        (segments[4] ?? "").replace(/%40/gi, "@"),
+      )
+    ) {
       await next();
       return;
     }

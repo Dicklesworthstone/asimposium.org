@@ -17,6 +17,9 @@ import {
 import { loadNowStrip } from "./now-service";
 
 const DISCOVERY_CACHE_CONTROL = "public, max-age=60, s-maxage=60, stale-while-revalidate=120";
+// Cards include withdrawable scientific bodies; a shared cache must revalidate
+// before serving one, including a previously conditional response.
+const FELLOW_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 
 type FaceType = "json" | "markdown" | "html";
 
@@ -42,6 +45,7 @@ function serveRepresentation(
   body: string,
   contentType: string,
   etag: string,
+  cacheControl = DISCOVERY_CACHE_CONTROL,
 ): Response {
   const ifNoneMatch = c.req.header("if-none-match");
   if (ifNoneMatchMatches(ifNoneMatch, etag)) {
@@ -49,7 +53,7 @@ function serveRepresentation(
       status: 304,
       headers: {
         etag,
-        "cache-control": DISCOVERY_CACHE_CONTROL,
+        "cache-control": cacheControl,
         vary: "Accept, Accept-Encoding",
       },
     });
@@ -59,7 +63,7 @@ function serveRepresentation(
     headers: {
       "content-type": contentType,
       etag,
-      "cache-control": DISCOVERY_CACHE_CONTROL,
+      "cache-control": cacheControl,
       vary: "Accept, Accept-Encoding",
     },
   });
@@ -224,16 +228,22 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
     if (targetFace === "json") {
       const body = JSON.stringify(data);
       const etag = await computeStrongEtag("json", body);
-      return serveRepresentation(c, body, "application/json; charset=utf-8", etag);
+      return serveRepresentation(
+        c,
+        body,
+        "application/json; charset=utf-8",
+        etag,
+        FELLOW_CACHE_CONTROL,
+      );
     }
     if (targetFace === "html") {
       const html = renderFellowCardHtmlFragment(data);
       const etag = await computeStrongEtag("html", html);
-      return serveRepresentation(c, html, "text/html; charset=utf-8", etag);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
     }
     const md = renderFellowCardMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
-    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag);
+    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
   }
 
   app.on(["GET", "HEAD"], "/a/:name", (c) => {

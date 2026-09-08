@@ -2,7 +2,7 @@ import {
   GroundedFalsificationCheckSchema,
   ScientificVerificationSchema,
 } from "@asimposium/contracts";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import {
   type CurrentClaimDispositionFold,
@@ -13,13 +13,13 @@ import {
   assessScientificVerification,
   inspectFormalArtifact,
   readScientificProvenance,
-  SCIENTIFIC_INDEPENDENCE_POLICY,
+  recordedReviewIndependence,
   type ScientificClaim,
   type ScientificEvidence,
   ScientificInputError,
 } from "./scientific-checks.ts";
 
-interface ScientificRow {
+export interface ScientificRow {
   claim_id: string;
   event_id: string;
   seq: number;
@@ -50,11 +50,46 @@ export async function readScientificDispositions(
   problemId: string,
   cursor: number,
   claimLimit: number,
+  target?: { claimId: string; version: number },
 ): Promise<Map<string, ScientificDisposition>> {
-  const result = await db
+  const result = await prepareScientificDispositions(
+    db,
+    problemId,
+    cursor,
+    claimLimit,
+    target,
+  ).all<ScientificRow>();
+  const groups = new Map<string, ScientificRow[]>();
+  for (const row of result.results) {
+    if (target !== undefined && row.target_version > target.version) continue;
+    const rows = groups.get(row.claim_id) ?? [];
+    rows.push(row);
+    groups.set(row.claim_id, rows);
+  }
+  const output = new Map<string, ScientificDisposition>();
+  for (const [claimId, rows] of groups) output.set(claimId, await foldScientificRows(rows));
+  return output;
+}
+
+/** The public face batches this query with its bodies so content withdrawal
+ * cannot split the visible records from their computed standing. */
+export function prepareScientificDispositions(
+  db: D1Database,
+  problemId: string,
+  cursor: number,
+  claimLimit: number,
+  target?: { claimId: string; version: number },
+): D1PreparedStatement {
+  // A targeted read selects by immutable events so a later mutable head cannot
+  // erase the requested version. List callers retain their bounded selection.
+  const selection =
+    target === undefined
+      ? "SELECT id FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?"
+      : "SELECT object_id AS id FROM events WHERE problem_id = ? AND seq <= ? AND object_id = ? AND type = 'claim.created' AND object_kind = 'claim' LIMIT 1";
+  return db
     .prepare(`
     WITH selected_claims AS (
-      SELECT id FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?
+      ${selection}
     )
     SELECT s.id AS claim_id, e.id AS event_id, e.seq, e.type, e.object_id, e.object_version,
       CASE WHEN e.object_kind = 'claim' THEN e.object_version
@@ -79,17 +114,7 @@ export async function readScientificDispositions(
       AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created')
     ORDER BY e.seq ASC
   `)
-    .bind(problemId, cursor, claimLimit, problemId, cursor)
-    .all<ScientificRow>();
-  const groups = new Map<string, ScientificRow[]>();
-  for (const row of result.results) {
-    const rows = groups.get(row.claim_id) ?? [];
-    rows.push(row);
-    groups.set(row.claim_id, rows);
-  }
-  const output = new Map<string, ScientificDisposition>();
-  for (const [claimId, rows] of groups) output.set(claimId, await foldScientificRows(rows));
-  return output;
+    .bind(problemId, cursor, target?.claimId ?? claimLimit, problemId, cursor);
 }
 
 export async function foldScientificRows(
@@ -170,7 +195,8 @@ export async function foldScientificRows(
       item.payload.mode === "confirmatory" &&
       item.payload.computed_class !== "assertion" &&
       item.payload.computed_class !== "heuristic" &&
-      item.payload.selected_hypothesis_id == null
+      (item.payload.selected_hypothesis_id === null ||
+        item.payload.selected_hypothesis_id === undefined)
       ? item
       : undefined;
   };
@@ -280,16 +306,8 @@ export async function foldScientificRows(
     let carriesWeight =
       typeof payload.capable_of_failure === "string" &&
       payload.capable_of_failure.trim().length > 0;
-    let tier: "T0" | "T1" | "T2" | "T3" = row.sponsor_id === claim.sponsorId ? "T0" : "T1";
-    if (
-      payload.independence_policy === SCIENTIFIC_INDEPENDENCE_POLICY &&
-      (payload.tier === "T0" ||
-        payload.tier === "T1" ||
-        payload.tier === "T2" ||
-        payload.tier === "T3")
-    ) {
-      tier = payload.tier;
-    } else legacyReviews++;
+    const { tier, legacy } = recordedReviewIndependence(payload, claim.sponsorId, row.sponsor_id);
+    if (legacy) legacyReviews++;
     let fullWriteUp = false;
     let artifactEvidenceId: string | undefined;
     if (payload.verification != null) {

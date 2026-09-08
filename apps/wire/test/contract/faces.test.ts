@@ -451,8 +451,6 @@ const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
   "/p/P-4DSP/claims.md",
   "/p/P-4DSP/claims.json",
   "/p/P-4DSP/claims.toon",
-  "/p/P-4DSP/claims/C-7.md",
-  "/p/P-4DSP/claims/C-7.json",
   "/p/P-4DSP/claims/C-7.toon",
   "/p/P-4DSP/hypotheses.md",
   "/p/P-4DSP/hypotheses.json",
@@ -535,6 +533,7 @@ describe("face wire format", () => {
         "/problems.json",
         "/p/{id}.md",
         "/p/{id}.json",
+        "/p/{id}/claims/{target}",
         "/search",
         "/search.md",
         "/search.json",
@@ -597,7 +596,7 @@ describe("face wire format", () => {
       "leases",
       "triage",
       "inbox",
-      "expanded per-problem faces beyond digest .md/.json (Fable §7.9)",
+      "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
       "event tails (W6.4)",
     ]);
   });
@@ -1018,7 +1017,7 @@ describe("face wire format", () => {
 
   test("the mounted snapshot query excludes future claims and unavailable source content", async () => {
     const visibleClaim = "VISIBLE-AT-FROZEN-CURSOR";
-    const secretFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
+    const unleakedFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
     const db = new Database(":memory:");
     try {
       db.run("CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL)");
@@ -1036,7 +1035,7 @@ describe("face wire format", () => {
         "INSERT INTO claims (id, problem_id, statement, source_seq) VALUES (?, ?, ?, ?)",
       );
       insertClaim.run("C-7", "P-4DSP", visibleClaim, 7);
-      insertClaim.run("C-8", "P-4DSP", secretFuture, 8);
+      insertClaim.run("C-8", "P-4DSP", unleakedFuture, 8);
       for (const seq of [7, 8]) {
         db.prepare(
           "INSERT INTO events VALUES (?, 'P-4DSP', ?, ?, 'claim', 'claim.created', 'sha256:fixture')",
@@ -1080,7 +1079,7 @@ describe("face wire format", () => {
       const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
       expect(face.items.map((item) => item.id)).toEqual(["C-7"]);
       expect(body).toContain(visibleClaim);
-      expect(body).not.toContain(secretFuture);
+      expect(body).not.toContain(unleakedFuture);
       expect(body).not.toContain("CANARY");
       expect(face.omitted).toContainEqual(
         expect.objectContaining({ reason: "content_unavailable" }),
