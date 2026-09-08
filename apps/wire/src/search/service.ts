@@ -12,6 +12,7 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../env";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import { findScientificClaim } from "../ledger/scientific-checks";
 
 interface ProblemRow {
   readonly id: string;
@@ -92,6 +93,7 @@ export async function executeSearch(
 
   // 2. Exact reference resolution (higher precedence than lexical search)
   const exactTarget = parseExactReference(request.q);
+  const pinnedClaim = exactTarget?.kind === "claim" && exactTarget.version !== undefined;
   let matchedExact = false;
 
   if (exactTarget) {
@@ -116,28 +118,51 @@ export async function executeSearch(
     }
 
     if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
-      // Look up claim in claims table
-      const claim = await db
-        .prepare(
-          `SELECT id, problem_id, statement, source_seq, created_at FROM claims
+      if (exactTarget.version !== undefined) {
+        const claim = await findScientificClaim(
+          db,
+          exactTarget.problemId,
+          exactTarget.id,
+          exactTarget.version,
+        );
+        if (claim) {
+          matchedExact = true;
+          addItem({
+            kind: "claim",
+            id: claim.claimId,
+            problem_id: exactTarget.problemId,
+            version: claim.version,
+            url: `https://asimposium.org/p/${exactTarget.problemId}/claims/${claim.claimId}@${claim.version}`,
+            title: `Claim ${claim.claimId}@${claim.version} in ${exactTarget.problemId}`,
+            statement: claim.statement,
+            snippet: claim.statement,
+            match_type: "exact_reference",
+            score_explanation: "exact_claim_version",
+          });
+        }
+      } else {
+        const claim = await db
+          .prepare(
+            `SELECT id, problem_id, statement, source_seq, created_at FROM claims
                WHERE id = ? AND problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
-        )
-        .bind(exactTarget.id, exactTarget.problemId)
-        .first<ClaimRow>();
+          )
+          .bind(exactTarget.id, exactTarget.problemId)
+          .first<ClaimRow>();
 
-      if (claim) {
-        matchedExact = true;
-        addItem({
-          kind: "claim",
-          id: claim.id,
-          problem_id: claim.problem_id,
-          url: `https://asimposium.org/p/${claim.problem_id}#${claim.id}`,
-          title: `Claim ${claim.id} in ${claim.problem_id}`,
-          statement: claim.statement,
-          snippet: claim.statement,
-          match_type: "exact_reference",
-          score_explanation: "exact_claim_id",
-        });
+        if (claim) {
+          matchedExact = true;
+          addItem({
+            kind: "claim",
+            id: claim.id,
+            problem_id: claim.problem_id,
+            url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}`,
+            title: `Claim ${claim.id} in ${claim.problem_id}`,
+            statement: claim.statement,
+            snippet: claim.statement,
+            match_type: "exact_reference",
+            score_explanation: "exact_claim_id",
+          });
+        }
       }
     }
 
@@ -181,7 +206,7 @@ export async function executeSearch(
   };
 
   // 3. FTS5 search on claims (public_claim_fts)
-  if (items.length < limit && (filterKind === "all" || filterKind === "claim")) {
+  if (!pinnedClaim && items.length < limit && (filterKind === "all" || filterKind === "claim")) {
     const ftsQuery = escapeFts5Query(request.q);
     if (ftsQuery.length > 0) {
       try {
@@ -206,7 +231,7 @@ export async function executeSearch(
             kind: "claim",
             id: row.claim_id,
             problem_id: row.problem_id,
-            url: `https://asimposium.org/p/${row.problem_id}#${row.claim_id}`,
+            url: `https://asimposium.org/p/${row.problem_id}/claims/${row.claim_id}`,
             title: `Claim ${row.claim_id} in ${row.problem_id}`,
             statement: row.statement,
             snippet: row.snippet ?? row.statement,
@@ -222,6 +247,7 @@ export async function executeSearch(
 
   // 4. Substring problem search (when searching all or problems)
   if (
+    !pinnedClaim &&
     !lexicalUnavailable &&
     items.length < limit &&
     (filterKind === "all" || filterKind === "problem")
@@ -253,6 +279,7 @@ export async function executeSearch(
 
   // 5. Substring fellow search (when searching all or fellows)
   if (
+    !pinnedClaim &&
     !lexicalUnavailable &&
     items.length < limit &&
     (filterKind === "all" || filterKind === "fellow")
@@ -284,6 +311,15 @@ export async function executeSearch(
 
   // 6. Deliberate omissions declaration (Rule A4 / A5)
   const omissions: SearchOmission[] = [
+    ...(pinnedClaim
+      ? [
+          {
+            reason: "exact_version_only",
+            detail:
+              "A version-pinned claim reference resolves only that publication, with no current-head or lexical fallback.",
+          },
+        ]
+      : []),
     ...(lexicalUnavailable
       ? [
           {

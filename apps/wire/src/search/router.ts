@@ -5,7 +5,9 @@ import { validatedProblem as problemDocument } from "../http/envelope";
 import { renderSearchMarkdown } from "./markdown";
 import { executeSearch, LEXICAL_SEARCH_UNAVAILABLE } from "./service";
 
-const PUBLIC_SEARCH_CACHE_CONTROL = "public, max-age=30, s-maxage=60, stale-while-revalidate=120";
+// Search excerpts share the claim faces' withdrawal boundary. A cached body
+// must revalidate before reuse rather than serve withdrawn scientific text.
+const PUBLIC_SEARCH_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
