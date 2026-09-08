@@ -86,6 +86,7 @@ import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
+import { resolveClaimMethodBasis, resolveReviewerMethodBasis } from "../ledger/review-independence";
 import {
   publicationProvenance,
   type ScreenedPublication,
@@ -2070,7 +2071,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             fellowId: auth.binding.fellowId,
             sponsorId: auth.binding.sponsorId,
             modelFamily: auth.binding.model,
-            methodBasis: auth.binding.harness,
+            methodBasis: undefined,
           })
         : { candidates: [], omitted: [], targets: [] };
     candidates.push(...reviewQueue.candidates);
@@ -4597,11 +4598,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // would let a caller pre-seed a future version that acquires weight later.
     const claim = await db
       .prepare(
-        `SELECT claim_id FROM claim_versions
+        `SELECT claim_id, kind, statement FROM claim_versions
          WHERE claim_id = ? AND problem_id = ? AND version = ?`,
       )
       .bind(parsed.data.target_claim_id, session.problem_id, parsed.data.target_version)
-      .first<{ claim_id: string }>();
+      .first<{ claim_id: string; kind: string; statement: string }>();
     if (claim === null || claim === undefined) {
       return validatedProblem({
         status: 404,
@@ -4651,6 +4652,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       throw new Error("CLAIM_ATTRIBUTION_MISSING");
     }
 
+    const authorMethodBasis = resolveClaimMethodBasis(claim.kind, claim.statement);
+    const reviewerMethodBasis =
+      resolveReviewerMethodBasis({
+        basis: parsed.data.basis,
+        rubric: parsed.data.rubric,
+        bodyMd: parsed.data.body_md,
+      }) ?? "";
+
     const gate = gateReviewSubmission({
       submission: {
         targetClaimId: parsed.data.target_claim_id,
@@ -4658,6 +4667,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         verdict: parsed.data.verdict,
         basis: parsed.data.basis,
         capableOfFailure: parsed.data.capable_of_failure,
+        rubric: parsed.data.rubric,
         bodyMd: parsed.data.body_md,
       },
       claimAuthorFellowId: authorEvent.actor_fellow_id,
@@ -4665,12 +4675,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       claimAuthorAttribution: {
         sponsorId: authorEvent.actor_sponsor_id,
         modelFamily: authorEvent.model_string_self_declared,
-        methodBasis: authorEvent.harness,
+        methodBasis: authorMethodBasis,
       },
       reviewerAttribution: {
         sponsorId: auth.binding.sponsorId,
         modelFamily: auth.binding.model,
-        methodBasis: auth.binding.harness,
+        methodBasis: reviewerMethodBasis,
       },
     });
     if (!gate.ok) {

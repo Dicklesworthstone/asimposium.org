@@ -38,6 +38,7 @@ export interface ReviewSubmission {
   readonly verdict: string;
   readonly basis: string;
   readonly capableOfFailure: string | undefined;
+  readonly rubric?: readonly string[];
   readonly bodyMd: string;
 }
 

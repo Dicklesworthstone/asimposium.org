@@ -1151,10 +1151,12 @@ async function addApprovedFellow(
     readonly scopes: readonly ("promote" | "review")[];
     readonly model?: string;
     readonly harness?: string;
+    readonly sponsor?: { readonly type: "sponsor"; readonly sponsorId: string };
   },
 ) {
+  const activeSponsor = input.sponsor ?? base.sponsor;
   const enrollmentRouter = createEnrollmentRouter({ service: base.service });
-  const minted = await base.service.mint(base.sponsor, {
+  const minted = await base.service.mint(activeSponsor, {
     requested_scopes: [...input.scopes],
     problem_binding: "P-4DSP",
   });
@@ -1176,7 +1178,7 @@ async function addApprovedFellow(
   );
   expect(registration.status).toBe(202);
   const { flow_handle: flowHandle } = (await registration.json()) as { flow_handle: string };
-  await base.service.decide(base.sponsor, minted.enrollmentId, {
+  await base.service.decide(activeSponsor, minted.enrollmentId, {
     enrollment_id: minted.enrollmentId,
     decision: "approve",
     step_up_authenticated_at: Math.floor(Date.now() / 1_000),
@@ -9778,5 +9780,336 @@ describe("committed promotion outbox nudge", () => {
       )?.n,
     ).toBe(2);
     expect(binding.fellowId.length).toBeGreaterThan(0);
+  });
+
+  describe("review independence tiers mounted routes (okkp)", () => {
+    test("mounted routes enforce honest tiers: harness never upgrades, aliases refuse T2, disjoint method earns T3", async () => {
+      const f = await fixture();
+
+      // 1. Author Fellow under Sponsor 1 with GPT-5.6 and codex harness
+      const author = await addApprovedFellow(f, {
+        suffix: "author",
+        scopes: ["promote", "review"],
+        model: "openai/gpt-5.6",
+        harness: "codex",
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_author" },
+      });
+      const authorSessionRes = await author.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "author-session-open" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+      });
+      expect(authorSessionRes.status).toBe(201);
+      const authorSession = (await authorSessionRes.json()) as { session_id: string };
+
+      const draftRes = await author.call(`/v1/sessions/${authorSession.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "author-draft" },
+        body: JSON.stringify({
+          type: "draft",
+          title: "Planar graph chromatic bound",
+          body_md: "Derivation of the 4-color conjecture for planar graphs.",
+          relates_to: [],
+        }),
+      });
+      expect(draftRes.status).toBe(201);
+      const draft = (await draftRes.json()) as { workshop_id: string };
+
+      const promoteRes = await author.call(`/v1/sessions/${authorSession.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "author-promote" },
+        body: JSON.stringify({
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: "Every planar graph admits a 4-coloring.",
+          falsifier: "A planar graph requiring at least 5 colors.",
+        }),
+      });
+      expect(promoteRes.status).toBe(201);
+      const promoted = (await promoteRes.json()) as { claim_id: string; version: number };
+      const claimId = promoted.claim_id;
+
+      // 2. Self-review refusal (P1)
+      const selfReview = await author.call(`/v1/sessions/${authorSession.session_id}/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "self-review" },
+        body: JSON.stringify({
+          target_claim_id: claimId,
+          target_version: 1,
+          verdict: "confirm",
+          basis: "I verified my own proof.",
+          capable_of_failure: "A 5-chromatic planar graph.",
+          body_md: "Self review of derivation.",
+        }),
+      });
+      expect(selfReview.status).toBe(422);
+      expect(((await selfReview.json()) as { code: string }).code).toBe("REVIEWER_IS_AUTHOR");
+
+      // 3. Same sponsor review earns T0
+      const sameSponsor = await addApprovedFellow(f, {
+        suffix: "same-sponsor",
+        scopes: ["review"],
+        model: "openai/gpt-5.6",
+        harness: "codex",
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_author" },
+      });
+      const sameSponsorSession = (await (
+        await sameSponsor.call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "same-sp-session" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        })
+      ).json()) as { session_id: string };
+
+      const sameSponsorReviewRes = await sameSponsor.call(
+        `/v1/sessions/${sameSponsorSession.session_id}/review`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "same-sp-review" },
+          body: JSON.stringify({
+            target_claim_id: claimId,
+            target_version: 1,
+            verdict: "confirm",
+            basis: "Colleague checked the proof derivation.",
+            capable_of_failure: "A 5-chromatic planar graph.",
+            body_md: "Detailed step-by-step review.",
+          }),
+        },
+      );
+      expect(sameSponsorReviewRes.status).toBe(201);
+      const sameSponsorReview = (await sameSponsorReviewRes.json()) as {
+        review_id: string;
+        tier: string;
+      };
+      expect(sameSponsorReview.tier).toBe("T0");
+
+      // 4. Different sponsor, same family with alias/version spelling (openai/gpt-5.6-latest) -> T1 (refusing T2)
+      const aliasFellow = await addApprovedFellow(f, {
+        suffix: "alias-model",
+        scopes: ["review"],
+        model: "openai/gpt-5.6-latest",
+        harness: "codex",
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_diff_1" },
+      });
+      const aliasSession = (await (
+        await aliasFellow.call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "alias-session" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        })
+      ).json()) as { session_id: string };
+
+      // Check review queue pack readback for alias Fellow
+      const aliasPackRes = await aliasFellow.call(
+        `/v1/sessions/${aliasSession.session_id}/pack?profile=review-queue&max_tokens=8000`,
+      );
+      expect(aliasPackRes.status).toBe(200);
+      const aliasPack = (await aliasPackRes.json()) as {
+        items: { kind: string; id: string; body: string }[];
+      };
+      const aliasCandidate = aliasPack.items.find(
+        (it) => it.kind === "review-candidate" && it.id.startsWith(claimId),
+      );
+      expect(aliasCandidate).toBeDefined();
+      if (aliasCandidate) {
+        expect(JSON.parse(aliasCandidate.body).prospective_independence_tier).toBe("T1");
+      }
+
+      // Submit review from alias Fellow -> persisted tier is T1!
+      const aliasReviewRes = await aliasFellow.call(
+        `/v1/sessions/${aliasSession.session_id}/review`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "alias-review" },
+          body: JSON.stringify({
+            target_claim_id: claimId,
+            target_version: 1,
+            verdict: "confirm",
+            basis: "Checked derivation with gpt-5.6-latest.",
+            capable_of_failure: "A 5-chromatic planar graph.",
+            body_md: "Review from gpt-5.6-latest.",
+          }),
+        },
+      );
+      expect(aliasReviewRes.status).toBe(201);
+      const aliasReview = (await aliasReviewRes.json()) as {
+        review_id: string;
+        tier: string;
+      };
+      expect(aliasReview.tier).toBe("T1");
+
+      // Verify persisted review table and event payload for alias review
+      const aliasDbRow = await f.db
+        .prepare("SELECT tier FROM reviews WHERE review_id = ?")
+        .bind(aliasReview.review_id)
+        .first<{ tier: string }>();
+      expect(aliasDbRow?.tier).toBe("T1");
+
+      // 5. Different family, changed harness (claude-code), UNCHANGED method (deductive) -> T2 (refusing T3)
+      const diffHarnessFellow = await addApprovedFellow(f, {
+        suffix: "diff-harness",
+        scopes: ["review"],
+        model: "anthropic/claude-3.7-sonnet",
+        harness: "claude-code",
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_diff_2" },
+      });
+      const diffHarnessSession = (await (
+        await diffHarnessFellow.call("/v1/sessions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "diff-harness-session",
+          },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        })
+      ).json()) as { session_id: string };
+
+      // Queue readback: prospective tier is T2 (changing harness does NOT upgrade to T3)
+      const diffHarnessPackRes = await diffHarnessFellow.call(
+        `/v1/sessions/${diffHarnessSession.session_id}/pack?profile=review-queue&max_tokens=8000`,
+      );
+      const diffHarnessPack = (await diffHarnessPackRes.json()) as {
+        items: { kind: string; id: string; body: string }[];
+      };
+      const diffHarnessCandidate = diffHarnessPack.items.find(
+        (it) => it.kind === "review-candidate" && it.id.startsWith(claimId),
+      );
+      expect(diffHarnessCandidate).toBeDefined();
+      if (diffHarnessCandidate) {
+        expect(JSON.parse(diffHarnessCandidate.body).prospective_independence_tier).toBe("T2");
+      }
+
+      // Review submission: reading the proof derivation -> method is deductive (unchanged from author's conjecture)
+      const diffHarnessReviewRes = await diffHarnessFellow.call(
+        `/v1/sessions/${diffHarnessSession.session_id}/review`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "diff-harness-review" },
+          body: JSON.stringify({
+            target_claim_id: claimId,
+            target_version: 1,
+            verdict: "confirm",
+            basis: "read the proof and verified quantifier scope and inference chain",
+            rubric: ["statement-match", "quantifier-scope"],
+            capable_of_failure: "A 5-chromatic planar graph.",
+            body_md: "Proof inspection in claude-code.",
+          }),
+        },
+      );
+      expect(diffHarnessReviewRes.status).toBe(201);
+      const diffHarnessReview = (await diffHarnessReviewRes.json()) as {
+        review_id: string;
+        tier: string;
+      };
+      // Changing harness from codex to claude-code did NOT upgrade to T3 because method is unchanged!
+      expect(diffHarnessReview.tier).toBe("T2");
+
+      // 6. Different family, SAME harness as author (codex), documented disjoint method (computational) -> T3!
+      const disjointFellow = await addApprovedFellow(f, {
+        suffix: "disjoint-method",
+        scopes: ["review"],
+        model: "anthropic/claude-3.7-sonnet",
+        harness: "codex", // SAME harness as author!
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_diff_3" },
+      });
+      const disjointSession = (await (
+        await disjointFellow.call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "disjoint-session" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        })
+      ).json()) as { session_id: string };
+
+      const disjointReviewRes = await disjointFellow.call(
+        `/v1/sessions/${disjointSession.session_id}/review`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "disjoint-review" },
+          body: JSON.stringify({
+            target_claim_id: claimId,
+            target_version: 1,
+            verdict: "confirm",
+            basis: "reran computational simulation independently over 10000 random planar graphs",
+            rubric: ["independent-rerun", "numerical-stability"],
+            capable_of_failure: "A counterexample planar graph requiring 5 colors.",
+            body_md: "Monte Carlo planar graph coloring simulation.",
+          }),
+        },
+      );
+      expect(disjointReviewRes.status).toBe(201);
+      const disjointReview = (await disjointReviewRes.json()) as {
+        review_id: string;
+        tier: string;
+      };
+      // Earns T3 due to genuine disjoint scientific method, despite using the exact same harness!
+      expect(disjointReview.tier).toBe("T3");
+
+      // 7. Deliberate unjustified lookalike (vague basis without method) -> stays at T2
+      const lookalikeFellow = await addApprovedFellow(f, {
+        suffix: "lookalike",
+        scopes: ["review"],
+        model: "google/gemini-2.5-pro",
+        harness: "gemini-cli",
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_diff_4" },
+      });
+      const lookalikeSession = (await (
+        await lookalikeFellow.call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "lookalike-session" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+        })
+      ).json()) as { session_id: string };
+
+      const lookalikeReviewRes = await lookalikeFellow.call(
+        `/v1/sessions/${lookalikeSession.session_id}/review`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "lookalike-review" },
+          body: JSON.stringify({
+            target_claim_id: claimId,
+            target_version: 1,
+            verdict: "confirm",
+            basis: "looks right, verified",
+            capable_of_failure: "A counterexample",
+            body_md: "Unjustified lookalike review.",
+          }),
+        },
+      );
+      expect(lookalikeReviewRes.status).toBe(201);
+      const lookalikeReview = (await lookalikeReviewRes.json()) as {
+        review_id: string;
+        tier: string;
+      };
+      expect(lookalikeReview.tier).toBe("T2");
+
+      // 8. Claim revision: revise claim C-1 to version 2
+      const reviseRes = await author.call(`/v1/sessions/${authorSession.session_id}/revise`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "author-revise" },
+        body: JSON.stringify({
+          claim_id: claimId,
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Every planar graph without self-loops admits a 4-coloring.",
+          falsifier: "A simple planar graph requiring 5 colors.",
+        }),
+      });
+      expect(reviseRes.status).toBe(201);
+
+      // Verify that past reviews pinned on version 1 remain intact with their exact tiers
+      const pastReviews = await f.db
+        .prepare(
+          "SELECT review_id, target_version, tier FROM reviews WHERE target_claim_id = ? ORDER BY created_at ASC",
+        )
+        .bind(claimId)
+        .all<{ review_id: string; target_version: number; tier: string }>();
+
+      const tiersByReviewId = new Map(pastReviews.results.map((r) => [r.review_id, r.tier]));
+      expect(tiersByReviewId.get(sameSponsorReview.review_id)).toBe("T0");
+      expect(tiersByReviewId.get(aliasReview.review_id)).toBe("T1");
+      expect(tiersByReviewId.get(diffHarnessReview.review_id)).toBe("T2");
+      expect(tiersByReviewId.get(disjointReview.review_id)).toBe("T3");
+      expect(tiersByReviewId.get(lookalikeReview.review_id)).toBe("T2");
+    });
   });
 });

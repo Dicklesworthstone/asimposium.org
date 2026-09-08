@@ -13,6 +13,8 @@
  * return the exact unmet conditions"). A refusal never mutates anything.
  */
 
+import { isDistinctModelFamily } from "./review-independence.ts";
+
 // ---------------------------------------------------------------------------
 // Vocabularies
 // ---------------------------------------------------------------------------
@@ -488,7 +490,7 @@ export function computeIndependenceTier(
   disjointMethod: boolean,
 ): IndependenceTier {
   if (reviewerSponsorId === authorSponsorId) return "T0";
-  if (reviewerModelFamily === authorModelFamily) return "T1";
+  if (!isDistinctModelFamily(reviewerModelFamily, authorModelFamily)) return "T1";
   return disjointMethod ? "T3" : "T2";
 }
 

@@ -1,7 +1,11 @@
 import type { PackProfile } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { Env } from "../env";
-import { independenceTier, type ReviewAttribution } from "../ledger/review-independence";
+import {
+  independenceTier,
+  type ReviewAttribution,
+  resolveClaimMethodBasis,
+} from "../ledger/review-independence";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -56,7 +60,12 @@ export async function readReviewQueuePack(
   db: Env["DB"],
   problemId: string,
   cursor: number,
-  reviewer: ReviewAttribution & { fellowId: string },
+  reviewer: (
+    | ReviewAttribution
+    | { sponsorId: string; modelFamily: string; methodBasis?: string }
+  ) & {
+    fellowId: string;
+  },
 ): Promise<LedgerPackSection & { targets: string[] }> {
   const result = await db
     .prepare(`
@@ -132,9 +141,13 @@ export async function readReviewQueuePack(
         {
           sponsorId: row.sponsor_id,
           modelFamily: row.model,
-          methodBasis: row.harness,
+          methodBasis: resolveClaimMethodBasis(row.kind, row.statement),
         },
-        reviewer,
+        {
+          sponsorId: reviewer.sponsorId,
+          modelFamily: reviewer.modelFamily,
+          methodBasis: reviewer.methodBasis ?? "",
+        },
       ),
       author_fellow: row.fellow_id,
       author_sponsor: row.sponsor_id,
@@ -257,7 +270,7 @@ export async function readTargetClaimPack(
     omitted: [{ reason: "profile_section_not_composed", detail: "version-pinned-dependencies" }],
   };
   const claim = results[0]?.results[0] as TargetRow | undefined;
-  if (claim?.body == null) {
+  if (claim?.body === null || claim?.body === undefined) {
     section.omitted.push({ reason: "content_unavailable", detail: target });
     return section;
   }

@@ -78,15 +78,75 @@ describe("W5.7 the review gate", () => {
     if (!result.ok) expect(result.code).toBe("REVIEW_VERDICT_UNKNOWN");
   });
 
-  test("an empty body is refused", () => {
+  test("different version spelling of same family returns T1", () => {
     const result = gateReviewSubmission({
-      submission: submission({ bodyMd: "  " }),
+      submission: submission(),
       claimAuthorFellowId: "F-1",
       reviewerFellowId: "F-2",
-      claimAuthorAttribution: AUTHOR,
-      reviewerAttribution: REVIEWER,
+      claimAuthorAttribution: {
+        sponsorId: "SP-1",
+        modelFamily: "openai/gpt-5.6",
+        methodBasis: "deductive",
+      },
+      reviewerAttribution: {
+        sponsorId: "SP-2",
+        modelFamily: "openai/gpt-5.6-latest",
+        methodBasis: "computational",
+      },
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.code).toBe("REVIEW_BODY_EMPTY");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.tier).toBe("T1");
+      expect(result.carriesWeight).toBe(true);
+    }
+  });
+
+  test("different declared families with unchanged method returns T2 (refusing T3)", () => {
+    const result = gateReviewSubmission({
+      submission: submission({ basis: "read the proof and verified derivation" }),
+      claimAuthorFellowId: "F-1",
+      reviewerFellowId: "F-2",
+      claimAuthorAttribution: {
+        sponsorId: "SP-1",
+        modelFamily: "openai/gpt-5.6",
+        methodBasis: "deductive",
+      },
+      reviewerAttribution: {
+        sponsorId: "SP-2",
+        modelFamily: "anthropic/claude-3.7-sonnet",
+        methodBasis: "deductive",
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.tier).toBe("T2");
+      expect(result.carriesWeight).toBe(true);
+    }
+  });
+
+  test("different declared families with documented disjoint method returns T3", () => {
+    const result = gateReviewSubmission({
+      submission: submission({
+        basis: "reran computational simulation independently",
+        rubric: ["independent-rerun"],
+      }),
+      claimAuthorFellowId: "F-1",
+      reviewerFellowId: "F-2",
+      claimAuthorAttribution: {
+        sponsorId: "SP-1",
+        modelFamily: "openai/gpt-5.6",
+        methodBasis: "deductive",
+      },
+      reviewerAttribution: {
+        sponsorId: "SP-2",
+        modelFamily: "anthropic/claude-3.7-sonnet",
+        methodBasis: "computational",
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.tier).toBe("T3");
+      expect(result.carriesWeight).toBe(true);
+    }
   });
 });
