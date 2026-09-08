@@ -7,6 +7,7 @@ import type {
 } from "@asimposium/contracts";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { z } from "zod";
 import type {
   ProblemFaceResponse as GeneratedProblemFaceResponse,
   PublicLedgerProblemId as GeneratedPublicLedgerProblemId,
@@ -21,8 +22,217 @@ import {
   compareGeneratedArtifact,
   generatedArtifacts,
 } from "../../src/artifacts.ts";
+import { BatchContractsSchema } from "../../src/batch.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
 import { ScreeningContractsSchema, ScreeningSchemaDocumentSchema } from "../../src/screening.ts";
+import { SessionsContractsSchema } from "../../src/sessions.ts";
+
+const minimalRevision = {
+  claim_id: "C-1",
+  base_version: 1,
+  kind: "definition",
+  statement: "An even integer is divisible by two.",
+};
+const minimalWorkshop = { type: "draft", title: "Boundary", body_md: "Private draft." };
+const defaultedRequests = [
+  {
+    root: "workshop_push_request",
+    input: minimalWorkshop,
+    defaults: { relates_to: [] },
+    malformed: { relates_to: null },
+  },
+  {
+    root: "workshop_push_request",
+    input: { ...minimalWorkshop, revision: minimalRevision },
+    defaults: { relates_to: [], revision: { ...minimalRevision, depends_on: [] } },
+    malformed: { revision: { ...minimalRevision, depends_on: [42] } },
+  },
+  {
+    root: "promote_request",
+    input: {
+      workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+      kind: "definition",
+      statement: "An even integer is divisible by two.",
+      scientific_provenance: {
+        method: { category: "deductive", procedure: "Use the definition." },
+      },
+    },
+    defaults: {
+      relates_to: [],
+      depends_on: [],
+      scientific_provenance: {
+        model_family_self_declared: null,
+        method: { category: "deductive", procedure: "Use the definition.", evidence: [] },
+      },
+    },
+    malformed: { depends_on: "C-1" },
+  },
+  {
+    root: "session_close_request",
+    input: { handback: "C-1 needs an independent review." },
+    defaults: { promote: [], keep: [], discard: [] },
+    malformed: { keep: ["not-a-workshop-id"] },
+  },
+  {
+    root: "review_request",
+    input: {
+      target_claim_id: "C-1",
+      target_version: 1,
+      verdict: "inform",
+      basis: "Checked the definition.",
+      body_md: "The definition matches the source.",
+      scientific_provenance: {},
+    },
+    defaults: { rubric: [], scientific_provenance: { model_family_self_declared: null } },
+    malformed: { rubric: [false] },
+  },
+  {
+    root: "hypothesis_request",
+    input: {
+      route: "Check finite boundary cases.",
+      mechanism: "Enumerate small integers.",
+      falsifier: "A boundary violates the proposed invariant.",
+      origin: "proposed",
+      body_md: "First check the first ten integers.",
+    },
+    defaults: { discriminating_predictions: [] },
+    malformed: { discriminating_predictions: [null] },
+  },
+  {
+    root: "revise_request",
+    input: minimalRevision,
+    defaults: { depends_on: [] },
+    malformed: { depends_on: [""] },
+  },
+] satisfies {
+  root: keyof typeof SessionsContractsSchema.shape;
+  input: object;
+  defaults: object;
+  malformed: object;
+}[];
+
+function generatedValidator(kind: string, root: string) {
+  const artifact = generatedArtifacts().find(
+    (candidate) => candidate.relativePath === `generated/${kind}.schema.json`,
+  );
+  if (artifact === undefined) throw new Error(`Missing generated ${kind} schema`);
+  const ajv = new Ajv2020({ strict: true, allErrors: true });
+  addFormats(ajv);
+  ajv.addSchema(JSON.parse(artifact.content), kind);
+  return ajv.compile({ $ref: `${kind}#/properties/${root}` });
+}
+
+for (const [index, example] of defaultedRequests.entries()) {
+  test(`request defaults: sessions ${example.root} case ${index} matches raw Worker input`, () => {
+    const schema = SessionsContractsSchema.shape[example.root];
+    const validate = generatedValidator("sessions", example.root);
+    const normalized: unknown = schema.parse(example.input);
+    expect(normalized).toEqual({ ...example.input, ...example.defaults });
+    const original = JSON.stringify(example.input);
+    expect(validate(example.input), JSON.stringify(validate.errors)).toBe(true);
+    expect(JSON.stringify(example.input)).toBe(original); // Ajv must not manufacture defaults.
+    expect(validate(normalized), JSON.stringify(validate.errors)).toBe(true);
+    for (const invalid of [
+      { ...example.input, ...example.malformed },
+      { ...example.input, disposition: "proved" },
+    ]) {
+      expect(schema.safeParse(invalid).success).toBe(false);
+      expect(validate(invalid)).toBe(false);
+    }
+  });
+}
+
+test("request defaults: nested batch parents are optional only in the request", () => {
+  const input = { members: [{ tempId: "tmp:first" }] };
+  const schema = BatchContractsSchema.shape.plan_request;
+  const normalized = schema.parse(input);
+  expect(normalized).toEqual({ members: [{ tempId: "tmp:first", causedBy: [] }] });
+  const validate = generatedValidator("batch", "plan_request");
+  expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
+  expect(input).toEqual({ members: [{ tempId: "tmp:first" }] });
+  expect(validate(normalized)).toBe(true);
+  for (const invalid of [
+    { members: [{ tempId: "tmp:first", causedBy: null }] },
+    { members: [{ tempId: "tmp:first", causedBy: ["not-a-temp-id"] }] },
+    { members: [{ tempId: "tmp:first", extra: true }] },
+  ]) {
+    expect(schema.safeParse(invalid).success).toBe(false);
+    expect(validate(invalid)).toBe(false);
+  }
+  const member = generatedValidator("batch", "member");
+  expect(member(input.members[0])).toBe(false);
+  expect(member(normalized.members[0])).toBe(true);
+});
+
+test("request defaults: response and normalized-record branches retain exact output schemas", () => {
+  for (const [kind, schema] of [
+    ["sessions", SessionsContractsSchema],
+    ["batch", BatchContractsSchema],
+  ] as const) {
+    const artifact = generatedArtifacts().find(
+      (candidate) => candidate.relativePath === `generated/${kind}.schema.json`,
+    );
+    if (artifact === undefined) throw new Error(`Missing generated ${kind} schema`);
+    const generated = JSON.parse(artifact.content);
+    const output = z.toJSONSchema(schema);
+    expect(generated.required).toEqual(output.required);
+    expect(generated.additionalProperties).toBe(false);
+    for (const [name, property] of Object.entries(output.properties ?? {})) {
+      if (name.endsWith("_request") || name.endsWith("_query")) continue;
+      expect(JSON.stringify(generated.properties[name]), `${kind}.${name}`).toBe(
+        JSON.stringify(property),
+      );
+    }
+  }
+  const normalizedDraft = {
+    ...minimalWorkshop,
+    workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+    relates_to: [],
+    workshop_seq: 1,
+    created_at: "2026-09-08T00:00:00Z",
+    revision: { ...minimalRevision, depends_on: [] },
+  };
+  const view = {
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    problem_id: "P-4DSP",
+    fellow_id: "fellow-test",
+    objects: [normalizedDraft],
+    has_more: false,
+    next_cursor: null,
+  };
+  const validate = generatedValidator("sessions", "sponsor_workshop_view");
+  expect(validate(view), JSON.stringify(validate.errors)).toBe(true);
+  expect(validate({ ...view, objects: [{ ...normalizedDraft, revision: minimalRevision }] })).toBe(
+    false,
+  );
+  const packWithoutOmitted = {
+    schema: "asimposium.pack.v1",
+    face: "json",
+    kind: "pack",
+    session: "S-abcdefghijklmnopqrstuvwxyz",
+    problem: "P-4DSP",
+    profile: "working",
+    cursor: 0,
+    fingerprint: "fnv1a64:0000000000000000",
+    title: "Working context",
+    preamble: "Public context follows.",
+    items: [],
+    next_actions: [],
+    degraded: [],
+    budget_tokens: 800,
+    tokens_estimate: 1,
+  };
+  const pack = generatedValidator("sessions", "pack_response");
+  expect(pack(packWithoutOmitted)).toBe(false);
+  expect(SessionsContractsSchema.shape.pack_response.safeParse(packWithoutOmitted).success).toBe(
+    false,
+  );
+  expect(pack({ ...packWithoutOmitted, omitted: [] })).toBe(true);
+  expect(
+    SessionsContractsSchema.shape.pack_response.safeParse({ ...packWithoutOmitted, omitted: [] })
+      .success,
+  ).toBe(true);
+});
 
 const GENERATED_SCREENING_SCHEMA = new URL(
   "../../generated/screening.schema.json",

@@ -212,6 +212,20 @@ function formatJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+/** Mixed protocol documents describe raw requests and normalized responses.
+ * Defaulted request fields may be absent on the wire. Keep every other branch
+ * in output mode, including shared schemas nested in sponsor responses. */
+function requestAwareJsonSchema(schema: z.ZodObject) {
+  const document = z.toJSONSchema(schema);
+  for (const [name, contract] of Object.entries(schema.shape)) {
+    if (!name.endsWith("_request") && !name.endsWith("_query")) continue;
+    const { $schema: _dialect, ...input } = z.toJSONSchema(contract, { io: "input" });
+    if (document.properties === undefined) throw new Error("CONTRACT_PROPERTIES_MISSING");
+    document.properties[name] = input;
+  }
+  return document;
+}
+
 /**
  * Attach validated corpus examples to an agent-facing schema document
  * (bead asimposiumorg-zjs9). Fails generation loudly on any mismatch so a
@@ -496,7 +510,7 @@ function generatedSessionsJsonSchema(): string {
     title: "ASImposium session-protocol contracts",
     description:
       "Fable §7 session loop: open, pack, workshop push, promote, close. Writes are JSON only; packs are budgeted with mandatory omitted[] and server-authored next_actions.",
-    ...z.toJSONSchema(SessionsContractsSchema),
+    ...requestAwareJsonSchema(SessionsContractsSchema),
   };
 
   return formatJson(withExamples("sessions", document));
@@ -665,7 +679,7 @@ function generatedBatchJsonSchema(): string {
     title: "ASImposium batch planning contracts",
     description:
       "W2.2 / W1.2 batch commit planning contract. Validates batch members, causal DAG, bounds, and topological order.",
-    ...z.toJSONSchema(BatchContractsSchema),
+    ...requestAwareJsonSchema(BatchContractsSchema),
   };
   return formatJson(document);
 }

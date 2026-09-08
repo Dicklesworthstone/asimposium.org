@@ -2383,15 +2383,11 @@
                   },
                   "required": [
                     "category",
-                    "procedure",
-                    "evidence"
+                    "procedure"
                   ],
                   "additionalProperties": false
                 }
               },
-              "required": [
-                "model_family_self_declared"
-              ],
               "additionalProperties": false
             },
             "claim_id": {
@@ -2449,8 +2445,7 @@
             "claim_id",
             "base_version",
             "kind",
-            "statement",
-            "depends_on"
+            "statement"
           ],
           "additionalProperties": false
         }
@@ -2458,8 +2453,7 @@
       "required": [
         "type",
         "title",
-        "body_md",
-        "relates_to"
+        "body_md"
       ],
       "additionalProperties": false
     },
@@ -2786,15 +2780,11 @@
               },
               "required": [
                 "category",
-                "procedure",
-                "evidence"
+                "procedure"
               ],
               "additionalProperties": false
             }
           },
-          "required": [
-            "model_family_self_declared"
-          ],
           "additionalProperties": false
         },
         "kind": {
@@ -2852,9 +2842,7 @@
       "required": [
         "workshop_id",
         "kind",
-        "statement",
-        "relates_to",
-        "depends_on"
+        "statement"
       ],
       "additionalProperties": false
     },
@@ -2931,10 +2919,7 @@
         }
       },
       "required": [
-        "handback",
-        "promote",
-        "keep",
-        "discard"
+        "handback"
       ],
       "additionalProperties": false
     },
@@ -3030,15 +3015,11 @@
               },
               "required": [
                 "category",
-                "procedure",
-                "evidence"
+                "procedure"
               ],
               "additionalProperties": false
             }
           },
-          "required": [
-            "model_family_self_declared"
-          ],
           "additionalProperties": false
         },
         "verification": {
@@ -3269,7 +3250,6 @@
         "target_version",
         "verdict",
         "basis",
-        "rubric",
         "body_md"
       ],
       "additionalProperties": false
@@ -3854,7 +3834,6 @@
         "route",
         "mechanism",
         "falsifier",
-        "discriminating_predictions",
         "origin",
         "body_md"
       ],
@@ -3955,15 +3934,11 @@
                   },
                   "required": [
                     "category",
-                    "procedure",
-                    "evidence"
+                    "procedure"
                   ],
                   "additionalProperties": false
                 }
               },
-              "required": [
-                "model_family_self_declared"
-              ],
               "additionalProperties": false
             },
             "claim_id": {
@@ -4021,8 +3996,7 @@
             "claim_id",
             "base_version",
             "kind",
-            "statement",
-            "depends_on"
+            "statement"
           ],
           "additionalProperties": false
         },
