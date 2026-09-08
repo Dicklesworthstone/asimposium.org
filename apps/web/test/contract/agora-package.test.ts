@@ -878,7 +878,7 @@ describe("apex markdown redirect origin", () => {
       expect(typeof nextConfig.redirects).toBe("function");
       if (typeof nextConfig.redirects !== "function") throw new Error("redirects-not-callable");
       const redirects = await nextConfig.redirects();
-      for (const suffix of ["md", "json"]) {
+      for (const suffix of ["md", "json", "bib"]) {
         expect(
           redirects.find(({ source }) => source === `/p/:slug/claims/:claim.${suffix}`),
         ).toEqual({

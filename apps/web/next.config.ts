@@ -160,6 +160,11 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/p/:slug/claims/:claim.bib",
+        destination: `${stoaOrigin}/p/:slug/claims/:claim.bib`,
+        permanent: true,
+      },
+      {
         source: "/p/:slug/claims/:claim.json",
         destination: `${stoaOrigin}/p/:slug/claims/:claim.json`,
         permanent: true,

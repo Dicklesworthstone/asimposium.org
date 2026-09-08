@@ -129,6 +129,15 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
             <a href={`${agentPath}.md`}>Markdown</a> · <a href={`${agentPath}.json`}>JSON</a>
           </p>
         </section>
+        {face.next_actions.some((action) => action.url.endsWith(`/${exact}.bib`)) && (
+          <section aria-labelledby="citation-heading">
+            <h2 id="citation-heading">Cite this statement version</h2>
+            <p>
+              <a href={`${agentPath}.bib`}>Download BibTeX</a> ·{" "}
+              <a href={`${agentPath}.csl.json`}>Download CSL-JSON</a>
+            </p>
+          </section>
+        )}
       </main>
     </>
   );

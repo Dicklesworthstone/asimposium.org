@@ -134,6 +134,11 @@ describe("public-ledger client", () => {
       ),
     );
     face.items[0].body = "<script>private-looking body is inert</script>";
+    face.next_actions.push({
+      method: "GET",
+      url: "/p/P-CALIBRATION/claims/C-1@1.bib",
+      why: "Cite this version",
+    });
     setMockFetch(async (input, init) => {
       expect(String(input)).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json`);
       const options = init as RequestInit & { next?: { revalidate?: number } };
@@ -154,6 +159,17 @@ describe("public-ledger client", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
     expect(html).toContain(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.json`);
+    expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.bib"`);
+    expect(html).toContain(
+      `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.csl.json"`,
+    );
+    face.next_actions = face.next_actions.filter(
+      (action: { url: string }) => !action.url.endsWith(".bib"),
+    );
+    const unavailable = renderToStaticMarkup(
+      await ClaimPage({ params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) }),
+    );
+    expect(unavailable).not.toContain("Download BibTeX");
   });
 
   test("claim reads distinguish a typed absence from unavailable data and reject a wrong pin", async () => {
