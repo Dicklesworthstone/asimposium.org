@@ -408,7 +408,7 @@ async function loadClaimFace(
       {
         reason: "claim_face_scope",
         detail:
-          "Version history, dependencies, review-request lifecycle and private work are not included. Evidence and review lists contain at most 20 records each; omissions are explicit.",
+          "Direct premises use their recorded publication versions. Transitive dependencies, evidence ceilings, version history, review-request lifecycle and private work are not included. Evidence and review lists contain at most 20 records each; omissions are explicit.",
       },
       ...(fold.legacyReviews > 0
         ? [
@@ -421,6 +421,13 @@ async function loadClaimFace(
         : []),
     ],
     next_actions: [
+      ...section.candidates
+        .filter((item) => item.kind === "claim-dependency")
+        .map((item) => ({
+          method: "GET" as const,
+          url: `/p/${problemId}/claims/${item.id}.md`,
+          why: "read a premise at the version used by this claim",
+        })),
       ...(section.candidates.some((item) => item.kind === "claim-detail")
         ? [
             {

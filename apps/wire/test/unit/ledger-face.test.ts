@@ -4,6 +4,7 @@ import type { Projection } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
 import { createLedgerFaceRoutes, renderBudgetedClaimFace } from "../../src/ledger-face.ts";
+import { readTargetClaimPack } from "../../src/sessions/ledger-pack.ts";
 
 const base = ClaimFaceResponseSchema.parse(
   await Bun.file(
@@ -13,6 +14,101 @@ const base = ClaimFaceResponseSchema.parse(
     ),
   ).json(),
 );
+
+test("dependency reads reject damaged pins and disclose unavailable legacy history (unit row double)", async () => {
+  const dependencyPayload = { claim_id: "C-1", kind: "claim", statement: "PUBLIC_PREMISE_CANARY" };
+  const dependencyJson = JSON.stringify(dependencyPayload);
+  const pin = {
+    claim_id: "C-1",
+    version: 1,
+    event_id: "E-premise",
+    content_digest: `sha256:${"a".repeat(64)}`,
+    payload_digest: await sha256Hex(dependencyJson),
+  };
+  const originalDependency = {
+    id: "C-1@1",
+    payload_json: dependencyJson,
+    payload_sha256: pin.payload_digest,
+    body: JSON.stringify({
+      claim_id: "C-1",
+      version: 1,
+      event: pin.event_id,
+      content_digest: pin.content_digest,
+      sponsor: "S-author",
+    }),
+  };
+  let dependency: {
+    id: string;
+    payload_json: string;
+    payload_sha256: string;
+    body: string | null;
+  } = { ...originalDependency };
+  let parentPayload: Record<string, unknown> = {
+    claim_id: "C-2",
+    kind: "claim",
+    statement: "A dependent statement.",
+    dependency_pins: [pin],
+  };
+  const statement = { bind: () => statement };
+  const db = {
+    prepare: () => statement,
+    batch: async () => {
+      const payload_json = JSON.stringify(parentPayload);
+      return [
+        {
+          results: [
+            {
+              id: "C-2@1",
+              payload_json,
+              payload_sha256: await sha256Hex(payload_json),
+              body: JSON.stringify({ sponsor: "S-author" }),
+            },
+          ],
+        },
+        { results: [] },
+        { results: [] },
+        { results: [dependency] },
+      ];
+    },
+  } as unknown as Env["DB"];
+  const read = () => readTargetClaimPack(db, "P-UNIT", 2, "C-2@1");
+  expect((await read()).candidates.some((item) => item.kind === "claim-dependency")).toBe(true);
+  for (const change of [
+    { payload_json: JSON.stringify({ ...dependencyPayload, statement: "CORRUPT_PREMISE_CANARY" }) },
+    {
+      payload_json: JSON.stringify({ ...dependencyPayload, claim_id: "C-9" }),
+      payload_sha256: await sha256Hex(JSON.stringify({ ...dependencyPayload, claim_id: "C-9" })),
+    },
+    { body: null },
+    {
+      body: JSON.stringify({ version: 2, event: pin.event_id, content_digest: pin.content_digest }),
+    },
+    { body: JSON.stringify({ version: 1, event: "E-wrong", content_digest: pin.content_digest }) },
+    {
+      body: JSON.stringify({
+        version: 1,
+        event: pin.event_id,
+        content_digest: `sha256:${"b".repeat(64)}`,
+      }),
+    },
+  ]) {
+    dependency = { ...originalDependency, ...change };
+    const section = await read();
+    expect(section.candidates.some((item) => item.kind === "claim-dependency")).toBe(false);
+    expect(section.omitted).toContainEqual({ reason: "content_unavailable", detail: "C-1@1" });
+    expect(JSON.stringify(section)).not.toContain("CORRUPT_PREMISE_CANARY");
+  }
+  dependency = { ...originalDependency };
+  for (const dependency_pins of [undefined, null, ["C-1"], [{ claim_id: "C-1" }], [pin, pin]]) {
+    parentPayload = { ...parentPayload, dependency_pins };
+    const section = await read();
+    expect(section.candidates.some((item) => item.kind === "claim-dependency")).toBe(false);
+    expect(section.omitted).toContainEqual({
+      reason: "dependency_history_unavailable",
+      detail: "C-2@1",
+    });
+  }
+});
 
 test("citation route verifies payload bytes and pins before exposing export content (unit row double)", async () => {
   const payload = { claim_id: "C-1", kind: "claim", statement: "Two is a positive even integer." };

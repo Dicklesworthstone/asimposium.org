@@ -40,10 +40,13 @@ function normalizeSql(sql: string): string {
 }
 
 const SEARCH_INDEX_SOURCE_SQL = normalizeSql(`SELECT e.id AS event_id, e.problem_id,
-  e.object_id AS claim_id, e.payload_sha256, c.statement FROM events e
+  e.object_id AS claim_id, e.payload_sha256, c.statement, content.payload_json, e.type AS event_type, e.object_version AS version FROM events e
   JOIN claims c ON c.id = e.object_id AND c.problem_id = e.problem_id
-  WHERE e.id = ? AND e.problem_id = ? AND e.type = 'claim.created'
-  AND e.object_kind = 'claim' AND e.object_version = 1
+  JOIN event_content content ON content.event_id = e.id AND content.payload_sha256 = e.payload_sha256
+    AND content.redacted_at IS NULL
+  WHERE e.id = ? AND e.problem_id = ?
+  AND ((e.type = 'claim.created' AND e.object_version = 1) OR (e.type = 'claim.revised' AND e.object_version > 1))
+  AND e.object_kind = 'claim'
   AND e.payload_sha256 = ? AND c.payload_sha256 = e.payload_sha256`);
 
 const ACK_DELIVERED_CAS_SQL = normalizeSql(`UPDATE outbox SET state = 'delivered',
@@ -372,6 +375,8 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           return { results: results as T[], success: true, meta: {} };
         },
         first: async <T>() => {
+          if (sql.includes("SELECT 1 AS superseded")) return null;
+          if (sql.includes("SELECT 1 AS withdrawn")) return null;
           if (sql.includes("FROM events e") || sql.includes("JOIN claims c")) {
             if (normalizeSql(sql) !== SEARCH_INDEX_SOURCE_SQL) {
               throw new Error("PLANTED_SEARCH_INDEX_SOURCE_SQL_DRIFT");
@@ -410,6 +415,13 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
               claim_id: claim.id,
               payload_sha256: event.payload_sha256,
               statement: claim.statement,
+              payload_json: canonicalClaimPayload({
+                claimId: claim.id,
+                kind: "claim",
+                statement: claim.statement,
+              }),
+              event_type: event.type,
+              version: event.object_version,
             } as T;
           }
           if (sql === OUTBOX_PENDING_SNAPSHOT_SQL) {
@@ -776,6 +788,15 @@ describe("Krater outbox Durable Object contracts", () => {
     insertEvent.run("E-dig", "P-src", 5, "claim.created", "claim", "C-dig", 1, digest);
     // A different problem may not reach through the join to another's claim row.
     insertEvent.run("E-cross", "P-other", 1, "claim.created", "claim", "C-ok", 1, digest);
+    // These are explicitly legacy SQL fixtures, predating chain enforcement.
+    sqlite.exec(
+      readFileSync(
+        resolve(import.meta.dir, "../../../../db/migrations/0004_krater_integrity_v1.sql"),
+        "utf8",
+      ),
+    );
+    sqlite.exec(`INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      SELECT id, payload_sha256, '{}' FROM events`);
 
     const shipped = sqlite.prepare(SEARCH_INDEX_SOURCE_SQL);
     expect(shipped.all("E-ok", "P-src", digest)).toEqual([
@@ -785,6 +806,9 @@ describe("Krater outbox Durable Object contracts", () => {
         claim_id: "C-ok",
         payload_sha256: digest,
         statement: "public claim",
+        payload_json: "{}",
+        event_type: "claim.created",
+        version: 1,
       },
     ]);
     for (const eventId of ["E-type", "E-ver", "E-kind", "E-dig"]) {

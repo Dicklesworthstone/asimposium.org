@@ -1481,10 +1481,13 @@ describe("session protocol routes", () => {
     expect(text).not.toContain("PRIVATE-TARGET");
     expect(pack.items.every((item) => item.scope !== "workshop")).toBe(true);
     expect(pack.items.find((item) => item.kind === "claim-detail")?.id).toBe("C-1@1");
-    expect(pack.omitted).toContainEqual({
-      reason: "profile_section_not_composed",
-      detail: "version-pinned-dependencies",
-    });
+    expect(
+      JSON.parse(pack.items.find((item) => item.kind === "claim-detail")?.body ?? "{}")
+        .dependency_pins,
+    ).toEqual([]);
+    expect(pack.omitted.some((item) => item.reason === "dependency_history_unavailable")).toBe(
+      false,
+    );
     expect(
       await (await f.call(`${packPath}?profile=review&target=C-1@1&max_tokens=8000`)).text(),
     ).toBe(text);

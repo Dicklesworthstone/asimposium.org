@@ -1,4 +1,8 @@
-import type { ScientificProvenance } from "@asimposium/contracts";
+import {
+  type ClaimDependencyPin,
+  ClaimDependencyPinsSchema,
+  type ScientificProvenance,
+} from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -19,6 +23,7 @@ export interface KraterWriteInput {
   idempotencyKey: string;
   statement: string;
   readonly scientificProvenance?: ScientificProvenance;
+  readonly dependencyPins?: readonly ClaimDependencyPin[];
   /**
    * The split/policy.ts normHash of the statement, supplied by the caller so
    * the claims row itself carries the normalized identity (P11). When set it
@@ -481,11 +486,15 @@ export function canonicalClaimPayload(input: {
   readonly kind: "claim";
   readonly statement: string;
   readonly scientificProvenance?: ScientificProvenance;
+  readonly dependencyPins?: readonly ClaimDependencyPin[];
 }): string {
   return canonicalJson({
     claim_id: input.claimId,
     kind: input.kind,
     statement: input.statement,
+    ...(input.dependencyPins === undefined
+      ? {}
+      : { dependency_pins: ClaimDependencyPinsSchema.parse(input.dependencyPins) }),
     ...(input.scientificProvenance === undefined
       ? {}
       : { scientific_provenance: input.scientificProvenance }),
@@ -498,6 +507,7 @@ function payloadFor(input: KraterWriteInput): string {
     kind: "claim",
     statement: input.statement,
     scientificProvenance: input.scientificProvenance,
+    dependencyPins: input.dependencyPins,
   });
 }
 
@@ -505,6 +515,9 @@ function requestFor(input: KraterWriteInput): string {
   return canonicalJson({
     claim_id: input.claimId,
     statement: input.statement,
+    ...(input.dependencyPins === undefined
+      ? {}
+      : { dependency_pins: ClaimDependencyPinsSchema.parse(input.dependencyPins) }),
     ...(input.scientificProvenance === undefined
       ? {}
       : { scientific_provenance: input.scientificProvenance }),
@@ -1822,6 +1835,7 @@ export async function writeClaim(
         kind: "claim",
         statement: claim.statement,
         scientificProvenance: input.scientificProvenance,
+        dependencyPins: input.dependencyPins,
       }),
     );
     if (
@@ -1909,6 +1923,7 @@ export interface KraterRevisionInput {
   kind: string;
   statement: string;
   readonly scientificProvenance?: ScientificProvenance;
+  readonly dependencyPins?: readonly ClaimDependencyPin[];
   falsifier: string | null;
   /** The claim-version content digest from mintClaimVersion. */
   contentDigest: string;
@@ -1935,6 +1950,7 @@ export function canonicalRevisionPayload(input: {
   readonly kind: string;
   readonly statement: string;
   readonly scientificProvenance?: ScientificProvenance;
+  readonly dependencyPins?: readonly ClaimDependencyPin[];
 }): string {
   return canonicalJson({
     base_version: input.baseVersion,
@@ -1942,6 +1958,9 @@ export function canonicalRevisionPayload(input: {
     falsifier: input.falsifier,
     kind: input.kind,
     statement: input.statement,
+    ...(input.dependencyPins === undefined
+      ? {}
+      : { dependency_pins: ClaimDependencyPinsSchema.parse(input.dependencyPins) }),
     ...(input.scientificProvenance === undefined
       ? {}
       : { scientific_provenance: input.scientificProvenance }),
@@ -2025,6 +2044,7 @@ export async function writeClaimRevision(
       kind: input.kind,
       statement: input.statement,
       scientificProvenance: input.scientificProvenance,
+      dependencyPins: input.dependencyPins,
     });
     const [payloadSha256, requestDigest] = await Promise.all([
       sha256Hex(payloadJson),
@@ -2037,6 +2057,9 @@ export async function writeClaimRevision(
               ...(input.scientificProvenance === undefined
                 ? {}
                 : { scientific_provenance: input.scientificProvenance }),
+              ...(input.dependencyPins === undefined
+                ? {}
+                : { dependency_pins: ClaimDependencyPinsSchema.parse(input.dependencyPins) }),
             }),
           )
         : Promise.resolve(companionRequestDigest),
@@ -2310,6 +2333,7 @@ export async function writeClaimRevision(
         kind: input.kind,
         statement: claim.statement,
         scientificProvenance: input.scientificProvenance,
+        dependencyPins: input.dependencyPins,
       }),
     );
     if (

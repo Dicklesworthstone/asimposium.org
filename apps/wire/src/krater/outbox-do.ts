@@ -3,7 +3,7 @@ import type {
   D1PreparedStatement,
   DurableObjectState,
 } from "@cloudflare/workers-types";
-import { canonicalClaimPayload, sha256Hex } from "./krater";
+import { sha256Hex } from "./krater";
 
 export const KRATER_OUTBOX_DO_NAME = "krater-outbox-v0";
 export const OUTBOX_DRAIN_BATCH_SIZE = 8;
@@ -102,6 +102,9 @@ interface SearchIndexSourceRow {
   claim_id: string;
   payload_sha256: string;
   statement: string;
+  payload_json: string;
+  event_type: string;
+  version: number;
 }
 
 interface CountRow {
@@ -920,16 +923,53 @@ export class KraterOutboxDrainer {
     const source = await statement(
       this.env.DB,
       `SELECT e.id AS event_id, e.problem_id, e.object_id AS claim_id,
-              e.payload_sha256, c.statement
+              e.payload_sha256, c.statement, content.payload_json, e.type AS event_type, e.object_version AS version
        FROM events e
        JOIN claims c ON c.id = e.object_id AND c.problem_id = e.problem_id
+       JOIN event_content content ON content.event_id = e.id AND content.payload_sha256 = e.payload_sha256
+         AND content.redacted_at IS NULL
        WHERE e.id = ? AND e.problem_id = ?
-         AND e.type = 'claim.created' AND e.object_kind = 'claim' AND e.object_version = 1
+         AND ((e.type = 'claim.created' AND e.object_version = 1) OR (e.type = 'claim.revised' AND e.object_version > 1))
+         AND e.object_kind = 'claim'
          AND e.payload_sha256 = ? AND c.payload_sha256 = e.payload_sha256`,
       row.event_id,
       row.problem_id,
       row.payload_sha256,
     ).first<SearchIndexSourceRow>();
+    if (source === null) {
+      // A queued old version can outlive a newer head. Retire that obsolete
+      // effect; retrying it forever would starve the new version's index job.
+      const superseded = await statement(
+        this.env.DB,
+        `SELECT 1 AS superseded
+        FROM events queued JOIN claims head ON head.problem_id = queued.problem_id AND head.id = queued.object_id
+        JOIN events current ON current.problem_id = head.problem_id AND current.object_id = head.id
+          AND current.seq = head.source_seq AND current.payload_sha256 = head.payload_sha256
+          AND current.object_kind = 'claim' AND current.type IN ('claim.created', 'claim.revised')
+        WHERE queued.id = ? AND queued.problem_id = ? AND queued.payload_sha256 = ?
+          AND queued.object_kind = 'claim' AND queued.type IN ('claim.created', 'claim.revised')
+          AND current.seq > queued.seq LIMIT 1`,
+        row.event_id,
+        row.problem_id,
+        row.payload_sha256,
+      ).first();
+      if (superseded !== null) return;
+      const withdrawn = await statement(
+        this.env.DB,
+        `SELECT 1 AS withdrawn
+        FROM events queued JOIN event_content content ON content.event_id = queued.id
+          AND content.payload_sha256 = queued.payload_sha256
+        WHERE queued.id = ? AND queued.problem_id = ? AND queued.payload_sha256 = ?
+          AND queued.object_kind = 'claim' AND queued.type IN ('claim.created', 'claim.revised')
+          AND content.redacted_at IS NOT NULL LIMIT 1`,
+        row.event_id,
+        row.problem_id,
+        row.payload_sha256,
+      ).first();
+      // Withdrawal is permanent. No content may be indexed, and retrying this
+      // effect cannot restore it. Public search also excludes retained FTS copies.
+      if (withdrawn !== null) return;
+    }
     if (
       source === null ||
       source.event_id !== row.event_id ||
@@ -941,16 +981,22 @@ export class KraterOutboxDrainer {
     ) {
       throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
     }
-    const observedPayloadSha256 = await sha256Hex(
-      canonicalClaimPayload({
-        claimId: source.claim_id,
-        kind: "claim",
-        statement: source.statement,
-      }),
-    );
+    // Hash the stored publication, including provenance and dependency pins.
+    // Reconstructing an older payload shape silently rejects valid new fields.
+    const observedPayloadSha256 = await sha256Hex(source.payload_json);
     if (observedPayloadSha256 !== source.payload_sha256) {
       throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
     }
+    const payload: unknown = JSON.parse(source.payload_json);
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload))
+      throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+    const publication = payload as Record<string, unknown>;
+    if (
+      publication.claim_id !== source.claim_id ||
+      publication.statement !== source.statement ||
+      (source.event_type === "claim.revised" && publication.base_version !== source.version - 1)
+    )
+      throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
 
     await this.env.DB.batch([
       statement(

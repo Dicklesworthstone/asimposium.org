@@ -90,6 +90,7 @@ import {
   inspectFormalArtifact,
   isScientificReferenceChanged,
   readScientificClaim,
+  resolveClaimDependencies,
   resolveScientificReferences,
   SCIENTIFIC_INDEPENDENCE_POLICY,
   type ScientificClaim,
@@ -429,6 +430,23 @@ interface PackSessionRow {
   readonly session_id: string;
   readonly problem_id: string;
   readonly closed_at: string | null;
+}
+
+function dependencyUnavailableProblem(): Response {
+  return validatedProblem({
+    status: 422,
+    code: "DEPENDENCY_NOT_FOUND",
+    title: "A dependency's public version is unavailable",
+    detail:
+      "Every premise must have an available, digest-verified public version on this problem. No claim was published.",
+    fixHint:
+      "Read the dependency's public claim face, remove unavailable references, and retry with a new Idempotency-Key.",
+    rule: "P10",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: { depends_on: ["C-1"] },
+    },
+  });
 }
 
 function scientificRefusal(scope: "review" | "evidence", detail: string): Response {
@@ -2188,6 +2206,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
+        ...targetSection.candidates
+          .filter((item) => item.kind === "claim-dependency")
+          // Actions are mandatory envelope bytes. Every premise carries its
+          // own read_url; one navigation hint keeps the smallest pack usable.
+          .slice(0, 1)
+          .map((item) => ({
+            method: "GET" as const,
+            url: `/p/${session.problem_id}/claims/${item.id}.md`,
+            why: "Read a premise at the exact version used by the selected claim.",
+            public_read: true,
+          })),
         ...(firstReviewTarget !== undefined
           ? [
               {
@@ -2703,6 +2732,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
+    try {
+      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
+    } catch (error) {
+      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
+      throw error;
+    }
+
     // Fable §9.1 + P7/A9 (bead asimposiumorg-b9y9): every public ledger
     // ingress — this promote included — crosses the one centralized
     // screening decision boundary after the cheap gates and before any
@@ -2771,6 +2808,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           idempotencyKey: kraterIdempotencyKey,
           statement: parsed.data.statement,
           scientificProvenance: parsed.data.scientific_provenance,
+          dependencyPins,
           normHash: candidateHash,
           createdAt: promotedAt,
           // Rule A3: the full attribution snapshot on the claim.created event.
@@ -2806,6 +2844,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               // NOT NULL constraint aborts the whole event/projection batch.
               // A same-caller-key loser cannot overwrite the winner's replay;
               // the ownership guard below then aborts its separate event.
+              ...scientificContentGuards(
+                db,
+                dependencyPins.map((pin) => ({
+                  eventId: pin.event_id,
+                  payloadDigest: pin.payload_digest,
+                })),
+              ),
               screeningPublicationStatement(
                 db,
                 screening,
@@ -2981,6 +3026,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
       // P11 commit-time guard: a concurrent identical promotion committed
       // first and this batch died on claims_problem_norm_hash_idx — the read
       // above ran before the winner landed. Name the winning claim in the
@@ -3335,6 +3381,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (cycle !== null && cycle !== undefined) return dependencyCycleProblem();
     }
 
+    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
+    try {
+      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
+    } catch (error) {
+      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
+      throw error;
+    }
+
     // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
     // bytes; it must earn its own screening decision and can never inherit
     // one from the previous version.
@@ -3390,6 +3444,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kind: parsed.data.kind,
           statement: parsed.data.statement,
           scientificProvenance: parsed.data.scientific_provenance,
+          dependencyPins,
           falsifier: parsed.data.falsifier ?? null,
           contentDigest: versionMint.contentDigest,
           editorFellowId: auth.binding.fellowId,
@@ -3421,6 +3476,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
+              ...scientificContentGuards(
+                db,
+                dependencyPins.map((pin) => ({
+                  eventId: pin.event_id,
+                  payloadDigest: pin.payload_digest,
+                })),
+              ),
               screeningPublicationStatement(
                 db,
                 screening,
@@ -3557,6 +3619,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message)) {
         return dependencyCycleProblem();
       }
+      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
       if (error instanceof Error && /claim_versions/.test(error.message)) {
         // The stale-base backstop: a concurrent revision minted @base+1 first,
         // so this batch died on the claim_versions primary key without

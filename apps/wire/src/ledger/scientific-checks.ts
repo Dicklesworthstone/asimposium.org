@@ -1,4 +1,6 @@
 import {
+  type ClaimDependencyPin,
+  ClaimDependencyPinsSchema,
   FormalArtifactSchema,
   type GroundedFalsificationCheck,
   type ScientificEvidenceReference,
@@ -114,6 +116,13 @@ export async function readScientificClaim(
     .first<ContentRow & { content_digest: string; statement: string }>();
   if (!row) throw new ScientificInputError("The exact public claim version is unavailable.");
   const payload = await checkedScientificPayload(row);
+  if (
+    payload.claim_id !== claimId ||
+    payload.statement !== row.statement ||
+    (version > 1 && payload.base_version !== version - 1)
+  ) {
+    throw new ScientificInputError("The public claim payload does not match its exact version.");
+  }
   return {
     eventId: row.event_id,
     payloadDigest: row.payload_sha256,
@@ -125,6 +134,39 @@ export async function readScientificClaim(
     sponsorId: row.sponsor_id,
     provenance: readScientificProvenance(payload.scientific_provenance),
   };
+}
+
+/** Resolve the requested heads once, before paid screening. A withheld head
+ * refuses admission; it must never fall back to an older public version. */
+export async function resolveClaimDependencies(
+  db: D1Database,
+  problemId: string,
+  claimIds: readonly string[],
+): Promise<ClaimDependencyPin[]> {
+  const pins = await Promise.all(
+    claimIds.map(async (claimId) => {
+      const head = await db
+        .prepare(
+          "SELECT MAX(version) AS version FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
+        )
+        .bind(problemId, claimId)
+        .first<{ version: number | null }>();
+      if (head?.version === null || head?.version === undefined)
+        throw new ScientificInputError("A dependency has no published version on this problem.");
+      const claim = await readScientificClaim(db, problemId, claimId, head.version);
+      return {
+        claim_id: claim.claimId,
+        version: claim.version,
+        content_digest: claim.contentDigest,
+        event_id: claim.eventId,
+        payload_digest: claim.payloadDigest,
+      };
+    }),
+  );
+  const parsed = ClaimDependencyPinsSchema.safeParse(pins);
+  if (!parsed.success)
+    throw new ScientificInputError("A dependency has an invalid publication identity.");
+  return parsed.data;
 }
 
 export async function readScientificEvidence(

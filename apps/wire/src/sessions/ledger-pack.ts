@@ -1,4 +1,8 @@
-import type { PackProfile } from "@asimposium/contracts";
+import {
+  type ClaimDependencyPin,
+  ClaimDependencyPinsSchema,
+  type PackProfile,
+} from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
@@ -224,10 +228,10 @@ export async function readPublicClaimSnapshot(
     ...targetClaimStatements(db, problemId, cursor, target),
     prepareScientificDispositions(db, problemId, cursor, 1, { claimId, version }),
   ]);
-  const rows = results[3]?.results as ScientificRow[] | undefined;
+  const rows = results[4]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, 3), problemId, target),
+    section: await composeTargetClaimPack(results.slice(0, 4), problemId, target),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -311,6 +315,37 @@ function targetClaimStatements(
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
       .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
+    db
+      .prepare(`
+      SELECT json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.claim_id') || '@' || json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.version') AS id,
+        e.payload_sha256, c.payload_json,
+        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+          'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
+          'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
+          'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,
+          'fellow', e.actor_fellow_id, 'sponsor', e.actor_sponsor_id,
+          'session', e.actor_session_id, 'model_self_declared', e.model_string_self_declared,
+          'harness_self_declared', e.harness,
+          'scientific_provenance', json_extract(c.payload_json, '$.scientific_provenance')) END AS body
+      FROM events parent JOIN event_content pc ON pc.event_id = parent.id
+        AND pc.payload_sha256 = parent.payload_sha256 AND pc.redacted_at IS NULL
+      JOIN json_each(CASE WHEN json_valid(pc.payload_json) THEN pc.payload_json ELSE '{}' END, '$.dependency_pins') pin
+      LEFT JOIN events e ON e.id = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.event_id')
+        AND e.problem_id = parent.problem_id AND e.object_kind = 'claim'
+        AND e.type IN ('claim.created', 'claim.revised') AND e.seq < parent.seq
+        AND e.object_id = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.claim_id')
+        AND e.object_version = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.version')
+        AND e.payload_sha256 = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.payload_digest')
+      LEFT JOIN claim_versions v ON v.problem_id = e.problem_id AND v.claim_id = e.object_id
+        AND v.version = e.object_version AND v.content_digest = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.content_digest')
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+        AND v.claim_id IS NOT NULL
+      WHERE parent.problem_id = ? AND parent.object_id = ? AND parent.object_version = ?
+        AND parent.object_kind = 'claim' AND parent.type IN ('claim.created', 'claim.revised')
+        AND parent.seq <= ?
+      ORDER BY CAST(pin.key AS INTEGER) ASC LIMIT 17
+    `)
+      .bind(problemId, claimId, version, cursor),
   ];
 }
 
@@ -327,7 +362,7 @@ async function composeTargetClaimPack(
   };
   const section: LedgerPackSection = {
     candidates: [],
-    omitted: [{ reason: "profile_section_not_composed", detail: "version-pinned-dependencies" }],
+    omitted: [],
   };
   const claim = results[0]?.results[0] as TargetRow | undefined;
   if (claim?.body === null || claim?.body === undefined) {
@@ -337,8 +372,38 @@ async function composeTargetClaimPack(
   const [claimId, versionText] = target.split("@");
   const version = Number(versionText);
   const claimBody = JSON.parse(claim.body) as Record<string, unknown>;
-  for (const [index, kind] of ["claim-detail", "claim-evidence", "claim-review"].entries()) {
-    const rows = (results[index]?.results ?? []) as TargetRow[];
+  let dependencyPins: ClaimDependencyPin[] | null = null;
+  try {
+    if (claim.payload_json === null) throw new ScientificInputError("Claim content unavailable.");
+    const payload = await checkedScientificPayload({ ...claim, payload_json: claim.payload_json });
+    const pins = ClaimDependencyPinsSchema.safeParse(payload.dependency_pins);
+    if (pins.success && !pins.data.some((pin) => pin.claim_id === claimId))
+      dependencyPins = pins.data;
+  } catch (error) {
+    if (!(error instanceof ScientificInputError)) throw error;
+    section.omitted.push({ reason: "content_unavailable", detail: target });
+    return section;
+  }
+  if (dependencyPins === null)
+    section.omitted.push({ reason: "dependency_history_unavailable", detail: target });
+  else if (dependencyPins.length > 0)
+    section.omitted.push({
+      reason: "profile_section_not_composed",
+      detail: "transitive-dependency-closure-and-evidence-ceiling",
+    });
+  const groups = [
+    [0, "claim-detail"],
+    [3, "claim-dependency"],
+    [1, "claim-evidence"],
+    [2, "claim-review"],
+  ] as const;
+  for (const [index, [resultIndex, kind]] of groups.entries()) {
+    if (kind === "claim-dependency" && dependencyPins === null) continue;
+    const rows = (results[resultIndex]?.results ?? []) as TargetRow[];
+    if (kind === "claim-dependency" && rows.length !== dependencyPins?.length) {
+      section.omitted.push({ reason: "dependency_history_unavailable", detail: target });
+      continue;
+    }
     if (rows.length > LEDGER_PACK_CANDIDATE_LIMIT)
       section.omitted.push({ reason: "candidate_limit", detail: `${target}:${kind}` });
     for (const [position, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
@@ -351,11 +416,35 @@ async function composeTargetClaimPack(
           });
           const projected = JSON.parse(row.body) as Record<string, unknown>;
           if (kind === "claim-detail") {
-            if (payload.claim_id !== claimId || typeof payload.statement !== "string")
+            if (
+              payload.claim_id !== claimId ||
+              typeof payload.statement !== "string" ||
+              (version > 1 && payload.base_version !== version - 1)
+            )
               throw new ScientificInputError(
                 "Claim content does not match the requested identity.",
               );
             projected.statement = payload.statement;
+            projected.dependency_pins = dependencyPins;
+          } else if (kind === "claim-dependency") {
+            const pin = dependencyPins?.[position];
+            if (
+              !pin ||
+              row.id !== `${pin.claim_id}@${pin.version}` ||
+              projected.event !== pin.event_id ||
+              row.payload_sha256 !== pin.payload_digest ||
+              projected.content_digest !== pin.content_digest ||
+              projected.version !== pin.version ||
+              payload.claim_id !== pin.claim_id ||
+              typeof payload.statement !== "string" ||
+              (pin.version > 1 && payload.base_version !== pin.version - 1)
+            )
+              throw new ScientificInputError(
+                "Dependency content does not match its publication pin.",
+              );
+            projected.statement = payload.statement;
+            projected.parent_target = target;
+            projected.read_url = `/p/${problemId}/claims/${row.id}.md`;
           } else if (kind === "claim-review") {
             if (
               payload.target_claim_id !== claimId ||
