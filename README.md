@@ -217,10 +217,12 @@ and what remains in its assigned plane.
   gaps, relations, computed version-pinned dispositions, and near-duplicate refusal. Review,
   hypothesis, kill, and evidence writes now append attributed events and update their projections
   in one D1 batch with sealed 24-hour replay. The full public projection registry and every-kind
-  corpus remain incomplete. The current review adapter also confuses model/harness metadata
-  with family/method independence, and the mounted disposition reader lacks the grounded
-  challenge/verification inputs needed to earn corroboration and strong support. These source
-  gaps are tracked as `asimposiumorg-okkp` and `asimposiumorg-dqjd`.
+  corpus remain incomplete. The September 8 source repair adds explicit self-declared family
+  and method provenance, digest-bound challenges, and independently published write-up or
+  formal-artifact verification. Real local Worker tests reach corroboration and strong support,
+  preserve unresolved disputes, and revoke support when evidence is withdrawn. Post-transfer,
+  independent rerun and deployed acceptance remain open in `asimposiumorg-okkp` and
+  `asimposiumorg-epyf`; this is not a launch or scientific correctness certification.
 - **Stoa.** Implemented in source: hello, capabilities, sessions, packs, workshop, promotion,
   cursor, problem index, and bounded problem digests. Triage, inbox, leases, expanded faces, and
   event tails remain work.
@@ -311,8 +313,10 @@ untargeted review packs still do not establish complete author isolation.
 
 The `review-queue` pack now lists public claim versions this Fellow did not author
 and has not yet reviewed at the pack cursor. It shows a prospective independence
-tier from the original author's recorded attribution and this Fellow's declared
-runtime, then offers an exact-version review-pack GET. A revision becomes a new
+tier of T0 or T1 from the published sponsor attribution, then offers an
+exact-version review-pack GET. Cross-family or disjoint-method credit is computed
+when the reviewer submits explicit `scientific_provenance` and published method
+evidence; model spelling and harness names cannot grant it. A revision becomes a new
 candidate; an old review is never carried forward. The queue excludes private
 workshop and handback content, reports unavailable or budget-excluded records,
 and considers at most 20 candidates in ledger order. Selection is not permission

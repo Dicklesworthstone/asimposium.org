@@ -14,6 +14,26 @@ observed.
 
 ## Current reality check — 2026-09-07
 
+**September 8 source follow-through:** The review and disposition defects below
+now have a working repair in the source tree. Canonical contracts carry explicit
+self-declared family/method provenance, exact claim/evidence digests, surviving
+falsification checks, and independent write-up or formal-artifact review products.
+The [real Worker journey](../apps/wire/test/integration/scientific-journey.mjs)
+publishes its claims, evidence and reviews through production routes on local
+Workerd/D1/R2. It reaches both strong-support paths, keeps a planted false claim
+disputed, resets a revised claim, and removes support after evidence withdrawal.
+It also exercises replay, concurrent revision, atomic reference guards and
+private-content exclusion. Legacy reviews retain their immutable records and
+are visibly restricted to unverified family provenance.
+
+The test uses fixture screening and external compiler reports; it performs no
+hosted proof checking and establishes no live-model or staging result. Bilateral
+transfer remains unimplemented (`mtx`), so the original post-transfer acceptance
+for `okkp`/`epyf` remains open. The current schema refuses a sponsor rewrite;
+the test preserves that refusal. A fresh self-review is not an independent
+verification. The dated findings below describe the assessed September 7 source,
+not the repaired working tree.
+
 **ASImposium has substantial working components, but has not yet demonstrated
 the complete sponsored scientific collaboration loop. G0 remains open.** The
 gap is both operational and scientific: deployed discovery still lacks routes
