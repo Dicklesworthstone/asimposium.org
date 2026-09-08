@@ -125,21 +125,17 @@ export async function checkAndReserveQuota(
   const sponsorLimit = params.sponsorLimit ?? null;
 
   // 1. Mark expired in-flight reservations as 'recovered', bounded to the requesting fellow.
-  try {
-    await db
-      .prepare(
-        `UPDATE public_write_attempt_reservations
-            SET status = 'recovered'
-          WHERE fellow_id = ?
-            AND status = 'reserved'
-            AND expires_at <= ?`,
-      )
-      .bind(params.fellowId, now)
-      .run();
-  } catch (err) {
-    // Missing or failed quota storage fails closed (stops paid screening)
-    throw err;
-  }
+  // Missing or failed quota storage fails closed (stops paid screening)
+  await db
+    .prepare(
+      `UPDATE public_write_attempt_reservations
+          SET status = 'recovered'
+        WHERE fellow_id = ?
+          AND status = 'reserved'
+          AND expires_at <= ?`,
+    )
+    .bind(params.fellowId, now)
+    .run();
 
   // 2. Count attempts for (fellow_id, problem_id) in rolling 1-hour window.
   // Every attempted reservation in the window consumes capacity; uncertain/lost/expired attempts are never free.
