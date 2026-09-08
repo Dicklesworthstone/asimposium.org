@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { SearchQueryRequestSchema, SearchResponseSchema } from "./search.ts";
+import {
+  PUBLIC_CLAIM_TARGET_PATTERN,
+  PUBLIC_LEDGER_PROBLEM_ID_PATTERN,
+  SearchQueryRequestSchema,
+  SearchResponseSchema,
+} from "./search.ts";
 import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./sessions.ts";
 
 /**
@@ -18,7 +23,7 @@ import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./ses
  * whitespace, and control characters, so a row cannot escape its code span,
  * gain listing lines, or forge renderer structure (asimposiumorg-gfbc).
  */
-const PROBLEM_INDEX_ID_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PROBLEM_INDEX_ID_PATTERN = PUBLIC_LEDGER_PROBLEM_ID_PATTERN;
 
 /**
  * Public-ledger problem identifiers use Krater's established bounded grammar,
@@ -89,7 +94,7 @@ export type ClaimDisposition = z.infer<typeof ClaimDispositionSchema>;
 export const PublicClaimTargetSchema = z
   .string()
   .max(64)
-  .regex(/^C-[0-9]{1,45}(?:@[1-9][0-9]{0,15})?$/)
+  .regex(PUBLIC_CLAIM_TARGET_PATTERN)
   .refine((value) => !value.includes("@") || Number.isSafeInteger(Number(value.split("@")[1])));
 
 /** Direct premises captured at publication, scoped by the parent problem. */

@@ -17,15 +17,22 @@ export const SEARCH_QUERY_MAX_LENGTH = 256;
 export const SEARCH_LIMIT_DEFAULT = 20;
 export const SEARCH_LIMIT_MAX = 50;
 
+/** Shared by canonical public-face schemas and exact-reference parsing. */
+export const PUBLIC_LEDGER_PROBLEM_ID_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const PUBLIC_CLAIM_TARGET_PATTERN = /^C-[0-9]{1,45}(?:@[1-9][0-9]{0,15})?$/;
+
 /** Exact identifier patterns matching ASImposium canonical naming. */
 export const EXACT_PROBLEM_ID_PATTERN = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
 export const EXACT_CLAIM_ID_PATTERN = /^C-[0-9]+$/;
 export const EXACT_FELLOW_ID_PATTERN = /^F-[A-Za-z0-9]{26}$/;
 export const EXACT_PROBLEM_CLAIM_REF_PATTERN =
-  /^(?!.*--)(P-[A-Z0-9][A-Z0-9-]{1,30})[#/](C-[0-9]+)$/;
+  /^(?!.*--)(P-[A-Z0-9][A-Z0-9-]{1,30})[#/](C-[0-9]+(?:@[1-9][0-9]{0,15})?)$/;
 
 export const STABLE_URL_PATTERN =
-  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/(?:p\/([A-Za-z0-9._:-]+)(?:#(C-[0-9]+))?|fellows\/([A-Za-z0-9._:-]+))$/;
+  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/(?:p\/([A-Za-z0-9._:-]+)(?:#(C-[0-9]+(?:@[1-9][0-9]{0,15})?))?|fellows\/([A-Za-z0-9._:-]+))$/;
+
+const CANONICAL_CLAIM_URL_PATTERN =
+  /^https?:\/\/(?:[a-zA-Z0-9-]+\.)?asimposium\.org\/p\/([^/?#]+)\/claims\/([^/?#]+)$/;
 
 export const SearchKindFilterSchema = z.enum(["all", "problem", "claim", "fellow"]);
 export type SearchKindFilter = z.infer<typeof SearchKindFilterSchema>;
@@ -44,7 +51,7 @@ export const SearchQueryRequestSchema = z
       .min(1, "search query cannot be empty")
       .max(SEARCH_QUERY_MAX_LENGTH, "search query too long")
       .regex(
-        /^(?!\s*C-[0-9]+\s*$)/,
+        /^(?!\s*C-[0-9]+(?:@[0-9]+)?\s*$)/,
         "A claim reference requires its enclosing problem, e.g. P-EXAMPLE#C-1",
       )
       .refine((val) => !val.includes("\u0000"), "search query cannot contain null bytes"),
@@ -70,6 +77,7 @@ export const SearchResultItemSchema = z
     statement: z.string().nullable().optional(),
     snippet: z.string().max(2000),
     problem_id: z.string().nullable().optional(),
+    version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
     match_type: SearchMatchTypeSchema,
     score_explanation: z.string().max(128),
   })
@@ -113,11 +121,30 @@ export type SearchResponse = z.infer<typeof SearchResponseSchema>;
  */
 export type ExactReferenceTarget =
   | { readonly kind: "problem"; readonly id: string }
-  | { readonly kind: "claim"; readonly id: string; readonly problemId: string }
+  | {
+      readonly kind: "claim";
+      readonly id: string;
+      readonly problemId: string;
+      readonly version?: number;
+    }
   | { readonly kind: "fellow"; readonly id: string };
 
 export function parseExactReference(rawQuery: string): ExactReferenceTarget | null {
   const query = rawQuery.trim();
+
+  const canonical = query.match(CANONICAL_CLAIM_URL_PATTERN);
+  if (canonical?.[1] && canonical[2]) {
+    try {
+      const problemId = decodeURIComponent(canonical[1]);
+      const target = decodeURIComponent(canonical[2]).replace(
+        /\.(?:csl\.json|md|json|html|bib)$/,
+        "",
+      );
+      return claimReference(problemId, target);
+    } catch {
+      return null;
+    }
+  }
 
   // 1. URL parsing
   const urlMatch = query.match(STABLE_URL_PATTERN);
@@ -130,7 +157,7 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
     }
     if (problemSlugOrId) {
       if (claimFragment) {
-        return { kind: "claim", id: claimFragment, problemId: problemSlugOrId };
+        return claimReference(problemSlugOrId, claimFragment);
       }
       return { kind: "problem", id: problemSlugOrId };
     }
@@ -139,11 +166,7 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
   // 2. Problem-scoped claim ref e.g. P-123#C-45 or P-123/C-45
   const compositeMatch = query.match(EXACT_PROBLEM_CLAIM_REF_PATTERN);
   if (compositeMatch?.[1] && compositeMatch[2]) {
-    return {
-      kind: "claim",
-      id: compositeMatch[2],
-      problemId: compositeMatch[1],
-    };
+    return claimReference(compositeMatch[1], compositeMatch[2]);
   }
 
   // 3. Problem ID
@@ -158,6 +181,19 @@ export function parseExactReference(rawQuery: string): ExactReferenceTarget | nu
   }
 
   return null;
+}
+
+function claimReference(problemId: string, target: string): ExactReferenceTarget | null {
+  if (
+    !PUBLIC_LEDGER_PROBLEM_ID_PATTERN.test(problemId) ||
+    !PUBLIC_CLAIM_TARGET_PATTERN.test(target)
+  )
+    return null;
+  const [id, versionText] = target.split("@");
+  if (id === undefined) return null;
+  if (versionText === undefined) return { kind: "claim", id, problemId };
+  const version = Number(versionText);
+  return Number.isSafeInteger(version) ? { kind: "claim", id, problemId, version } : null;
 }
 
 /**
