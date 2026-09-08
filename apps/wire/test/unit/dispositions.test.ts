@@ -5,7 +5,6 @@ import {
   type ClaimDisposition,
   type ClaimEvent,
   type ClaimTransitionContext,
-  computeIndependenceTier,
   computeReviewStateFacet,
   computeStalenessFacet,
   displayClaimDisposition,
@@ -17,8 +16,6 @@ import {
   HYPOTHESIS_DISPOSITIONS,
   type HypothesisDisposition,
   type HypothesisEvent,
-  pinIndependenceAtReviewTime,
-  recomputePinnedIndependence,
   type VerifiedReview,
   wearsMachineCheckedBadge,
 } from "../../src/ledger/dispositions.ts";
@@ -805,78 +802,6 @@ describe("hypothesis sub-machine", () => {
 // ---------------------------------------------------------------------------
 // Independence tiers (§6.6)
 // ---------------------------------------------------------------------------
-
-describe("independence tiers", () => {
-  test("T0 same sponsor", () => {
-    expect(computeIndependenceTier("S-1", "S-1", "family-b", "family-a", true)).toBe("T0");
-  });
-  test("T1 different sponsor, same model family", () => {
-    expect(computeIndependenceTier("S-2", "S-1", "family-a", "family-a", true)).toBe("T1");
-  });
-  test("T2 different sponsor and different family", () => {
-    expect(computeIndependenceTier("S-2", "S-1", "family-b", "family-a", false)).toBe("T2");
-  });
-  test("T3 = T2 + disjoint method", () => {
-    expect(computeIndependenceTier("S-2", "S-1", "family-b", "family-a", true)).toBe("T3");
-  });
-  test("disjoint method cannot lift a same-sponsor review past T0, nor a same-family review past T1", () => {
-    expect(computeIndependenceTier("S-1", "S-1", "family-b", "family-a", true)).toBe("T0");
-    expect(computeIndependenceTier("S-2", "S-1", "family-a", "family-a", true)).toBe("T1");
-  });
-
-  test("a review's tier is pinned at review time from the facts at that moment", () => {
-    const pinned = pinIndependenceAtReviewTime(
-      "S-2",
-      "S-1",
-      "family-b",
-      "family-a",
-      false,
-      "2026-08-18T00:00:00Z",
-    );
-    expect(pinned.tier).toBe("T2");
-    expect(pinned.pinned_at.reviewer_sponsor_id).toBe("S-2");
-    expect(pinned.pinned_at.reviewed_at).toBe("2026-08-18T00:00:00Z");
-  });
-
-  test("a later sponsorship transfer never retroactively upgrades a recorded tier", () => {
-    // Pinned T0: reviewer and author shared a sponsor at review time. The
-    // reviewer later transfers to a different sponsor and re-declares a
-    // different family — recomputation now says T3, and that is refused.
-    const pinned = pinIndependenceAtReviewTime(
-      "S-1",
-      "S-1",
-      "family-a",
-      "family-a",
-      false,
-      "2026-08-01T00:00:00Z",
-    );
-    expect(pinned.tier).toBe("T0");
-    const result = recomputePinnedIndependence(pinned, "S-9", "S-1", "family-b", "family-a", true);
-    expect(result.allowed).toBe(false);
-    if (!result.allowed) {
-      expect(result.unmet).toEqual([
-        "independence tier is pinned at review time (T0); a later sponsorship transfer, re-declaration, or roster change never retroactively upgrades a recorded tier (recomputed T3)",
-      ]);
-    }
-  });
-
-  test("recomputation that agrees with the pin is a no-op returning the pinned tier", () => {
-    const pinned = pinIndependenceAtReviewTime(
-      "S-2",
-      "S-1",
-      "family-b",
-      "family-a",
-      true,
-      "2026-08-01T00:00:00Z",
-    );
-    expect(recomputePinnedIndependence(pinned, "S-2", "S-1", "family-b", "family-a", true)).toEqual(
-      {
-        allowed: true,
-        next: "T3",
-      },
-    );
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Computed facets

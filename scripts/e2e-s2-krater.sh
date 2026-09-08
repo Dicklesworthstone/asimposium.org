@@ -183,6 +183,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/problem.ts
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
+  packages/contracts/src/scientific-provenance.ts
   packages/contracts/src/sessions.ts
   packages/contracts/src/health.ts
   packages/contracts/src/search.ts
@@ -229,6 +230,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/http/redact.ts
   apps/wire/src/ledger/review-gate.ts
   apps/wire/src/ledger/review-independence.ts
+  apps/wire/src/ledger/scientific-checks.ts
+  apps/wire/src/ledger/scientific-disposition.ts
   apps/wire/src/ledger/disposition-read.ts
   apps/wire/src/ledger/evidence-class.ts
   apps/wire/src/ledger/dispositions.ts

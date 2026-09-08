@@ -1,11 +1,7 @@
 import type { PackProfile } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { Env } from "../env";
-import {
-  independenceTier,
-  type ReviewAttribution,
-  resolveClaimMethodBasis,
-} from "../ledger/review-independence";
+import { scientificIndependence } from "../ledger/review-independence";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -21,6 +17,7 @@ interface ProvenanceRow {
   model: string | null;
   harness: string | null;
   content_available: number;
+  payload_json?: string | null;
 }
 
 interface GapRow extends ProvenanceRow {
@@ -60,10 +57,8 @@ export async function readReviewQueuePack(
   db: Env["DB"],
   problemId: string,
   cursor: number,
-  reviewer: (
-    | ReviewAttribution
-    | { sponsorId: string; modelFamily: string; methodBasis?: string }
-  ) & {
+  reviewer: {
+    sponsorId: string;
     fellowId: string;
   },
 ): Promise<LedgerPackSection & { targets: string[] }> {
@@ -78,9 +73,9 @@ export async function readReviewQueuePack(
     )
     SELECT h.object_id || '@' || h.object_version AS id,
       v.kind, v.statement, v.falsifier, h.id AS event_id, h.seq,
-      a.actor_fellow_id AS fellow_id, a.actor_sponsor_id AS sponsor_id,
+      a.actor_fellow_id AS fellow_id, h.actor_sponsor_id AS sponsor_id,
       a.actor_session_id AS session_id, a.model_string_self_declared AS model,
-      a.harness, a.id AS author_event_id,
+      a.harness, a.id AS author_event_id, c.payload_json,
       (c.event_id IS NOT NULL AND c.redacted_at IS NULL
        AND ac.event_id IS NOT NULL AND ac.redacted_at IS NULL) AS content_available
     FROM claim_heads pins JOIN events h ON h.problem_id = ? AND h.seq = pins.head_seq
@@ -137,18 +132,19 @@ export async function readReviewQueuePack(
       kind: row.kind,
       statement: row.statement,
       falsifier: row.falsifier,
-      prospective_independence_tier: independenceTier(
+      prospective_independence_tier: scientificIndependence(
         {
           sponsorId: row.sponsor_id,
-          modelFamily: row.model,
-          methodBasis: resolveClaimMethodBasis(row.kind, row.statement),
+          provenance: null,
         },
         {
           sponsorId: reviewer.sponsorId,
-          modelFamily: reviewer.modelFamily,
-          methodBasis: reviewer.methodBasis ?? "",
+          provenance: null,
         },
+        [],
       ),
+      independence_note:
+        "Family is self-declared; method evidence is checked at review submission. Model version and harness do not establish independence.",
       author_fellow: row.fellow_id,
       author_sponsor: row.sponsor_id,
       author_session: row.session_id,
@@ -210,7 +206,8 @@ export async function readTargetClaimPack(
           'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,
           'fellow', e.actor_fellow_id, 'sponsor', e.actor_sponsor_id,
           'session', e.actor_session_id, 'model_self_declared', e.model_string_self_declared,
-          'harness_self_declared', e.harness) END AS body
+          'harness_self_declared', e.harness,
+          'scientific_provenance', json_extract(c.payload_json, '$.scientific_provenance')) END AS body
       FROM claim_versions v JOIN events e
         ON e.problem_id = v.problem_id AND e.object_id = v.claim_id
        AND e.object_version = v.version AND e.object_kind = 'claim'
@@ -231,6 +228,9 @@ export async function readTargetClaimPack(
           'computation_domain_or_floor', x.computation_domain_or_floor,
           'reproduction', json(x.reproduction_json), 'selected_hypothesis_id', x.selected_hypothesis_id,
           'body_md', x.body_md, 'cas_hash', x.cas_hash,
+          'content_digest', 'sha256:' || e.payload_sha256,
+          'falsification_check', json_extract(c.payload_json, '$.falsification_check'),
+          'formal_artifact', json_extract(c.payload_json, '$.formal_artifact'),
           'event', e.id, 'seq', e.seq, 'fellow', e.actor_fellow_id,
           'sponsor', e.actor_sponsor_id, 'session', e.actor_session_id,
           'model_self_declared', e.model_string_self_declared, 'harness_self_declared', e.harness
@@ -250,6 +250,9 @@ export async function readTargetClaimPack(
         CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
           'problem', x.problem_id, 'target', x.target_claim_id || '@' || x.target_version,
           'tier', x.tier, 'verdict', x.verdict, 'basis', x.basis,
+          'independence_policy', coalesce(json_extract(c.payload_json, '$.independence_policy'), 'legacy-unverified'),
+          'scientific_provenance', json_extract(c.payload_json, '$.scientific_provenance'),
+          'verification', json_extract(c.payload_json, '$.verification'),
           'capable_of_failure', x.capable_of_failure, 'rubric', json(x.rubric_json),
           'body_md', x.body_md, 'cas_hash', x.cas_hash,
           'event', e.id, 'seq', e.seq, 'fellow', e.actor_fellow_id,

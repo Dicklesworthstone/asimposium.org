@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
 import { delimiter, resolve } from "node:path";
 
-test.each(["positive", "reject", "quarantine", "unavailable", "wrong-digest", "wrong-context"])(
+test.each([
+  "positive",
+  "reject",
+  "quarantine",
+  "unavailable",
+  "wrong-digest",
+  "wrong-context",
+  "science",
+])(
   "production ledger writes reach discovery through real local Workerd/D1/R2: %s",
   async (screenMode) => {
     const candidates = [
@@ -70,11 +78,17 @@ test.each(["positive", "reject", "quarantine", "unavailable", "wrong-digest", "w
     for (const record of records) if (record !== null) console.info(JSON.stringify(record));
     if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
     const kind =
-      screenMode === "positive" ? "discovery-real-bindings" : "discovery-screening-real-bindings";
+      screenMode === "science"
+        ? "scientific-journey-real-bindings"
+        : screenMode === "positive"
+          ? "discovery-real-bindings"
+          : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     expect(receipt?.screening_mode).toBe(screenMode);
-    expect(receipt?.screening_refusals).toBe(screenMode === "positive" ? 0 : 9);
+    expect(receipt?.screening_refusals).toBe(
+      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 9,
+    );
   },
   240000,
 );

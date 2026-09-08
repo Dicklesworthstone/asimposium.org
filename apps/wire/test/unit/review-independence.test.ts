@@ -1,273 +1,159 @@
 import { describe, expect, test } from "bun:test";
-
+import { ScientificProvenanceSchema } from "@asimposium/contracts";
 import {
-  independenceTier,
-  type ReviewAttribution,
   reviewerIsAuthor,
+  scientificIndependence,
   tierMovesDisclosure,
 } from "../../src/ledger/review-independence.ts";
 
-const A: ReviewAttribution = { sponsorId: "SP-1", modelFamily: "claude", methodBasis: "search" };
-
-describe("W5.7 review independence tiers", () => {
-  test("P1: the author can never review their own object", () => {
-    expect(reviewerIsAuthor("F-1", "F-1")).toBe(true);
-    expect(reviewerIsAuthor("F-1", "F-2")).toBe(false);
+const digest = "a".repeat(64);
+const evidence = {
+  evidenceId: "E-1",
+  payloadDigest: digest,
+  eventId: "EVENT-1",
+  fellowId: "F-reviewer",
+  sponsorId: "SP-2",
+  kind: "computation",
+  direction: "supports",
+  body: "Checked divisibility through n=100.",
+  payload: { reproduction: { commands: ["python check.py"] } },
+};
+const methodReview = { reviewerFellowId: "F-reviewer" };
+const declaration = (
+  family: string | null,
+  category: "deductive" | "computation" = "deductive",
+  grounded = false,
+) =>
+  ScientificProvenanceSchema.parse({
+    model_family_self_declared: family,
+    method: {
+      category,
+      procedure: "Public check of the stated divisibility argument.",
+      evidence: grounded ? [{ evidence_id: evidence.evidenceId, digest: `sha256:${digest}` }] : [],
+    },
   });
+const author = { sponsorId: "SP-1", provenance: declaration("gpt") };
 
-  test("T0 same sponsor; T1 different sponsor, same model family; T2 different model family; T3 disjoint method", () => {
-    expect(independenceTier(A, { ...A })).toBe("T0");
-    expect(independenceTier(A, { ...A, sponsorId: "SP-2" })).toBe("T1");
+describe("immutable declared scientific independence", () => {
+  test("T0 sponsor, T1 family, T2 different family, T3 resolved disjoint procedure", () => {
     expect(
-      independenceTier(A, { sponsorId: "SP-2", modelFamily: "gpt", methodBasis: "search" }),
+      scientificIndependence(
+        author,
+        { sponsorId: "SP-1", provenance: declaration("claude", "computation", true) },
+        [evidence],
+      ),
+    ).toBe("T0");
+    expect(
+      scientificIndependence(
+        author,
+        { sponsorId: "SP-2", provenance: declaration("gpt", "computation", true) },
+        [evidence],
+      ),
+    ).toBe("T1");
+    expect(
+      scientificIndependence(author, { sponsorId: "SP-2", provenance: declaration("claude") }, []),
     ).toBe("T2");
     expect(
-      independenceTier(A, { sponsorId: "SP-2", modelFamily: "gpt", methodBasis: "proof-search" }),
+      scientificIndependence(
+        author,
+        { sponsorId: "SP-2", provenance: declaration("claude", "computation", true) },
+        [evidence],
+        methodReview,
+      ),
     ).toBe("T3");
   });
 
-  test("strongly-supported requires T2 or higher", () => {
-    expect(tierMovesDisclosure("T0")).toBe(false);
-    expect(tierMovesDisclosure("T1")).toBe(false);
-    expect(tierMovesDisclosure("T2")).toBe(true);
-    expect(tierMovesDisclosure("T3")).toBe(true);
-  });
-
-  test("aliases and version spellings of one family refuse T2 and return T1", () => {
-    const author: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "openai/gpt-5.6",
-      methodBasis: "deductive",
-    };
-    // Different version punctuation and aliases of gpt-5
-    expect(
-      independenceTier(author, {
-        sponsorId: "SP-2",
-        modelFamily: "openai/gpt-5.6-latest",
-        methodBasis: "computational",
-      }),
-    ).toBe("T1");
-    expect(
-      independenceTier(author, {
-        sponsorId: "SP-2",
-        modelFamily: "gpt-5.6-turbo",
-        methodBasis: "computational",
-      }),
-    ).toBe("T1");
-    expect(
-      independenceTier(author, {
-        sponsorId: "SP-2",
-        modelFamily: "gpt-5",
-        methodBasis: "computational",
-      }),
-    ).toBe("T1");
-
-    // Claude 3.7 variants
-    const claudeAuthor: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "anthropic/claude-3-7-sonnet",
-      methodBasis: "deductive",
-    };
-    expect(
-      independenceTier(claudeAuthor, {
-        sponsorId: "SP-2",
-        modelFamily: "claude-3.7-sonnet-latest",
-        methodBasis: "computational",
-      }),
-    ).toBe("T1");
-
-    // Gemini variants
-    const geminiAuthor: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "google/gemini-2.5-pro",
-      methodBasis: "deductive",
-    };
-    expect(
-      independenceTier(geminiAuthor, {
-        sponsorId: "SP-2",
-        modelFamily: "gemini-2.5-flash",
-        methodBasis: "computational",
-      }),
-    ).toBe("T1");
-
-    // Grok variants
-    const grokAuthor: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "xai/grok-3",
-      methodBasis: "deductive",
-    };
-    expect(
-      independenceTier(grokAuthor, {
-        sponsorId: "SP-2",
-        modelFamily: "grok-3-mini",
-        methodBasis: "computational",
-      }),
-    ).toBe("T1");
-  });
-
-  test("genuinely distinct declared families earn T2", () => {
-    const author: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "openai/gpt-5.6",
-      methodBasis: "deductive",
-    };
-    // GPT-5 vs Claude 3.7
-    expect(
-      independenceTier(author, {
-        sponsorId: "SP-2",
-        modelFamily: "anthropic/claude-3.7-sonnet",
-        methodBasis: "deductive",
-      }),
-    ).toBe("T2");
-
-    // Same provider (openai), distinct families (gpt-5 vs o3)
-    expect(
-      independenceTier(author, {
-        sponsorId: "SP-2",
-        modelFamily: "openai/o3",
-        methodBasis: "deductive",
-      }),
-    ).toBe("T2");
-
-    // Different providers (anthropic vs bedrock), same underlying family (claude-3.7) -> refuses T2
-    expect(
-      independenceTier(
-        { sponsorId: "SP-1", modelFamily: "anthropic/claude-3.7-sonnet", methodBasis: "deductive" },
-        { sponsorId: "SP-2", modelFamily: "bedrock/claude-3.7-sonnet", methodBasis: "deductive" },
-      ),
-    ).toBe("T1");
-
-    // Gemini vs Llama
-    expect(
-      independenceTier(
-        { sponsorId: "SP-1", modelFamily: "google/gemini-2.5-pro", methodBasis: "deductive" },
-        { sponsorId: "SP-2", modelFamily: "meta/llama-3.3-70b", methodBasis: "deductive" },
-      ),
-    ).toBe("T2");
-
-    // DeepSeek vs GPT
-    expect(
-      independenceTier(
-        { sponsorId: "SP-1", modelFamily: "deepseek-r1", methodBasis: "deductive" },
-        { sponsorId: "SP-2", modelFamily: "openai/gpt-5", methodBasis: "deductive" },
-      ),
-    ).toBe("T2");
-  });
-
-  test("missing or unknown model data refuses T2 and caps at T1", () => {
-    const author: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "openai/gpt-5.6",
-      methodBasis: "deductive",
-    };
-    for (const unknownModel of [
-      "",
-      "   ",
-      "unknown",
-      "unspecified",
-      "undefined",
-      "none",
-      "n/a",
-      "custom-unrecognized",
-    ]) {
+  test("missing or unknown family cannot earn cross-family credit", () => {
+    for (const provenance of [null, declaration(null)]) {
+      expect(scientificIndependence(author, { sponsorId: "SP-2", provenance }, [])).toBe("T1");
       expect(
-        independenceTier(author, {
-          sponsorId: "SP-2",
-          modelFamily: unknownModel,
-          methodBasis: "computational",
-        }),
-      ).toBe("T1");
-      expect(
-        independenceTier(
-          { sponsorId: "SP-1", modelFamily: unknownModel, methodBasis: "deductive" },
-          { sponsorId: "SP-2", modelFamily: "openai/gpt-5.6", methodBasis: "computational" },
+        scientificIndependence(
+          { ...author, provenance },
+          { sponsorId: "SP-2", provenance: declaration("claude") },
+          [],
         ),
       ).toBe("T1");
     }
+    for (const family of ["", "unknown", "unspecified", "none", "null", "missing"]) {
+      expect(
+        ScientificProvenanceSchema.safeParse({ model_family_self_declared: family }).success,
+      ).toBe(false);
+    }
   });
 
-  test("changed harness with unchanged method refuses T3 and returns T2", () => {
-    // Both read the same derivation (method: deductive)
-    // Even though author uses codex and reviewer uses claude-code
-    const author: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "openai/gpt-5.6",
-      methodBasis: "deductive",
-    };
-    const reviewer: ReviewAttribution = {
-      sponsorId: "SP-2",
-      modelFamily: "anthropic/claude-3.7-sonnet",
-      methodBasis: "deductive",
-    };
-    expect(independenceTier(author, reviewer)).toBe("T2");
-
-    // Client harness strings passed as methodBasis never earn T3
+  test("unresolved, wrong-id or wrong-digest method references cannot earn T3", () => {
+    const reviewer = { sponsorId: "SP-2", provenance: declaration("claude", "computation", true) };
+    for (const references of [
+      [],
+      [{ ...evidence, evidenceId: "E-2" }],
+      [{ ...evidence, payloadDigest: "b".repeat(64) }],
+    ]) {
+      expect(scientificIndependence(author, reviewer, references, methodReview)).toBe("T2");
+    }
     expect(
-      independenceTier(
-        { sponsorId: "SP-1", modelFamily: "openai/gpt-5.6", methodBasis: "codex" },
-        {
-          sponsorId: "SP-2",
-          modelFamily: "anthropic/claude-3.7-sonnet",
-          methodBasis: "claude-code",
-        },
+      scientificIndependence(
+        author,
+        { ...reviewer, provenance: declaration("claude", "computation") },
+        [],
       ),
     ).toBe("T2");
   });
 
-  test("same harness with documented disjoint method earns T3", () => {
-    // Both fellows used the same client software (e.g. codex), but reviewer executed
-    // an independent computational rerun against the author's deductive proof
-    const author: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "openai/gpt-5.6",
-      methodBasis: "deductive",
-    };
-    const reviewer: ReviewAttribution = {
-      sponsorId: "SP-2",
-      modelFamily: "anthropic/claude-3.7-sonnet",
-      methodBasis: "computational",
-    };
-    expect(independenceTier(author, reviewer)).toBe("T3");
-  });
-
-  test("absent or unknown method evidence refuses T3 and returns T2", () => {
-    const author: ReviewAttribution = {
-      sponsorId: "SP-1",
-      modelFamily: "openai/gpt-5.6",
-      methodBasis: "deductive",
-    };
-    for (const unknownMethod of ["", "   ", "unknown", "unspecified", "undefined", "looks-right"]) {
-      expect(
-        independenceTier(author, {
-          sponsorId: "SP-2",
-          modelFamily: "anthropic/claude-3.7-sonnet",
-          methodBasis: unknownMethod,
-        }),
-      ).toBe("T2");
+  test("borrowed arguments and unsupported method labels cannot manufacture T3", () => {
+    const reviewer = { sponsorId: "SP-2", provenance: declaration("claude", "computation", true) };
+    for (const publication of [
+      { ...evidence, fellowId: "F-author" },
+      { ...evidence, sponsorId: "SP-1" },
+      { ...evidence, kind: "argument" },
+      { ...evidence, payload: {} },
+    ]) {
+      expect(scientificIndependence(author, reviewer, [publication], methodReview)).toBe("T2");
     }
+    expect(scientificIndependence(author, reviewer, [evidence])).toBe("T2");
   });
 
-  test("same sponsor always returns T0 regardless of model or method", () => {
+  test("raw model aliases, harness and prose keywords are not provenance declarations", () => {
+    for (const model of [
+      "openai/gpt-5.6",
+      "openai/gpt-5.6-latest",
+      "test-model",
+      "another-model",
+      "forged-model",
+    ]) {
+      expect(
+        ScientificProvenanceSchema.safeParse({
+          model,
+          harness: "claude-code",
+          basis: "not an independent rerun",
+          rubric: ["independent-rerun"],
+        }).success,
+      ).toBe(false);
+    }
+    // Future families need no code catalog. This remains visibly self-declared.
     expect(
-      independenceTier(
-        { sponsorId: "SP-1", modelFamily: "openai/gpt-5.6", methodBasis: "deductive" },
-        {
-          sponsorId: "SP-1",
-          modelFamily: "anthropic/claude-3.7-sonnet",
-          methodBasis: "computational",
-        },
+      scientificIndependence(
+        author,
+        { sponsorId: "SP-2", provenance: declaration("future-family") },
+        [],
       ),
-    ).toBe("T0");
+    ).toBe("T2");
   });
 
-  test("the tier is over the immutable attribution, never the current binding", () => {
-    // The same two records always compute the same tier — a later transfer
-    // cannot change a historical review's independence.
-    const reviewer: ReviewAttribution = {
-      sponsorId: "SP-2",
-      modelFamily: "gpt",
-      methodBasis: "proof-search",
-    };
-    expect(independenceTier(A, reviewer)).toBe(independenceTier(A, { ...reviewer }));
+  test("an immutable record is unaffected by a later sponsor transfer", () => {
+    const published = { sponsorId: "SP-2", provenance: declaration("claude") };
+    const before = scientificIndependence(author, published, []);
+    const currentBinding = { ...published, sponsorId: "SP-1" };
+    expect(scientificIndependence(author, currentBinding, [])).toBe("T0");
+    expect(scientificIndependence(author, published, [])).toBe(before);
+  });
+
+  test("self-review is separately refused; only cross-family tiers satisfy disclosure", () => {
+    expect(reviewerIsAuthor("F-1", "F-1")).toBe(true);
+    expect(reviewerIsAuthor("F-1", "F-2")).toBe(false);
+    expect(
+      ["T0", "T1", "T2", "T3"].map((tier) =>
+        tierMovesDisclosure(tier as "T0" | "T1" | "T2" | "T3"),
+      ),
+    ).toEqual([false, false, true, true]);
   });
 });

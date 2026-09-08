@@ -190,21 +190,14 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     const first = before.candidates[0];
     if (first === undefined) throw new Error("expected a review candidate");
     expect(JSON.parse(first.body).prospective_independence_tier).toBe("T0");
-    for (const [modelFamily, methodBasis, tier] of [
-      [f.binding.model, f.binding.harness, "T1"],
-      ["another-model", f.binding.harness, "T2"],
-      ["another-model", "another-method", "T3"],
-    ] as const) {
-      const queue = await readReviewQueuePack(f.db, "P-4DSP", cut, {
-        ...attribution,
-        sponsorId: "another-sponsor",
-        modelFamily,
-        methodBasis,
-      });
-      const candidate = queue.candidates[0];
-      if (candidate === undefined) throw new Error("expected an independence candidate");
-      expect(JSON.parse(candidate.body).prospective_independence_tier).toBe(tier);
-    }
+    const queue = await readReviewQueuePack(f.db, "P-4DSP", cut, {
+      fellowId: attribution.fellowId,
+      sponsorId: "another-sponsor",
+    });
+    const candidate = queue.candidates[0];
+    if (candidate === undefined) throw new Error("expected an independence candidate");
+    expect(JSON.parse(candidate.body).prospective_independence_tier).toBe("T1");
+    expect(JSON.parse(candidate.body).independence_note).toContain("self-declared");
     const response = await reviewer.call(`${path}/pack?profile=review-queue&max_tokens=8000`);
     const bytes = await response.text();
     const pack = PackResponseSchema.parse(JSON.parse(bytes));
@@ -308,8 +301,6 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     const section = await readReviewQueuePack(f.db, "P-4DSP", 1000, {
       fellowId: reviewer.binding.fellowId,
       sponsorId: reviewer.binding.sponsorId,
-      modelFamily: reviewer.binding.model,
-      methodBasis: reviewer.binding.harness,
     });
     expect(section.targets).toHaveLength(20);
     expect(section.targets[0]).toBe("C-1@1");
@@ -7183,23 +7174,13 @@ describe("session protocol routes", () => {
       })),
     ).toEqual([
       expect.objectContaining({
-        kind: "run",
-        sql: expect.stringContaining("FROM events JOIN selected_claims"),
-        bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
-      }),
-      expect.objectContaining({
-        kind: "run",
-        sql: expect.stringContaining("FROM reviews JOIN selected_claims"),
-        bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
-      }),
-      expect.objectContaining({
-        kind: "run",
-        sql: expect.stringContaining("FROM evidence JOIN selected_claims"),
+        kind: "all",
+        sql: expect.stringContaining("JOIN selected_claims s"),
         bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
       }),
     ]);
-    // The cap-level regression above pins disposition reads to one three-query
-    // batch; adding another per-claim read must fail this exact witness.
+    // One joined read covers the bounded claim set and its publication content;
+    // adding another per-claim read must fail this exact witness.
   }, 20000);
 
   test("PLANTED: createApp refuses a corrupt oversized claim without reflecting it", async () => {
@@ -9786,7 +9767,7 @@ describe("committed promotion outbox nudge", () => {
   });
 
   describe("review independence tiers mounted routes (okkp)", () => {
-    test("mounted routes enforce honest tiers: harness never upgrades, aliases refuse T2, disjoint method earns T3", async () => {
+    test("mounted routes require declarations and evidence: aliases and harnesses cannot manufacture tiers", async () => {
       const f = await fixture();
 
       // 1. Author Fellow under Sponsor 1 with GPT-5.6 and codex harness
@@ -9826,6 +9807,14 @@ describe("committed promotion outbox nudge", () => {
           kind: "conjecture",
           statement: "Every planar graph admits a 4-coloring.",
           falsifier: "A planar graph requiring at least 5 colors.",
+          scientific_provenance: {
+            model_family_self_declared: "gpt",
+            method: {
+              category: "deductive",
+              procedure: "Inspect a complete coloring derivation.",
+              evidence: [],
+            },
+          },
         }),
       });
       expect(promoteRes.status).toBe(201);
@@ -9929,6 +9918,7 @@ describe("committed promotion outbox nudge", () => {
             target_version: 1,
             verdict: "confirm",
             basis: "Checked derivation with gpt-5.6-latest.",
+            scientific_provenance: { model_family_self_declared: "gpt" },
             capable_of_failure: "A 5-chromatic planar graph.",
             body_md: "Review from gpt-5.6-latest.",
           }),
@@ -9967,7 +9957,7 @@ describe("committed promotion outbox nudge", () => {
         })
       ).json()) as { session_id: string };
 
-      // Queue readback: prospective tier is T2 (changing harness does NOT upgrade to T3)
+      // Queue guidance cannot promise family/method credit before submission.
       const diffHarnessPackRes = await diffHarnessFellow.call(
         `/v1/sessions/${diffHarnessSession.session_id}/pack?profile=review-queue&max_tokens=8000`,
       );
@@ -9979,7 +9969,7 @@ describe("committed promotion outbox nudge", () => {
       );
       expect(diffHarnessCandidate).toBeDefined();
       if (diffHarnessCandidate) {
-        expect(JSON.parse(diffHarnessCandidate.body).prospective_independence_tier).toBe("T2");
+        expect(JSON.parse(diffHarnessCandidate.body).prospective_independence_tier).toBe("T1");
       }
 
       // Review submission: reading the proof derivation -> method is deductive (unchanged from author's conjecture)
@@ -9993,6 +9983,14 @@ describe("committed promotion outbox nudge", () => {
             target_version: 1,
             verdict: "confirm",
             basis: "read the proof and verified quantifier scope and inference chain",
+            scientific_provenance: {
+              model_family_self_declared: "claude",
+              method: {
+                category: "deductive",
+                procedure: "Inspect the same derivation.",
+                evidence: [],
+              },
+            },
             rubric: ["statement-match", "quantifier-scope"],
             capable_of_failure: "A 5-chromatic planar graph.",
             body_md: "Proof inspection in claude-code.",
@@ -10007,7 +10005,7 @@ describe("committed promotion outbox nudge", () => {
       // Changing harness from codex to claude-code did NOT upgrade to T3 because method is unchanged!
       expect(diffHarnessReview.tier).toBe("T2");
 
-      // 6. Different family, SAME harness as author (codex), documented disjoint method (computational) -> T3!
+      // 6. A declared different method still requires published evidence.
       const disjointFellow = await addApprovedFellow(f, {
         suffix: "disjoint-method",
         scopes: ["review"],
@@ -10033,6 +10031,14 @@ describe("committed promotion outbox nudge", () => {
             target_version: 1,
             verdict: "confirm",
             basis: "reran computational simulation independently over 10000 random planar graphs",
+            scientific_provenance: {
+              model_family_self_declared: "claude",
+              method: {
+                category: "computation",
+                procedure: "A claimed simulation without published evidence.",
+                evidence: [],
+              },
+            },
             rubric: ["independent-rerun", "numerical-stability"],
             capable_of_failure: "A counterexample planar graph requiring 5 colors.",
             body_md: "Monte Carlo planar graph coloring simulation.",
@@ -10044,8 +10050,9 @@ describe("committed promotion outbox nudge", () => {
         review_id: string;
         tier: string;
       };
-      // Earns T3 due to genuine disjoint scientific method, despite using the exact same harness!
-      expect(disjointReview.tier).toBe("T3");
+      // A claimed rerun without published evidence cannot earn T3. The real
+      // Workerd scientific journey separately proves the grounded T3 path.
+      expect(disjointReview.tier).toBe("T2");
 
       // 7. Deliberate unjustified lookalike (vague basis without method) -> stays at T2
       const lookalikeFellow = await addApprovedFellow(f, {
@@ -10073,6 +10080,7 @@ describe("committed promotion outbox nudge", () => {
             target_version: 1,
             verdict: "confirm",
             basis: "looks right, verified",
+            scientific_provenance: { model_family_self_declared: "gemini" },
             capable_of_failure: "A counterexample",
             body_md: "Unjustified lookalike review.",
           }),
@@ -10111,247 +10119,161 @@ describe("committed promotion outbox nudge", () => {
       expect(tiersByReviewId.get(sameSponsorReview.review_id)).toBe("T0");
       expect(tiersByReviewId.get(aliasReview.review_id)).toBe("T1");
       expect(tiersByReviewId.get(diffHarnessReview.review_id)).toBe("T2");
-      expect(tiersByReviewId.get(disjointReview.review_id)).toBe("T3");
+      expect(tiersByReviewId.get(disjointReview.review_id)).toBe("T2");
       expect(tiersByReviewId.get(lookalikeReview.review_id)).toBe("T2");
     });
   });
 
-  describe("scientific dispositions reachability and mounted journey (asimposiumorg-dqjd)", () => {
-    test("full mounted journey from open to corroborated to strongly-supported with causal negatives", async () => {
-      const f = await fixture();
-      const author = await addApprovedFellow(f, {
-        suffix: "dqjd-author",
+  describe("scientific dispositions through canonical publications (asimposiumorg-dqjd)", () => {
+    test("grounded write-up reviews earn support; unsupported assertions do not", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, call = f.call, expected = 201) => {
+        const response = await call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `grounded-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(expected);
+        return (await response.json()) as Record<string, unknown>;
+      };
+      await post(`${f.path}/revise`, {
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "conjecture",
+        statement: "Every even natural number is divisible by two.",
+        falsifier: "An even natural number with nonzero remainder modulo two.",
+        scientific_provenance: { model_family_self_declared: "gpt" },
+      });
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "grounded-reviewer",
         scopes: ["promote", "review"],
-        model: "openai/gpt-5.6",
+        model: "claude",
         harness: "codex",
-        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_author" },
+        sponsor: { type: "sponsor", sponsorId: "usr_groundedreviewer" },
       });
-
-      // 1. Author opens session and pushes workshop item
-      const authorSessionRes = await author.call("/v1/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-author-sess" },
-        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
-      });
-      expect(authorSessionRes.status).toBe(201);
-      const authorSession = (await authorSessionRes.json()) as { session_id: string };
-
-      const workshopRes = await author.call(`/v1/sessions/${authorSession.session_id}/workshop`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-workshop-claim" },
-        body: JSON.stringify({
-          type: "draft",
-          title: "Planar 4-coloring",
-          body_md:
-            "Claim: every planar graph is 4-colorable. Falsifier: a planar 5-chromatic graph.",
-          relates_to: [],
-        }),
-      });
-      expect(workshopRes.status).toBe(201);
-      const workshop = (await workshopRes.json()) as { workshop_id: string };
-
-      // 2. Author promotes claim
-      const promoteRes = await author.call(`/v1/sessions/${authorSession.session_id}/promote`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-promote-claim" },
-        body: JSON.stringify({
-          workshop_id: workshop.workshop_id,
-          kind: "conjecture",
-          statement: "Every planar graph is 4-colorable.",
-          falsifier: "A planar graph requiring 5 colors.",
-          relates_to: [],
-          depends_on: [],
-        }),
-      });
-      expect(promoteRes.status, await promoteRes.clone().text()).toBe(201);
-      const { claim_id: claimId } = (await promoteRes.json()) as { claim_id: string };
-
-      // Check pack before any reviews or evidence: disposition is open
-      const pack1Res = await author.call(
-        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      const session = await post(
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "review" },
+        reviewer.call,
       );
-      expect(pack1Res.status).toBe(200);
-      const pack1 = PackResponseSchema.parse(await pack1Res.json());
-      const claimItem1 = pack1.items.find((item) => item.id === claimId);
-      expect(claimItem1?.body).toContain("(seq 1, open):");
-
-      // 3. Reviewer 1 (independent sponsor & model) submits supporting review without any falsification check
-      const reviewer1 = await addApprovedFellow(f, {
-        suffix: "dqjd-rev-1",
-        scopes: ["review"],
-        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_1" },
-        model: "anthropic/claude-3.5-sonnet",
-        harness: "claude-code",
-      });
-      const rev1SessionRes = await reviewer1.call("/v1/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev1-sess" },
-        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
-      });
-      expect(rev1SessionRes.status).toBe(201);
-      const rev1Session = (await rev1SessionRes.json()) as { session_id: string };
-
-      const review1Res = await reviewer1.call(`/v1/sessions/${rev1Session.session_id}/review`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev-1-post" },
-        body: JSON.stringify({
-          target_claim_id: claimId,
-          target_version: 1,
-          verdict: "confirm",
-          basis: "Verified the proof reduction independently.",
-          capable_of_failure: "a counterexample on 4-cycle",
-          full_write_up: true,
-          body_md: "Quantifiers and coloring cases verified.",
-        }),
-      });
-      expect(review1Res.status).toBe(201);
-      const review1Data = (await review1Res.json()) as { tier: string; full_write_up?: boolean };
-      expect(review1Data.tier).toBe("T2");
-      expect(review1Data.full_write_up).toBe(true);
-
-      // Pack check: Review exists, but without a recorded falsification check, disposition displays "open · unchallenged" (ADR-9)
-      const pack2Res = await author.call(
-        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      const path = `/v1/sessions/${session.session_id}`;
+      const targetPack = PackResponseSchema.parse(
+        await (
+          await reviewer.call(`${path}/pack?profile=review&target=C-1@2&max_tokens=8000`)
+        ).json(),
       );
-      expect(pack2Res.status).toBe(200);
-      const pack2 = PackResponseSchema.parse(await pack2Res.json());
-      const claimItem2 = pack2.items.find((item) => item.id === claimId);
-      expect(claimItem2?.body).toContain("(seq 1, open · unchallenged):");
-
-      // 4. Author submits evidence with a valid falsification check
-      const evidenceRes = await author.call(`/v1/sessions/${authorSession.session_id}/evidence`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-evidence-check" },
-        body: JSON.stringify({
+      const targetItem = targetPack.items.find((item) => item.kind === "claim-detail");
+      if (!targetItem) throw new Error("Exact claim version is missing from the review pack");
+      const target = JSON.parse(targetItem.body);
+      const review = {
+        target_claim_id: "C-1",
+        target_version: 2,
+        verdict: "confirm",
+        basis: "Checked divisibility and the zero case.",
+        capable_of_failure: "A nonzero remainder.",
+        scientific_provenance: { model_family_self_declared: "claude" },
+        body_md: "Write n=2k by evenness. Its remainder modulo two is zero, including k=0.",
+      };
+      const standing = async (expected: string) => {
+        const pack = PackResponseSchema.parse(
+          await (await reviewer.call(`${path}/pack?profile=working&max_tokens=8000`)).json(),
+        );
+        expect(pack.items.find((item) => item.id === "C-1")?.body).toContain(`, ${expected}):`);
+      };
+      expect(
+        (await post(`${path}/review`, { ...review, full_write_up: true }, reviewer.call, 422)).code,
+      ).toBe("REVIEW_BODY_INVALID");
+      expect((await post(`${path}/review`, review, reviewer.call)).tier).toBe("T2");
+      await standing("open · unchallenged");
+      const evidence = await post(`${f.path}/evidence`, {
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 2,
+        direction: "supports",
+        kind: "argument",
+        mode: "confirmatory",
+        source: {
+          kind: "locator",
+          locator: "https://example.invalid/even",
+          excerpt: "Definition and complete divisibility argument.",
+        },
+        body_md: review.body_md,
+      });
+      const evidencePack = PackResponseSchema.parse(
+        await (
+          await reviewer.call(`${path}/pack?profile=review&target=C-1@2&max_tokens=8000`)
+        ).json(),
+      );
+      const materialItem = evidencePack.items.find((item) => item.id === evidence.evidence_id);
+      if (!materialItem) throw new Error("Published evidence is missing from the review pack");
+      const material = JSON.parse(materialItem.body);
+      const reference = { evidence_id: evidence.evidence_id, digest: material.content_digest };
+      await post(
+        `${path}/evidence`,
+        {
           bears_on_kind: "claim",
-          bears_on_id: claimId,
-          bears_on_version: 1,
-          direction: "supports",
-          kind: "computation",
+          bears_on_id: "C-1",
+          bears_on_version: 2,
+          direction: "informs",
+          kind: "argument",
+          mode: "confirmatory",
           source: {
             kind: "locator",
-            locator: "https://example.org/check",
-            excerpt: "exhaustive check across 1000 configurations",
+            locator: "https://example.invalid/even-check",
+            excerpt: "Attempted a nonzero-remainder witness.",
           },
-          computation_domain_or_floor: "exhaustive check across 1000 configurations",
-          mode: "confirmatory",
-          body_md: "Computer check confirmed no 5-chromatic planar graph exists in search space.",
           falsification_check: {
-            attempted_falsifier: "search for 5-chromatic planar subgraph",
-            capable_of_failure: "finding any configuration requiring 5 colors",
-            result: "unsuccessful-refutation",
-            evidence_references: [],
+            target_digest: target.content_digest,
+            attempted_falsifier: "Find an even n with nonzero remainder.",
+            capable_of_failure: "The remainder is nonzero.",
+            result: "survived",
+            evidence: [reference],
           },
-        }),
-      });
-      expect(evidenceRes.status).toBe(201);
-
-      // 5. Reviewer 2 (second distinct independent fellow with recognized model) submits review
-      // Now that an attempt is recorded, this review corroborates the claim!
-      const reviewer2 = await addApprovedFellow(f, {
-        suffix: "dqjd-rev-2",
+          body_md: "The complete argument rules out the proposed nonzero-remainder witness.",
+        },
+        reviewer.call,
+      );
+      await standing("corroborated");
+      const verification = {
+        kind: "full-write-up",
+        target_digest: target.content_digest,
+        evidence: reference,
+        coverage: ["evenness definition", "divisibility", "zero case"],
+        result: "verified",
+      };
+      await post(`${path}/review`, { ...review, verification }, reviewer.call);
+      await standing("corroborated");
+      const second = await addApprovedFellow(f, {
+        suffix: "grounded-second",
         scopes: ["review"],
-        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_2" },
-        model: "google/gemini-2.0-flash",
-        harness: "gemini-cli",
+        model: "gemini",
+        harness: "codex",
+        sponsor: { type: "sponsor", sponsorId: "usr_groundedsecond" },
       });
-      const rev2SessionRes = await reviewer2.call("/v1/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev2-sess" },
-        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
-      });
-      expect(rev2SessionRes.status).toBe(201);
-      const rev2Session = (await rev2SessionRes.json()) as { session_id: string };
-
-      const review2Res = await reviewer2.call(`/v1/sessions/${rev2Session.session_id}/review`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev-2-post" },
-        body: JSON.stringify({
-          target_claim_id: claimId,
-          target_version: 1,
-          verdict: "confirm",
-          basis: "Independently reconstructed Kempe chain reduction.",
-          capable_of_failure: "an unavoidable set with an uncolorable configuration",
-          full_write_up: true,
-          body_md: "Second complete independent proof audit passed.",
-        }),
-      });
-      expect(review2Res.status).toBe(201);
-      const review2Data = (await review2Res.json()) as { tier: string; full_write_up?: boolean };
-      expect(review2Data.tier).toBe("T2");
-      expect(review2Data.full_write_up).toBe(true);
-
-      // Pack check: now that a falsification attempt was recorded and an independent review arrived, claim is corroborated!
-      const pack3Res = await author.call(
-        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      const secondSession = await post(
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "review" },
+        second.call,
       );
-      expect(pack3Res.status).toBe(200);
-      const pack3 = PackResponseSchema.parse(await pack3Res.json());
-      const claimItem3 = pack3.items.find((item) => item.id === claimId);
-      expect(claimItem3?.body).toContain("(seq 1, corroborated):");
-
-      // 6. Reviewer 1 submits another review on the corroborated claim to complete the two-reviewer full-write-up journey
-      const reviewer3 = await addApprovedFellow(f, {
-        suffix: "dqjd-rev-3",
-        scopes: ["review"],
-        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_3" },
-        model: "meta-llama/llama-3.3-70b",
-        harness: "vllm",
-      });
-      const rev3SessionRes = await reviewer3.call("/v1/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev3-sess" },
-        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
-      });
-      expect(rev3SessionRes.status).toBe(201);
-      const rev3Session = (await rev3SessionRes.json()) as { session_id: string };
-
-      const review3Res = await reviewer3.call(`/v1/sessions/${rev3Session.session_id}/review`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev-3-post" },
-        body: JSON.stringify({
-          target_claim_id: claimId,
-          target_version: 1,
-          verdict: "confirm",
-          basis: "Independent symbolic verification of the reduction graph.",
-          capable_of_failure: "unavoidable configuration failure",
-          full_write_up: true,
-          body_md: "Third independent full write-up review confirms result.",
-        }),
-      });
-      expect(review3Res.status).toBe(201);
-
-      // Pack check: two or more distinct cross-family full-write-up supporting reviews -> strongly-supported!
-      const pack4Res = await author.call(
-        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      await post(
+        `/v1/sessions/${secondSession.session_id}/review`,
+        {
+          ...review,
+          verification,
+          scientific_provenance: { model_family_self_declared: "gemini" },
+        },
+        second.call,
       );
-      expect(pack4Res.status).toBe(200);
-      const pack4 = PackResponseSchema.parse(await pack4Res.json());
-      const claimItem4 = pack4.items.find((item) => item.id === claimId);
-      expect(claimItem4?.body).toContain("(seq 1, strongly-supported):");
-
-      // 7. Causal negative: revising claim resets disposition to open
-      const reviseRes = await author.call(`/v1/sessions/${authorSession.session_id}/revise`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "dqjd-revise-claim" },
-        body: JSON.stringify({
-          claim_id: claimId,
-          base_version: 1,
-          kind: "conjecture",
-          statement: "Every loopless planar graph is 4-colorable.",
-          falsifier: "A loopless planar graph requiring 5 colors.",
-        }),
+      await standing("strongly-supported");
+      await post(`${f.path}/revise`, {
+        claim_id: "C-1",
+        base_version: 2,
+        kind: "conjecture",
+        statement: "Every positive even natural number is divisible by two.",
+        falsifier: "A positive even n with nonzero remainder.",
       });
-      expect(reviseRes.status).toBe(201);
-
-      // Pack check on revised claim: standing resets to open for @2
-      const pack5Res = await author.call(
-        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
-      );
-      expect(pack5Res.status).toBe(200);
-      const pack5 = PackResponseSchema.parse(await pack5Res.json());
-      const claimItem5 = pack5.items.find((item) => item.id === claimId);
-      expect(claimItem5?.body).toContain(`(seq 6, open):`);
+      await standing("open");
     });
   });
 });

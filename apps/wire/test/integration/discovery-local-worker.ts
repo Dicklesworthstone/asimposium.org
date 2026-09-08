@@ -14,7 +14,7 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
-import { genesisChainDigest } from "../../src/krater/krater.ts";
+import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
@@ -23,6 +23,7 @@ export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
 let screenCalls = 0;
 let screeningDelayMs = 0;
 let revokeDuringNextScreen = false;
+let redactDuringNextScreen: string | null = null;
 type ScreenMode =
   | "pass"
   | "reject"
@@ -35,6 +36,11 @@ let lastScreen: { kind: string; problemId: string; fellowId: string; digest: str
 const app = createApp({
   screenPromotion: async (input, env) => {
     screenCalls += 1;
+    if (redactDuringNextScreen !== null) {
+      const eventId = redactDuringNextScreen;
+      redactDuringNextScreen = null;
+      await redactEventContent(env.DB, eventId, "privacy", new Date().toISOString());
+    }
     // Keep the timer in this request's Workerd I/O context.
     if (screeningDelayMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, screeningDelayMs));
@@ -146,6 +152,23 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   screeningCalls(): number {
     return screenCalls;
+  }
+
+  redactPublicContent(eventId: string) {
+    return redactEventContent(this.env.DB, eventId, "privacy", new Date().toISOString());
+  }
+
+  redactOnNextScreen(eventId: string): void {
+    redactDuringNextScreen = eventId;
+  }
+
+  // Fault-inject a changed current sponsor binding to test historical pins.
+  // There is no mounted transfer workflow yet; this does not certify one or
+  // change immutable grants/tokens. Existing credentials may consequently fail.
+  async changeCurrentSponsor(fellowId: string, sponsorId: string): Promise<void> {
+    await this.env.DB.prepare("UPDATE enrollment_fellows SET sponsor_id = ? WHERE fellow_id = ?")
+      .bind(sponsorId, fellowId)
+      .run();
   }
 
   pauseScreening(): void {

@@ -81,15 +81,26 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
-import {
-  computeCurrentClaimDisposition,
-  type VersionedClaimTimelineEvent,
-} from "../ledger/disposition-read";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
 import { gateReviewSubmission } from "../ledger/review-gate";
-import { resolveClaimMethodBasis, resolveReviewerMethodBasis } from "../ledger/review-independence";
+import { scientificIndependence } from "../ledger/review-independence";
+import {
+  inspectFormalArtifact,
+  isScientificReferenceChanged,
+  readScientificClaim,
+  resolveScientificReferences,
+  SCIENTIFIC_INDEPENDENCE_POLICY,
+  type ScientificClaim,
+  type ScientificContentIdentity,
+  type ScientificEvidence,
+  ScientificInputError,
+  scientificContentGuards,
+  validateFalsificationCheck,
+  validateScientificVerification,
+} from "../ledger/scientific-checks";
+import { readScientificDispositions } from "../ledger/scientific-disposition";
 import {
   publicationProvenance,
   type ScreenedPublication,
@@ -420,60 +431,38 @@ interface PackSessionRow {
   readonly closed_at: string | null;
 }
 
-interface PackClaimEventRow {
-  readonly claim_id: string;
-  readonly seq: number;
-  readonly type: string;
-  readonly object_version: number;
-}
-
-interface PackReviewRow {
-  readonly claim_id: string;
-  readonly review_id: string;
-  readonly reviewer_fellow_id: string;
-  readonly tier: "T0" | "T1" | "T2" | "T3";
-  readonly verdict: string;
-  readonly target_version: number;
-  readonly capable_of_failure: string | null;
-  readonly source_seq: number;
-  readonly payload_json: string | null;
-}
-
-interface PackEvidenceRow {
-  readonly claim_id: string;
-  readonly evidence_id: string;
-  readonly bears_on_version: number;
-  readonly direction: string;
-  readonly kind: string;
-  readonly computed_class: string;
-  readonly source_seq: number;
-  readonly payload_json: string | null;
-}
-
-function safeParseJson(raw: string | null | undefined): Record<string, unknown> | null {
-  if (raw === null || raw === undefined) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function groupPackRows<Row>(
-  rows: readonly Row[],
-  claimIdOf: (row: Row) => string,
-): ReadonlyMap<string, readonly Row[]> {
-  const grouped = new Map<string, Row[]>();
-  for (const row of rows) {
-    const claimId = claimIdOf(row);
-    const existing = grouped.get(claimId);
-    if (existing === undefined) grouped.set(claimId, [row]);
-    else existing.push(row);
-  }
-  return grouped;
+function scientificRefusal(scope: "review" | "evidence", detail: string): Response {
+  return validatedProblem({
+    status: 422,
+    code: scope === "review" ? "REVIEW_BODY_INVALID" : "EVIDENCE_BODY_INVALID",
+    title: "The scientific references do not match the public ledger",
+    detail,
+    fixHint:
+      "Fetch the exact-version review pack and use its claim content_digest and published evidence IDs and content digests. Describe the actual check; omit verification claims you did not perform.",
+    rule: "P9",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example:
+        scope === "review"
+          ? {
+              target_claim_id: "C-1",
+              target_version: 1,
+              verdict: "cannot-verify",
+              basis: "The referenced material was unavailable.",
+              body_md: "No verification is claimed.",
+            }
+          : {
+              bears_on_kind: "claim",
+              bears_on_id: "C-1",
+              bears_on_version: 1,
+              direction: "informs",
+              kind: "argument",
+              source: { kind: "model_memory" },
+              mode: "exploratory",
+              body_md: "Record the available observation without asserting a grounded check.",
+            },
+    },
+  });
 }
 
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
@@ -1885,85 +1874,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // The promote opens it; the reviews on the exact pinned version drive
         // it further (corroborated, disputed, …) via the state machine.
         const selectedClaims = claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT);
-        const selectedClaimCte = `SELECT id FROM claims
-          WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?`;
-        const dispositionResults = await db.batch([
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT events.object_id AS claim_id, events.seq, events.type, events.object_version
-               FROM events JOIN selected_claims ON selected_claims.id = events.object_id
-               WHERE events.problem_id = ? AND events.object_kind = 'claim' AND events.seq <= ?
-               ORDER BY events.seq ASC`,
-            )
-            .bind(
-              session.problem_id,
-              cursor,
-              PACK_CLAIM_CANDIDATE_LIMIT,
-              session.problem_id,
-              cursor,
-            ),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
-                      reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
-                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq,
-                      c.payload_json
-               FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
-               LEFT JOIN event_content c ON c.event_id = reviews.source_event_id AND c.redacted_at IS NULL
-               WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
-                 AND reviews.source_seq <= ?
-               ORDER BY reviews.source_seq ASC`,
-            )
-            .bind(
-              session.problem_id,
-              cursor,
-              PACK_CLAIM_CANDIDATE_LIMIT,
-              session.problem_id,
-              cursor,
-            ),
-          db
-            .prepare(
-              `WITH selected_claims AS (${selectedClaimCte})
-               SELECT evidence.bears_on_id AS claim_id, evidence.evidence_id,
-                      evidence.bears_on_version, evidence.direction, evidence.kind,
-                      evidence.computed_class, evidence.source_seq,
-                      c.payload_json
-               FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
-               LEFT JOIN event_content c ON c.event_id = evidence.source_event_id AND c.redacted_at IS NULL
-               WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
-                 AND evidence.bears_on_version IS NOT NULL
-                 AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
-               ORDER BY evidence.source_seq ASC`,
-            )
-            .bind(
-              session.problem_id,
-              cursor,
-              PACK_CLAIM_CANDIDATE_LIMIT,
-              session.problem_id,
-              cursor,
-            ),
-        ]);
-        const [claimEventsResult, reviewRowsResult, evidenceResult] = dispositionResults;
-        if (
-          claimEventsResult === undefined ||
-          reviewRowsResult === undefined ||
-          evidenceResult === undefined
-        ) {
-          throw new Error("pack disposition batch returned an incomplete result set");
-        }
-        const claimEventsById = groupPackRows(
-          (claimEventsResult.results ?? []) as PackClaimEventRow[],
-          (row) => row.claim_id,
-        );
-        const reviewRowsById = groupPackRows(
-          (reviewRowsResult.results ?? []) as PackReviewRow[],
-          (row) => row.claim_id,
-        );
-        const evidenceById = groupPackRows(
-          (evidenceResult.results ?? []) as PackEvidenceRow[],
-          (row) => row.claim_id,
+        const dispositions = await readScientificDispositions(
+          db,
+          session.problem_id,
+          cursor,
+          PACK_CLAIM_CANDIDATE_LIMIT,
         );
 
         for (const [index, claim] of selectedClaims.entries()) {
@@ -1971,101 +1886,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             claimContentUnavailable = true;
             continue;
           }
-          const claimEvents = claimEventsById.get(claim.id) ?? [];
-          const reviewRows = reviewRowsById.get(claim.id) ?? [];
-          const evidenceRows = evidenceById.get(claim.id) ?? [];
-          const fold = computeCurrentClaimDisposition([
-            ...claimEvents.flatMap((row): VersionedClaimTimelineEvent[] => {
-              if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
-              return [
-                {
-                  kind:
-                    row.type === "claim.created"
-                      ? ("claim-created" as const)
-                      : ("claim-revised" as const),
-                  sequence: row.seq,
-                  version: row.object_version,
-                },
-              ];
-            }),
-            ...reviewRows.map((review): VersionedClaimTimelineEvent => {
-              const payload = safeParseJson(review.payload_json);
-              return {
-                kind: "review-created" as const,
-                sequence: review.source_seq,
-                targetVersion: review.target_version,
-                carriesWeight:
-                  review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
-                verdict: review.verdict,
-                review: {
-                  review_id: review.review_id,
-                  reviewer_id: review.reviewer_fellow_id,
-                  tier: review.tier,
-                  cross_family: review.tier === "T2" || review.tier === "T3",
-                  full_write_up: payload?.full_write_up === true,
-                },
-                artifactCompilation: payload?.artifact_compilation === true,
-                statementEquivalence: payload?.statement_equivalence === true,
-              };
-            }),
-            ...evidenceRows.flatMap((evidence): VersionedClaimTimelineEvent[] => {
-              const payload = safeParseJson(evidence.payload_json);
-
-              if (evidence.direction === "refutes") {
-                return [
-                  {
-                    kind: "refuting-evidence" as const,
-                    sequence: evidence.source_seq,
-                    targetVersion: evidence.bears_on_version,
-                    evidenceId: evidence.evidence_id,
-                  },
-                ];
-              }
-
-              if (payload?.falsification_check && typeof payload.falsification_check === "object") {
-                const check = payload.falsification_check as Record<string, unknown>;
-                return [
-                  {
-                    kind: "falsification-attempt" as const,
-                    sequence: evidence.source_seq,
-                    targetVersion: evidence.bears_on_version,
-                    attemptId: evidence.evidence_id,
-                    attemptedFalsifier:
-                      typeof check.attempted_falsifier === "string"
-                        ? check.attempted_falsifier
-                        : "",
-                    capableOfFailure:
-                      typeof check.capable_of_failure === "string" ? check.capable_of_failure : "",
-                    result: typeof check.result === "string" ? check.result : "",
-                    evidenceReferences: Array.isArray(check.evidence_references)
-                      ? (check.evidence_references as string[])
-                      : undefined,
-                  },
-                ];
-              }
-
-              if (evidence.computed_class === "certified" || evidence.kind === "certificate") {
-                return [
-                  {
-                    kind: "certified-artifact" as const,
-                    sequence: evidence.source_seq,
-                    targetVersion: evidence.bears_on_version,
-                    evidenceId: evidence.evidence_id,
-                  },
-                ];
-              }
-
-              return [];
-            }),
-          ]);
-          const disposition = displayClaimDisposition(fold.disposition, fold.context);
+          const fold = dispositions.get(claim.id);
+          if (!fold) throw new Error("Public claim has no scientific ledger timeline");
+          const disposition =
+            displayClaimDisposition(fold.disposition, fold.context) +
+            (fold.stale ? " · stale" : "");
           candidates.push({
             kind: "claim",
             id: claim.id,
             scope: "ledger",
             tokens: 1,
             untrusted: true,
-            body: `${claim.id} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}`,
+            body:
+              `${claim.id} (seq ${claim.source_seq}, ${disposition}): ${claim.statement}` +
+              (fold.legacyReviews > 0
+                ? `\n${fold.legacyReviews} review(s) use legacy-unverified provenance; historical declared tiers are displayed on their records but cannot earn cross-family credit.`
+                : ""),
             why_included:
               "include a live public claim in ledger sequence order, with its computed disposition",
             stable_prefix: 100 + index,
@@ -2140,8 +1976,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? await readReviewQueuePack(db, session.problem_id, cursor, {
             fellowId: auth.binding.fellowId,
             sponsorId: auth.binding.sponsorId,
-            modelFamily: auth.binding.model,
-            methodBasis: undefined,
           })
         : { candidates: [], omitted: [], targets: [] };
     candidates.push(...reviewQueue.candidates);
@@ -2889,7 +2723,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: parsed.data.kind,
-        statement: parsed.data.statement,
+        statement:
+          parsed.data.scientific_provenance === undefined
+            ? parsed.data.statement
+            : JSON.stringify({
+                statement: parsed.data.statement,
+                scientific_provenance: parsed.data.scientific_provenance,
+              }),
         falsifier: parsed.data.falsifier ?? null,
       },
     );
@@ -2930,6 +2770,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           eventId,
           idempotencyKey: kraterIdempotencyKey,
           statement: parsed.data.statement,
+          scientificProvenance: parsed.data.scientific_provenance,
           normHash: candidateHash,
           createdAt: promotedAt,
           // Rule A3: the full attribution snapshot on the claim.created event.
@@ -3548,6 +3389,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           newVersion: versionMint.version,
           kind: parsed.data.kind,
           statement: parsed.data.statement,
+          scientificProvenance: parsed.data.scientific_provenance,
           falsifier: parsed.data.falsifier ?? null,
           contentDigest: versionMint.contentDigest,
           editorFellowId: auth.binding.fellowId,
@@ -4722,14 +4564,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       throw new Error("CLAIM_ATTRIBUTION_MISSING");
     }
 
-    const authorMethodBasis = resolveClaimMethodBasis(claim.kind, claim.statement);
-    const reviewerMethodBasis =
-      resolveReviewerMethodBasis({
-        basis: parsed.data.basis,
-        rubric: parsed.data.rubric,
-        bodyMd: parsed.data.body_md,
-      }) ?? "";
-
     const gate = gateReviewSubmission({
       submission: {
         targetClaimId: parsed.data.target_claim_id,
@@ -4742,16 +4576,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       claimAuthorFellowId: authorEvent.actor_fellow_id,
       reviewerFellowId: auth.binding.fellowId,
-      claimAuthorAttribution: {
-        sponsorId: authorEvent.actor_sponsor_id,
-        modelFamily: authorEvent.model_string_self_declared,
-        methodBasis: authorMethodBasis,
-      },
-      reviewerAttribution: {
-        sponsorId: auth.binding.sponsorId,
-        modelFamily: auth.binding.model,
-        methodBasis: reviewerMethodBasis,
-      },
     });
     if (!gate.ok) {
       return validatedProblem({
@@ -4774,6 +4598,65 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+
+    let scientificClaim: ScientificClaim;
+    let methodEvidence: ScientificEvidence[] = [];
+    let verification: Awaited<ReturnType<typeof validateScientificVerification>> | undefined;
+    try {
+      scientificClaim = await readScientificClaim(
+        db,
+        session.problem_id,
+        parsed.data.target_claim_id,
+        parsed.data.target_version,
+      );
+      methodEvidence = await resolveScientificReferences(
+        db,
+        session.problem_id,
+        scientificClaim,
+        parsed.data.scientific_provenance?.method?.evidence ?? [],
+      );
+      if (parsed.data.verification) {
+        verification = await validateScientificVerification(
+          db,
+          session.problem_id,
+          scientificClaim,
+          parsed.data.verification,
+          auth.binding.fellowId,
+          auth.binding.sponsorId,
+        );
+        if (
+          (parsed.data.verdict === "confirm" || parsed.data.verdict === "reproduces") &&
+          !verification.fullWriteUp &&
+          !verification.certifiedArtifact
+        ) {
+          throw new ScientificInputError(
+            "A negative or inconclusive verification cannot be submitted as a supporting verdict.",
+          );
+        }
+      }
+    } catch (error) {
+      if (error instanceof ScientificInputError) return scientificRefusal("review", error.message);
+      throw error;
+    }
+    const tier = scientificIndependence(
+      scientificClaim,
+      {
+        sponsorId: auth.binding.sponsorId,
+        provenance: parsed.data.scientific_provenance ?? null,
+      },
+      methodEvidence,
+      {
+        reviewerFellowId: auth.binding.fellowId,
+        ...(verification?.certifiedArtifact
+          ? { verifiedArtifactEvidenceId: verification.evidence.evidenceId }
+          : {}),
+      },
+    );
+    const scientificIdentities: ScientificContentIdentity[] = [
+      scientificClaim,
+      ...methodEvidence,
+      ...(verification ? [verification.evidence] : []),
+    ];
 
     // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
     // author-controlled public text screened at the centralized boundary
@@ -4819,16 +4702,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectId: reviewId,
           objectVersion: 1,
           payloadJson: canonicalJson({
-            artifact_compilation: parsed.data.artifact_compilation,
             basis: parsed.data.basis,
             body_md: parsed.data.body_md,
             capable_of_failure: parsed.data.capable_of_failure ?? null,
-            full_write_up: parsed.data.full_write_up,
+            scientific_provenance: parsed.data.scientific_provenance ?? null,
+            independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+            verification: parsed.data.verification ?? null,
             rubric: parsed.data.rubric,
-            statement_equivalence: parsed.data.statement_equivalence,
             target_claim_id: parsed.data.target_claim_id,
             target_version: parsed.data.target_version,
-            tier: gate.tier,
+            tier,
             verdict: parsed.data.verdict,
           }),
           createdAt,
@@ -4843,6 +4726,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           statementsAfterEvent: ({ sequence }) => [
+            ...scientificContentGuards(db, scientificIdentities),
             db
               .prepare(
                 `INSERT INTO reviews
@@ -4858,7 +4742,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 parsed.data.target_claim_id,
                 parsed.data.target_version,
                 auth.binding.fellowId,
-                gate.tier,
+                tier,
                 parsed.data.verdict,
                 parsed.data.basis,
                 parsed.data.capable_of_failure ?? null,
@@ -4889,11 +4773,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               review_id: reviewId,
               target_claim_id: parsed.data.target_claim_id,
               target_version: parsed.data.target_version,
-              tier: gate.tier,
+              tier,
               carries_weight: gate.carriesWeight,
-              full_write_up: parsed.data.full_write_up,
-              artifact_compilation: parsed.data.artifact_compilation,
-              statement_equivalence: parsed.data.statement_equivalence,
+              independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+              full_write_up: verification?.fullWriteUp ?? false,
+              artifact_compilation: verification?.certifiedArtifact ?? false,
+              statement_equivalence: verification?.certifiedArtifact ?? false,
             }),
         }),
       );
@@ -4910,6 +4795,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
       );
     } catch (error) {
+      if (isScientificReferenceChanged(error)) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        return scientificRefusal(
+          "review",
+          "Referenced scientific content changed during publication; fetch a fresh pack.",
+        );
+      }
       try {
         const winner = await readReplayRecord(
           db,
@@ -5627,6 +5519,47 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    const scientificIdentities: ScientificContentIdentity[] = [];
+    let formalArtifactDigest: string | null = null;
+    try {
+      if (parsed.data.falsification_check || parsed.data.formal_artifact) {
+        if (parsed.data.bears_on_kind !== "claim") {
+          throw new ScientificInputError(
+            "Scientific checks and formal artifacts require an exact claim version.",
+          );
+        }
+        const claim = await readScientificClaim(
+          db,
+          session.problem_id,
+          parsed.data.bears_on_id,
+          parsed.data.bears_on_version,
+        );
+        scientificIdentities.push(claim);
+        if (parsed.data.falsification_check)
+          scientificIdentities.push(
+            ...(await validateFalsificationCheck(
+              db,
+              session.problem_id,
+              claim,
+              parsed.data.falsification_check,
+              parsed.data.direction,
+            )),
+          );
+        if (parsed.data.formal_artifact) {
+          formalArtifactDigest = await inspectFormalArtifact(parsed.data.formal_artifact);
+          if (parsed.data.kind !== "certificate" || formalArtifactDigest === null) {
+            throw new ScientificInputError(
+              "A formal artifact requires certificate evidence with an identified declaration, axiom report and source without proof holes.",
+            );
+          }
+        }
+      }
+    } catch (error) {
+      if (error instanceof ScientificInputError)
+        return scientificRefusal("evidence", error.message);
+      throw error;
+    }
+
     // The class is COMPUTED from the evidence's shape, never author-asserted.
     const assessment = assessEvidenceClass({
       source: {
@@ -5640,7 +5573,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : undefined,
       certifiedArtifact:
         parsed.data.kind === "certificate"
-          ? { shapeCheckDigest: parsed.data.source.locator }
+          ? { shapeCheckDigest: formalArtifactDigest ?? undefined }
           : undefined,
       selectedHypothesis: parsed.data.selected_hypothesis_id !== undefined,
       mode: parsed.data.mode,
@@ -5696,6 +5629,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             computed_class: assessment.class,
             direction: parsed.data.direction,
             falsification_check: parsed.data.falsification_check ?? null,
+            formal_artifact: parsed.data.formal_artifact ?? null,
             kind: parsed.data.kind,
             mode: parsed.data.mode,
             reproduction: parsed.data.reproduction ?? null,
@@ -5714,6 +5648,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           statementsAfterEvent: ({ sequence }) => [
+            ...scientificContentGuards(db, scientificIdentities),
             db
               .prepare(
                 `INSERT INTO evidence
@@ -5788,6 +5723,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
       );
     } catch (error) {
+      if (isScientificReferenceChanged(error)) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        return scientificRefusal(
+          "evidence",
+          "Referenced scientific content changed during publication; fetch a fresh pack.",
+        );
+      }
       try {
         const winner = await readReplayRecord(
           db,

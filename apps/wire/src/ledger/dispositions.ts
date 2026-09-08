@@ -13,8 +13,6 @@
  * return the exact unmet conditions"). A refusal never mutates anything.
  */
 
-import { isDistinctModelFamily } from "./review-independence.ts";
-
 // ---------------------------------------------------------------------------
 // Vocabularies
 // ---------------------------------------------------------------------------
@@ -476,94 +474,6 @@ export function displayHypothesisDisposition(disposition: HypothesisDisposition)
   if (disposition === "active") return "surviving current tests";
   if (disposition === "narrowed") return "narrowed · surviving current tests";
   return disposition;
-}
-
-// ---------------------------------------------------------------------------
-// Independence tiers (§6.6): computed and pinned at review time
-// ---------------------------------------------------------------------------
-
-export function computeIndependenceTier(
-  reviewerSponsorId: string,
-  authorSponsorId: string,
-  reviewerModelFamily: string,
-  authorModelFamily: string,
-  disjointMethod: boolean,
-): IndependenceTier {
-  if (reviewerSponsorId === authorSponsorId) return "T0";
-  if (!isDistinctModelFamily(reviewerModelFamily, authorModelFamily)) return "T1";
-  return disjointMethod ? "T3" : "T2";
-}
-
-/**
- * A review's independence pinned at review time from the sponsor-of-record and
- * declared family at that moment. Independence is a fact about the moment of
- * verification.
- */
-export interface PinnedIndependence {
-  readonly tier: IndependenceTier;
-  readonly pinned_at: {
-    readonly reviewer_sponsor_id: string;
-    readonly author_sponsor_id: string;
-    readonly reviewer_model_family: string;
-    readonly author_model_family: string;
-    readonly disjoint_method: boolean;
-    readonly reviewed_at: string;
-  };
-}
-
-export function pinIndependenceAtReviewTime(
-  reviewerSponsorId: string,
-  authorSponsorId: string,
-  reviewerModelFamily: string,
-  authorModelFamily: string,
-  disjointMethod: boolean,
-  reviewedAt: string,
-): PinnedIndependence {
-  return {
-    tier: computeIndependenceTier(
-      reviewerSponsorId,
-      authorSponsorId,
-      reviewerModelFamily,
-      authorModelFamily,
-      disjointMethod,
-    ),
-    pinned_at: {
-      reviewer_sponsor_id: reviewerSponsorId,
-      author_sponsor_id: authorSponsorId,
-      reviewer_model_family: reviewerModelFamily,
-      author_model_family: authorModelFamily,
-      disjoint_method: disjointMethod,
-      reviewed_at: reviewedAt,
-    },
-  };
-}
-
-/**
- * Retroactive-upgrade refusal (§6.6, Rev 3.1): a later sponsorship transfer,
- * Fellow re-declaration, or roster change never upgrades a recorded tier,
- * because manufacturing independence after the fact is a named attack. A
- * recomputation that agrees with the pin is a no-op; any drift is refused with
- * the exact recorded tier.
- */
-export function recomputePinnedIndependence(
-  pinned: PinnedIndependence,
-  currentReviewerSponsorId: string,
-  currentAuthorSponsorId: string,
-  currentReviewerModelFamily: string,
-  currentAuthorModelFamily: string,
-  currentDisjointMethod: boolean,
-): TransitionResult<IndependenceTier> {
-  const now = computeIndependenceTier(
-    currentReviewerSponsorId,
-    currentAuthorSponsorId,
-    currentReviewerModelFamily,
-    currentAuthorModelFamily,
-    currentDisjointMethod,
-  );
-  if (now === pinned.tier) return allow(pinned.tier);
-  return refuse(
-    `independence tier is pinned at review time (${pinned.tier}); a later sponsorship transfer, re-declaration, or roster change never retroactively upgrades a recorded tier (recomputed ${now})`,
-  );
 }
 
 // ---------------------------------------------------------------------------

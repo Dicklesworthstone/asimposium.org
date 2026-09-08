@@ -145,7 +145,8 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptId: "E-1",
         attemptedFalsifier: "check parity condition",
         capableOfFailure: "counterexample on 4-cycle",
-        result: "unsuccessful-refutation",
+        result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       review(3, 1, "confirm"),
     ]);
@@ -217,6 +218,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "check 1",
         capableOfFailure: "counterexample",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       {
         kind: "falsification-attempt",
@@ -226,6 +228,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "check 1 duplicate",
         capableOfFailure: "counterexample",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
     ]);
     expect(deduped.context.recorded_refutation_attempts).toBe(1);
@@ -243,6 +246,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "formal proof checker",
         capableOfFailure: "kernel typecheck error",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       {
         kind: "certified-artifact",
@@ -279,14 +283,13 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
           cross_family: true,
           full_write_up: false,
         },
-        artifactCompilation: true,
-        statementEquivalence: true,
+        artifactEvidenceId: "E-CERT",
       },
     ]);
     expect(stronglySupported.disposition).toBe("strongly-supported");
     expect(stronglySupported.context.has_certified_artifact).toBe(true);
 
-    // Negative: review missing statementEquivalence does not certify artifact
+    // Negative: a verification of a different artifact cannot certify this one.
     const unconfirmedEquivalence = computeCurrentClaimDisposition([
       { kind: "claim-created", sequence: 1, version: 1 },
       {
@@ -297,6 +300,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "formal proof checker",
         capableOfFailure: "kernel typecheck error",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       {
         kind: "certified-artifact",
@@ -317,8 +321,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
           cross_family: true,
           full_write_up: false,
         },
-        artifactCompilation: true,
-        statementEquivalence: false,
+        artifactEvidenceId: "E-DIFFERENT",
       },
     ]);
     expect(unconfirmedEquivalence.disposition).toBe("corroborated");
@@ -335,6 +338,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "checker",
         capableOfFailure: "typecheck error",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       {
         kind: "certified-artifact",
@@ -355,8 +359,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
           cross_family: false,
           full_write_up: false,
         },
-        artifactCompilation: true,
-        statementEquivalence: true,
+        artifactEvidenceId: "E-CERT",
       },
     ]);
     expect(t0Review.disposition).toBe("open");
@@ -394,6 +397,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "falsifier check",
         capableOfFailure: "failure scenario",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       fullReview(3, "fellow-A", true),
       fullReview(4, "fellow-B", true),
@@ -411,6 +415,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "falsifier check",
         capableOfFailure: "failure scenario",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       fullReview(3, "fellow-A", true),
       fullReview(4, "fellow-A", true),
@@ -428,6 +433,7 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
         attemptedFalsifier: "falsifier check",
         capableOfFailure: "failure scenario",
         result: "survived",
+        evidenceReferences: ["E-CHECK"],
       },
       fullReview(3, "fellow-A", true),
       fullReview(4, "fellow-B", false),

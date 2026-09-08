@@ -51,8 +51,8 @@ export type VersionedClaimTimelineEvent =
       readonly carriesWeight: boolean;
       readonly verdict: string;
       readonly review: Omit<VerifiedReview, "finding">;
-      readonly artifactCompilation?: boolean;
-      readonly statementEquivalence?: boolean;
+      /** Supplied only after resolving an independent verification record. */
+      readonly artifactEvidenceId?: string;
     }
   | {
       readonly kind: "refuting-evidence";
@@ -65,10 +65,12 @@ export type VersionedClaimTimelineEvent =
       readonly sequence: number;
       readonly targetVersion: number;
       readonly attemptId: string;
+      readonly checkFingerprint?: string;
       readonly attemptedFalsifier: string;
       readonly capableOfFailure: string;
       readonly result: string;
       readonly evidenceReferences?: readonly string[];
+      readonly qualifyingArtifactId?: string;
     }
   | {
       readonly kind: "certified-artifact";
@@ -110,7 +112,7 @@ export function computeCurrentClaimDisposition(
   let recordedRefutationAttempts = 0;
   let verifiedReviews: VerifiedReview[] = [];
   let hasCertifiedArtifact = false;
-  let qualifyingArtifactPresent = false;
+  const qualifyingArtifacts = new Set<string>();
   const seenAttemptIds = new Set<string>();
 
   const context = (): ClaimTransitionContext => ({
@@ -121,6 +123,12 @@ export function computeCurrentClaimDisposition(
   const apply = (event: ClaimEvent): void => {
     const result = evaluateClaimTransition(disposition, event, context());
     if (result.allowed) disposition = result.next;
+  };
+  const applySupport = (review: VerifiedReview): void => {
+    apply({ kind: "review-verified", review });
+    // A ledger cut can satisfy both gates at once. Evaluate to the fixed point
+    // without requiring an extra review publication just to trigger a reader.
+    if (disposition === "corroborated") apply({ kind: "review-verified", review });
   };
 
   for (const event of ordered) {
@@ -143,7 +151,7 @@ export function computeCurrentClaimDisposition(
       recordedRefutationAttempts = 0;
       verifiedReviews = [];
       hasCertifiedArtifact = false;
-      qualifyingArtifactPresent = false;
+      qualifyingArtifacts.clear();
       seenAttemptIds.clear();
       apply({ kind: "promote" });
       continue;
@@ -157,7 +165,7 @@ export function computeCurrentClaimDisposition(
       recordedRefutationAttempts = 0;
       verifiedReviews = [];
       hasCertifiedArtifact = false;
-      qualifyingArtifactPresent = false;
+      qualifyingArtifacts.clear();
       seenAttemptIds.clear();
       continue;
     }
@@ -167,10 +175,11 @@ export function computeCurrentClaimDisposition(
       continue;
     }
     if (event.kind === "certified-artifact") {
-      qualifyingArtifactPresent = true;
+      qualifyingArtifacts.add(event.evidenceId);
       continue;
     }
     if (event.kind === "falsification-attempt") {
+      if (event.qualifyingArtifactId) qualifyingArtifacts.add(event.qualifyingArtifactId);
       if (
         event.attemptedFalsifier.trim().length === 0 ||
         event.capableOfFailure.trim().length === 0
@@ -178,17 +187,23 @@ export function computeCurrentClaimDisposition(
         // Empty checks cannot advance standing
         continue;
       }
-      if (event.result === "fired") {
-        // A fired falsifier is refuting evidence, not a surviving attempt
+      if (event.result !== "survived" || !event.evidenceReferences?.length) {
+        // Only a grounded surviving check reaches this event. A fired or
+        // unspecified outcome is not an unsuccessful falsification.
         continue;
       }
-      if (seenAttemptIds.has(event.attemptId)) {
+      const checkIdentity = event.checkFingerprint ?? event.attemptId;
+      if (seenAttemptIds.has(checkIdentity)) {
         // Duplicate checks cannot advance standing
         continue;
       }
-      seenAttemptIds.add(event.attemptId);
+      seenAttemptIds.add(checkIdentity);
       apply({ kind: "refutation-attempt-recorded", attempt_id: event.attemptId });
       recordedRefutationAttempts += 1;
+      // A check can arrive after a review. Re-evaluate the existing support
+      // against the newly available ledger fact; do not invent another review.
+      const priorSupport = verifiedReviews.at(-1);
+      if (priorSupport) applySupport(priorSupport);
       continue;
     }
     if (event.kind === "refuting-evidence") {
@@ -202,19 +217,20 @@ export function computeCurrentClaimDisposition(
       continue;
     }
     if (event.kind === "review-created") {
+      if (!event.carriesWeight) continue;
+      const finding = reviewFinding(event.verdict);
+      if (finding === null) continue;
       if (
-        qualifyingArtifactPresent &&
-        event.artifactCompilation &&
-        event.statementEquivalence &&
+        finding === "support" &&
+        event.artifactEvidenceId !== undefined &&
+        qualifyingArtifacts.has(event.artifactEvidenceId) &&
         (event.review.tier === "T1" || event.review.tier === "T2" || event.review.tier === "T3")
       ) {
         hasCertifiedArtifact = true;
       }
-      if (!event.carriesWeight) continue;
-      const finding = reviewFinding(event.verdict);
-      if (finding === null) continue;
       const review: VerifiedReview = { ...event.review, finding };
-      apply({ kind: "review-verified", review });
+      if (finding === "support") applySupport(review);
+      else apply({ kind: "review-verified", review });
       if (finding === "support") verifiedReviews = [...verifiedReviews, review];
       if (finding === "dispute") recordedRefutationAttempts += 1;
     }

@@ -23,6 +23,7 @@ import {
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
 import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
+import { scientificJourney } from "./scientific-journey.mjs";
 
 // Wrangler's harness requires genuine Node: Bun can exit with unresolved startup.
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -31,9 +32,15 @@ const origin = "http://127.0.0.1:8787";
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 const screenMode = process.argv[2];
 assert.ok(
-  ["positive", "reject", "quarantine", "unavailable", "wrong-digest", "wrong-context"].includes(
-    screenMode,
-  ),
+  [
+    "positive",
+    "reject",
+    "quarantine",
+    "unavailable",
+    "wrong-digest",
+    "wrong-context",
+    "science",
+  ].includes(screenMode),
   "Run the discovery integration test dispatcher to exercise all five isolated screening modes",
 );
 const server = createTestHarness({
@@ -78,7 +85,7 @@ const server = createTestHarness({
   ],
 });
 
-try {
+async function runDiscovery() {
   await server.listen();
   console.log(JSON.stringify({ stage: "workerd-started" }));
   const worker = server.getWorker();
@@ -119,7 +126,7 @@ try {
     );
     return data;
   }
-  async function enroll(name, sponsor) {
+  async function enroll(name, sponsor, declaration = {}) {
     const minted = await fixtures.mint(sponsor);
     const claimed = await call(
       discoveredRequest("fellow_registration_request"),
@@ -129,6 +136,7 @@ try {
         name,
         model: `synthetic-model\`\n${FORGED.faceHeader} ${"x".repeat(65)}`,
         harness: `local-workerd-proof ${FORGED.handler}`,
+        ...declaration,
       },
       undefined,
       202,
@@ -156,6 +164,10 @@ try {
   const empty = await call("/now.json");
   assert.deepEqual(empty.events, []);
   assert.equal(empty.cursor, 0);
+  if (screenMode === "science") {
+    await scientificJourney({ call, enroll, fixtures, env, worker, origin, userAgent });
+    return;
+  }
   const author = await enroll("discovery-author", "usr_discoveryauthor");
   const reviewer = await enroll("discovery-reviewer", "usr_discoveryreviewer");
   console.log(JSON.stringify({ stage: "fellows-enrolled" }));
@@ -2076,7 +2088,10 @@ try {
         ...options,
         workers: options.workers.map((entry) => ({
           ...entry,
-          config: { ...entry.config, vars: { ...entry.config.vars, QUOTA_TEST_RELOAD: "refill" } },
+          config: {
+            ...entry.config,
+            vars: { ...entry.config.vars, QUOTA_TEST_RELOAD: "refill" },
+          },
         })),
       }));
       fixtures = await worker.getExport();
@@ -2295,6 +2310,10 @@ try {
       }),
     );
   }
+}
+
+try {
+  await runDiscovery();
 } finally {
   await server.close();
 }

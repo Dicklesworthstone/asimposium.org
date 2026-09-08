@@ -1,3 +1,4 @@
+import type { ScientificProvenance } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -17,6 +18,7 @@ export interface KraterWriteInput {
   eventId: string;
   idempotencyKey: string;
   statement: string;
+  readonly scientificProvenance?: ScientificProvenance;
   /**
    * The split/policy.ts normHash of the statement, supplied by the caller so
    * the claims row itself carries the normalized identity (P11). When set it
@@ -478,8 +480,16 @@ export function canonicalClaimPayload(input: {
   readonly claimId: string;
   readonly kind: "claim";
   readonly statement: string;
+  readonly scientificProvenance?: ScientificProvenance;
 }): string {
-  return canonicalJson({ claim_id: input.claimId, kind: input.kind, statement: input.statement });
+  return canonicalJson({
+    claim_id: input.claimId,
+    kind: input.kind,
+    statement: input.statement,
+    ...(input.scientificProvenance === undefined
+      ? {}
+      : { scientific_provenance: input.scientificProvenance }),
+  });
 }
 
 function payloadFor(input: KraterWriteInput): string {
@@ -487,11 +497,18 @@ function payloadFor(input: KraterWriteInput): string {
     claimId: input.claimId,
     kind: "claim",
     statement: input.statement,
+    scientificProvenance: input.scientificProvenance,
   });
 }
 
 function requestFor(input: KraterWriteInput): string {
-  return canonicalJson({ claim_id: input.claimId, statement: input.statement });
+  return canonicalJson({
+    claim_id: input.claimId,
+    statement: input.statement,
+    ...(input.scientificProvenance === undefined
+      ? {}
+      : { scientific_provenance: input.scientificProvenance }),
+  });
 }
 
 export async function genesisChainDigest(problemId: string): Promise<string> {
@@ -1804,6 +1821,7 @@ export async function writeClaim(
         claimId: claim.id,
         kind: "claim",
         statement: claim.statement,
+        scientificProvenance: input.scientificProvenance,
       }),
     );
     if (
@@ -1890,6 +1908,7 @@ export interface KraterRevisionInput {
   newVersion: number;
   kind: string;
   statement: string;
+  readonly scientificProvenance?: ScientificProvenance;
   falsifier: string | null;
   /** The claim-version content digest from mintClaimVersion. */
   contentDigest: string;
@@ -1915,6 +1934,7 @@ export function canonicalRevisionPayload(input: {
   readonly falsifier: string | null;
   readonly kind: string;
   readonly statement: string;
+  readonly scientificProvenance?: ScientificProvenance;
 }): string {
   return canonicalJson({
     base_version: input.baseVersion,
@@ -1922,6 +1942,9 @@ export function canonicalRevisionPayload(input: {
     falsifier: input.falsifier,
     kind: input.kind,
     statement: input.statement,
+    ...(input.scientificProvenance === undefined
+      ? {}
+      : { scientific_provenance: input.scientificProvenance }),
   });
 }
 
@@ -2001,6 +2024,7 @@ export async function writeClaimRevision(
       falsifier: input.falsifier,
       kind: input.kind,
       statement: input.statement,
+      scientificProvenance: input.scientificProvenance,
     });
     const [payloadSha256, requestDigest] = await Promise.all([
       sha256Hex(payloadJson),
@@ -2010,6 +2034,9 @@ export async function writeClaimRevision(
               base_version: input.baseVersion,
               claim_id: input.claimId,
               statement: input.statement,
+              ...(input.scientificProvenance === undefined
+                ? {}
+                : { scientific_provenance: input.scientificProvenance }),
             }),
           )
         : Promise.resolve(companionRequestDigest),
@@ -2282,6 +2309,7 @@ export async function writeClaimRevision(
         falsifier: input.falsifier,
         kind: input.kind,
         statement: claim.statement,
+        scientificProvenance: input.scientificProvenance,
       }),
     );
     if (
