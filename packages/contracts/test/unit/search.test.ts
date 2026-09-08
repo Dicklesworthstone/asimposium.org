@@ -17,6 +17,8 @@ describe("W6.8 Search contracts", () => {
     for (const [path, valid] of [
       ["valid/search-scoped-claim.json", true],
       ["invalid/search-unscoped-claim.json", false],
+      ["valid/search-versioned-claim.json", true],
+      ["invalid/search-unscoped-version.json", false],
     ] as const) {
       const query = await Bun.file(new URL(`../fixtures/${path}`, import.meta.url)).json();
       expect(SearchQueryRequestSchema.safeParse(query).success).toBe(valid);
@@ -113,6 +115,60 @@ describe("W6.8 Search contracts", () => {
       });
     });
 
+    test("resolves canonical claim faces and scoped version pins to the same exact target", () => {
+      for (const host of ["asimposium.org", "a.asimposium.org", "a-staging.asimposium.org"]) {
+        for (const suffix of ["", ".md", ".json", ".html", ".bib", ".csl.json"]) {
+          expect(parseExactReference(`https://${host}/p/P-ALPHA/claims/C-1@2${suffix}`)).toEqual({
+            kind: "claim",
+            id: "C-1",
+            problemId: "P-ALPHA",
+            version: 2,
+          });
+        }
+      }
+      for (const q of [
+        "P-ALPHA#C-1@2",
+        "P-ALPHA/C-1@2",
+        "https://a.asimposium.org/p/P-ALPHA#C-1@2",
+        "https://a.asimposium.org/p/P-ALPHA/claims/C-1%402.json",
+      ]) {
+        expect(parseExactReference(q)).toEqual({
+          kind: "claim",
+          id: "C-1",
+          problemId: "P-ALPHA",
+          version: 2,
+        });
+      }
+      expect(parseExactReference("https://asimposium.org/p/P-ALPHA/claims/C-1.json")).toEqual({
+        kind: "claim",
+        id: "C-1",
+        problemId: "P-ALPHA",
+      });
+    });
+
+    test("refuses ambiguous, unsafe or foreign canonical targets without a head fallback", () => {
+      for (const target of [
+        "C-1@0",
+        "C-1@01",
+        "C-1@-1",
+        "C-1@9007199254740992",
+        "C-1@2.5",
+        "C-1@2.json.bib",
+        "C-1%2F..",
+        "%ZZ",
+      ]) {
+        expect(parseExactReference(`https://asimposium.org/p/P-ALPHA/claims/${target}`)).toBeNull();
+      }
+      for (const q of [
+        "https://evil.example/p/P-ALPHA/claims/C-1@2",
+        "https://asimposium.org.evil.example/p/P-ALPHA/claims/C-1@2",
+        "https://evil@asimposium.org/p/P-ALPHA/claims/C-1@2",
+        "https://asimposium.org/p/P--ALPHA/claims/C-1@2",
+      ]) {
+        expect(parseExactReference(q)).toBeNull();
+      }
+    });
+
     test("returns null for ordinary lexical queries", () => {
       expect(parseExactReference("prime numbers")).toBeNull();
       expect(parseExactReference("P-")).toBeNull();
@@ -126,7 +182,7 @@ describe("W6.8 Search contracts", () => {
 
   describe("SearchQueryRequestSchema", () => {
     test("requires enclosing problem for a local claim reference", () => {
-      for (const q of ["C-1", " C-9999 "]) {
+      for (const q of ["C-1", " C-9999 ", "C-1@2"]) {
         const result = SearchQueryRequestSchema.safeParse({ q });
         expect(result.success).toBe(false);
         if (!result.success) expect(result.error.issues[0]?.message).toContain("problem");
