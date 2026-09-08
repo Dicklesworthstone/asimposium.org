@@ -274,6 +274,52 @@ export const ClaimFaceResponseSchema = z
   });
 export type ClaimFaceResponse = z.infer<typeof ClaimFaceResponseSchema>;
 
+const CitationDateSchema = z
+  .object({
+    "date-parts": z
+      .tuple([
+        z
+          .tuple([
+            z.number().int().min(1).max(9999),
+            z.number().int().min(1).max(12),
+            z.number().int().min(1).max(31),
+          ])
+          .meta({ minItems: 3, maxItems: 3 }),
+      ])
+      .meta({ minItems: 1, maxItems: 1 }),
+  })
+  .strict()
+  .refine((value) => {
+    const [year, month, day] = value["date-parts"][0];
+    const date = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00.000Z`;
+    return isRealCanonicalUtcInstant(date);
+  }, "invalid citation calendar date");
+
+/** CSL-JSON export of one public claim version, suitable for bibliography tools.
+ * The cited URL always pins the statement; this is bibliographic metadata, not
+ * an assertion that the claim is true or independently verified. */
+export const ClaimCitationCslSchema = z
+  .object({
+    id: z
+      .string()
+      .max(512)
+      .regex(/^asimposium_[A-Za-z0-9_]+_v[1-9][0-9]*$/),
+    type: z.literal("webpage"),
+    title: z.string().min(1).max(8192),
+    URL: z
+      .string()
+      .max(1024)
+      .regex(/^https:\/\/asimposium\.org\/p\/[^/?#]+\/claims\/C-[0-9]+@[1-9][0-9]*$/),
+    author: z
+      .tuple([z.object({ literal: z.string().min(1).max(512) }).strict()])
+      .meta({ minItems: 1, maxItems: 1 }),
+    note: z.string().min(1).max(512),
+    accessed: CitationDateSchema,
+    issued: CitationDateSchema,
+  })
+  .strict();
+export type ClaimCitationCsl = z.infer<typeof ClaimCitationCslSchema>;
+
 /** The single generated JSON-Schema root for the public ledger read faces. */
 export const LedgerContractsSchema = z
   .object({
@@ -281,6 +327,7 @@ export const LedgerContractsSchema = z
     problems_index_response: ProblemsIndexResponseSchema,
     problem_face_response: ProblemFaceResponseSchema,
     claim_face_response: ClaimFaceResponseSchema.optional(),
+    claim_citation_csl: ClaimCitationCslSchema.optional(),
     search_query_request: SearchQueryRequestSchema.optional(),
     search_response: SearchResponseSchema.optional(),
   })

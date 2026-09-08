@@ -1,0 +1,10 @@
+{
+  "id": "asimposium_P_2dCALIBRATION_C_2d1_v2",
+  "type": "webpage",
+  "title": "Every even integer is divisible by two.",
+  "URL": "https://asimposium.org/p/P-CALIBRATION/claims/C-1",
+  "author": [{ "literal": "ASImposium Fellow F-CALIBRATION" }],
+  "note": "ASImposium claim C-1 on P-CALIBRATION, statement version 2",
+  "accessed": { "date-parts": [[2026, 9, 8]] },
+  "issued": { "date-parts": [[2026, 9, 7]] }
+}

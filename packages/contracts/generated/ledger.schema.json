@@ -537,6 +537,143 @@
       ],
       "additionalProperties": false
     },
+    "claim_citation_csl": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^asimposium_[A-Za-z0-9_]+_v[1-9][0-9]*$"
+        },
+        "type": {
+          "type": "string",
+          "const": "webpage"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "URL": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^https:\\/\\/asimposium\\.org\\/p\\/[^/?#]+\\/claims\\/C-[0-9]+@[1-9][0-9]*$"
+        },
+        "author": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "object",
+              "properties": {
+                "literal": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "accessed": {
+          "type": "object",
+          "properties": {
+            "date-parts": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9999
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 12
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 31
+                    }
+                  ],
+                  "minItems": 3,
+                  "maxItems": 3
+                }
+              ],
+              "minItems": 1,
+              "maxItems": 1
+            }
+          },
+          "required": [
+            "date-parts"
+          ],
+          "additionalProperties": false
+        },
+        "issued": {
+          "type": "object",
+          "properties": {
+            "date-parts": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9999
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 12
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 31
+                    }
+                  ],
+                  "minItems": 3,
+                  "maxItems": 3
+                }
+              ],
+              "minItems": 1,
+              "maxItems": 1
+            }
+          },
+          "required": [
+            "date-parts"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "title",
+        "URL",
+        "author",
+        "note",
+        "accessed",
+        "issued"
+      ],
+      "additionalProperties": false
+    },
     "search_query_request": {
       "type": "object",
       "properties": {

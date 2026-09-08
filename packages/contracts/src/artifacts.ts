@@ -69,6 +69,7 @@ import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
 import {
+  type ClaimCitationCsl,
   type ClaimFaceResponse,
   LedgerContractsSchema,
   type ProblemFaceResponse,
@@ -462,12 +463,14 @@ function generatedLedgerJsonSchema(): string {
 
 function generatedLedgerTypes(): string {
   const typeNames = [
+    "ClaimCitationCsl",
     "ClaimFaceResponse",
     "ProblemFaceResponse",
     "ProblemIndexEntry",
     "ProblemsIndexResponse",
     "PublicLedgerProblemId",
   ] as const satisfies readonly (keyof {
+    ClaimCitationCsl: ClaimCitationCsl;
     ClaimFaceResponse: ClaimFaceResponse;
     ProblemFaceResponse: ProblemFaceResponse;
     ProblemIndexEntry: ProblemIndexEntry;

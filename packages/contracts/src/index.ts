@@ -222,6 +222,8 @@ export {
 } from "./health.ts";
 export {
   CLAIM_DISPOSITIONS,
+  type ClaimCitationCsl,
+  ClaimCitationCslSchema,
   type ClaimDisposition,
   ClaimDispositionSchema,
   type ClaimFaceResponse,

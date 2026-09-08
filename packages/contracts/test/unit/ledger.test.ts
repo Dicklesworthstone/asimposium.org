@@ -4,6 +4,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import {
+  ClaimCitationCslSchema,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
@@ -12,6 +13,25 @@ import {
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
+
+test("claim citation exports require an exact public version and real calendar dates", async () => {
+  const good = ClaimCitationCslSchema.parse(
+    await fixture(new URL("../fixtures/valid/ledger-claim-citation.json", import.meta.url)),
+  );
+  expect(
+    ClaimCitationCslSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/ledger-claim-citation-unpinned.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
+  for (const patch of [
+    { accessed: { "date-parts": [[2026, 2, 30]] } },
+    { URL: "https://example.org/p/P-CALIBRATION/claims/C-1@2" },
+    { workshop: "private material" },
+  ])
+    expect(ClaimCitationCslSchema.safeParse({ ...good, ...patch }).success).toBe(false);
+});
 
 test("public exact claim faces reject private material, asserted truth and inconsistent pins", async () => {
   const good = ClaimFaceResponseSchema.parse(
