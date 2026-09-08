@@ -158,6 +158,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0043_screening_publication_provenance.sql
   db/migrations/0044_public_write_quotas.sql
   db/migrations/0045_claim_dependency_cycles.sql
+  db/migrations/0046_workshop_revision.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -354,6 +355,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0043_screening_publication_provenance.sql
   0044_public_write_quotas.sql
   0045_claim_dependency_cycles.sql
+  0046_workshop_revision.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

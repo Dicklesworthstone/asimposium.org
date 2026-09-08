@@ -287,10 +287,23 @@ export const ClaimRevisionSchema = z
   .object({
     scientific_provenance: ClaimScientificProvenanceSchema.optional(),
     claim_id: ClaimIdSchema,
-    base_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
+    base_version: z
+      .number()
+      .int()
+      .min(1)
+      .max(Number.MAX_SAFE_INTEGER - 1),
     kind: ClaimKindSchema,
-    statement: z.string().trim().min(1).max(8 * 1024),
-    falsifier: z.string().trim().min(1).max(4 * 1024).optional(),
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    falsifier: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4 * 1024)
+      .optional(),
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
   })
   .strict();

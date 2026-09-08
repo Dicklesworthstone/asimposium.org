@@ -20,7 +20,16 @@ import { normHash } from "../../src/split/policy.ts";
  *
  * Runs against real Workerd / D1 / R2 bindings.
  */
-export async function claimsJourney({ call, enroll, fixtures, env, worker, origin, userAgent }) {
+export async function claimsJourney({
+  call,
+  enroll,
+  fixtures,
+  env,
+  worker,
+  origin,
+  userAgent,
+  sponsorWorkshop,
+}) {
   const problem = "P-CLAIMS-E2E";
   await fixtures.seedProblem(problem);
 
@@ -611,6 +620,320 @@ export async function claimsJourney({ call, enroll, fixtures, env, worker, origi
   const missingFace = await face(`${targetClaim.claim_id}@999`, "json");
   assert.equal(missingFace.status, 404, "Nonexistent version pin must return 404");
 
+  // Typed workshop replacement -> the same production revision validator.
+  // A dedicated Fellow keeps this journey inside the unchanged write quotas.
+  const workshopSponsor = "usr_claims_workshop_sponsor";
+  const workshopAuthor = await createFellow("typed-workshop-author", workshopSponsor);
+  const initialStatement = "A workshop gadget has exactly three labeled ports.";
+  const workshopClaim = await call(
+    `${workshopAuthor.path}/promote`,
+    {
+      workshop_id: workshopAuthor.draft.workshop_id,
+      kind: "definition",
+      statement: initialStatement,
+    },
+    workshopAuthor.token,
+    201,
+  );
+  const replacement = {
+    claim_id: workshopClaim.claim_id,
+    base_version: 1,
+    kind: "definition",
+    statement: "A workshop gadget has exactly three labeled ports and one distinguished port.",
+    depends_on: [],
+  };
+  const privateNotes = `${privateCanary}: abandoned attempts must stay private.`;
+  const pushRevision = (revision, author = workshopAuthor) =>
+    call(
+      `${author.path}/workshop`,
+      {
+        type: "draft",
+        title: "Exact replacement",
+        body_md: privateNotes,
+        revision,
+      },
+      author.token,
+      201,
+    );
+  const publicState = async () => ({
+    events: await countEvents(),
+    cursor: await getPublicCursor(),
+    versions: (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM claim_versions WHERE problem_id = ?")
+        .bind(problem)
+        .first()
+    ).n,
+  });
+  const beforePush = await publicState();
+  const draft = await pushRevision(replacement);
+  assert.deepEqual(await publicState(), beforePush, "Private revision push cannot publish");
+  const draftRow = await env.DB.prepare(
+    "SELECT revision_json, fellow_id FROM workshop_objects WHERE workshop_id = ?",
+  )
+    .bind(draft.workshop_id)
+    .first();
+  assert.deepEqual(JSON.parse(draftRow.revision_json), replacement);
+  const sponsorPage = await sponsorWorkshop(workshopSponsor, {
+    problem_id: problem,
+    fellow_id: draftRow.fellow_id,
+  });
+  const privateObject = sponsorPage.objects.find(
+    (object) => object.workshop_id === draft.workshop_id,
+  );
+  assert.deepEqual(privateObject.revision, replacement);
+  assert.equal(privateObject.body_md, privateNotes);
+  const deniedRead = await sponsorWorkshop(
+    "usr_claims_sponsor_4",
+    { problem_id: problem, fellow_id: draftRow.fellow_id },
+    404,
+  );
+  assert.equal(deniedRead.code, "WORKSHOP_NOT_FOUND");
+  assert.ok(!JSON.stringify(deniedRead).includes(privateNotes));
+  const unpublishedFace = await face(workshopClaim.claim_id);
+  const unpublishedText = await unpublishedFace.text();
+  assert.ok(!unpublishedText.includes(replacement.statement));
+  assert.ok(!unpublishedText.includes(privateCanary));
+
+  // The exact content and owning scope cannot mutate behind a workshop ID.
+  await assert.rejects(
+    env.DB.prepare("UPDATE workshop_objects SET revision_json = ? WHERE workshop_id = ?")
+      .bind(JSON.stringify({ ...replacement, claim_id: targetClaim.claim_id }), draft.workshop_id)
+      .run(),
+    /WORKSHOP_REVISION_IMMUTABLE/,
+  );
+  await assert.rejects(
+    env.DB.prepare("UPDATE workshop_objects SET session_id = ? WHERE workshop_id = ?")
+      .bind(nonAuthorFellow.session.session_id, draft.workshop_id)
+      .run(),
+    /WORKSHOP_REVISION_IMMUTABLE/,
+  );
+
+  for (const [path, body, token, status, code] of [
+    [
+      workshopAuthor.path,
+      { workshop_id: draft.workshop_id, claim_id: targetClaim.claim_id },
+      workshopAuthor.token,
+      422,
+      "REVISE_BODY_INVALID",
+    ],
+    [
+      nonAuthorFellow.path,
+      { workshop_id: draft.workshop_id },
+      nonAuthorFellow.token,
+      404,
+      "WORKSHOP_OBJECT_NOT_FOUND",
+    ],
+    [
+      workshopAuthor.path,
+      { workshop_id: workshopAuthor.draft.workshop_id },
+      workshopAuthor.token,
+      404,
+      "WORKSHOP_OBJECT_NOT_FOUND",
+    ],
+  ]) {
+    const refused = await call(`${path}/revise`, body, token, status);
+    assert.equal(refused.code, code);
+    assert.ok(refused.rule && refused.fix_hint && refused.schema && refused.example);
+  }
+  const invalidPush = await call(
+    `${workshopAuthor.path}/workshop`,
+    {
+      type: "draft",
+      title: "Invalid base",
+      body_md: privateNotes,
+      revision: { ...replacement, base_version: 0 },
+    },
+    workshopAuthor.token,
+    422,
+  );
+  assert.equal(invalidPush.code, "WORKSHOP_PUSH_BODY_INVALID");
+
+  // Both input forms must refuse the same invalid replacement without a
+  // version/event/cursor burn. Stored drafts intentionally have a lower bar.
+  const assertParity = async (revision, status, code, author = workshopAuthor) => {
+    const candidate = await pushRevision(revision, author);
+    const before = await publicState();
+    const direct = await call(`${author.path}/revise`, revision, author.token, status);
+    const stored = await call(
+      `${author.path}/revise`,
+      { workshop_id: candidate.workshop_id },
+      author.token,
+      status,
+    );
+    assert.equal(direct.code, code);
+    assert.equal(stored.code, code);
+    assert.equal(stored.rule, direct.rule);
+    assert.deepEqual(await publicState(), before, `${code} cannot mint public state`);
+  };
+  await assertParity({ ...replacement, kind: "conjecture" }, 422, "MISSING_FALSIFIER");
+  await assertParity(
+    { ...replacement, depends_on: [workshopClaim.claim_id] },
+    422,
+    "CYCLE_IN_DEPENDENCIES",
+  );
+  await assertParity({ ...replacement, depends_on: ["C-999999"] }, 422, "DEPENDENCY_NOT_FOUND");
+  await assertParity(
+    { ...replacement, statement: "Definition updated with broader domain." },
+    409,
+    "DUPLICATE_CLAIM",
+  );
+  await assertParity(replacement, 403, "NOT_CLAIM_AUTHOR", nonAuthorFellow);
+  await fixtures.setScreenMode("reject");
+  try {
+    await assertParity(replacement, 403, "POLICY_DENIED");
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
+
+  const screenBefore = await fixtures.screeningCalls();
+  const beforePublish = await publicState();
+  const publicationKey = "typed-workshop-publication";
+  const published = await call(
+    `${workshopAuthor.path}/revise`,
+    { workshop_id: draft.workshop_id },
+    workshopAuthor.token,
+    201,
+    publicationKey,
+  );
+  assert.equal(published.claim_id, workshopClaim.claim_id);
+  assert.equal(published.version, 2);
+  assert.equal(await fixtures.screeningCalls(), screenBefore + 1);
+  assert.deepEqual(await publicState(), {
+    events: beforePublish.events + 1,
+    cursor: beforePublish.cursor + 1,
+    versions: beforePublish.versions + 1,
+  });
+  const event = await env.DB.prepare(
+    "SELECT actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness FROM events WHERE problem_id = ? AND seq = ?",
+  )
+    .bind(problem, published.seq)
+    .first();
+  assert.deepEqual(event, {
+    actor_fellow_id: draftRow.fellow_id,
+    actor_sponsor_id: workshopSponsor,
+    actor_session_id: workshopAuthor.session.session_id,
+    model_string_self_declared: "synthetic-claim-model",
+    harness: "local-claims-proof",
+  });
+  for (const [version, statement] of [
+    [1, initialStatement],
+    [2, replacement.statement],
+  ]) {
+    const jsonFace = ClaimFaceResponseSchema.parse(
+      await (await face(`${workshopClaim.claim_id}@${version}`)).json(),
+    );
+    assert.equal(jsonFace.claim_state.version, version);
+    assert.equal(jsonFace.claim_state.disposition, "open");
+    assert.ok(JSON.stringify(jsonFace).includes(statement));
+    for (const fmt of ["md", "html", "json"]) {
+      const response = await face(`${workshopClaim.claim_id}@${version}`, fmt);
+      assert.equal(response.status, 200);
+      assert.ok(!(await response.text()).includes(privateCanary));
+    }
+  }
+  const replay = await call(
+    `${workshopAuthor.path}/revise`,
+    { workshop_id: draft.workshop_id },
+    workshopAuthor.token,
+    200,
+    publicationKey,
+  );
+  assert.deepEqual({ ...replay, _status: 201 }, published);
+  assert.equal(await fixtures.screeningCalls(), screenBefore + 1);
+  await assertParity(replacement, 409, "OBJECT_VERSION_CONFLICT");
+
+  // Distinct keys, same base, concurrent direct vs stored: exactly one wins.
+  const raceReplacement = {
+    ...replacement,
+    base_version: 2,
+    statement: "A revision race gadget has three ports and a chosen orientation.",
+  };
+  const raceDraft = await pushRevision(raceReplacement);
+  const beforeRace = await publicState();
+  await fixtures.pauseScreening();
+  let raced;
+  try {
+    raced = await Promise.all([
+      call(`${workshopAuthor.path}/revise`, raceReplacement, workshopAuthor.token, null),
+      call(
+        `${workshopAuthor.path}/revise`,
+        { workshop_id: raceDraft.workshop_id },
+        workshopAuthor.token,
+        null,
+      ),
+    ]);
+  } finally {
+    await fixtures.resumeScreening();
+  }
+  assert.deepEqual(raced.map((value) => value._status).sort(), [201, 409]);
+  assert.equal(raced.find((value) => value._status === 409).code, "OBJECT_VERSION_CONFLICT");
+  assert.deepEqual(await publicState(), {
+    events: beforeRace.events + 1,
+    cursor: beforeRace.cursor + 1,
+    versions: beforeRace.versions + 1,
+  });
+
+  // Exact replay survives session close; a new session cannot adopt an old ID.
+  await call(
+    `${workshopAuthor.path}/close`,
+    { handback: "Typed revision published; old versions remain available." },
+    workshopAuthor.token,
+    201,
+  );
+  const afterClose = await publicState();
+  const closedReplay = await call(
+    `${workshopAuthor.path}/revise`,
+    { workshop_id: draft.workshop_id },
+    workshopAuthor.token,
+    200,
+    publicationKey,
+  );
+  assert.deepEqual({ ...closedReplay, _status: 201 }, published);
+  const nextSession = await call(
+    "/v1/sessions",
+    { problem_id: problem },
+    workshopAuthor.token,
+    201,
+  );
+  const foreignSession = await call(
+    `/v1/sessions/${nextSession.session_id}/revise`,
+    { workshop_id: raceDraft.workshop_id },
+    workshopAuthor.token,
+    404,
+  );
+  assert.equal(foreignSession.code, "WORKSHOP_OBJECT_NOT_FOUND");
+  assert.deepEqual(await publicState(), afterClose);
+
+  // Corrupt stored content is an internal failure, with no draft bytes in the
+  // response and no fallback to generic Markdown or paid screening.
+  const corruptDraft = await call(
+    `/v1/sessions/${nextSession.session_id}/workshop`,
+    {
+      type: "draft",
+      title: "Storage corruption fixture",
+      body_md: privateNotes,
+    },
+    workshopAuthor.token,
+    201,
+  );
+  await env.DB.prepare("UPDATE workshop_objects SET revision_json = ? WHERE workshop_id = ?")
+    .bind(JSON.stringify({ unexpected: privateNotes }), corruptDraft.workshop_id)
+    .run();
+  const beforeCorruptRead = await publicState();
+  const screenBeforeCorruptRead = await fixtures.screeningCalls();
+  const corruptRefusal = await call(
+    `/v1/sessions/${nextSession.session_id}/revise`,
+    {
+      workshop_id: corruptDraft.workshop_id,
+    },
+    workshopAuthor.token,
+    500,
+  );
+  assert.equal(corruptRefusal.code, "INTERNAL_ERROR");
+  assert.ok(!JSON.stringify(corruptRefusal).includes(privateCanary));
+  assert.deepEqual(await publicState(), beforeCorruptRead);
+  assert.equal(await fixtures.screeningCalls(), screenBeforeCorruptRead);
+
   // --- Requirement 11: OPS.2a Structured Diagnostic Log ---
   const cursor = await getPublicCursor();
   const claimCountRow = await env.DB.prepare(
@@ -624,12 +947,18 @@ export async function claimsJourney({ call, enroll, fixtures, env, worker, origi
     problem,
     cursor,
     claims_verified: claimCountRow?.n ?? allKinds.length,
-    concurrency_races: ["duplicate_claim_p11", "version_conflict_p9"],
+    concurrency_races: [
+      "duplicate_claim_p11",
+      "version_conflict_p9",
+      "direct_vs_workshop_revision",
+    ],
+    typed_workshop_revision:
+      "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
     kinds_tested: allKinds,
     rules_verified: ["P3", "P9", "P10", "P11"],
     boundary: {
       runtime: "workerd",
-      database: "Cloudflare D1 (local migrated, migrations 0001-0045)",
+      database: "Cloudflare D1 (local migrated, migrations 0001-0046)",
       cas: "Cloudflare R2 CAS",
       durable_objects: "KraterOutboxDrainer (sqlite storage)",
       routes: "production wire routes",

@@ -127,6 +127,7 @@ import {
 import {
   type ClaimId,
   type ClaimKind,
+  type ClaimRevision,
   type CursorResponse,
   type NextAction,
   type PackBudget,
@@ -139,6 +140,8 @@ import {
   type ProblemId,
   type PromoteRequest,
   type PromoteResponse,
+  type ReviseRequest,
+  type ReviseResponse,
   type SessionCloseRequest,
   type SessionCloseResponse,
   type SessionId,
@@ -503,6 +506,7 @@ function generatedSessionsTypes(): string {
   const typeNames = [
     "ClaimId",
     "ClaimKind",
+    "ClaimRevision",
     "CursorResponse",
     "NextAction",
     "PackBudget",
@@ -515,6 +519,8 @@ function generatedSessionsTypes(): string {
     "ProblemId",
     "PromoteRequest",
     "PromoteResponse",
+    "ReviseRequest",
+    "ReviseResponse",
     "SessionCloseRequest",
     "SessionCloseResponse",
     "SessionId",
@@ -533,6 +539,7 @@ function generatedSessionsTypes(): string {
   ] as const satisfies readonly (keyof {
     ClaimId: ClaimId;
     ClaimKind: ClaimKind;
+    ClaimRevision: ClaimRevision;
     CursorResponse: CursorResponse;
     NextAction: NextAction;
     PackBudget: PackBudget;
@@ -545,6 +552,8 @@ function generatedSessionsTypes(): string {
     ProblemId: ProblemId;
     PromoteRequest: PromoteRequest;
     PromoteResponse: PromoteResponse;
+    ReviseRequest: ReviseRequest;
+    ReviseResponse: ReviseResponse;
     SessionCloseRequest: SessionCloseRequest;
     SessionCloseResponse: SessionCloseResponse;
     SessionId: SessionId;

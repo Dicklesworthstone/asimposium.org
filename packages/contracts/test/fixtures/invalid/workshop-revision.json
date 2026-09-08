@@ -1,0 +1,11 @@
+{
+  "type": "draft",
+  "title": "An invalid revision base",
+  "body_md": "Private scratch.",
+  "revision": {
+    "claim_id": "C-1",
+    "base_version": 0,
+    "kind": "definition",
+    "statement": "The invalid base must never be stored."
+  }
+}

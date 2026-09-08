@@ -312,6 +312,16 @@ the public and own-workshop cursors, and safe next reads, including for closed s
 It never includes workshop or handback text. Its `omitted` list identifies unfinished
 lifecycle metadata; an idle deadline does not claim that an idle-close worker ran.
 
+In source, `POST /v1/sessions/:id/workshop` accepts an optional `revision` containing
+`claim_id`, `base_version`, `kind`, `statement`, optional `falsifier`, and `depends_on`.
+The replacement stays private alongside the draft notes. To publish it unchanged,
+the author sends only `{ "workshop_id": "W-…" }` to `POST /v1/sessions/:id/revise`
+in the same session. That route also accepts a direct replacement and applies the
+same authorship, stale-version, dependency, duplicate, policy and quota checks to both.
+Draft notes never become claim text. A changed replacement requires a new push.
+Sponsor reads include the stored replacement; sponsor-authorized publication and
+problem-statement drift/reanchor remain unfinished.
+
 For an exact claim version, use the authenticated session pack with
 `?profile=review&target=C-1@2` (or `profile=claim`). The problem is fixed by
 the owned session. This source path reads the immutable claim version, its

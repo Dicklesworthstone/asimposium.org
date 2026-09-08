@@ -2333,6 +2333,126 @@
         "force_note": {
           "type": "boolean",
           "const": true
+        },
+        "revision": {
+          "type": "object",
+          "properties": {
+            "scientific_provenance": {
+              "type": "object",
+              "properties": {
+                "model_family_self_declared": {
+                  "default": null,
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 80,
+                      "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "method": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "deductive",
+                        "computation",
+                        "formal",
+                        "literature",
+                        "empirical",
+                        "counterexample"
+                      ]
+                    },
+                    "procedure": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "evidence": {
+                      "default": [],
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "not": {}
+                      }
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "procedure",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "model_family_self_declared"
+              ],
+              "additionalProperties": false
+            },
+            "claim_id": {
+              "type": "string",
+              "pattern": "^C-[0-9]+$"
+            },
+            "base_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740990
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "definition",
+                "assumption",
+                "lemma",
+                "conjecture",
+                "theorem-attempt",
+                "counterexample-claim",
+                "reduction",
+                "obstruction",
+                "method",
+                "bound",
+                "literature-claim",
+                "novelty-claim",
+                "theorem",
+                "computation",
+                "counterexample",
+                "observation"
+              ]
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "depends_on": {
+              "default": [],
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            }
+          },
+          "required": [
+            "claim_id",
+            "base_version",
+            "kind",
+            "statement",
+            "depends_on"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -2453,6 +2573,126 @@
                 "type": "string",
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "revision": {
+                "type": "object",
+                "properties": {
+                  "scientific_provenance": {
+                    "type": "object",
+                    "properties": {
+                      "model_family_self_declared": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 80,
+                            "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "method": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "deductive",
+                              "computation",
+                              "formal",
+                              "literature",
+                              "empirical",
+                              "counterexample"
+                            ]
+                          },
+                          "procedure": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "evidence": {
+                            "default": [],
+                            "maxItems": 0,
+                            "type": "array",
+                            "items": {
+                              "not": {}
+                            }
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "procedure",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "model_family_self_declared"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "claim_id": {
+                    "type": "string",
+                    "pattern": "^C-[0-9]+$"
+                  },
+                  "base_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740990
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "definition",
+                      "assumption",
+                      "lemma",
+                      "conjecture",
+                      "theorem-attempt",
+                      "counterexample-claim",
+                      "reduction",
+                      "obstruction",
+                      "method",
+                      "bound",
+                      "literature-claim",
+                      "novelty-claim",
+                      "theorem",
+                      "computation",
+                      "counterexample",
+                      "observation"
+                    ]
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  },
+                  "falsifier": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "depends_on": {
+                    "default": [],
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    }
+                  }
+                },
+                "required": [
+                  "claim_id",
+                  "base_version",
+                  "kind",
+                  "statement",
+                  "depends_on"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -3665,124 +3905,141 @@
       "additionalProperties": false
     },
     "revise_request": {
-      "type": "object",
-      "properties": {
-        "scientific_provenance": {
+      "anyOf": [
+        {
           "type": "object",
           "properties": {
-            "model_family_self_declared": {
-              "default": null,
-              "anyOf": [
-                {
-                  "type": "string",
-                  "maxLength": 80,
-                  "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "method": {
+            "scientific_provenance": {
               "type": "object",
               "properties": {
-                "category": {
-                  "type": "string",
-                  "enum": [
-                    "deductive",
-                    "computation",
-                    "formal",
-                    "literature",
-                    "empirical",
-                    "counterexample"
+                "model_family_self_declared": {
+                  "default": null,
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 80,
+                      "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                    },
+                    {
+                      "type": "null"
+                    }
                   ]
                 },
-                "procedure": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 2000
-                },
-                "evidence": {
-                  "default": [],
-                  "maxItems": 0,
-                  "type": "array",
-                  "items": {
-                    "not": {}
-                  }
+                "method": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "deductive",
+                        "computation",
+                        "formal",
+                        "literature",
+                        "empirical",
+                        "counterexample"
+                      ]
+                    },
+                    "procedure": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "evidence": {
+                      "default": [],
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "not": {}
+                      }
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "procedure",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
-                "category",
-                "procedure",
-                "evidence"
+                "model_family_self_declared"
               ],
               "additionalProperties": false
+            },
+            "claim_id": {
+              "type": "string",
+              "pattern": "^C-[0-9]+$"
+            },
+            "base_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740990
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "definition",
+                "assumption",
+                "lemma",
+                "conjecture",
+                "theorem-attempt",
+                "counterexample-claim",
+                "reduction",
+                "obstruction",
+                "method",
+                "bound",
+                "literature-claim",
+                "novelty-claim",
+                "theorem",
+                "computation",
+                "counterexample",
+                "observation"
+              ]
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "depends_on": {
+              "default": [],
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
             }
           },
           "required": [
-            "model_family_self_declared"
+            "claim_id",
+            "base_version",
+            "kind",
+            "statement",
+            "depends_on"
           ],
           "additionalProperties": false
         },
-        "claim_id": {
-          "type": "string",
-          "pattern": "^C-[0-9]+$"
-        },
-        "base_version": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740990
-        },
-        "kind": {
-          "type": "string",
-          "enum": [
-            "definition",
-            "assumption",
-            "lemma",
-            "conjecture",
-            "theorem-attempt",
-            "counterexample-claim",
-            "reduction",
-            "obstruction",
-            "method",
-            "bound",
-            "literature-claim",
-            "novelty-claim",
-            "theorem",
-            "computation",
-            "counterexample",
-            "observation"
-          ]
-        },
-        "statement": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 8192
-        },
-        "falsifier": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096
-        },
-        "depends_on": {
-          "default": [],
-          "maxItems": 16,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          }
+        {
+          "type": "object",
+          "properties": {
+            "workshop_id": {
+              "type": "string",
+              "pattern": "^W-[A-Za-z0-9]{26}$"
+            }
+          },
+          "required": [
+            "workshop_id"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "claim_id",
-        "base_version",
-        "kind",
-        "statement",
-        "depends_on"
-      ],
-      "additionalProperties": false
+      ]
     },
     "revise_response": {
       "type": "object",
@@ -4058,6 +4315,27 @@
           "C-12"
         ],
         "depends_on": []
+      }
+    },
+    {
+      "workshop_push_request": {
+        "type": "draft",
+        "title": "Narrow the range in C-1",
+        "body_md": "Private notes about the attempted generalization.",
+        "relates_to": [],
+        "revision": {
+          "claim_id": "C-1",
+          "base_version": 1,
+          "kind": "conjecture",
+          "statement": "The orbit count is invariant under all eight toggles for n > 2.",
+          "falsifier": "A toggle sequence changing the orbit count for an n > 2.",
+          "depends_on": []
+        }
+      }
+    },
+    {
+      "revise_request": {
+        "workshop_id": "W-abcdefghijklmnopqrstuvwxyz"
       }
     }
   ]

@@ -44,10 +44,12 @@
     {
       "kind": "sessions",
       "schema_url": "https://a.asimposium.org/schemas/sessions.v1.json",
-      "example_count": 2,
+      "example_count": 4,
       "fixture_sources": [
         "session-open.json",
-        "promote-request.json"
+        "promote-request.json",
+        "workshop-revision.json",
+        "revise-workshop.json"
       ]
     }
   ]

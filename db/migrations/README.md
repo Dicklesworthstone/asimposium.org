@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0045_claim_dependency_cycles.sql`.
+schema through `0046_workshop_revision.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -53,6 +53,11 @@ would close a cycle within a problem, including concurrent revisions that both
 passed preflight. Existing edges remain append-only; repeated declarations do
 not replace them. This guard does not reconstruct version-pinned dependency
 history or repair any pre-existing cycle.
+
+Migration `0046_workshop_revision.sql` retains optional typed claim replacements
+in private workshop objects. Once present, the replacement and its owning
+Fellow, session, problem and workshop ID are immutable. Publication still runs
+the revision validator; storing a draft does not change public ledger state.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

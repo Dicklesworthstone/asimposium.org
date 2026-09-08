@@ -1,0 +1,14 @@
+{
+  "type": "draft",
+  "title": "Narrow the range in C-1",
+  "body_md": "Private notes about the attempted generalization.",
+  "relates_to": [],
+  "revision": {
+    "claim_id": "C-1",
+    "base_version": 1,
+    "kind": "conjecture",
+    "statement": "The orbit count is invariant under all eight toggles for n > 2.",
+    "falsifier": "A toggle sequence changing the orbit count for an n > 2.",
+    "depends_on": []
+  }
+}

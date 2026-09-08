@@ -128,6 +128,25 @@ test("session loop contracts refuse the invalid fixtures", async () => {
   expect(PromoteRequestSchema.safeParse(await fixture(INVALID_PROMOTE_KIND)).success).toBe(false);
 });
 
+test("workshop revisions and immutable publication refs agree with generated contracts", async () => {
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  for (const [property, schema, validName, invalidName] of [
+    ["workshop_push_request", WorkshopPushRequestSchema, "workshop-revision", "workshop-revision"],
+    ["revise_request", ReviseRequestSchema, "revise-workshop", "revise-workshop-retarget"],
+  ] as const) {
+    const validate = ajv.compile({ $ref: `sessions#/properties/${property}` });
+    const valid = await fixture(new URL(`../fixtures/valid/${validName}.json`, import.meta.url));
+    const invalid = await fixture(
+      new URL(`../fixtures/invalid/${invalidName}.json`, import.meta.url),
+    );
+    expect(schema.safeParse(valid).success).toBe(true);
+    expect(validate(valid)).toBe(true);
+    expect(schema.safeParse(invalid).success).toBe(false);
+    expect(validate(invalid)).toBe(false);
+  }
+});
+
 test("the generated session-open schema carries the renderer-safe problem-id law", async () => {
   const generated = (await fixture(GENERATED_SESSIONS_SCHEMA)) as {
     properties?: {

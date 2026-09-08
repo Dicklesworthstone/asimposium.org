@@ -2,17 +2,29 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { claimsJourney } from "./claims-journey.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+// Fresh local signing key exercises the actual sponsor ingress; no OAuth claim.
+const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+const keyId = "claims-local-sponsor";
+const publicKeyHex = Buffer.from(
+  await crypto.subtle.exportKey("raw", signingKeys.publicKey),
+).toString("hex");
 
 const server = createTestHarness({
   root,
   workers: [
     {
+      // Wrangler's test secret overrides take precedence over workstation
+      // .dev.vars. The signer must match this run's fresh public keyring.
+      secrets: {
+        SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: keyId, publicKeyHex, notBefore: 0 }]),
+      },
       config: {
         name: "asimposium-claims-proof",
         main: `${root}/apps/wire/test/integration/discovery-local-worker.ts`,
@@ -134,6 +146,29 @@ async function runClaimsProof() {
     return issued.token;
   }
 
+  async function sponsorWorkshop(sponsorId, body, expected = 200) {
+    const path = "/v1/sponsors/workshop";
+    const raw = JSON.stringify(body);
+    const envelope = await mintServiceEnvelope({
+      privateKey: signingKeys.privateKey,
+      kid: keyId,
+      now: Math.floor(Date.now() / 1000),
+      method: "POST",
+      route: path,
+      action: "workshop.read",
+      principalId: sponsorId,
+      body: raw,
+    });
+    const response = await worker.fetch(`${origin}${path}`, {
+      method: "POST",
+      headers: { ...serviceEnvelopeHeaders(envelope), "User-Agent": userAgent },
+      body: raw,
+    });
+    assert.equal(response.status, expected, `Signed sponsor workshop read expected ${expected}`);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    return response.json();
+  }
+
   try {
     const result = await claimsJourney({
       call,
@@ -143,6 +178,7 @@ async function runClaimsProof() {
       worker,
       origin,
       userAgent,
+      sponsorWorkshop,
     });
     return result;
   } finally {

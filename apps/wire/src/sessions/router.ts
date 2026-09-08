@@ -1,4 +1,5 @@
 import {
+  ClaimRevisionSchema,
   CursorResponseSchema,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
@@ -2320,7 +2321,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "WORKSHOP_PUSH_BODY_INVALID",
         title: "The workshop push does not match the contract",
         detail: "The JSON body does not match the workshop-push contract.",
-        fixHint: "Send {type, title, body_md, relates_to?}.",
+        fixHint:
+          "Send {type, title, body_md, relates_to?, revision?}; revision is an exact claim replacement for later publication.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -2467,8 +2469,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 .prepare(
                   `INSERT INTO workshop_objects
                      (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title,
-                      body_md, cas_hash, relates_to_json, force_note, created_at)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                      body_md, cas_hash, relates_to_json, force_note, created_at, revision_json)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                    FROM session_write_replays
                    WHERE scope = 'workshop_push' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -2486,6 +2488,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   JSON.stringify(parsed.data.relates_to),
                   parsed.data.force_note === true ? 1 : 0,
                   createdAt,
+                  parsed.data.revision === undefined ? null : JSON.stringify(parsed.data.revision),
                   auth.binding.fellowId,
                   key,
                   digest,
@@ -3125,14 +3128,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       }
     }
-    const parsed = ReviseRequestSchema.safeParse(rawBody);
-    if (!parsed.success) {
+    const submitted = ReviseRequestSchema.safeParse(rawBody);
+    if (!submitted.success) {
       return validatedProblem({
         status: 422,
         code: "REVISE_BODY_INVALID",
         title: "The revision does not match the contract",
         detail: "The JSON body does not match the revise contract.",
-        fixHint: "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}.",
+        fixHint:
+          "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}, or {workshop_id} to publish your stored replacement unchanged.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -3147,30 +3151,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
-      return validatedProblem({
-        status: 422,
-        code: "MISSING_FALSIFIER",
-        title: "Conjecture-class claims require a falsifier",
-        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
-        fixHint:
-          "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
-        rule: "P3",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            claim_id: parsed.data.claim_id,
-            base_version: parsed.data.base_version,
-            kind: parsed.data.kind,
-            statement: parsed.data.statement,
-            falsifier: "<what would refute this>",
-            depends_on: parsed.data.depends_on,
-          },
-        },
-      });
-    }
-
-    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/revise`, parsed.data);
+    // Bind replay to the submitted reference, before consulting mutable state.
+    // Successful retries must still work after the session closes or head moves.
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/revise`,
+      submitted.data,
+    );
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -3217,6 +3203,76 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // or edits content. Head-version staleness is refused with the exact head
     // so the caller can re-apply; the batch-level primary-key guard remains
     // the atomic backstop for concurrent revisions of the same base.
+    let replacement = submitted.data;
+    if ("workshop_id" in replacement) {
+      try {
+        const draft = await db
+          .prepare(
+            `SELECT revision_json FROM workshop_objects
+         WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
+          )
+          .bind(
+            replacement.workshop_id,
+            session.session_id,
+            auth.binding.fellowId,
+            session.problem_id,
+          )
+          .first<{ revision_json: string | null }>();
+        if (draft === null || draft === undefined || draft.revision_json === null) {
+          return validatedProblem({
+            status: 404,
+            code: "WORKSHOP_OBJECT_NOT_FOUND",
+            title: "No revision draft in this session",
+            detail:
+              "The workshop id does not name a typed revision owned by this session and Fellow.",
+            fixHint:
+              "Push a workshop object with a revision payload, then send its workshop_id to this route.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+            },
+          });
+        }
+        // Storage corruption is an internal failure, never a fallback to request
+        // content, generic Markdown, or an unvalidated claim replacement.
+        replacement = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
+      } catch {
+        // Hono's sub-router default error handler is a plain-text 500 and can
+        // log parser details. Keep corrupt private content behind a fixed face.
+        return validatedProblem({
+          status: 500,
+          code: "INTERNAL_ERROR",
+          title: "The stored revision is unavailable",
+          detail: "The private replacement could not be read safely. No revision was published.",
+          fixHint:
+            "Retry shortly. If this persists, report the route and the time to the operator.",
+        });
+      }
+    }
+    const parsed = { data: replacement };
+    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
+      return validatedProblem({
+        status: 422,
+        code: "MISSING_FALSIFIER",
+        title: "Conjecture-class claims require a falsifier",
+        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
+        fixHint:
+          "Add 'falsifier' to a new replacement (push a new workshop revision if using a draft). If nothing could refute the statement, it may be a definition (kind: 'definition').",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.claim_id,
+            base_version: parsed.data.base_version,
+            kind: parsed.data.kind,
+            statement: parsed.data.statement,
+            falsifier: "<what would refute this>",
+            depends_on: parsed.data.depends_on,
+          },
+        },
+      });
+    }
     const claimHead = await db
       .prepare(
         `SELECT
@@ -6114,7 +6170,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // before this query ever runs.
       const beforeWorkshopSeq = parsedRequest.data.before_workshop_seq;
       const objects = await c.env.DB.prepare(
-        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at
+        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at, revision_json
            FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
              AND (? IS NULL OR workshop_seq < ?)
            ORDER BY workshop_seq DESC LIMIT ${SPONSOR_WORKSHOP_PAGE_LIMIT + 1}`,
@@ -6127,6 +6183,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           body_md: string;
           cas_hash: string | null;
           relates_to_json: string;
+          revision_json: string | null;
           workshop_seq: number;
           created_at: string;
         }>();
@@ -6168,6 +6225,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           relates_to: JSON.parse(row.relates_to_json) as string[],
           workshop_seq: row.workshop_seq,
           created_at: row.created_at,
+          ...(row.revision_json === null
+            ? {}
+            : { revision: ClaimRevisionSchema.parse(JSON.parse(row.revision_json)) }),
         });
       }
       const view = SponsorWorkshopViewSchema.parse({

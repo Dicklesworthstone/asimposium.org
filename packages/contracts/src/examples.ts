@@ -29,7 +29,12 @@ import { ProblemFaceResponseSchema, ProblemsIndexResponseSchema } from "./ledger
 import { ProblemDocumentSchema } from "./problem.ts";
 import { ScreeningContractsSchema } from "./screening.ts";
 import { SearchQueryRequestSchema } from "./search.ts";
-import { PromoteRequestSchema, SessionOpenRequestSchema } from "./sessions.ts";
+import {
+  PromoteRequestSchema,
+  ReviseRequestSchema,
+  SessionOpenRequestSchema,
+  WorkshopPushRequestSchema,
+} from "./sessions.ts";
 
 const FIXTURES_DIR = join(import.meta.dir, "..", "test", "fixtures", "valid");
 
@@ -111,10 +116,17 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
   },
   {
     kind: "sessions",
-    fixtures: ["session-open.json", "promote-request.json"],
+    fixtures: [
+      "session-open.json",
+      "promote-request.json",
+      "workshop-revision.json",
+      "revise-workshop.json",
+    ],
     build: ({ bodies }: BuilderInput): unknown => [
       { session_open_request: SessionOpenRequestSchema.parse(bodies[0]) },
       { promote_request: PromoteRequestSchema.parse(bodies[1]) },
+      { workshop_push_request: WorkshopPushRequestSchema.parse(bodies[2]) },
+      { revise_request: ReviseRequestSchema.parse(bodies[3]) },
     ],
   },
 ]);

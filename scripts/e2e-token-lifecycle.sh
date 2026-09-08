@@ -88,6 +88,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0043_screening_publication_provenance.sql"
   "0044_public_write_quotas.sql"
   "0045_claim_dependency_cycles.sql"
+  "0046_workshop_revision.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
