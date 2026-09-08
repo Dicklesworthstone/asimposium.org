@@ -99,6 +99,19 @@ export async function readScientificClaim(
   claimId: string,
   version: number,
 ): Promise<ScientificClaim> {
+  const claim = await findScientificClaim(db, problemId, claimId, version);
+  if (!claim) throw new ScientificInputError("The exact public claim version is unavailable.");
+  return claim;
+}
+
+/** Nullable public lookup for discovery; corruption and storage failures still
+ * throw, while missing/withdrawn versions reveal no retained projection text. */
+export async function findScientificClaim(
+  db: D1Database,
+  problemId: string,
+  claimId: string,
+  version: number,
+): Promise<ScientificClaim | null> {
   const row = await db
     .prepare(`
     SELECT e.id AS event_id, e.payload_sha256, c.payload_json,
@@ -107,6 +120,7 @@ export async function readScientificClaim(
     FROM claim_versions v JOIN events e ON e.problem_id = v.problem_id
       AND e.object_id = v.claim_id AND e.object_version = v.version
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
+    JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
     JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       AND c.redacted_at IS NULL
     WHERE v.problem_id = ? AND v.claim_id = ? AND v.version = ?
@@ -114,7 +128,7 @@ export async function readScientificClaim(
   `)
     .bind(problemId, claimId, version)
     .first<ContentRow & { content_digest: string; statement: string }>();
-  if (!row) throw new ScientificInputError("The exact public claim version is unavailable.");
+  if (!row) return null;
   const payload = await checkedScientificPayload(row);
   if (
     payload.claim_id !== claimId ||
