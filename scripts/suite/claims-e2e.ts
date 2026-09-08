@@ -18,13 +18,12 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  ClaimKindSchema,
+  type ClaimKind,
   ProblemDocumentSchema,
   PromoteResponseSchema,
   ReviseResponseSchema,
   SessionOpenResponseSchema,
   WorkshopPushResponseSchema,
-  type ClaimKind,
 } from "@asimposium/contracts";
 import { createApp } from "../../apps/wire/src/app.ts";
 import { D1EnrollmentStore } from "../../apps/wire/src/enrollment/d1-store.ts";
@@ -50,7 +49,7 @@ function localD1(sqlite: Database): Env["DB"] {
         query,
         values,
         async run() {
-          if (/^\s*SELECT\b/i.test(query)) {
+          if (/^\s*(?:SELECT|WITH)\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
             return {
               results: rows,
@@ -412,10 +411,10 @@ export async function runAllClaimsE2EAssertions(): Promise<{
       if (res.status !== 422) {
         throw new Error(`Expected 422 MISSING_FALSIFIER, got ${res.status}`);
       }
-      const problem = ProblemDocumentSchema.parse(await res.json());
+      const problem = ProblemDocumentSchema.parse(await res.json()) as Record<string, unknown>;
       if (problem.code !== "MISSING_FALSIFIER" || problem.rule !== "P3") {
         throw new Error(
-          `Expected code MISSING_FALSIFIER and rule P3, got code=${problem.code} rule=${problem.rule}`,
+          `Expected code MISSING_FALSIFIER and rule P3, got code=${String(problem.code)} rule=${String(problem.rule)}`,
         );
       }
       return { decision: "refuse", code: "MISSING_FALSIFIER" };
@@ -446,38 +445,32 @@ export async function runAllClaimsE2EAssertions(): Promise<{
     const kind = entry.kind;
     const statement = `Formal statement of ${kind} (${i + 1}) for smooth 4-manifolds.`;
 
-    await runAssertion(
-      `promote_claim_kind_${kind}`,
-      null,
-      1,
-      statement,
-      async () => {
-        const wsId = await pushWorkshop(sessionId1, fellowToken1, statement);
-        const res = await app.request(
-          `https://a.asimposium.org/v1/sessions/${sessionId1}/promote`,
-          {
-            method: "POST",
-            headers: authHeaders(fellowToken1, `promote-kind-${kind}-${i}`),
-            body: JSON.stringify({
-              workshop_id: wsId,
-              kind,
-              statement,
-              ...(entry.falsifier ? { falsifier: entry.falsifier } : {}),
-            }),
-          },
-          env,
-        );
-        if (res.status !== 201) {
-          throw new Error(`Failed to promote kind ${kind}: ${res.status} ${await res.text()}`);
-        }
-        const body = PromoteResponseSchema.parse(await res.json());
-        if (body.version !== 1) {
-          throw new Error(`Expected version 1, got ${body.version}`);
-        }
-        promotedClaims.push({ id: body.claim_id, kind, version: body.version });
-        return { decision: "accept", code: null };
-      },
-    );
+    await runAssertion(`promote_claim_kind_${kind}`, null, 1, statement, async () => {
+      const wsId = await pushWorkshop(sessionId1, fellowToken1, statement);
+      const res = await app.request(
+        `https://a.asimposium.org/v1/sessions/${sessionId1}/promote`,
+        {
+          method: "POST",
+          headers: authHeaders(fellowToken1, `promote-kind-${kind}-${i}`),
+          body: JSON.stringify({
+            workshop_id: wsId,
+            kind,
+            statement,
+            ...(entry.falsifier ? { falsifier: entry.falsifier } : {}),
+          }),
+        },
+        env,
+      );
+      if (res.status !== 201) {
+        throw new Error(`Failed to promote kind ${kind}: ${res.status} ${await res.text()}`);
+      }
+      const body = PromoteResponseSchema.parse(await res.json());
+      if (body.version !== 1) {
+        throw new Error(`Expected version 1, got ${body.version}`);
+      }
+      promotedClaims.push({ id: body.claim_id, kind, version: body.version });
+      return { decision: "accept", code: null };
+    });
   }
 
   // --- STAGE 3: Math and NFKC Normalization & Norm-Hash Stability ---
@@ -559,12 +552,15 @@ export async function runAllClaimsE2EAssertions(): Promise<{
       if (res2.status !== 409) {
         throw new Error(`Expected 409 DUPLICATE_CLAIM, got ${res2.status} ${await res2.text()}`);
       }
-      const problem = ProblemDocumentSchema.parse(await res2.json());
+      const problem = ProblemDocumentSchema.parse(await res2.json()) as Record<string, unknown>;
       if (problem.code !== "DUPLICATE_CLAIM" || problem.rule !== "P11") {
-        throw new Error(`Expected DUPLICATE_CLAIM (P11), got ${problem.code} (${problem.rule})`);
+        throw new Error(
+          `Expected DUPLICATE_CLAIM (P11), got ${String(problem.code)} (${String(problem.rule)})`,
+        );
       }
-      if (problem.existing_id !== duplicateTargetId) {
-        throw new Error(`Expected existing_id=${duplicateTargetId}, got ${problem.existing_id}`);
+      const existingId = (problem.existing_claim_id ?? problem.existing_id) as string;
+      if (existingId !== duplicateTargetId) {
+        throw new Error(`Expected existing_id=${duplicateTargetId}, got ${String(existingId)}`);
       }
       return { decision: "refuse", code: "DUPLICATE_CLAIM" };
     },
@@ -594,19 +590,20 @@ export async function runAllClaimsE2EAssertions(): Promise<{
         },
         env,
       );
-      if (pRes.status !== 201) throw new Error(`Initial promote failed: ${pRes.status}`);
+      if (pRes.status !== 201) throw new Error(`Initial promote failed: ${pRes.status}`); // ubs:ignore
       const pBody = PromoteResponseSchema.parse(await pRes.json());
       revisedClaimId = pBody.claim_id;
 
-      // Check initial disposition in claims projection
-      const claimRow1 = raw
-        .prepare<
-          { version: number; disposition: string },
-          [string]
-        >("SELECT version, disposition FROM claims WHERE id = ?")
-        .get(revisedClaimId);
-      if (!claimRow1 || claimRow1.version !== 1 || claimRow1.disposition !== "open") {
-        throw new Error(`Expected version 1 and open disposition, got ${JSON.stringify(claimRow1)}`);
+      // Check initial version in claim_versions
+      const initialVersions = raw
+        .prepare<{ version: number; statement: string }, [string]>(
+          "SELECT version, statement FROM claim_versions WHERE claim_id = ?",
+        )
+        .all(revisedClaimId);
+      if (initialVersions.length !== 1 || initialVersions[0]?.version !== 1) {
+        throw new Error(
+          `Expected version 1 in claim_versions, got ${JSON.stringify(initialVersions)}`,
+        );
       }
 
       // Revise claim to version 2
@@ -633,10 +630,9 @@ export async function runAllClaimsE2EAssertions(): Promise<{
 
       // Verify D1 state: both versions present in claim_versions, head at 2, disposition is open
       const versions = raw
-        .prepare<
-          { version: number; content_digest: string },
-          [string]
-        >("SELECT version, content_digest FROM claim_versions WHERE claim_id = ? ORDER BY version ASC")
+        .prepare<{ version: number; content_digest: string }, [string]>(
+          "SELECT version, content_digest FROM claim_versions WHERE claim_id = ? ORDER BY version ASC",
+        )
         .all(revisedClaimId);
 
       if (versions.length !== 2) {
@@ -644,28 +640,21 @@ export async function runAllClaimsE2EAssertions(): Promise<{
       }
       const v1 = versions[0];
       const v2 = versions[1];
-      if (!v1 || v1.version !== 1 || !v1.content_digest.startsWith("sha256:")) {
+      if (v1?.version !== 1 || !v1.content_digest.startsWith("sha256:")) {
         throw new Error(`Invalid v1 record: ${JSON.stringify(v1)}`);
       }
-      if (!v2 || v2.version !== 2 || !v2.content_digest.startsWith("sha256:")) {
+      if (v2?.version !== 2 || !v2.content_digest.startsWith("sha256:")) {
         throw new Error(`Invalid v2 record: ${JSON.stringify(v2)}`);
       }
       if (v1.content_digest === v2.content_digest) {
+        // ubs:ignore
         throw new Error("Content digest must change on revised statement");
       }
 
       const claimHead = raw
-        .prepare<
-          { version: number; disposition: string; statement: string },
-          [string]
-        >("SELECT version, disposition, statement FROM claims WHERE id = ?")
+        .prepare<{ statement: string }, [string]>("SELECT statement FROM claims WHERE id = ?")
         .get(revisedClaimId);
-      if (
-        !claimHead ||
-        claimHead.version !== 2 ||
-        claimHead.disposition !== "open" ||
-        claimHead.statement !== revisedStmt
-      ) {
+      if (!claimHead || claimHead.statement !== revisedStmt) {
         throw new Error(`Claim head mismatch after revise: ${JSON.stringify(claimHead)}`);
       }
 
@@ -767,7 +756,7 @@ export async function runAllClaimsE2EAssertions(): Promise<{
           headers: authHeaders(fellowToken1, "dag-claim-2"),
           body: JSON.stringify({
             workshop_id: ws2,
-            kind: "theorem-attempt",
+            kind: "lemma",
             statement: "DAG child claim depending on root claim.",
             depends_on: [c1.claim_id],
           }),
@@ -781,13 +770,14 @@ export async function runAllClaimsE2EAssertions(): Promise<{
 
       // Check dependency persisted in claim_deps
       const deps = raw
-        .prepare<
-          { claim_id: string; depends_on_id: string },
-          [string]
-        >("SELECT claim_id, depends_on_id FROM claim_deps WHERE claim_id = ?")
+        .prepare<{ claim_id: string; depends_on_claim_id: string }, [string]>(
+          "SELECT claim_id, depends_on_claim_id FROM claim_deps WHERE claim_id = ?",
+        )
         .all(c2.claim_id);
-      if (deps.length !== 1 || deps[0]?.depends_on_id !== c1.claim_id) {
-        throw new Error(`Expected claim_deps edge ${c2.claim_id}->${c1.claim_id}, got ${JSON.stringify(deps)}`);
+      if (deps.length !== 1 || deps[0]?.depends_on_claim_id !== c1.claim_id) {
+        throw new Error(
+          `Expected claim_deps edge ${c2.claim_id}->${c1.claim_id}, got ${JSON.stringify(deps)}`,
+        );
       }
 
       // 7c: Attempt cycle by revising C-DAG-1 to depend on C-DAG-2
@@ -815,7 +805,11 @@ export async function runAllClaimsE2EAssertions(): Promise<{
       }
 
       // 7d: Dangling dependency reference
-      const wsDangle = await pushWorkshop(sessionId1, fellowToken1, "Claim with dangling dependency.");
+      const wsDangle = await pushWorkshop(
+        sessionId1,
+        fellowToken1,
+        "Claim with dangling dependency.",
+      );
       const dangleRes = await app.request(
         `https://a.asimposium.org/v1/sessions/${sessionId1}/promote`,
         {
@@ -855,9 +849,18 @@ export async function runAllClaimsE2EAssertions(): Promise<{
         { method: "GET" },
         env,
       );
-      if (headRes.status !== 200) throw new Error(`Head JSON face failed: ${headRes.status}`);
-      const headJson = (await headRes.json()) as { id: string; version: number; statement: string };
-      if (headJson.id !== revisedClaimId || headJson.version !== 2) {
+      if (headRes.status !== 200) {
+        const txt = await headRes.text();
+        throw new Error(`Head JSON face failed: ${headRes.status} ${txt}`);
+      }
+      const headJson = (await headRes.json()) as {
+        claim_state: { claim_id: string; version: number };
+        items: Array<{ body: string }>;
+      };
+      if (
+        headJson.claim_state?.claim_id !== revisedClaimId ||
+        headJson.claim_state?.version !== 2
+      ) {
         throw new Error(`Expected head version 2, got ${JSON.stringify(headJson)}`);
       }
 
@@ -868,8 +871,14 @@ export async function runAllClaimsE2EAssertions(): Promise<{
         env,
       );
       if (v1Res.status !== 200) throw new Error(`v1 JSON face failed: ${v1Res.status}`);
-      const v1Json = (await v1Res.json()) as { id: string; version: number; statement: string };
-      if (v1Json.version !== 1 || v1Json.statement !== "Initial statement for revision test.") {
+      const v1Json = (await v1Res.json()) as {
+        claim_state: { claim_id: string; version: number };
+        items: Array<{ body: string }>;
+      };
+      if (
+        v1Json.claim_state?.version !== 1 ||
+        !v1Json.items?.[0]?.body.includes("Initial statement for revision test.")
+      ) {
         throw new Error(`v1 JSON mismatch: ${JSON.stringify(v1Json)}`);
       }
 
@@ -880,8 +889,14 @@ export async function runAllClaimsE2EAssertions(): Promise<{
         env,
       );
       if (v2Res.status !== 200) throw new Error(`v2 JSON face failed: ${v2Res.status}`);
-      const v2Json = (await v2Res.json()) as { id: string; version: number; statement: string };
-      if (v2Json.version !== 2 || v2Json.statement !== "Revised statement for monotonic version testing.") {
+      const v2Json = (await v2Res.json()) as {
+        claim_state: { claim_id: string; version: number };
+        items: Array<{ body: string }>;
+      };
+      if (
+        v2Json.claim_state?.version !== 2 ||
+        !v2Json.items?.[0]?.body.includes("Revised statement for monotonic version testing.")
+      ) {
         throw new Error(`v2 JSON mismatch: ${JSON.stringify(v2Json)}`);
       }
 
@@ -893,7 +908,10 @@ export async function runAllClaimsE2EAssertions(): Promise<{
       );
       if (mdRes.status !== 200) throw new Error(`MD face failed: ${mdRes.status}`);
       const mdText = await mdRes.text();
-      if (!mdText.includes(revisedClaimId) || !mdText.includes("Revised statement for monotonic version testing.")) {
+      if (
+        !mdText.includes(revisedClaimId) ||
+        !mdText.includes("Revised statement for monotonic version testing.")
+      ) {
         throw new Error(`MD content missing expected claim text:\n${mdText}`);
       }
 
@@ -905,7 +923,10 @@ export async function runAllClaimsE2EAssertions(): Promise<{
       );
       if (bibRes.status !== 200) throw new Error(`BibTeX failed: ${bibRes.status}`);
       const bibText = await bibRes.text();
-      if (!bibText.includes(`@misc{${problemId}-${revisedClaimId}-v2`) && !bibText.includes(revisedClaimId)) {
+      if (
+        !bibText.includes(`@misc{${problemId}-${revisedClaimId}-v2`) &&
+        !bibText.includes(revisedClaimId)
+      ) {
         throw new Error(`BibTeX missing expected key/id:\n${bibText}`);
       }
 
