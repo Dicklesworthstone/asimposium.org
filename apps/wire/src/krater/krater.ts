@@ -2765,7 +2765,6 @@ export async function writeGapEvent(
 ): Promise<KraterWriteResult> {
   const writeClaimStartedAt = performance.now();
   const serverNowMs = Date.now();
-  const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
   const preflight = await backfillKraterIntegrity(
     db,
     input.problemId,
@@ -2945,21 +2944,7 @@ export async function writeGapEvent(
           input.idempotencyKey,
           ...settleGuardBinds,
         ),
-        statement(
-          db,
-          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
-           SELECT ?, ?, 'search.index', ?, ?, ?
-           FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL${settleGuardSql}`,
-          input.eventId,
-          input.problemId,
-          `search.index:${input.eventId}`,
-          payloadSha256,
-          outboxCreatedAt,
-          input.problemId,
-          input.idempotencyKey,
-          ...settleGuardBinds,
-        ),
+        // Gaps are projected above; search.index accepts only claim publications.
         statement(
           db,
           `INSERT INTO integrity_checkpoints
@@ -3049,7 +3034,7 @@ export async function writeGapEvent(
 /**
  * W5.5: the relation-assertion write (ADR-21). One atomic batch: the
  * claim_relations row (natural key — a duplicate edge refuses here), the
- * relation.asserted event, content, outbox and checkpoint. The edge's public
+ * relation.asserted event, content and checkpoint. The edge's public
  * cite is the assertion event's #seq.
  */
 export interface KraterRelationInput {
@@ -3073,7 +3058,6 @@ export async function writeRelationEvent(
 ): Promise<KraterWriteResult> {
   const writeClaimStartedAt = performance.now();
   const serverNowMs = Date.now();
-  const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
   const preflight = await backfillKraterIntegrity(
     db,
     input.problemId,
@@ -3225,20 +3209,7 @@ export async function writeRelationEvent(
           input.problemId,
           input.idempotencyKey,
         ),
-        statement(
-          db,
-          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
-           SELECT ?, ?, 'search.index', ?, ?, ?
-           FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
-          input.eventId,
-          input.problemId,
-          `search.index:${input.eventId}`,
-          payloadSha256,
-          outboxCreatedAt,
-          input.problemId,
-          input.idempotencyKey,
-        ),
+        // Relations are projected above; search.index accepts only claim publications.
         statement(
           db,
           `INSERT INTO integrity_checkpoints

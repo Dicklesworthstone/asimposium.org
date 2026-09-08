@@ -7,6 +7,7 @@ import {
 import { PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
 import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
 import { claimDependencies } from "./claim-dependencies.mjs";
+import { outboxFairness } from "./outbox-fairness.mjs";
 
 // Known-outcome scientific products, exercised through the production HTTP app.
 // Only sponsor setup, empty problem creation and classifier decisions use the
@@ -20,6 +21,7 @@ export async function scientificJourney({
   origin,
   userAgent,
 }) {
+  await outboxFairness({ call, enroll, fixtures, env, userAgent });
   await claimDependencies({ call, enroll, fixtures, env, worker, origin, userAgent });
   const problem = "P-SCIENCE";
   await fixtures.seedProblem(problem);

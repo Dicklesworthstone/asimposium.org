@@ -131,6 +131,8 @@ interface OutboxHarnessOptions {
   readonly acknowledgeFailures?: number;
   readonly acknowledgeZeroChanges?: number;
   readonly searchIndexEffectFailures?: number;
+  readonly sourceReadFailures?: number;
+  readonly sourcePayloadJson?: string;
   readonly missingSourceClaim?: boolean;
   readonly sourceProblemId?: string;
   readonly sourceEventType?: string;
@@ -235,6 +237,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
   let acknowledgeFailures = options.acknowledgeFailures ?? 0;
   let acknowledgeZeroChanges = options.acknowledgeZeroChanges ?? 0;
   let searchIndexEffectFailures = options.searchIndexEffectFailures ?? 0;
+  let sourceReadFailures = options.sourceReadFailures ?? 0;
   let alarmAt: number | null = null;
   let alarmScheduledAt: number | null = null;
   let statusSnapshotQueries = 0;
@@ -378,6 +381,12 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           if (sql.includes("SELECT 1 AS superseded")) return null;
           if (sql.includes("SELECT 1 AS withdrawn")) return null;
           if (sql.includes("FROM events e") || sql.includes("JOIN claims c")) {
+            if (sourceReadFailures > 0) {
+              sourceReadFailures -= 1;
+              // Identical text must not turn an unclassified storage exception
+              // into the consumer's typed permanent-source refusal.
+              throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+            }
             if (normalizeSql(sql) !== SEARCH_INDEX_SOURCE_SQL) {
               throw new Error("PLANTED_SEARCH_INDEX_SOURCE_SQL_DRIFT");
             }
@@ -415,11 +424,13 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
               claim_id: claim.id,
               payload_sha256: event.payload_sha256,
               statement: claim.statement,
-              payload_json: canonicalClaimPayload({
-                claimId: claim.id,
-                kind: "claim",
-                statement: claim.statement,
-              }),
+              payload_json:
+                options.sourcePayloadJson ??
+                canonicalClaimPayload({
+                  claimId: claim.id,
+                  kind: "claim",
+                  statement: claim.statement,
+                }),
               event_type: event.type,
               version: event.object_version,
             } as T;
@@ -1017,6 +1028,7 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(failed.status).toBe(400);
     expect(await failed.json()).toEqual({ code: "PLANTED_SEARCH_INDEX_EFFECT_FAILURE" });
     expect(row.state).toBe("pending");
+    expect(row.quarantined_at).toBeNull();
     expect(harness.searchDocuments()).toEqual([]);
     expect(harness.alarmAt()).not.toBeNull();
 
@@ -1041,13 +1053,51 @@ describe("Krater outbox Durable Object contracts", () => {
       const rows = [row];
       const harness = outboxHarness(rows, options);
 
-      const failed = await harness.drainer.fetch(drainRequest());
+      const refused = await harness.drainer.fetch(drainRequest());
 
-      expect(failed.status).toBe(400);
-      expect(await failed.json()).toEqual({ code: "KRATER_OUTBOX_SEARCH_SOURCE_INVALID" });
+      expect(refused.status).toBe(200);
+      expect(await refused.json()).toMatchObject({ delivered: 0, quarantined: 1 });
       expect(row.state).toBe("pending");
+      expect(row.delivered_at).toBeNull();
+      expect(row.quarantine_code).toBe("OUTBOX_PAYLOAD_INVALID");
+      expect(row.quarantined_at).not.toBeNull();
+      expect(harness.storageValue(`attempt:${row.event_id}`)).toBeUndefined();
       expect(harness.searchDocuments()).toEqual([]);
       expect(harness.alarmAt()).not.toBeNull();
+    });
+  }
+
+  test("a source read exception retries even when its message resembles a permanent refusal", async () => {
+    const row = outboxRow(1);
+    const harness = outboxHarness([row], { sourceReadFailures: 1 });
+    const failed = await harness.drainer.fetch(drainRequest());
+    expect(failed.status).toBe(400);
+    expect(row.quarantined_at).toBeNull();
+    expect(row.state).toBe("pending");
+    expect(harness.alarmAt()).not.toBeNull();
+    await harness.drainer.alarm();
+    expect(row.state).toBe("delivered");
+    expect(harness.searchDocuments()).toEqual([searchDocumentFor(row)]);
+  });
+
+  for (const payload of [
+    "{",
+    "null",
+    "[]",
+    '{"claim_id":"C-other","statement":"Public claim 1"}',
+  ]) {
+    test(`a digest-matching invalid publication is quarantined: ${payload}`, async () => {
+      const row = {
+        ...outboxRow(1),
+        payload_sha256: createHash("sha256").update(payload).digest("hex"),
+      };
+      const harness = outboxHarness([row], { sourcePayloadJson: payload });
+      const response = await harness.drainer.fetch(drainRequest());
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ delivered: 0, quarantined: 1 });
+      expect(row.quarantine_code).toBe("OUTBOX_PAYLOAD_INVALID");
+      expect(row.delivered_at).toBeNull();
+      expect(harness.searchDocuments()).toEqual([]);
     });
   }
 

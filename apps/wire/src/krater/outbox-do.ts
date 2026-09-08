@@ -35,6 +35,11 @@ export const OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS = 5 * 60 * 1_000;
  *                   only — workshop/private bytes never leave
  *                   the ledger plane)
  *
+ * Only claim creation/revision enqueues this consumer. An invalid source
+ * (including legacy gap/relation jobs) is retained in D1 quarantine as
+ * OUTBOX_PAYLOAD_INVALID, never marked delivered. Storage/effect failures
+ * remain pending and retry; they are not proof of a corrupt source.
+ *
  * Adding a consumer: (1) extend `validateOutboxRow` with the kind and its
  * dedupe-key shape (a kind the validator refuses is dead on arrival); (2) the
  * consumer's effect must be reconstructible from the referenced event — the
@@ -45,6 +50,11 @@ export const OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS = 5 * 60 * 1_000;
  */
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
+class SearchIndexSourceError extends Error {
+  constructor() {
+    super("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+  }
+}
 const OUTBOX_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
 const OUTBOX_SCAN_WRAP_THROUGH_ID_KEY = "scan_wrap_through_id";
@@ -979,24 +989,30 @@ export class KraterOutboxDrainer {
       source.claim_id.length === 0 ||
       typeof source.statement !== "string"
     ) {
-      throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+      throw new SearchIndexSourceError();
     }
     // Hash the stored publication, including provenance and dependency pins.
     // Reconstructing an older payload shape silently rejects valid new fields.
     const observedPayloadSha256 = await sha256Hex(source.payload_json);
     if (observedPayloadSha256 !== source.payload_sha256) {
-      throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+      throw new SearchIndexSourceError();
     }
-    const payload: unknown = JSON.parse(source.payload_json);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(source.payload_json);
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new SearchIndexSourceError();
+      throw error;
+    }
     if (payload === null || typeof payload !== "object" || Array.isArray(payload))
-      throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+      throw new SearchIndexSourceError();
     const publication = payload as Record<string, unknown>;
     if (
       publication.claim_id !== source.claim_id ||
       publication.statement !== source.statement ||
       (source.event_type === "claim.revised" && publication.base_version !== source.version - 1)
     )
-      throw new Error("KRATER_OUTBOX_SEARCH_SOURCE_INVALID");
+      throw new SearchIndexSourceError();
 
     await this.env.DB.batch([
       statement(
@@ -1135,7 +1151,16 @@ export class KraterOutboxDrainer {
           }
 
           await this.recordAttempt(row);
-          await this.applySearchIndexEffect(row);
+          try {
+            await this.applySearchIndexEffect(row);
+          } catch (error) {
+            if (!(error instanceof SearchIndexSourceError)) throw error;
+            // The handoff cannot produce a valid public claim document. Keep
+            // the failed job visible for repair without starving later work.
+            if (await this.quarantine(row, "OUTBOX_PAYLOAD_INVALID")) quarantined += 1;
+            scanAfterId = row.id;
+            continue;
+          }
           if (faultMode === "hold-before-ack") {
             await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
             await this.state.storage.put("fault_mode", "none");
