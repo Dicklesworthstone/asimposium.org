@@ -404,6 +404,7 @@ export {
   SEARCH_LIMIT_DEFAULT,
   SEARCH_LIMIT_MAX,
   SEARCH_QUERY_MAX_LENGTH,
+  SEARCH_SNIPPET_MAX_LENGTH,
   type SearchKindFilter,
   SearchKindFilterSchema,
   type SearchMatchKind,

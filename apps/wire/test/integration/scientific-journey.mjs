@@ -137,6 +137,7 @@ export async function scientificJourney({
       const response = await worker.fetch(url, { headers: { "user-agent": userAgent } });
       assert.equal(response.status, 200);
       const result = await response.json();
+      assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
       assert.equal(
         result.items.length,
         1,
@@ -158,10 +159,39 @@ export async function scientificJourney({
         headers: { "user-agent": userAgent },
       });
       assert.equal(md.status, 200);
+      assert.ok(md.headers.get("etag"));
+      searchEtags.set(`${version}:${q}:md`, md.headers.get("etag"));
       const text = await md.text();
       assert.ok(text.includes(canonical));
       assert.ok(text.includes(`@${version}`));
       assert.ok(!text.includes(privateCanary));
+    }
+  }
+  async function missingCitationSearch(target, version) {
+    const q = `https://asimposium.org/p/${problem}/claims/${target}`;
+    const query = new URLSearchParams({ q, kind: "claim", limit: "1" });
+    for (const suffix of ["json", "md"]) {
+      const priorEtag = searchEtags.get(`${version}:${q}${suffix === "md" ? ":md" : ""}`);
+      if (version) assert.ok(priorEtag, "Withdrawal must test an actual prior search ETag");
+      const response = await worker.fetch(`${origin}/search.${suffix}?${query}`, {
+        headers: {
+          "user-agent": userAgent,
+          ...(version
+            ? {
+                "if-none-match": priorEtag,
+              }
+            : {}),
+        },
+      });
+      assert.equal(response.status, 200, "Missing/withdrawn citation cannot reuse a prior 304");
+      const body = await response.text();
+      if (suffix === "json") {
+        const value = JSON.parse(body);
+        assert.deepEqual(value.items, []);
+        assert.equal(value.explanation, "exact_reference_not_found");
+      }
+      assert.ok(!body.includes(statement));
+      assert.ok(!body.includes(privateCanary));
     }
   }
   async function checkCitation(target, version, expectedStatement) {
@@ -228,6 +258,30 @@ export async function scientificJourney({
     }
   }
   await checkCitation(claim.claim_id, 1, statement);
+  await missingCitationSearch(`${claim.claim_id}@99999`);
+  const foreignCitation = await call(
+    `/search.json?${new URLSearchParams({
+      q: `https://asimposium.org/p/P-NO-SEARCH-CLAIM/claims/${claim.claim_id}@1`,
+      kind: "claim",
+    })}`,
+  );
+  assert.deepEqual(foreignCitation.items, []);
+  const otherProblemCitation = await call(
+    `/search.json?${new URLSearchParams({
+      q: `https://asimposium.org/p/P-OUTBOX-FAIRNESS/claims/${claim.claim_id}@1`,
+      kind: "claim",
+    })}`,
+  );
+  assert.equal(otherProblemCitation.items[0].problem_id, "P-OUTBOX-FAIRNESS");
+  assert.notEqual(otherProblemCitation.items[0].statement, statement);
+  const unscopedCitation = await call(
+    `/search.json?q=${claim.claim_id}%401&kind=claim`,
+    undefined,
+    undefined,
+    400,
+  );
+  assert.equal(unscopedCitation.code, "SCHEMA_INVALID");
+  assert.ok(unscopedCitation.fix_hint.includes("problem"));
   async function pack(actor, profile = "working", target) {
     const query = new URLSearchParams({
       profile,
@@ -696,6 +750,18 @@ export async function scientificJourney({
   await checkCitation(claim.claim_id, 2, revisedStatement);
   await checkCitation(`${claim.claim_id}@1`, 1, statement);
   await checkCitation(`${claim.claim_id}@2`, 2, revisedStatement);
+  const headSearch = await call(
+    `/search.json?${new URLSearchParams({
+      q: `https://asimposium.org/p/${problem}/claims/${claim.claim_id}.json`,
+      kind: "claim",
+      limit: "1",
+    })}`,
+  );
+  assert.equal(headSearch.items[0].statement, revisedStatement);
+  assert.equal(
+    headSearch.items[0].url,
+    `https://asimposium.org/p/${problem}/claims/${claim.claim_id}`,
+  );
   assert.equal(oldReview.target_version, 1);
   await standing("open");
   const pinnedBeforeWithdrawal = await worker.fetch(
@@ -1017,6 +1083,8 @@ export async function scientificJourney({
   });
   assert.ok([403, 404].includes(forbiddenWorkshop.status));
   await fixtures.redactPublicContent(revisedDetail.event);
+  await missingCitationSearch(`${claim.claim_id}@2`, 2);
+  await missingCitationSearch(claim.claim_id);
   const hiddenStatement = ClaimFaceResponseSchema.parse(
     await call(`/p/${problem}/claims/${claim.claim_id}@2.json`),
   );
@@ -1041,6 +1109,7 @@ export async function scientificJourney({
   }
   await checkCitation(`${claim.claim_id}@1`, 1, statement);
   await fixtures.redactPublicContent(detail.event);
+  await missingCitationSearch(`${claim.claim_id}@1`, 1);
   for (const suffix of ["bib", "csl.json"]) {
     const response = await worker.fetch(
       `${origin}/p/${problem}/claims/${claim.claim_id}@1.${suffix}`,
@@ -1104,6 +1173,7 @@ export async function scientificJourney({
         "anonymous md/json/html scientific standing and privacy parity",
         "historical version standing, withdrawal and conditional-read invalidation",
         "anonymous version-pinned BibTeX/CSL downloads, multiline revision and withdrawal without fallback",
+        "canonical and version-pinned citation search, exact history, problem scoping and withdrawal revalidation",
         "immutable identity refuses sponsor rewrite",
         "lost-response replay",
         "concurrent revision",

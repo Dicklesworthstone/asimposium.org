@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { SearchResponseSchema } from "@asimposium/contracts";
@@ -83,6 +84,76 @@ function mockEnv(db: Env["DB"]): Env {
 }
 
 describe("W6.8 Public Search Routes", () => {
+  test.each([false, true])(
+    "versioned lookup verifies stored bytes (corrupt=%s)",
+    async (corrupt) => {
+      const { db, raw } = createMigratedDb();
+      const statement = `A complete historical statement. ${"x".repeat(2500)}`;
+      const payload = JSON.stringify({ claim_id: "C-1", kind: "claim", statement });
+      const digest = createHash("sha256").update(payload).digest("hex");
+      // SQLite projection fixture for read-side faults; production writes are
+      // exercised independently by scientific-journey on real Workerd/D1.
+      raw.run(`
+      INSERT INTO problems (id, public_seq, created_at, updated_at, chain_version, chain_digest)
+      VALUES ('P-PIN', 1, '2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z', 2, 'sha256:fixture-chain');
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
+      VALUES ('P-PIN', 'complete', 0, 2);
+    `);
+      raw
+        .prepare(`INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
+      VALUES ('C-1', 'P-PIN', ?, ?, 1, '2026-09-08T00:00:00.000Z')`)
+        .run(statement, digest);
+      raw
+        .prepare(`INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version,
+      payload_sha256, created_at, row_digest, chain_digest)
+      VALUES ('E-PIN', 'P-PIN', 1, 'claim.created', 'claim', 'C-1', 1, ?, '2026-09-08T00:00:00.000Z',
+        'sha256:fixture-row', 'sha256:fixture-chain')`)
+        .run(digest);
+      raw
+        .prepare(
+          "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-PIN', ?, ?)",
+        )
+        .run(digest, corrupt ? "{}" : payload);
+      raw
+        .prepare(`INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, content_digest, editor_fellow_id, created_at)
+      VALUES ('P-PIN', 'C-1', 1, 'conjecture', ?, ?, 'F-fixture', '2026-09-08T00:00:00.000Z')`)
+        .run(statement, `sha256:${digest}`);
+      const app = createApp();
+      const env = mockEnv(db);
+      const url = "https://a.asimposium.org/search.json?q=P-PIN%23C-1%401&kind=claim";
+      try {
+        raw.run("ALTER TABLE public_claim_fts RENAME TO retained_pin_fts");
+        const response = await app.request(url, {}, env);
+        if (corrupt) {
+          expect(response.status).toBe(503);
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          expect(response.headers.get("etag")).toBeNull();
+          expect(await response.text()).not.toContain(statement);
+          return;
+        }
+        expect(response.status).toBe(200);
+        const result = SearchResponseSchema.parse(await response.json());
+        expect(result.items[0]).toMatchObject({
+          version: 1,
+          statement,
+          match_type: "exact_reference",
+        });
+        expect(result.items[0]?.snippet).toHaveLength(2000);
+        expect(result.omitted.map((x) => x.reason)).not.toContain("lexical_search_unavailable");
+        const absent = await app.request(url.replace("%401", "%409"), {}, env);
+        expect(absent.status).toBe(200);
+        expect(SearchResponseSchema.parse(await absent.json()).items).toEqual([]);
+
+        raw.run("ALTER TABLE claim_versions RENAME TO retained_pin_versions");
+        const unavailable = await app.request(url, {}, env);
+        expect(unavailable.status).toBe(503);
+        expect(unavailable.headers.get("etag")).toBeNull();
+      } finally {
+        raw.close();
+      }
+    },
+  );
+
   test("fills the limit after exact-match deduplication with stable lexical tie order", async () => {
     for (const order of [
       ["", "-Z", "-A"],

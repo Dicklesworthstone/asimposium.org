@@ -16,6 +16,7 @@ import { z } from "zod";
 export const SEARCH_QUERY_MAX_LENGTH = 256;
 export const SEARCH_LIMIT_DEFAULT = 20;
 export const SEARCH_LIMIT_MAX = 50;
+export const SEARCH_SNIPPET_MAX_LENGTH = 2000;
 
 /** Shared by canonical public-face schemas and exact-reference parsing. */
 export const PUBLIC_LEDGER_PROBLEM_ID_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -75,7 +76,7 @@ export const SearchResultItemSchema = z
     url: z.string().min(1).max(512),
     title: z.string().nullable().optional(),
     statement: z.string().nullable().optional(),
-    snippet: z.string().max(2000),
+    snippet: z.string().max(SEARCH_SNIPPET_MAX_LENGTH),
     problem_id: z.string().nullable().optional(),
     version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
     match_type: SearchMatchTypeSchema,

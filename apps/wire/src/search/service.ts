@@ -3,6 +3,7 @@ import {
   parseExactReference,
   SEARCH_LIMIT_DEFAULT,
   SEARCH_LIMIT_MAX,
+  SEARCH_SNIPPET_MAX_LENGTH,
   type SearchNextAction,
   type SearchOmission,
   type SearchQueryRequest,
@@ -135,7 +136,7 @@ export async function executeSearch(
             url: `https://asimposium.org/p/${exactTarget.problemId}/claims/${claim.claimId}@${claim.version}`,
             title: `Claim ${claim.claimId}@${claim.version} in ${exactTarget.problemId}`,
             statement: claim.statement,
-            snippet: claim.statement,
+            snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
             match_type: "exact_reference",
             score_explanation: "exact_claim_version",
           });
@@ -158,7 +159,7 @@ export async function executeSearch(
             url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}`,
             title: `Claim ${claim.id} in ${claim.problem_id}`,
             statement: claim.statement,
-            snippet: claim.statement,
+            snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
             match_type: "exact_reference",
             score_explanation: "exact_claim_id",
           });
@@ -234,7 +235,7 @@ export async function executeSearch(
             url: `https://asimposium.org/p/${row.problem_id}/claims/${row.claim_id}`,
             title: `Claim ${row.claim_id} in ${row.problem_id}`,
             statement: row.statement,
-            snippet: row.snippet ?? row.statement,
+            snippet: (row.snippet ?? row.statement).slice(0, SEARCH_SNIPPET_MAX_LENGTH),
             match_type: "lexical_fts",
             score_explanation: `bm25_rank_${row.rank.toFixed(2)}`,
           });

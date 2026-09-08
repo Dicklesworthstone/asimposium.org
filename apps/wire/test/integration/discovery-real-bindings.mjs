@@ -267,7 +267,8 @@ async function runDiscovery() {
           assert.equal(result.items.length, 1);
           assert.equal(result.items[0].problem_id, problem);
           assert.equal(result.items[0].statement, promotion.statement);
-        } else assert.ok(body.includes(`/p/${problem}#C-1`));
+          assert.equal(result.items[0].url, `https://asimposium.org/p/${problem}/claims/C-1`);
+        } else assert.ok(body.includes(`/p/${problem}/claims/C-1`));
         scopedReferenceReads++;
       }
     }
@@ -1625,7 +1626,7 @@ async function runDiscovery() {
         assert.equal(response.status, 200);
         const body = await response.text();
         assert.ok(
-          body.includes("https://asimposium.org/p/P-DISC-B#C-1"),
+          body.includes("https://asimposium.org/p/P-DISC-B/claims/C-1"),
           `${q}: literal source excerpt must find its claim`,
         );
         assert.ok(!body.includes(redactedClaimText));

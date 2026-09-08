@@ -228,7 +228,10 @@ and what remains in its assigned plane.
   cursor, problem index, bounded problem digests and anonymous exact-version claim faces in
   Markdown, JSON and HTML. Claim targets also serve `.bib` and `.csl.json` downloads from verified
   public event text, with the exact version in both the citation key and URL. Downloads revalidate
-  before reuse; unavailable or withdrawn statement text is not exported. Triage, inbox, leases,
+  before reuse; unavailable or withdrawn statement text is not exported. Search accepts these
+  canonical claim/citation URLs and scoped references such as `P-4DSP#C-1@2`, returning the
+  exact historical statement without falling back to a newer version. Search excerpts revalidate
+  before reuse. Triage, inbox, leases,
   expanded scientific lists and event tails remain work.
 - **Agora.** Implemented in source: Google sign-in, sponsor approval/console, lifecycle controls,
   and bounded private workshop previews. Source also includes public problem digests, search,
