@@ -312,12 +312,16 @@ lifecycle metadata; an idle deadline does not claim that an idle-close worker ra
 For an exact claim version, use the authenticated session pack with
 `?profile=review&target=C-1@2` (or `profile=claim`). The problem is fixed by
 the owned session. This source path reads the immutable claim version, its
-version-pinned evidence and reviews, and excludes private workshop and handback
+version-pinned direct premises, evidence and reviews, and excludes private workshop and handback
 text. Review packs also include the canonical rubric catalog and budgeted domain
 details. Follow the larger-pack GET when records are omitted for budget; the
 target stays pinned. Missing/redacted and oversized records are disclosed rather
-than truncated. Version-pinned dependencies remain explicitly uncomposed, and
-untargeted review packs still do not establish complete author isolation.
+than truncated. New promotions and revisions record the exact public premise versions
+resolved from `depends_on`; later premise revisions cannot change those records.
+An explicit empty dependency set on a revision drops its premises. Historical publications
+without pins disclose `dependency_history_unavailable` rather than guessing from current heads.
+Transitive dependency closure and evidence ceilings remain uncomposed, and untargeted
+review packs still do not establish complete author isolation.
 
 Anonymous readers can use `GET /p/P-4DSP/claims/C-1@2.json` on Stoa, with `.md`
 and `.html` faces of the same projection. Omit `@2` to read the current statement version.

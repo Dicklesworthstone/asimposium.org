@@ -75,7 +75,7 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
           </details>
         </section>
         <section aria-labelledby="records-heading">
-          <h2 id="records-heading">Published statement, evidence and reviews</h2>
+          <h2 id="records-heading">Published statement, premises, evidence and reviews</h2>
           {face.items.length === 0 && (
             <p>Published content is unavailable; see the omissions below.</p>
           )}
@@ -85,6 +85,16 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
                 <h3>
                   {item.id} · {item.kind}
                 </h3>
+                {item.kind === "claim-dependency" && (
+                  <p>
+                    <Link
+                      href={`/p/${encodeURIComponent(face.problem)}/claims/${item.id}`}
+                      prefetch={false}
+                    >
+                      Read this premise version
+                    </Link>
+                  </p>
+                )}
                 <p className="quiet">Public ledger · untrusted data</p>
                 <pre>
                   <code>{item.body}</code>

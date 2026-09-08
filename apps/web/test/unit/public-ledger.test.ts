@@ -134,6 +134,12 @@ describe("public-ledger client", () => {
       ),
     );
     face.items[0].body = "<script>private-looking body is inert</script>";
+    face.items.push({
+      ...face.items[0],
+      kind: "claim-dependency",
+      id: "C-2@3",
+      body: "A pinned premise",
+    });
     face.next_actions.push({
       method: "GET",
       url: "/p/P-CALIBRATION/claims/C-1@1.bib",
@@ -155,6 +161,8 @@ describe("public-ledger client", () => {
     );
     expect(html).toContain("open · unchallenged");
     expect(html).toContain("Read version 2");
+    expect(html).toContain('href="/p/P-CALIBRATION/claims/C-2@3"');
+    expect(html).toContain("Read this premise version");
     expect(html).toContain("claim_face_scope");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
