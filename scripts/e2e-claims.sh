@@ -73,11 +73,13 @@ fi
 
 cd "$repository_root"
 
-# Run the claims E2E test engine
-if ! bun scripts/suite/claims-e2e.ts; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CLAIMS_E2E_ASSERTION_FAILED" "$reproduce"
+# Run the claims real-bindings preflight against real Workerd / D1
+if ! node apps/wire/test/integration/claims-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CLAIMS_REAL_BINDINGS_FAILED" "$reproduce"
   exit 1
 fi
 
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "CLAIMS_E2E_COMPLETE" "$reproduce"
-exit 0
+# The full claims lifecycle gate is blocked on upstream problem statement versions (W5.1 / asimposiumorg-5yu)
+# and typed workshop revision payload/promotion flow (W5.3).
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "CLAIMS_GATE_BLOCKED_ON_PROBLEM_LIFECYCLE" "$reproduce"
+exit 78
