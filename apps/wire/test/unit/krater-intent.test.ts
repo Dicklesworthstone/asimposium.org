@@ -169,4 +169,135 @@ describe("the §7.6 intent classifier", () => {
       expect(second, body).toEqual(first);
     }
   });
+
+  test("exact 800 and 801 boundary checks with and without relates_to", () => {
+    const exact800 = "a".repeat(800);
+    const exact801 = "a".repeat(801);
+
+    // Unanchored: 800 passes, 801 triggers LOOKS_LIKE_CLAIM
+    const unanchored800 = assessNoteIntent(exact800, false);
+    expect(unanchored800.looksLikeClaim).toBe(false);
+    expect(unanchored800.signals).toEqual([]);
+
+    const unanchored801 = assessNoteIntent(exact801, false);
+    expect(unanchored801.looksLikeClaim).toBe(true);
+    expect(unanchored801.signals).toEqual(["long-unanchored:>800"]);
+
+    // Anchored (relates_to present): both pass
+    const anchored800 = assessNoteIntent(exact800, true);
+    expect(anchored800.looksLikeClaim).toBe(false);
+    expect(anchored800.signals).toEqual([]);
+
+    const anchored801 = assessNoteIntent(exact801, true);
+    expect(anchored801.looksLikeClaim).toBe(false);
+    expect(anchored801.signals).toEqual([]);
+
+    // 801 whitespace characters without relates_to triggers classifier,
+    // but suggestedClaimFromNote produces an empty statement cleanly.
+    const whitespace801 = " \t\n".repeat(267);
+    const unanchoredWhitespace = assessNoteIntent(whitespace801, false);
+    expect(unanchoredWhitespace.looksLikeClaim).toBe(true);
+    expect(unanchoredWhitespace.signals).toEqual(["long-unanchored:>800"]);
+    expect(suggestedClaimFromNote(whitespace801)).toEqual({ statement: "" });
+  });
+
+  test("clear claims in various standard mathematical forms", () => {
+    const claimSamples = [
+      "Therefore every positive integer greater than 1 has a unique prime factorization.",
+      "We prove that the Riemann zeta function has all non-trivial zeros on the critical line.",
+      "We show that P does not equal NP under standard Turing machine assumptions.",
+      "We establish that the heat kernel satisfies the maximum principle.",
+      "We claim that the spectral gap is bounded strictly away from zero.",
+      "Lemma 1: For all n > 0, the factorial n! is divisible by all primes <= n.",
+      "Theorem 2.1: Compact subsets of metric spaces are closed and bounded.",
+      "Corollary 3: There are infinitely many primes of the form 4k + 1.",
+      "Conjecture: The Collatz sequence terminates for all positive integers.",
+      "Proposition: The quotient ring R/M is a field if and only if M is maximal.",
+      "Claim: The running time of Dijkstra's algorithm is O(E + V log V).",
+      "By induction on k, we obtain the identity. Q.E.D.",
+    ];
+
+    for (const sample of claimSamples) {
+      const assessment = assessNoteIntent(sample, false);
+      expect(assessment.looksLikeClaim, sample).toBe(true);
+      expect(assessment.signals.length, sample).toBeGreaterThan(0);
+    }
+  });
+
+  test("clear notes without claim markers pass unconditionally", () => {
+    const noteSamples = [
+      "Initial brainstorm on the structure of the proof.",
+      "Tried using the Cauchy-Schwarz inequality, but the denominator blew up.",
+      "Need to review Tao's 2014 paper on arithmetic progressions in primes.",
+      "Refactored lemma helper to clean up unnecessary lemmas in the draft.",
+      "Checked test coverage on local workerd instance: 100% green.",
+      "Meeting with sponsor agreed to focus on the modular representation approach.",
+    ];
+
+    for (const sample of noteSamples) {
+      const assessment = assessNoteIntent(sample, false);
+      expect(assessment.looksLikeClaim, sample).toBe(false);
+      expect(assessment.signals, sample).toEqual([]);
+    }
+  });
+
+  test("math formulas and near-miss vocabulary do not trigger false claims", () => {
+    const nearMissSamples = [
+      // Substring overlaps: "there" or "fore" without "therefore"
+      "Look over there at the fore of the ship.",
+      // "dilemma" does not match "lemma:"
+      "The classical prisoner's dilemma is often analyzed in game theory.",
+      // "claim" without colon
+      "This is a bold claim to make in informal notes without formal verification.",
+      // "prove" without "we prove"
+      "Can one prove this directly from the axioms? It remains unclear.",
+      // "theorem" without colon or digit
+      "Every major theorem in this subject relies on compactness.",
+      // Math formulas
+      "Consider the integral $$\\int_{-\\infty}^\\infty e^{-x^2} dx = \\sqrt{\\pi}$$.",
+      "Let $f(x) = x^2 + 2x + 1 = (x + 1)^2$. Clearly $f(x) \\ge 0$.",
+      "Let variables be $a_1, a_2, \\dots, a_n \\in \\mathbb{R}$.",
+      // Code fragments in notes
+      "```python\ndef prove_bound(x, y):\n    return x + y > 0\n```",
+      "assert len(data) > 0, 'data must be non-empty'",
+    ];
+
+    for (const sample of nearMissSamples) {
+      const assessment = assessNoteIntent(sample, false);
+      expect(assessment.looksLikeClaim, sample).toBe(false);
+      expect(assessment.signals, sample).toEqual([]);
+    }
+  });
+
+  test("valid strange notes and rich formatting pass under 800 characters", () => {
+    const strangeSamples = [
+      // Markdown table
+      "| Method | Accuracy | Latency (ms) |\n|---|---|---|\n| Baseline | 82.1% | 12 |\n| Proposed | 88.4% | 14 |",
+      // Nested blockquotes
+      "> First observation\n>> Secondary detail on the observation\n>>> Minor side note",
+      // Unicode math symbols (Fraktur, Greek, Blackboard Bold)
+      "Let $\\mathfrak{g}$ be a Lie algebra over $\\mathbb{C}$, with roots $\\alpha \\in \\Phi$.",
+      // ASCII art diagram
+      "+-------+     +-------+\n| A     | --> | B     |\n+-------+     +-------+",
+      // Short poem
+      "Roses are red,\nViolets are blue,\nWorking on proofs,\nUntil dreams come true.",
+    ];
+
+    for (const sample of strangeSamples) {
+      expect(sample.length).toBeLessThan(800);
+      const assessment = assessNoteIntent(sample, false);
+      expect(assessment.looksLikeClaim, sample).toBe(false);
+      expect(assessment.signals, sample).toEqual([]);
+    }
+  });
+
+  test("adversarial prose containing quoted markers fires classifier as designed (escape via force_note)", () => {
+    // Colleague-voice rule: even if quoting or discussing markers, the classifier
+    // mechanically flags them, directing the author to promote or use force_note: true.
+    const metaProse =
+      "The author states: 'Therefore the solution is unique', but this is questionable.";
+    const assessment = assessNoteIntent(metaProse, false);
+    expect(assessment.looksLikeClaim).toBe(true);
+    expect(assessment.signals).toContain("proposition-marker:\\btherefore\\b");
+  });
 });
