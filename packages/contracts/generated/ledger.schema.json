@@ -320,7 +320,7 @@
           "minLength": 1
         },
         "items": {
-          "maxItems": 41,
+          "maxItems": 57,
           "type": "array",
           "items": {
             "type": "object",
@@ -329,6 +329,7 @@
                 "type": "string",
                 "enum": [
                   "claim-detail",
+                  "claim-dependency",
                   "claim-evidence",
                   "claim-review"
                 ]
@@ -673,6 +674,45 @@
         "issued"
       ],
       "additionalProperties": false
+    },
+    "claim_dependency_pins": {
+      "maxItems": 16,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "maxLength": 47,
+            "pattern": "^C-[0-9]+$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "content_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "event_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "payload_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "claim_id",
+          "version",
+          "content_digest",
+          "event_id",
+          "payload_digest"
+        ],
+        "additionalProperties": false
+      }
     },
     "search_query_request": {
       "type": "object",

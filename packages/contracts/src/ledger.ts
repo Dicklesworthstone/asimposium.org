@@ -92,6 +92,25 @@ export const PublicClaimTargetSchema = z
   .regex(/^C-[0-9]{1,45}(?:@[1-9][0-9]{0,15})?$/)
   .refine((value) => !value.includes("@") || Number.isSafeInteger(Number(value.split("@")[1])));
 
+/** Direct premises captured at publication, scoped by the parent problem. */
+export const ClaimDependencyPinSchema = z
+  .object({
+    claim_id: ClaimIdSchema.max(47),
+    version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    content_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    event_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    payload_digest: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+export const ClaimDependencyPinsSchema = z
+  .array(ClaimDependencyPinSchema)
+  .max(16)
+  .refine(
+    (pins) => new Set(pins.map((pin) => pin.claim_id)).size === pins.length,
+    "a claim may name each direct premise only once",
+  );
+export type ClaimDependencyPin = z.infer<typeof ClaimDependencyPinSchema>;
+
 /** Computed ledger facts, never accepted on a scientific write. */
 export const PublicClaimStateSchema = z
   .object({
@@ -246,16 +265,23 @@ export const ClaimFaceResponseSchema = z
     items: z
       .array(
         FaceItemSchema.extend({
-          kind: z.enum(["claim-detail", "claim-evidence", "claim-review"]),
+          kind: z.enum(["claim-detail", "claim-dependency", "claim-evidence", "claim-review"]),
           id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/),
         }).strict(),
       )
-      .max(41),
+      .max(57),
   })
   .strict()
   .superRefine((face, context) => {
     const ids = new Set(face.items.map((item) => item.id));
     const claim = face.items.filter((item) => item.kind === "claim-detail");
+    for (const item of face.items.filter((item) => item.kind === "claim-dependency")) {
+      if (!item.id.includes("@") || !PublicClaimTargetSchema.safeParse(item.id).success)
+        context.addIssue({
+          code: "custom",
+          message: "dependency face items must name exact claim versions",
+        });
+    }
     const unavailable = face.omitted.some(
       (entry) =>
         entry.reason === "content_unavailable" ||
@@ -330,6 +356,7 @@ export const LedgerContractsSchema = z
     problem_face_response: ProblemFaceResponseSchema,
     claim_face_response: ClaimFaceResponseSchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
+    claim_dependency_pins: ClaimDependencyPinsSchema.optional(),
     search_query_request: SearchQueryRequestSchema.optional(),
     search_response: SearchResponseSchema.optional(),
   })

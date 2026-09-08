@@ -5,6 +5,7 @@ import addFormats from "ajv-formats";
 
 import {
   ClaimCitationCslSchema,
+  ClaimDependencyPinsSchema,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
@@ -13,6 +14,33 @@ import {
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
+
+test("dependency publications require bounded exact versions and public content identities", async () => {
+  const good = ClaimDependencyPinsSchema.parse(
+    await fixture(new URL("../fixtures/valid/ledger-claim-dependencies.json", import.meta.url)),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/ledger-claim-dependency-unpinned.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.claim_dependency_pins);
+  expect(published(good)).toBe(true);
+  for (const value of [
+    invalid,
+    [{ ...good[0], version: 0 }],
+    [{ ...good[0], version: 9007199254740992 }],
+    [{ ...good[0], payload_digest: "unknown" }],
+    [{ ...good[0], workshop: "private" }],
+    Array(17).fill(good[0]),
+  ]) {
+    expect(ClaimDependencyPinsSchema.safeParse(value).success).toBe(false);
+    expect(published(value)).toBe(false);
+  }
+  expect(ClaimDependencyPinsSchema.safeParse([...good, ...good]).success).toBe(false);
+  expect(ClaimDependencyPinsSchema.parse([])).toEqual([]);
+});
 
 test("claim citation exports require an exact public version and real calendar dates", async () => {
   const good = ClaimCitationCslSchema.parse(
