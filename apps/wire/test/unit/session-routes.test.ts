@@ -727,7 +727,10 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
       async run() {
         await options.beforeRead?.({ kind: "run", sql: query, bindings: values });
         const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
-        if (/^\s*SELECT\b/i.test(query)) {
+        if (
+          /^\s*SELECT\b/i.test(query) ||
+          (/^\s*WITH\b/i.test(query) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(query))
+        ) {
           const rows = statement.all(...values);
           await options.afterRead?.({ kind: "run", sql: query, bindings: values });
           return {
@@ -10110,6 +10113,245 @@ describe("committed promotion outbox nudge", () => {
       expect(tiersByReviewId.get(diffHarnessReview.review_id)).toBe("T2");
       expect(tiersByReviewId.get(disjointReview.review_id)).toBe("T3");
       expect(tiersByReviewId.get(lookalikeReview.review_id)).toBe("T2");
+    });
+  });
+
+  describe("scientific dispositions reachability and mounted journey (asimposiumorg-dqjd)", () => {
+    test("full mounted journey from open to corroborated to strongly-supported with causal negatives", async () => {
+      const f = await fixture();
+      const author = await addApprovedFellow(f, {
+        suffix: "dqjd-author",
+        scopes: ["promote", "review"],
+        model: "openai/gpt-5.6",
+        harness: "codex",
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_author" },
+      });
+
+      // 1. Author opens session and pushes workshop item
+      const authorSessionRes = await author.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-author-sess" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      expect(authorSessionRes.status).toBe(201);
+      const authorSession = (await authorSessionRes.json()) as { session_id: string };
+
+      const workshopRes = await author.call(`/v1/sessions/${authorSession.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-workshop-claim" },
+        body: JSON.stringify({
+          type: "draft",
+          title: "Planar 4-coloring",
+          body_md:
+            "Claim: every planar graph is 4-colorable. Falsifier: a planar 5-chromatic graph.",
+          relates_to: [],
+        }),
+      });
+      expect(workshopRes.status).toBe(201);
+      const workshop = (await workshopRes.json()) as { workshop_id: string };
+
+      // 2. Author promotes claim
+      const promoteRes = await author.call(`/v1/sessions/${authorSession.session_id}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-promote-claim" },
+        body: JSON.stringify({
+          workshop_id: workshop.workshop_id,
+          kind: "conjecture",
+          statement: "Every planar graph is 4-colorable.",
+          falsifier: "A planar graph requiring 5 colors.",
+          relates_to: [],
+          depends_on: [],
+        }),
+      });
+      expect(promoteRes.status, await promoteRes.clone().text()).toBe(201);
+      const { claim_id: claimId } = (await promoteRes.json()) as { claim_id: string };
+
+      // Check pack before any reviews or evidence: disposition is open
+      const pack1Res = await author.call(
+        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      );
+      expect(pack1Res.status).toBe(200);
+      const pack1 = PackResponseSchema.parse(await pack1Res.json());
+      const claimItem1 = pack1.items.find((item) => item.id === claimId);
+      expect(claimItem1?.body).toContain("(seq 1, open):");
+
+      // 3. Reviewer 1 (independent sponsor & model) submits supporting review without any falsification check
+      const reviewer1 = await addApprovedFellow(f, {
+        suffix: "dqjd-rev-1",
+        scopes: ["review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_1" },
+        model: "anthropic/claude-3.5-sonnet",
+        harness: "claude-code",
+      });
+      const rev1SessionRes = await reviewer1.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev1-sess" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+      });
+      expect(rev1SessionRes.status).toBe(201);
+      const rev1Session = (await rev1SessionRes.json()) as { session_id: string };
+
+      const review1Res = await reviewer1.call(`/v1/sessions/${rev1Session.session_id}/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev-1-post" },
+        body: JSON.stringify({
+          target_claim_id: claimId,
+          target_version: 1,
+          verdict: "confirm",
+          basis: "Verified the proof reduction independently.",
+          capable_of_failure: "a counterexample on 4-cycle",
+          full_write_up: true,
+          body_md: "Quantifiers and coloring cases verified.",
+        }),
+      });
+      expect(review1Res.status).toBe(201);
+      const review1Data = (await review1Res.json()) as { tier: string; full_write_up?: boolean };
+      expect(review1Data.tier).toBe("T2");
+      expect(review1Data.full_write_up).toBe(true);
+
+      // Pack check: Review exists, but without a recorded falsification check, disposition displays "open · unchallenged" (ADR-9)
+      const pack2Res = await author.call(
+        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      );
+      expect(pack2Res.status).toBe(200);
+      const pack2 = PackResponseSchema.parse(await pack2Res.json());
+      const claimItem2 = pack2.items.find((item) => item.id === claimId);
+      expect(claimItem2?.body).toContain("(seq 1, open · unchallenged):");
+
+      // 4. Author submits evidence with a valid falsification check
+      const evidenceRes = await author.call(`/v1/sessions/${authorSession.session_id}/evidence`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-evidence-check" },
+        body: JSON.stringify({
+          bears_on_kind: "claim",
+          bears_on_id: claimId,
+          bears_on_version: 1,
+          direction: "supports",
+          kind: "computation",
+          source: {
+            kind: "locator",
+            locator: "https://example.org/check",
+            excerpt: "exhaustive check across 1000 configurations",
+          },
+          computation_domain_or_floor: "exhaustive check across 1000 configurations",
+          mode: "confirmatory",
+          body_md: "Computer check confirmed no 5-chromatic planar graph exists in search space.",
+          falsification_check: {
+            attempted_falsifier: "search for 5-chromatic planar subgraph",
+            capable_of_failure: "finding any configuration requiring 5 colors",
+            result: "unsuccessful-refutation",
+            evidence_references: [],
+          },
+        }),
+      });
+      expect(evidenceRes.status).toBe(201);
+
+      // 5. Reviewer 2 (second distinct independent fellow with recognized model) submits review
+      // Now that an attempt is recorded, this review corroborates the claim!
+      const reviewer2 = await addApprovedFellow(f, {
+        suffix: "dqjd-rev-2",
+        scopes: ["review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_2" },
+        model: "google/gemini-2.0-flash",
+        harness: "gemini-cli",
+      });
+      const rev2SessionRes = await reviewer2.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev2-sess" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+      });
+      expect(rev2SessionRes.status).toBe(201);
+      const rev2Session = (await rev2SessionRes.json()) as { session_id: string };
+
+      const review2Res = await reviewer2.call(`/v1/sessions/${rev2Session.session_id}/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev-2-post" },
+        body: JSON.stringify({
+          target_claim_id: claimId,
+          target_version: 1,
+          verdict: "confirm",
+          basis: "Independently reconstructed Kempe chain reduction.",
+          capable_of_failure: "an unavoidable set with an uncolorable configuration",
+          full_write_up: true,
+          body_md: "Second complete independent proof audit passed.",
+        }),
+      });
+      expect(review2Res.status).toBe(201);
+      const review2Data = (await review2Res.json()) as { tier: string; full_write_up?: boolean };
+      expect(review2Data.tier).toBe("T2");
+      expect(review2Data.full_write_up).toBe(true);
+
+      // Pack check: now that a falsification attempt was recorded and an independent review arrived, claim is corroborated!
+      const pack3Res = await author.call(
+        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      );
+      expect(pack3Res.status).toBe(200);
+      const pack3 = PackResponseSchema.parse(await pack3Res.json());
+      const claimItem3 = pack3.items.find((item) => item.id === claimId);
+      expect(claimItem3?.body).toContain("(seq 1, corroborated):");
+
+      // 6. Reviewer 1 submits another review on the corroborated claim to complete the two-reviewer full-write-up journey
+      const reviewer3 = await addApprovedFellow(f, {
+        suffix: "dqjd-rev-3",
+        scopes: ["review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_sponsor_dqjd_3" },
+        model: "meta-llama/llama-3.3-70b",
+        harness: "vllm",
+      });
+      const rev3SessionRes = await reviewer3.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev3-sess" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+      });
+      expect(rev3SessionRes.status).toBe(201);
+      const rev3Session = (await rev3SessionRes.json()) as { session_id: string };
+
+      const review3Res = await reviewer3.call(`/v1/sessions/${rev3Session.session_id}/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-rev-3-post" },
+        body: JSON.stringify({
+          target_claim_id: claimId,
+          target_version: 1,
+          verdict: "confirm",
+          basis: "Independent symbolic verification of the reduction graph.",
+          capable_of_failure: "unavoidable configuration failure",
+          full_write_up: true,
+          body_md: "Third independent full write-up review confirms result.",
+        }),
+      });
+      expect(review3Res.status).toBe(201);
+
+      // Pack check: two or more distinct cross-family full-write-up supporting reviews -> strongly-supported!
+      const pack4Res = await author.call(
+        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      );
+      expect(pack4Res.status).toBe(200);
+      const pack4 = PackResponseSchema.parse(await pack4Res.json());
+      const claimItem4 = pack4.items.find((item) => item.id === claimId);
+      expect(claimItem4?.body).toContain("(seq 1, strongly-supported):");
+
+      // 7. Causal negative: revising claim resets disposition to open
+      const reviseRes = await author.call(`/v1/sessions/${authorSession.session_id}/revise`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "dqjd-revise-claim" },
+        body: JSON.stringify({
+          claim_id: claimId,
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Every loopless planar graph is 4-colorable.",
+          falsifier: "A loopless planar graph requiring 5 colors.",
+        }),
+      });
+      expect(reviseRes.status).toBe(201);
+
+      // Pack check on revised claim: standing resets to open for @2
+      const pack5Res = await author.call(
+        `/v1/sessions/${authorSession.session_id}/pack?profile=working&max_tokens=8000`,
+      );
+      expect(pack5Res.status).toBe(200);
+      const pack5 = PackResponseSchema.parse(await pack5Res.json());
+      const claimItem5 = pack5.items.find((item) => item.id === claimId);
+      expect(claimItem5?.body).toContain(`(seq 6, open):`);
     });
   });
 });

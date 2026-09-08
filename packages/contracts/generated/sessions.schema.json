@@ -2712,6 +2712,18 @@
             "maxLength": 160
           }
         },
+        "full_write_up": {
+          "default": false,
+          "type": "boolean"
+        },
+        "artifact_compilation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "statement_equivalence": {
+          "default": false,
+          "type": "boolean"
+        },
         "body_md": {
           "type": "string",
           "minLength": 1,
@@ -2724,6 +2736,9 @@
         "verdict",
         "basis",
         "rubric",
+        "full_write_up",
+        "artifact_compilation",
+        "statement_equivalence",
         "body_md"
       ],
       "additionalProperties": false
@@ -2754,6 +2769,15 @@
           ]
         },
         "carries_weight": {
+          "type": "boolean"
+        },
+        "full_write_up": {
+          "type": "boolean"
+        },
+        "artifact_compilation": {
+          "type": "boolean"
+        },
+        "statement_equivalence": {
           "type": "boolean"
         }
       },
@@ -2866,6 +2890,52 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 80
+            },
+            "falsification_check": {
+              "type": "object",
+              "properties": {
+                "target_digest": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "attempted_falsifier": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "capable_of_failure": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "result": {
+                  "type": "string",
+                  "enum": [
+                    "unsuccessful-refutation",
+                    "survived",
+                    "falsifier-not-found",
+                    "fired"
+                  ]
+                },
+                "evidence_references": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                }
+              },
+              "required": [
+                "attempted_falsifier",
+                "capable_of_failure",
+                "result",
+                "evidence_references"
+              ],
+              "additionalProperties": false
             },
             "body_md": {
               "type": "string",
@@ -2992,6 +3062,52 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 80
+            },
+            "falsification_check": {
+              "type": "object",
+              "properties": {
+                "target_digest": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "attempted_falsifier": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "capable_of_failure": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "result": {
+                  "type": "string",
+                  "enum": [
+                    "unsuccessful-refutation",
+                    "survived",
+                    "falsifier-not-found",
+                    "fired"
+                  ]
+                },
+                "evidence_references": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                }
+              },
+              "required": [
+                "attempted_falsifier",
+                "capable_of_failure",
+                "result",
+                "evidence_references"
+              ],
+              "additionalProperties": false
             },
             "body_md": {
               "type": "string",

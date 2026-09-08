@@ -408,6 +408,8 @@ export {
   EvidenceRequestSchema,
   type EvidenceResponse,
   EvidenceResponseSchema,
+  type FalsificationCheck,
+  FalsificationCheckSchema,
   GapClosedResponseSchema,
   type GapFiledResponse,
   GapFiledResponseSchema,

@@ -51,9 +51,27 @@ export type VersionedClaimTimelineEvent =
       readonly carriesWeight: boolean;
       readonly verdict: string;
       readonly review: Omit<VerifiedReview, "finding">;
+      readonly artifactCompilation?: boolean;
+      readonly statementEquivalence?: boolean;
     }
   | {
       readonly kind: "refuting-evidence";
+      readonly sequence: number;
+      readonly targetVersion: number;
+      readonly evidenceId: string;
+    }
+  | {
+      readonly kind: "falsification-attempt";
+      readonly sequence: number;
+      readonly targetVersion: number;
+      readonly attemptId: string;
+      readonly attemptedFalsifier: string;
+      readonly capableOfFailure: string;
+      readonly result: string;
+      readonly evidenceReferences?: readonly string[];
+    }
+  | {
+      readonly kind: "certified-artifact";
       readonly sequence: number;
       readonly targetVersion: number;
       readonly evidenceId: string;
@@ -91,11 +109,14 @@ export function computeCurrentClaimDisposition(
   let disposition: ClaimDisposition = "draft";
   let recordedRefutationAttempts = 0;
   let verifiedReviews: VerifiedReview[] = [];
+  let hasCertifiedArtifact = false;
+  let qualifyingArtifactPresent = false;
+  const seenAttemptIds = new Set<string>();
 
   const context = (): ClaimTransitionContext => ({
     recorded_refutation_attempts: recordedRefutationAttempts,
     verified_reviews: verifiedReviews,
-    has_certified_artifact: false,
+    has_certified_artifact: hasCertifiedArtifact,
   });
   const apply = (event: ClaimEvent): void => {
     const result = evaluateClaimTransition(disposition, event, context());
@@ -121,6 +142,9 @@ export function computeCurrentClaimDisposition(
       currentVersion = 1;
       recordedRefutationAttempts = 0;
       verifiedReviews = [];
+      hasCertifiedArtifact = false;
+      qualifyingArtifactPresent = false;
+      seenAttemptIds.clear();
       apply({ kind: "promote" });
       continue;
     }
@@ -132,11 +156,39 @@ export function computeCurrentClaimDisposition(
       currentVersion = event.version;
       recordedRefutationAttempts = 0;
       verifiedReviews = [];
+      hasCertifiedArtifact = false;
+      qualifyingArtifactPresent = false;
+      seenAttemptIds.clear();
       continue;
     }
     if (currentVersion === null || event.targetVersion !== currentVersion) {
       // Old/future pins remain visible on their own timelines but never move
       // the current head merely because the identity later revised.
+      continue;
+    }
+    if (event.kind === "certified-artifact") {
+      qualifyingArtifactPresent = true;
+      continue;
+    }
+    if (event.kind === "falsification-attempt") {
+      if (
+        event.attemptedFalsifier.trim().length === 0 ||
+        event.capableOfFailure.trim().length === 0
+      ) {
+        // Empty checks cannot advance standing
+        continue;
+      }
+      if (event.result === "fired") {
+        // A fired falsifier is refuting evidence, not a surviving attempt
+        continue;
+      }
+      if (seenAttemptIds.has(event.attemptId)) {
+        // Duplicate checks cannot advance standing
+        continue;
+      }
+      seenAttemptIds.add(event.attemptId);
+      apply({ kind: "refutation-attempt-recorded", attempt_id: event.attemptId });
+      recordedRefutationAttempts += 1;
       continue;
     }
     if (event.kind === "refuting-evidence") {
@@ -149,13 +201,23 @@ export function computeCurrentClaimDisposition(
       recordedRefutationAttempts += 1;
       continue;
     }
-    if (!event.carriesWeight) continue;
-    const finding = reviewFinding(event.verdict);
-    if (finding === null) continue;
-    const review: VerifiedReview = { ...event.review, finding };
-    apply({ kind: "review-verified", review });
-    if (finding === "support") verifiedReviews = [...verifiedReviews, review];
-    if (finding === "dispute") recordedRefutationAttempts += 1;
+    if (event.kind === "review-created") {
+      if (
+        qualifyingArtifactPresent &&
+        event.artifactCompilation &&
+        event.statementEquivalence &&
+        (event.review.tier === "T1" || event.review.tier === "T2" || event.review.tier === "T3")
+      ) {
+        hasCertifiedArtifact = true;
+      }
+      if (!event.carriesWeight) continue;
+      const finding = reviewFinding(event.verdict);
+      if (finding === null) continue;
+      const review: VerifiedReview = { ...event.review, finding };
+      apply({ kind: "review-verified", review });
+      if (finding === "support") verifiedReviews = [...verifiedReviews, review];
+      if (finding === "dispute") recordedRefutationAttempts += 1;
+    }
   }
 
   return { disposition, currentVersion, context: context() };

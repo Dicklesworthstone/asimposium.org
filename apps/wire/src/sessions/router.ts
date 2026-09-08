@@ -81,7 +81,10 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
-import { computeCurrentClaimDisposition } from "../ledger/disposition-read";
+import {
+  computeCurrentClaimDisposition,
+  type VersionedClaimTimelineEvent,
+} from "../ledger/disposition-read";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
@@ -433,13 +436,30 @@ interface PackReviewRow {
   readonly target_version: number;
   readonly capable_of_failure: string | null;
   readonly source_seq: number;
+  readonly payload_json: string | null;
 }
 
-interface PackRefutingEvidenceRow {
+interface PackEvidenceRow {
   readonly claim_id: string;
   readonly evidence_id: string;
   readonly bears_on_version: number;
+  readonly direction: string;
+  readonly kind: string;
+  readonly computed_class: string;
   readonly source_seq: number;
+  readonly payload_json: string | null;
+}
+
+function safeParseJson(raw: string | null | undefined): Record<string, unknown> | null {
+  if (raw === null || raw === undefined) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function groupPackRows<Row>(
@@ -1888,8 +1908,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               `WITH selected_claims AS (${selectedClaimCte})
                SELECT reviews.target_claim_id AS claim_id, reviews.review_id,
                       reviews.reviewer_fellow_id, reviews.tier, reviews.verdict,
-                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq
+                      reviews.target_version, reviews.capable_of_failure, reviews.source_seq,
+                      c.payload_json
                FROM reviews JOIN selected_claims ON selected_claims.id = reviews.target_claim_id
+               LEFT JOIN event_content c ON c.event_id = reviews.source_event_id AND c.redacted_at IS NULL
                WHERE reviews.problem_id = ? AND reviews.source_seq IS NOT NULL
                  AND reviews.source_seq <= ?
                ORDER BY reviews.source_seq ASC`,
@@ -1905,10 +1927,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             .prepare(
               `WITH selected_claims AS (${selectedClaimCte})
                SELECT evidence.bears_on_id AS claim_id, evidence.evidence_id,
-                      evidence.bears_on_version, evidence.source_seq
+                      evidence.bears_on_version, evidence.direction, evidence.kind,
+                      evidence.computed_class, evidence.source_seq,
+                      c.payload_json
                FROM evidence JOIN selected_claims ON selected_claims.id = evidence.bears_on_id
+               LEFT JOIN event_content c ON c.event_id = evidence.source_event_id AND c.redacted_at IS NULL
                WHERE evidence.problem_id = ? AND evidence.bears_on_kind = 'claim'
-                 AND evidence.direction = 'refutes' AND evidence.bears_on_version IS NOT NULL
+                 AND evidence.bears_on_version IS NOT NULL
                  AND evidence.source_seq IS NOT NULL AND evidence.source_seq <= ?
                ORDER BY evidence.source_seq ASC`,
             )
@@ -1920,11 +1945,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               cursor,
             ),
         ]);
-        const [claimEventsResult, reviewRowsResult, refutingEvidenceResult] = dispositionResults;
+        const [claimEventsResult, reviewRowsResult, evidenceResult] = dispositionResults;
         if (
           claimEventsResult === undefined ||
           reviewRowsResult === undefined ||
-          refutingEvidenceResult === undefined
+          evidenceResult === undefined
         ) {
           throw new Error("pack disposition batch returned an incomplete result set");
         }
@@ -1936,8 +1961,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           (reviewRowsResult.results ?? []) as PackReviewRow[],
           (row) => row.claim_id,
         );
-        const refutingEvidenceById = groupPackRows(
-          (refutingEvidenceResult.results ?? []) as PackRefutingEvidenceRow[],
+        const evidenceById = groupPackRows(
+          (evidenceResult.results ?? []) as PackEvidenceRow[],
           (row) => row.claim_id,
         );
 
@@ -1948,9 +1973,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
           const claimEvents = claimEventsById.get(claim.id) ?? [];
           const reviewRows = reviewRowsById.get(claim.id) ?? [];
-          const refutingEvidence = refutingEvidenceById.get(claim.id) ?? [];
+          const evidenceRows = evidenceById.get(claim.id) ?? [];
           const fold = computeCurrentClaimDisposition([
-            ...claimEvents.flatMap((row) => {
+            ...claimEvents.flatMap((row): VersionedClaimTimelineEvent[] => {
               if (row.type !== "claim.created" && row.type !== "claim.revised") return [];
               return [
                 {
@@ -1963,30 +1988,75 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 },
               ];
             }),
-            ...reviewRows.map((review) => ({
-              kind: "review-created" as const,
-              sequence: review.source_seq,
-              targetVersion: review.target_version,
-              carriesWeight:
-                review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
-              verdict: review.verdict,
-              review: {
-                review_id: review.review_id,
-                reviewer_id: review.reviewer_fellow_id,
-                tier: review.tier,
-                cross_family: review.tier === "T2" || review.tier === "T3",
-                // The v1 review contract records the exercised rubric and
-                // basis, but has no explicit whole-write-up coverage claim.
-                // Never infer the stronger property from body length.
-                full_write_up: false,
-              },
-            })),
-            ...refutingEvidence.map((evidence) => ({
-              kind: "refuting-evidence" as const,
-              sequence: evidence.source_seq,
-              targetVersion: evidence.bears_on_version,
-              evidenceId: evidence.evidence_id,
-            })),
+            ...reviewRows.map((review): VersionedClaimTimelineEvent => {
+              const payload = safeParseJson(review.payload_json);
+              return {
+                kind: "review-created" as const,
+                sequence: review.source_seq,
+                targetVersion: review.target_version,
+                carriesWeight:
+                  review.capable_of_failure !== null && review.capable_of_failure.trim().length > 0,
+                verdict: review.verdict,
+                review: {
+                  review_id: review.review_id,
+                  reviewer_id: review.reviewer_fellow_id,
+                  tier: review.tier,
+                  cross_family: review.tier === "T2" || review.tier === "T3",
+                  full_write_up: payload?.full_write_up === true,
+                },
+                artifactCompilation: payload?.artifact_compilation === true,
+                statementEquivalence: payload?.statement_equivalence === true,
+              };
+            }),
+            ...evidenceRows.flatMap((evidence): VersionedClaimTimelineEvent[] => {
+              const payload = safeParseJson(evidence.payload_json);
+
+              if (evidence.direction === "refutes") {
+                return [
+                  {
+                    kind: "refuting-evidence" as const,
+                    sequence: evidence.source_seq,
+                    targetVersion: evidence.bears_on_version,
+                    evidenceId: evidence.evidence_id,
+                  },
+                ];
+              }
+
+              if (payload?.falsification_check && typeof payload.falsification_check === "object") {
+                const check = payload.falsification_check as Record<string, unknown>;
+                return [
+                  {
+                    kind: "falsification-attempt" as const,
+                    sequence: evidence.source_seq,
+                    targetVersion: evidence.bears_on_version,
+                    attemptId: evidence.evidence_id,
+                    attemptedFalsifier:
+                      typeof check.attempted_falsifier === "string"
+                        ? check.attempted_falsifier
+                        : "",
+                    capableOfFailure:
+                      typeof check.capable_of_failure === "string" ? check.capable_of_failure : "",
+                    result: typeof check.result === "string" ? check.result : "",
+                    evidenceReferences: Array.isArray(check.evidence_references)
+                      ? (check.evidence_references as string[])
+                      : undefined,
+                  },
+                ];
+              }
+
+              if (evidence.computed_class === "certified" || evidence.kind === "certificate") {
+                return [
+                  {
+                    kind: "certified-artifact" as const,
+                    sequence: evidence.source_seq,
+                    targetVersion: evidence.bears_on_version,
+                    evidenceId: evidence.evidence_id,
+                  },
+                ];
+              }
+
+              return [];
+            }),
           ]);
           const disposition = displayClaimDisposition(fold.disposition, fold.context);
           candidates.push({
@@ -4749,10 +4819,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectId: reviewId,
           objectVersion: 1,
           payloadJson: canonicalJson({
+            artifact_compilation: parsed.data.artifact_compilation,
             basis: parsed.data.basis,
             body_md: parsed.data.body_md,
             capable_of_failure: parsed.data.capable_of_failure ?? null,
+            full_write_up: parsed.data.full_write_up,
             rubric: parsed.data.rubric,
+            statement_equivalence: parsed.data.statement_equivalence,
             target_claim_id: parsed.data.target_claim_id,
             target_version: parsed.data.target_version,
             tier: gate.tier,
@@ -4818,6 +4891,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               target_version: parsed.data.target_version,
               tier: gate.tier,
               carries_weight: gate.carriesWeight,
+              full_write_up: parsed.data.full_write_up,
+              artifact_compilation: parsed.data.artifact_compilation,
+              statement_equivalence: parsed.data.statement_equivalence,
             }),
         }),
       );
@@ -5562,6 +5638,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         parsed.data.kind === "computation"
           ? { domainOrFloor: parsed.data.computation_domain_or_floor }
           : undefined,
+      certifiedArtifact:
+        parsed.data.kind === "certificate"
+          ? { shapeCheckDigest: parsed.data.source.locator }
+          : undefined,
       selectedHypothesis: parsed.data.selected_hypothesis_id !== undefined,
       mode: parsed.data.mode,
     });
@@ -5615,6 +5695,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             computation_domain_or_floor: parsed.data.computation_domain_or_floor ?? null,
             computed_class: assessment.class,
             direction: parsed.data.direction,
+            falsification_check: parsed.data.falsification_check ?? null,
             kind: parsed.data.kind,
             mode: parsed.data.mode,
             reproduction: parsed.data.reproduction ?? null,
