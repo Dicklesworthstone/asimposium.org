@@ -259,6 +259,43 @@ export const PackResponseSchema = z
   });
 export type PackResponse = z.infer<typeof PackResponseSchema>;
 
+/** §6.1/§7.2: the promoted object kinds the validator accepts in v1. */
+export const ClaimKindSchema = z.enum([
+  "definition",
+  "assumption",
+  "lemma",
+  "conjecture",
+  "theorem-attempt",
+  "counterexample-claim",
+  "reduction",
+  "obstruction",
+  "method",
+  "bound",
+  "literature-claim",
+  "novelty-claim",
+  "theorem",
+  "computation",
+  "counterexample",
+  "observation",
+]);
+export type ClaimKind = z.infer<typeof ClaimKindSchema>;
+
+/** Exact author-written replacement, shared by direct revisions and private drafts.
+ * P3 remains a publication-time validator refusal, so falsifier is optional here.
+ */
+export const ClaimRevisionSchema = z
+  .object({
+    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
+    claim_id: ClaimIdSchema,
+    base_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
+    kind: ClaimKindSchema,
+    statement: z.string().trim().min(1).max(8 * 1024),
+    falsifier: z.string().trim().min(1).max(4 * 1024).optional(),
+    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+  })
+  .strict();
+export type ClaimRevision = z.infer<typeof ClaimRevisionSchema>;
+
 /** §7.4 workshop push. Policy screening applies; structural rules do not. */
 export const WorkshopPushTypeSchema = z.enum([
   "note",
@@ -284,6 +321,8 @@ export const WorkshopPushRequestSchema = z
      * genuine note: recorded, ranked last, visible to the sponsor (§7.6).
      */
     force_note: z.literal(true).optional(),
+    /** Optional publication-ready replacement; draft prose stays private. */
+    revision: ClaimRevisionSchema.optional(),
   })
   .strict();
 export type WorkshopPushRequest = z.infer<typeof WorkshopPushRequestSchema>;
@@ -309,6 +348,7 @@ export const SponsorWorkshopObjectSchema = z
     relates_to: z.array(z.string().min(1).max(64)).max(16),
     workshop_seq: z.number().int().positive(),
     created_at: z.string().datetime(),
+    revision: ClaimRevisionSchema.optional(),
   })
   .strict();
 export type SponsorWorkshopObject = z.infer<typeof SponsorWorkshopObjectSchema>;
@@ -376,27 +416,6 @@ export const SponsorWorkshopViewSchema = z
     }
   });
 export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
-
-/** §6.1/§7.2: the promoted object kinds the validator accepts in v1. */
-export const ClaimKindSchema = z.enum([
-  "definition",
-  "assumption",
-  "lemma",
-  "conjecture",
-  "theorem-attempt",
-  "counterexample-claim",
-  "reduction",
-  "obstruction",
-  "method",
-  "bound",
-  "literature-claim",
-  "novelty-claim",
-  "theorem",
-  "computation",
-  "counterexample",
-  "observation",
-]);
-export type ClaimKind = z.infer<typeof ClaimKindSchema>;
 
 /**
  * The promote payload. P3: conjecture-class claims require a falsifier — the
@@ -667,30 +686,12 @@ export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema
  * here because the conjecture-class P3 refusal belongs to the validator, not
  * the parser.
  */
-export const ReviseRequestSchema = z
-  .object({
-    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
-    claim_id: ClaimIdSchema,
-    base_version: z
-      .number()
-      .int()
-      .min(1)
-      .max(Number.MAX_SAFE_INTEGER - 1),
-    kind: ClaimKindSchema,
-    statement: z
-      .string()
-      .trim()
-      .min(1)
-      .max(8 * 1024),
-    falsifier: z
-      .string()
-      .trim()
-      .min(1)
-      .max(4 * 1024)
-      .optional(),
-    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
-  })
-  .strict();
+export const ReviseRequestSchema = z.union([
+  ClaimRevisionSchema,
+  // The stored replacement is immutable. A publication request cannot edit
+  // its content, retarget its claim, or silently advance its base version.
+  z.object({ workshop_id: WorkshopObjectIdSchema }).strict(),
+]);
 export type ReviseRequest = z.infer<typeof ReviseRequestSchema>;
 
 export const ReviseResponseSchema = z

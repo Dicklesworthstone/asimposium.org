@@ -486,6 +486,8 @@ export {
   type ReviewResponse,
   ReviewResponseSchema,
   type ReviseRequest,
+  type ClaimRevision,
+  ClaimRevisionSchema,
   ReviseRequestSchema,
   type ReviseResponse,
   ReviseResponseSchema,
