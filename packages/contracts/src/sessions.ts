@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
+import {
+  ClaimScientificProvenanceSchema,
+  FormalArtifactSchema,
+  GroundedFalsificationCheckSchema,
+  ScientificProvenanceSchema,
+  ScientificVerificationSchema,
+} from "./scientific-provenance.ts";
 
 export { type RateLimitBudget, RateLimitBudgetSchema };
 
@@ -400,6 +407,7 @@ export type ClaimKind = z.infer<typeof ClaimKindSchema>;
 export const PromoteRequestSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
+    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
     kind: ClaimKindSchema,
     statement: z
       .string()
@@ -459,6 +467,8 @@ export const SessionCloseResponseSchema = z
 /** §6.6 the review write: a Fellow in a session reviews a version-pinned claim. */
 export const ReviewRequestSchema = z
   .object({
+    scientific_provenance: ScientificProvenanceSchema.optional(),
+    verification: ScientificVerificationSchema.optional(),
     target_claim_id: ClaimIdSchema,
     /** The exact version the review pins (reviews pin versions, P9). */
     target_version: z.number().int().min(1),
@@ -478,12 +488,6 @@ export const ReviewRequestSchema = z
     capable_of_failure: z.string().trim().min(1).max(1000).optional(),
     /** The per-domain rubric lines the reviewer states they exercised. */
     rubric: z.array(z.string().min(1).max(160)).max(16).default([]),
-    /** The review covered a full write-up, not an excerpt or a summary. */
-    full_write_up: z.boolean().default(false),
-    /** Independent verification confirming clean artifact compilation. */
-    artifact_compilation: z.boolean().default(false),
-    /** Independent verification confirming the artifact statement matches the claimed theorem. */
-    statement_equivalence: z.boolean().default(false),
     body_md: z
       .string()
       .min(1)
@@ -501,6 +505,7 @@ export const ReviewResponseSchema = z
     tier: z.enum(["T0", "T1", "T2", "T3"]),
     /** False when the review is tagged assertion-only (no capable-of-failure). */
     carries_weight: z.boolean(),
+    independence_policy: z.string().min(1).optional(),
     full_write_up: z.boolean().optional(),
     artifact_compilation: z.boolean().optional(),
     statement_equivalence: z.boolean().optional(),
@@ -515,20 +520,7 @@ export type ReviewResponse = z.infer<typeof ReviewResponseSchema>;
  * candidate check, have capable-of-failure conditions (P5), report its result,
  * and reference evidence sufficient for an independent reader to verify.
  */
-export const FalsificationCheckSchema = z
-  .object({
-    /** Content or statement digest of the target claim version checked. */
-    target_digest: z.string().trim().min(1).max(128).optional(),
-    /** The published falsifier statement or exact challenge condition attempted. */
-    attempted_falsifier: z.string().trim().min(1).max(4096),
-    /** What outcome would have constituted a successful refutation (P5: capable of failure). */
-    capable_of_failure: z.string().trim().min(1).max(2000),
-    /** The outcome of the check: "unsuccessful-refutation" (claim survived, did not fire) vs "fired" (refuted). */
-    result: z.enum(["unsuccessful-refutation", "survived", "falsifier-not-found", "fired"]),
-    /** Evidence references, run locators, or artifact hashes grounding the check. */
-    evidence_references: z.array(z.string().min(1).max(120)).max(16).default([]),
-  })
-  .strict();
+export const FalsificationCheckSchema = GroundedFalsificationCheckSchema;
 export type FalsificationCheck = z.infer<typeof FalsificationCheckSchema>;
 
 /** §6.7 the evidence write: a Fellow submits material bearing on a claim or
@@ -575,6 +567,7 @@ const EvidenceRequestCommonFields = {
   selected_hypothesis_id: z.string().min(1).max(80).optional(),
   /** Documented falsification check / challenge attempting to refute a claim. */
   falsification_check: FalsificationCheckSchema.optional(),
+  formal_artifact: FormalArtifactSchema.optional(),
   body_md: z
     .string()
     .min(1)
@@ -676,6 +669,7 @@ export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema
  */
 export const ReviseRequestSchema = z
   .object({
+    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
     claim_id: ClaimIdSchema,
     base_version: z
       .number()

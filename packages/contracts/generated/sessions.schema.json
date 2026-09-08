@@ -2500,6 +2500,63 @@
           "type": "string",
           "pattern": "^W-[A-Za-z0-9]{26}$"
         },
+        "scientific_provenance": {
+          "type": "object",
+          "properties": {
+            "model_family_self_declared": {
+              "default": null,
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 80,
+                  "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "method": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "deductive",
+                    "computation",
+                    "formal",
+                    "literature",
+                    "empirical",
+                    "counterexample"
+                  ]
+                },
+                "procedure": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "evidence": {
+                  "default": [],
+                  "maxItems": 0,
+                  "type": "array",
+                  "items": {
+                    "not": {}
+                  }
+                }
+              },
+              "required": [
+                "category",
+                "procedure",
+                "evidence"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "model_family_self_declared"
+          ],
+          "additionalProperties": false
+        },
         "kind": {
           "type": "string",
           "enum": [
@@ -2671,6 +2728,255 @@
     "review_request": {
       "type": "object",
       "properties": {
+        "scientific_provenance": {
+          "type": "object",
+          "properties": {
+            "model_family_self_declared": {
+              "default": null,
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 80,
+                  "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "method": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "deductive",
+                    "computation",
+                    "formal",
+                    "literature",
+                    "empirical",
+                    "counterexample"
+                  ]
+                },
+                "procedure": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "evidence": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "evidence_id": {
+                        "type": "string",
+                        "maxLength": 80,
+                        "pattern": "^E-[A-Za-z0-9]+$"
+                      },
+                      "digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                      }
+                    },
+                    "required": [
+                      "evidence_id",
+                      "digest"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "category",
+                "procedure",
+                "evidence"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "model_family_self_declared"
+          ],
+          "additionalProperties": false
+        },
+        "verification": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "target_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "evidence": {
+                  "type": "object",
+                  "properties": {
+                    "evidence_id": {
+                      "type": "string",
+                      "maxLength": 80,
+                      "pattern": "^E-[A-Za-z0-9]+$"
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "evidence_id",
+                    "digest"
+                  ],
+                  "additionalProperties": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "full-write-up"
+                },
+                "coverage": {
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "result": {
+                  "type": "string",
+                  "enum": [
+                    "verified",
+                    "mismatch",
+                    "cannot-verify"
+                  ]
+                }
+              },
+              "required": [
+                "target_digest",
+                "evidence",
+                "kind",
+                "coverage",
+                "result"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "evidence": {
+                  "type": "object",
+                  "properties": {
+                    "evidence_id": {
+                      "type": "string",
+                      "maxLength": 80,
+                      "pattern": "^E-[A-Za-z0-9]+$"
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "evidence_id",
+                    "digest"
+                  ],
+                  "additionalProperties": false
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "formal-artifact"
+                },
+                "artifact_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "compilation": {
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "toolchain": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "result": {
+                      "type": "string",
+                      "enum": [
+                        "success",
+                        "failure"
+                      ]
+                    },
+                    "output": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 8000
+                    }
+                  },
+                  "required": [
+                    "command",
+                    "toolchain",
+                    "result",
+                    "output"
+                  ],
+                  "additionalProperties": false
+                },
+                "statement_comparison": {
+                  "type": "object",
+                  "properties": {
+                    "declaration": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "statement": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 8192
+                    },
+                    "result": {
+                      "type": "string",
+                      "enum": [
+                        "equivalent",
+                        "mismatch",
+                        "unresolved"
+                      ]
+                    },
+                    "explanation": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    }
+                  },
+                  "required": [
+                    "declaration",
+                    "statement",
+                    "result",
+                    "explanation"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "target_digest",
+                "evidence",
+                "kind",
+                "artifact_digest",
+                "compilation",
+                "statement_comparison"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
         "target_claim_id": {
           "type": "string",
           "pattern": "^C-[0-9]+$"
@@ -2712,18 +3018,6 @@
             "maxLength": 160
           }
         },
-        "full_write_up": {
-          "default": false,
-          "type": "boolean"
-        },
-        "artifact_compilation": {
-          "default": false,
-          "type": "boolean"
-        },
-        "statement_equivalence": {
-          "default": false,
-          "type": "boolean"
-        },
         "body_md": {
           "type": "string",
           "minLength": 1,
@@ -2736,9 +3030,6 @@
         "verdict",
         "basis",
         "rubric",
-        "full_write_up",
-        "artifact_compilation",
-        "statement_equivalence",
         "body_md"
       ],
       "additionalProperties": false
@@ -2770,6 +3061,10 @@
         },
         "carries_weight": {
           "type": "boolean"
+        },
+        "independence_policy": {
+          "type": "string",
+          "minLength": 1
         },
         "full_write_up": {
           "type": "boolean"
@@ -2896,8 +3191,7 @@
               "properties": {
                 "target_digest": {
                   "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 },
                 "attempted_falsifier": {
                   "type": "string",
@@ -2912,28 +3206,78 @@
                 "result": {
                   "type": "string",
                   "enum": [
-                    "unsuccessful-refutation",
                     "survived",
-                    "falsifier-not-found",
                     "fired"
                   ]
                 },
-                "evidence_references": {
-                  "default": [],
+                "evidence": {
+                  "minItems": 1,
                   "maxItems": 16,
                   "type": "array",
                   "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
+                    "type": "object",
+                    "properties": {
+                      "evidence_id": {
+                        "type": "string",
+                        "maxLength": 80,
+                        "pattern": "^E-[A-Za-z0-9]+$"
+                      },
+                      "digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                      }
+                    },
+                    "required": [
+                      "evidence_id",
+                      "digest"
+                    ],
+                    "additionalProperties": false
                   }
                 }
               },
               "required": [
+                "target_digest",
                 "attempted_falsifier",
                 "capable_of_failure",
                 "result",
-                "evidence_references"
+                "evidence"
+              ],
+              "additionalProperties": false
+            },
+            "formal_artifact": {
+              "type": "object",
+              "properties": {
+                "language": {
+                  "type": "string",
+                  "const": "lean"
+                },
+                "declaration": {
+                  "type": "string",
+                  "maxLength": 160,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_.']*$"
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 49152
+                },
+                "toolchain": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "axiom_report": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              },
+              "required": [
+                "language",
+                "declaration",
+                "source",
+                "toolchain",
+                "axiom_report"
               ],
               "additionalProperties": false
             },
@@ -3068,8 +3412,7 @@
               "properties": {
                 "target_digest": {
                   "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
+                  "pattern": "^sha256:[0-9a-f]{64}$"
                 },
                 "attempted_falsifier": {
                   "type": "string",
@@ -3084,28 +3427,78 @@
                 "result": {
                   "type": "string",
                   "enum": [
-                    "unsuccessful-refutation",
                     "survived",
-                    "falsifier-not-found",
                     "fired"
                   ]
                 },
-                "evidence_references": {
-                  "default": [],
+                "evidence": {
+                  "minItems": 1,
                   "maxItems": 16,
                   "type": "array",
                   "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 120
+                    "type": "object",
+                    "properties": {
+                      "evidence_id": {
+                        "type": "string",
+                        "maxLength": 80,
+                        "pattern": "^E-[A-Za-z0-9]+$"
+                      },
+                      "digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                      }
+                    },
+                    "required": [
+                      "evidence_id",
+                      "digest"
+                    ],
+                    "additionalProperties": false
                   }
                 }
               },
               "required": [
+                "target_digest",
                 "attempted_falsifier",
                 "capable_of_failure",
                 "result",
-                "evidence_references"
+                "evidence"
+              ],
+              "additionalProperties": false
+            },
+            "formal_artifact": {
+              "type": "object",
+              "properties": {
+                "language": {
+                  "type": "string",
+                  "const": "lean"
+                },
+                "declaration": {
+                  "type": "string",
+                  "maxLength": 160,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_.']*$"
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 49152
+                },
+                "toolchain": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "axiom_report": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              },
+              "required": [
+                "language",
+                "declaration",
+                "source",
+                "toolchain",
+                "axiom_report"
               ],
               "additionalProperties": false
             },
@@ -3274,6 +3667,63 @@
     "revise_request": {
       "type": "object",
       "properties": {
+        "scientific_provenance": {
+          "type": "object",
+          "properties": {
+            "model_family_self_declared": {
+              "default": null,
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 80,
+                  "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "method": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "deductive",
+                    "computation",
+                    "formal",
+                    "literature",
+                    "empirical",
+                    "counterexample"
+                  ]
+                },
+                "procedure": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "evidence": {
+                  "default": [],
+                  "maxItems": 0,
+                  "type": "array",
+                  "items": {
+                    "not": {}
+                  }
+                }
+              },
+              "required": [
+                "category",
+                "procedure",
+                "evidence"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "model_family_self_declared"
+          ],
+          "additionalProperties": false
+        },
         "claim_id": {
           "type": "string",
           "pattern": "^C-[0-9]+$"

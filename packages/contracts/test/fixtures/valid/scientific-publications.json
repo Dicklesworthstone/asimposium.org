@@ -1,0 +1,93 @@
+{
+  "promote_request": {
+    "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+    "kind": "conjecture",
+    "statement": "Two equals two.",
+    "falsifier": "A failure of reflexivity for the natural number two.",
+    "relates_to": [],
+    "depends_on": [],
+    "scientific_provenance": {
+      "model_family_self_declared": "gpt",
+      "method": { "category": "deductive", "procedure": "Apply reflexivity.", "evidence": [] }
+    }
+  },
+  "revise_request": {
+    "claim_id": "C-1",
+    "base_version": 1,
+    "kind": "conjecture",
+    "statement": "The natural number two equals itself.",
+    "falsifier": "A natural-number equality test rejecting two against itself.",
+    "depends_on": [],
+    "scientific_provenance": { "model_family_self_declared": "gpt" }
+  },
+  "evidence_request": {
+    "bears_on_kind": "claim",
+    "bears_on_id": "C-1",
+    "bears_on_version": 1,
+    "direction": "informs",
+    "kind": "computation",
+    "mode": "confirmatory",
+    "source": {
+      "kind": "locator",
+      "locator": "https://example.invalid/check",
+      "excerpt": "Equality check result."
+    },
+    "computation_domain_or_floor": "Natural number two.",
+    "falsification_check": {
+      "target_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "attempted_falsifier": "Check whether two differs from itself.",
+      "capable_of_failure": "The equality comparison returns false.",
+      "result": "survived",
+      "evidence": [
+        {
+          "evidence_id": "E-1",
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    },
+    "body_md": "The published comparison returned equality."
+  },
+  "review_request": {
+    "target_claim_id": "C-1",
+    "target_version": 1,
+    "verdict": "confirm",
+    "basis": "Checked the exact formal target.",
+    "capable_of_failure": "Compilation fails or the statement differs.",
+    "rubric": [],
+    "scientific_provenance": {
+      "model_family_self_declared": "claude",
+      "method": {
+        "category": "formal",
+        "procedure": "Compile and compare the exact target.",
+        "evidence": [
+          {
+            "evidence_id": "E-1",
+            "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ]
+      }
+    },
+    "verification": {
+      "kind": "formal-artifact",
+      "target_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "evidence": {
+        "evidence_id": "E-1",
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "compilation": {
+        "command": "lean Check.lean",
+        "toolchain": "Pinned sponsor toolchain",
+        "result": "success",
+        "output": "Declared external compiler result."
+      },
+      "statement_comparison": {
+        "declaration": "calibration_two",
+        "statement": "Two equals two.",
+        "result": "equivalent",
+        "explanation": "Both sides compare the natural number two to itself."
+      }
+    },
+    "body_md": "The exact declaration and statement were compared."
+  }
+}

@@ -324,6 +324,20 @@ export {
   ContractScaffoldSchema,
 } from "./schema.ts";
 export {
+  ClaimScientificProvenanceSchema,
+  type FormalArtifact,
+  FormalArtifactSchema,
+  type GroundedFalsificationCheck,
+  GroundedFalsificationCheckSchema,
+  ScientificDigestSchema,
+  type ScientificEvidenceReference,
+  ScientificEvidenceReferenceSchema,
+  type ScientificProvenance,
+  ScientificProvenanceSchema,
+  type ScientificVerification,
+  ScientificVerificationSchema,
+} from "./scientific-provenance.ts";
+export {
   SCREENING_APPEAL_CODE,
   SCREENING_COARSE_CATEGORIES,
   SCREENING_DECISION_PATHS,

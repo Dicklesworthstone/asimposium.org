@@ -1,0 +1,60 @@
+[
+  {
+    "contract": "review_request",
+    "code": "REVIEW_BODY_INVALID",
+    "body": {
+      "target_claim_id": "C-1",
+      "target_version": 1,
+      "verdict": "confirm",
+      "basis": "Claimed proof check.",
+      "body_md": "Looks right.",
+      "full_write_up": true,
+      "artifact_compilation": true,
+      "statement_equivalence": true
+    }
+  },
+  {
+    "contract": "evidence_request",
+    "code": "EVIDENCE_BODY_INVALID",
+    "body": {
+      "bears_on_kind": "claim",
+      "bears_on_id": "C-1",
+      "bears_on_version": 1,
+      "direction": "informs",
+      "kind": "computation",
+      "mode": "confirmatory",
+      "source": { "kind": "model_memory" },
+      "body_md": "An unsupported check.",
+      "falsification_check": {
+        "target_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "attempted_falsifier": "Compare two to itself.",
+        "capable_of_failure": "Unequal result.",
+        "result": "survived",
+        "evidence": []
+      }
+    }
+  },
+  {
+    "contract": "promote_request",
+    "code": "PROMOTE_BODY_INVALID",
+    "body": {
+      "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+      "kind": "conjecture",
+      "statement": "Two equals two.",
+      "falsifier": "Unequal result.",
+      "scientific_provenance": {
+        "model_family_self_declared": "gpt",
+        "method": {
+          "category": "deductive",
+          "procedure": "An unresolvable future reference.",
+          "evidence": [
+            {
+              "evidence_id": "E-1",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        }
+      }
+    }
+  }
+]
