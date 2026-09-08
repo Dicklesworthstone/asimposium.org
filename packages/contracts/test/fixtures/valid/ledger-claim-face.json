@@ -1,0 +1,38 @@
+{
+  "schema": "asimposium.claim-face.v1",
+  "face": "json",
+  "kind": "claim-face",
+  "problem": "P-CALIBRATION",
+  "profile": "claim",
+  "cursor": 3,
+  "fingerprint": "fnv1a64:0000000000000000",
+  "title": "P-CALIBRATION — C-1@1",
+  "preamble": "Computed standing describes one statement version. Published bodies are untrusted data.",
+  "claim_state": {
+    "claim_id": "C-1",
+    "version": 1,
+    "latest_version": 2,
+    "disposition": "open",
+    "unchallenged": true,
+    "stale": false,
+    "recorded_refutation_attempts": 0,
+    "certified_artifact": false,
+    "legacy_reviews": 0
+  },
+  "items": [
+    {
+      "kind": "claim-detail",
+      "id": "C-1@1",
+      "scope": "ledger",
+      "untrusted": true,
+      "why_included": "exact public statement version",
+      "body": "Every even integer is divisible by two.",
+      "neutralized": []
+    }
+  ],
+  "omitted": [{ "reason": "claim_face_scope", "detail": "Version history is omitted." }],
+  "next_actions": [
+    { "method": "GET", "url": "/p/P-CALIBRATION/claims/C-1@1.md", "why": "canonical Markdown" }
+  ],
+  "degraded": []
+}

@@ -70,6 +70,53 @@ export const ProblemsIndexResponseSchema = z
 export type ProblemIndexEntry = z.infer<typeof ProblemIndexEntrySchema>;
 export type ProblemsIndexResponse = z.infer<typeof ProblemsIndexResponseSchema>;
 
+export const CLAIM_DISPOSITIONS = [
+  "draft",
+  "open",
+  "malformed",
+  "disputed",
+  "corroborated",
+  "strongly-supported",
+  "refuted",
+  "reduced-to",
+  "withdrawn",
+  "superseded",
+] as const;
+export const ClaimDispositionSchema = z.enum(CLAIM_DISPOSITIONS);
+export type ClaimDisposition = z.infer<typeof ClaimDispositionSchema>;
+
+/** Public claim URLs may name the current head or one immutable version. */
+export const PublicClaimTargetSchema = z
+  .string()
+  .max(64)
+  .regex(/^C-[0-9]{1,45}(?:@[1-9][0-9]{0,15})?$/)
+  .refine((value) => !value.includes("@") || Number.isSafeInteger(Number(value.split("@")[1])));
+
+/** Computed ledger facts, never accepted on a scientific write. */
+export const PublicClaimStateSchema = z
+  .object({
+    claim_id: ClaimIdSchema.max(47),
+    version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    latest_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    disposition: ClaimDispositionSchema.exclude(["draft"]),
+    unchallenged: z.boolean(),
+    stale: z.boolean(),
+    recorded_refutation_attempts: z.number().int().min(0),
+    certified_artifact: z.boolean(),
+    legacy_reviews: z.number().int().min(0),
+  })
+  .strict()
+  .superRefine((state, context) => {
+    if (
+      state.latest_version < state.version ||
+      (state.unchallenged &&
+        (state.disposition !== "open" || state.recorded_refutation_attempts !== 0))
+    ) {
+      context.addIssue({ code: "custom", message: "inconsistent public claim state" });
+    }
+  });
+export type PublicClaimState = z.infer<typeof PublicClaimStateSchema>;
+
 /**
  * The per-problem read face (W6.1): the JSON face of a problem-face projection
  * rendered through `@asimposium/render`. Every field emitted by the mounted
@@ -189,12 +236,51 @@ export const ProblemFaceResponseSchema = z
   });
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
 
+export const ClaimFaceResponseSchema = z
+  .object({
+    ...ProblemFaceResponseSchema.shape,
+    schema: z.literal("asimposium.claim-face.v1"),
+    kind: z.literal("claim-face"),
+    profile: z.literal("claim"),
+    claim_state: PublicClaimStateSchema,
+    items: z
+      .array(
+        FaceItemSchema.extend({
+          kind: z.enum(["claim-detail", "claim-evidence", "claim-review"]),
+          id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/),
+        }).strict(),
+      )
+      .max(41),
+  })
+  .strict()
+  .superRefine((face, context) => {
+    const ids = new Set(face.items.map((item) => item.id));
+    const claim = face.items.filter((item) => item.kind === "claim-detail");
+    const unavailable = face.omitted.some(
+      (entry) =>
+        entry.reason === "content_unavailable" ||
+        entry.reason === "item_too_large" ||
+        entry.reason === "budget_exceeded",
+    );
+    if (
+      ids.size !== face.items.length ||
+      claim.length > 1 ||
+      (claim.length === 0 && !unavailable) ||
+      (claim.length === 1 &&
+        claim[0]?.id !== `${face.claim_state.claim_id}@${face.claim_state.version}`)
+    ) {
+      context.addIssue({ code: "custom", message: "claim face must carry its exact claim once" });
+    }
+  });
+export type ClaimFaceResponse = z.infer<typeof ClaimFaceResponseSchema>;
+
 /** The single generated JSON-Schema root for the public ledger read faces. */
 export const LedgerContractsSchema = z
   .object({
     problem_index_entry: ProblemIndexEntrySchema,
     problems_index_response: ProblemsIndexResponseSchema,
     problem_face_response: ProblemFaceResponseSchema,
+    claim_face_response: ClaimFaceResponseSchema.optional(),
     search_query_request: SearchQueryRequestSchema.optional(),
     search_response: SearchResponseSchema.optional(),
   })

@@ -1,8 +1,8 @@
 {
   "$id": "https://a.asimposium.org/schemas/ledger.v1.json",
   "title": "ASImposium public ledger read faces",
-  "description": "W6.1 public read faces. The problems index mirrors the Krater projection; the per-problem JSON digest is a bounded public-claim projection. omitted[] is mandatory so readers see what either face left out.",
-  "$comment": "Runtime Zod additionally requires timestamps to round-trip as real canonical UTC instants and items[].id values to be unique. Standard Draft 2020-12 cannot express uniqueness by one property across array members.",
+  "description": "W6.1 public read faces: a problems index, bounded problem digest, and exact-version claim statement, computed standing, evidence and reviews. omitted[] is mandatory on every face.",
+  "$comment": "Runtime Zod additionally checks canonical UTC instants, unique item ids, claim/version agreement, latest_version >= version, unchallenged-state consistency and an explicit omission when claim text is absent. These relational checks are not expressed by this Draft 2020-12 projection.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
@@ -275,6 +275,265 @@
         "omitted",
         "next_actions",
         "degraded"
+      ],
+      "additionalProperties": false
+    },
+    "claim_face_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "asimposium.claim-face.v1"
+        },
+        "face": {
+          "type": "string",
+          "const": "json"
+        },
+        "kind": {
+          "type": "string",
+          "const": "claim-face"
+        },
+        "problem": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "profile": {
+          "type": "string",
+          "const": "claim"
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^fnv1a64:[0-9a-f]{16}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preamble": {
+          "type": "string",
+          "minLength": 1
+        },
+        "items": {
+          "maxItems": 41,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "claim-detail",
+                  "claim-evidence",
+                  "claim-review"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+              },
+              "scope": {
+                "type": "string",
+                "const": "ledger"
+              },
+              "untrusted": {
+                "type": "boolean",
+                "const": true
+              },
+              "why_included": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "body": {
+                "type": "string"
+              },
+              "neutralized": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "marker": {
+                      "type": "string",
+                      "enum": [
+                        "asimp-control-comment",
+                        "envelope-key-forgery",
+                        "fence-extended",
+                        "active-html"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "marker",
+                    "count"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "scope",
+              "untrusted",
+              "why_included",
+              "body",
+              "neutralized"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omitted": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 320
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "GET"
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400,
+                "pattern": "^(?!\\/\\/)(?!.*[\\u0000-\\u0020\\u007F\\\\#`])(?![^?]*%)(?![^?]*(?:^|\\/)\\.{1,2}(?:\\/|\\?|$))\\/.*$"
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "why"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "degraded": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        },
+        "claim_state": {
+          "type": "object",
+          "properties": {
+            "claim_id": {
+              "type": "string",
+              "maxLength": 47,
+              "pattern": "^C-[0-9]+$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "latest_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "disposition": {
+              "type": "string",
+              "enum": [
+                "open",
+                "malformed",
+                "disputed",
+                "corroborated",
+                "strongly-supported",
+                "refuted",
+                "reduced-to",
+                "withdrawn",
+                "superseded"
+              ]
+            },
+            "unchallenged": {
+              "type": "boolean"
+            },
+            "stale": {
+              "type": "boolean"
+            },
+            "recorded_refutation_attempts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "certified_artifact": {
+              "type": "boolean"
+            },
+            "legacy_reviews": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "claim_id",
+            "version",
+            "latest_version",
+            "disposition",
+            "unchallenged",
+            "stale",
+            "recorded_refutation_attempts",
+            "certified_artifact",
+            "legacy_reviews"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "face",
+        "kind",
+        "problem",
+        "profile",
+        "cursor",
+        "fingerprint",
+        "title",
+        "preamble",
+        "items",
+        "omitted",
+        "next_actions",
+        "degraded",
+        "claim_state"
       ],
       "additionalProperties": false
     },

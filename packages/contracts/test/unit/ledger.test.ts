@@ -4,12 +4,52 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import {
+  ClaimFaceResponseSchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
   ProblemsIndexResponseSchema,
+  PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
+
+test("public exact claim faces reject private material, asserted truth and inconsistent pins", async () => {
+  const good = ClaimFaceResponseSchema.parse(
+    await fixture(new URL("../fixtures/valid/ledger-claim-face.json", import.meta.url)),
+  );
+  expect(
+    ClaimFaceResponseSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/ledger-claim-face-workshop.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
+  for (const change of [
+    { disposition: "proved" },
+    { version: 3 },
+    { disposition: "strongly-supported", unchallenged: true },
+    { recorded_refutation_attempts: 1, unchallenged: true },
+  ]) {
+    expect(
+      ClaimFaceResponseSchema.safeParse({
+        ...good,
+        claim_state: { ...good.claim_state, ...change },
+      }).success,
+    ).toBe(false);
+  }
+  expect(ClaimFaceResponseSchema.safeParse({ ...good, items: [] }).success).toBe(false);
+  expect(
+    ClaimFaceResponseSchema.safeParse({
+      ...good,
+      items: [],
+      omitted: [{ reason: "content_unavailable" }],
+    }).success,
+  ).toBe(true);
+  for (const target of ["C-1", "C-1@1", "C-123@45"])
+    expect(PublicClaimTargetSchema.safeParse(target).success).toBe(true);
+  for (const target of ["C-1@0", "C-1@01", "C-1@9007199254740992", "C-1/secret", "W-1"])
+    expect(PublicClaimTargetSchema.safeParse(target).success).toBe(false);
+});
 
 const VALID_INDEX = new URL("../fixtures/valid/ledger-problems-index.json", import.meta.url);
 const INVALID_INDEX = new URL(
@@ -214,6 +254,9 @@ test("the published ledger schema preserves the public face safety boundary", as
     problem_index_entry: index.problems[0],
     problems_index_response: index,
     problem_face_response: problemFace,
+    claim_face_response: await fixture(
+      new URL("../fixtures/valid/ledger-claim-face.json", import.meta.url),
+    ),
   };
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
@@ -231,6 +274,15 @@ test("the published ledger schema preserves the public face safety boundary", as
   });
 
   expectBothReject(withFace(await fixture(INVALID_WORKSHOP_FACE)), "workshop item");
+  expectBothReject(
+    {
+      ...valid,
+      claim_face_response: await fixture(
+        new URL("../fixtures/invalid/ledger-claim-face-workshop.json", import.meta.url),
+      ),
+    },
+    "private exact-claim item",
+  );
   for (const [label, mutate] of [
     [
       "trusted item",

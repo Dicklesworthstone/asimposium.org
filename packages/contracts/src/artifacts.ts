@@ -69,6 +69,7 @@ import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
 import {
+  type ClaimFaceResponse,
   LedgerContractsSchema,
   type ProblemFaceResponse,
   type ProblemIndexEntry,
@@ -451,9 +452,9 @@ function generatedLedgerJsonSchema(): string {
     $id: LEDGER_SCHEMA_ID,
     title: "ASImposium public ledger read faces",
     description:
-      "W6.1 public read faces. The problems index mirrors the Krater projection; the per-problem JSON digest is a bounded public-claim projection. omitted[] is mandatory so readers see what either face left out.",
+      "W6.1 public read faces: a problems index, bounded problem digest, and exact-version claim statement, computed standing, evidence and reviews. omitted[] is mandatory on every face.",
     $comment:
-      "Runtime Zod additionally requires timestamps to round-trip as real canonical UTC instants and items[].id values to be unique. Standard Draft 2020-12 cannot express uniqueness by one property across array members.",
+      "Runtime Zod additionally checks canonical UTC instants, unique item ids, claim/version agreement, latest_version >= version, unchallenged-state consistency and an explicit omission when claim text is absent. These relational checks are not expressed by this Draft 2020-12 projection.",
     ...z.toJSONSchema(LedgerContractsSchema),
   };
   return formatJson(withExamples("ledger", document));
@@ -461,11 +462,13 @@ function generatedLedgerJsonSchema(): string {
 
 function generatedLedgerTypes(): string {
   const typeNames = [
+    "ClaimFaceResponse",
     "ProblemFaceResponse",
     "ProblemIndexEntry",
     "ProblemsIndexResponse",
     "PublicLedgerProblemId",
   ] as const satisfies readonly (keyof {
+    ClaimFaceResponse: ClaimFaceResponse;
     ProblemFaceResponse: ProblemFaceResponse;
     ProblemIndexEntry: ProblemIndexEntry;
     ProblemsIndexResponse: ProblemsIndexResponse;

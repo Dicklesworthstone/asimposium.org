@@ -221,6 +221,11 @@ export {
   type InternalHealthData,
 } from "./health.ts";
 export {
+  CLAIM_DISPOSITIONS,
+  type ClaimDisposition,
+  ClaimDispositionSchema,
+  type ClaimFaceResponse,
+  ClaimFaceResponseSchema,
   LedgerContractsSchema,
   type ProblemFaceResponse,
   ProblemFaceResponseSchema,
@@ -228,6 +233,9 @@ export {
   ProblemIndexEntrySchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
+  type PublicClaimState,
+  PublicClaimStateSchema,
+  PublicClaimTargetSchema,
   type PublicLedgerProblemId,
   PublicLedgerProblemIdSchema,
 } from "./ledger.ts";
