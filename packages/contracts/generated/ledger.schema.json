@@ -721,7 +721,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 256,
-          "pattern": "^(?!\\s*C-[0-9]+\\s*$)"
+          "pattern": "^(?!\\s*C-[0-9]+(?:@[0-9]+)?\\s*$)"
         },
         "kind": {
           "default": "all",
@@ -824,6 +824,11 @@
                     "type": "null"
                   }
                 ]
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
               },
               "match_type": {
                 "type": "string",
@@ -985,6 +990,13 @@
     {
       "search_query_request": {
         "q": "P-ALPHA#C-1",
+        "kind": "claim",
+        "limit": 1
+      }
+    },
+    {
+      "search_query_request": {
+        "q": "https://a.asimposium.org/p/P-ALPHA/claims/C-1@2.csl.json",
         "kind": "claim",
         "limit": 1
       }

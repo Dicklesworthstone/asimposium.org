@@ -13,11 +13,12 @@
     {
       "kind": "ledger",
       "schema_url": "https://a.asimposium.org/schemas/ledger.v1.json",
-      "example_count": 3,
+      "example_count": 4,
       "fixture_sources": [
         "ledger-problems-index.json",
         "ledger-problem-face.json",
-        "search-scoped-claim.json"
+        "search-scoped-claim.json",
+        "search-versioned-claim.json"
       ]
     },
     {

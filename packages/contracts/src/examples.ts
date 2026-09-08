@@ -77,11 +77,13 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
       "ledger-problems-index.json",
       "ledger-problem-face.json",
       "search-scoped-claim.json",
+      "search-versioned-claim.json",
     ],
     build: ({ bodies }: BuilderInput): unknown => [
       { problems_index_response: ProblemsIndexResponseSchema.parse(bodies[0]) },
       { problem_face_response: ProblemFaceResponseSchema.parse(bodies[1]) },
       { search_query_request: SearchQueryRequestSchema.parse(bodies[2]) },
+      { search_query_request: SearchQueryRequestSchema.parse(bodies[3]) },
     ],
   },
   {
