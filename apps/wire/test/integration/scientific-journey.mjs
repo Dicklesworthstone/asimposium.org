@@ -122,15 +122,26 @@ export async function scientificJourney({
   const searchEtags = new Map();
   async function checkCitationSearch(version, expectedStatement) {
     const canonical = `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@${version}`;
-    for (const q of [canonical, `${canonical}.md`, `${canonical}.json`, `${canonical}.html`,
-      `${canonical}.bib`, `${canonical}.csl.json`, `${problem}#${claim.claim_id}@${version}`,
-      `${problem}/${claim.claim_id}@${version}`]) {
+    for (const q of [
+      canonical,
+      `${canonical}.md`,
+      `${canonical}.json`,
+      `${canonical}.html`,
+      `${canonical}.bib`,
+      `${canonical}.csl.json`,
+      `${problem}#${claim.claim_id}@${version}`,
+      `${problem}/${claim.claim_id}@${version}`,
+    ]) {
       const query = new URLSearchParams({ q, kind: "claim", limit: "1" });
       const url = `${origin}/search.json?${query}`;
       const response = await worker.fetch(url, { headers: { "user-agent": userAgent } });
       assert.equal(response.status, 200);
       const result = await response.json();
-      assert.equal(result.items.length, 1, "A published canonical claim citation must resolve in search");
+      assert.equal(
+        result.items.length,
+        1,
+        "A published canonical claim citation must resolve in search",
+      );
       assert.equal(result.items[0].statement, expectedStatement);
       assert.equal(result.items[0].version, version);
       assert.equal(result.items[0].url, canonical);
