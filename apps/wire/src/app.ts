@@ -830,7 +830,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       !encodedSeparator &&
       segments.length === 5 &&
       segments[3] === "claims" &&
-      /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html)$/.test(
+      /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html|bib|csl\.json)$/.test(
         (segments[4] ?? "").replace(/%40/gi, "@"),
       )
     ) {

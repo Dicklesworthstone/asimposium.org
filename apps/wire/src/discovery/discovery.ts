@@ -126,7 +126,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
   "GET /p/:id/claims/:target":
-    "Public claim head or exact version with computed standing, evidence and reviews; target ends in .md, .json or .html.",
+    "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews; .bib/.csl.json download a version-pinned citation.",
   "GET /search": "Public lexical search (negotiated face).",
   "GET /search.md": "Public lexical search (Markdown face).",
   "GET /search.json": "Public lexical search (JSON face).",
@@ -422,6 +422,12 @@ function responseFor(
           },
           "text/markdown": {},
           "text/html": {},
+          "application/x-bibtex": {},
+          "application/vnd.citationstyles.csl+json": {
+            schema: {
+              $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_citation_csl`,
+            },
+          },
         }
       : { [media]: {} };
   return {

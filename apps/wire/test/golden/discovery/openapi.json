@@ -1135,7 +1135,7 @@
     },
     "/p/{id}/claims/{target}": {
       "get": {
-        "summary": "Public claim head or exact version with computed standing, evidence and reviews; target ends in .md, .json or .html.",
+        "summary": "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews; .bib/.csl.json download a version-pinned citation.",
         "tags": [
           "public-reads"
         ],
@@ -1149,7 +1149,13 @@
                 }
               },
               "text/markdown": {},
-              "text/html": {}
+              "text/html": {},
+              "application/x-bibtex": {},
+              "application/vnd.citationstyles.csl+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_citation_csl"
+                }
+              }
             }
           },
           "default": {

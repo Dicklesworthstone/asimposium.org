@@ -23,10 +23,12 @@
  */
 
 import {
+  type ClaimCitationCsl,
+  ClaimCitationCslSchema,
   ClaimIdSchema,
   FellowIdSchema,
-  ProblemIdSchema,
   PromoteRequestSchema,
+  PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 
 export interface CitableClaim {
@@ -118,10 +120,13 @@ function snapshotCitationRequest(value: CitationRequest): CitationRequest {
   };
 }
 
-function citationTextIsSafe(text: string, allowAsciiSpace: boolean): boolean {
+function citationTextIsSafe(text: string, allowWhitespace: boolean): boolean {
   if (text !== text.normalize("NFC")) return false;
   for (const character of text) {
-    if (CITATION_UNSAFE_CHARACTER.test(character) && !(allowAsciiSpace && character === " ")) {
+    if (
+      CITATION_UNSAFE_CHARACTER.test(character) &&
+      !(allowWhitespace && /[ \t\r\n]/.test(character))
+    ) {
       return false;
     }
   }
@@ -129,7 +134,8 @@ function citationTextIsSafe(text: string, allowAsciiSpace: boolean): boolean {
 }
 
 function validateClaimIdentity(claim: CitableClaim): void {
-  if (!ProblemIdSchema.safeParse(claim.problemId).success) invalidCitationInput("problem id");
+  if (!PublicLedgerProblemIdSchema.safeParse(claim.problemId).success)
+    invalidCitationInput("problem id");
   if (!ClaimIdSchema.safeParse(claim.claimId).success) invalidCitationInput("claim id");
   if (!FellowIdSchema.safeParse(claim.authorFellowId).success) invalidCitationInput("Fellow id");
   if (!citationTextIsSafe(claim.authorFellowId, false)) {
@@ -220,10 +226,15 @@ function citationTimes(request: CitationRequest): CitationTimes {
 }
 
 /** The canonical public URL for a claim — the stable, citable target. */
-export function claimStableUrl(origin: string, problemId: string, claimId: string): string {
-  if (!ProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
+export function claimStableUrl(
+  origin: string,
+  problemId: string,
+  claimId: string,
+  statementVersion: number,
+): string {
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
   if (!ClaimIdSchema.safeParse(claimId).success) invalidCitationInput("claim id");
-  return `${exactHttpsOrigin(origin)}/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(claimId)}`;
+  return `${exactHttpsOrigin(origin)}/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(claimId)}@${exactStatementVersion(statementVersion)}`;
 }
 
 /**
@@ -232,11 +243,13 @@ export function claimStableUrl(origin: string, problemId: string, claimId: strin
  * bibliography entry overwriting the other.
  */
 export function citeKeyFor(problemId: string, claimId: string, statementVersion: number): string {
-  if (!ProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
   if (!ClaimIdSchema.safeParse(claimId).success) invalidCitationInput("claim id");
-  // ProblemIdSchema and ClaimIdSchema exclude underscores, so replacing their
-  // only separator character is injective over the canonical id alphabets.
-  const encode = (identifier: string): string => identifier.toLowerCase().replaceAll("-", "_");
+  // Public ledger IDs predate the narrower session grammar. Preserve case and
+  // escape every punctuation byte (including '_') so distinct public problems
+  // cannot overwrite each other's bibliography entries.
+  const encode = (identifier: string): string =>
+    identifier.replace(/[^A-Za-z0-9]/g, (character) => `_${character.charCodeAt(0).toString(16)}`);
   return `asimposium_${encode(problemId)}_${encode(claimId)}_v${exactStatementVersion(statementVersion)}`;
 }
 
@@ -267,8 +280,8 @@ export function bibtexForClaim(request: CitationRequest): string {
   validateClaimIdentity(claim);
   const { accessDate, publishedDate } = citationTimes(snapshot);
   const key = citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion);
-  const url = claimStableUrl(origin, claim.problemId, claim.claimId);
-  const title = bibtexEscape(claim.statement);
+  const url = claimStableUrl(origin, claim.problemId, claim.claimId, claim.statementVersion);
+  const title = bibtexEscape(claim.statement.replace(/[\t\r\n]+/g, " "));
   return [
     `@misc{${key},`,
     `  author = {{ASImposium Fellow ${bibtexEscape(claim.authorFellowId)}}},`,
@@ -281,13 +294,13 @@ export function bibtexForClaim(request: CitationRequest): string {
 }
 
 /** A CSL JSON item for the same claim — the machine-readable citation. */
-export function cslForClaim(request: CitationRequest): Record<string, unknown> {
+export function cslForClaim(request: CitationRequest): ClaimCitationCsl {
   const snapshot = snapshotCitationRequest(request);
   const { claim, origin } = snapshot;
   validateClaimIdentity(claim);
   const { accessDate, publishedDate } = citationTimes(snapshot);
-  const url = claimStableUrl(origin, claim.problemId, claim.claimId);
-  return {
+  const url = claimStableUrl(origin, claim.problemId, claim.claimId, claim.statementVersion);
+  return ClaimCitationCslSchema.parse({
     id: citeKeyFor(claim.problemId, claim.claimId, claim.statementVersion),
     type: "webpage",
     title: claim.statement,
@@ -312,5 +325,5 @@ export function cslForClaim(request: CitationRequest): Record<string, unknown> {
         ],
       ],
     },
-  };
+  });
 }

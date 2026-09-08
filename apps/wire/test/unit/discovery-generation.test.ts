@@ -155,6 +155,12 @@ describe("discovery generators (W1.6)", () => {
       },
       "text/markdown": {},
       "text/html": {},
+      "application/x-bibtex": {},
+      "application/vnd.citationstyles.csl+json": {
+        schema: {
+          $ref: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_citation_csl",
+        },
+      },
     });
   });
 

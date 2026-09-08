@@ -20,9 +20,11 @@ import { Hono } from "hono";
 
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
+import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
 import { displayClaimDisposition } from "./ledger/dispositions";
+import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -104,7 +106,7 @@ function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   });
 }
 
-async function strongEtag(face: "json" | "markdown", body: string): Promise<string> {
+async function strongEtag(face: string, body: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(`${face}\n${body}`),
@@ -419,6 +421,20 @@ async function loadClaimFace(
         : []),
     ],
     next_actions: [
+      ...(section.candidates.some((item) => item.kind === "claim-detail")
+        ? [
+            {
+              method: "GET" as const,
+              url: `/p/${problemId}/claims/${target}.bib`,
+              why: "download a BibTeX citation of this statement version",
+            },
+            {
+              method: "GET" as const,
+              url: `/p/${problemId}/claims/${target}.csl.json`,
+              why: "download a CSL-JSON citation of this statement version",
+            },
+          ]
+        : []),
       {
         method: "GET",
         url: `/p/${problemId}/claims/${target}.md`,
@@ -480,6 +496,84 @@ export function renderBudgetedClaimFace(projection: Projection): ReturnType<type
   }
   ClaimFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return faces;
+}
+
+/** Read the chosen publication and its current content control together. Pick
+ * the version BEFORE joining available content: a withdrawn head must never
+ * silently export an older statement. No workshop or projection text is read. */
+async function loadClaimCitation(
+  db: Env["DB"],
+  problemId: string,
+  target: string,
+  format: "bib" | "csl.json",
+): Promise<{ body: string; mediaType: string; filename: string } | null> {
+  if (
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    !PublicClaimTargetSchema.safeParse(target).success
+  )
+    return null;
+  const [claimId, versionText] = target.split("@");
+  const row = await db
+    .prepare(`
+    WITH publication AS (
+      SELECT e.id, e.type, e.object_version AS version, e.actor_fellow_id AS fellow_id,
+        e.created_at AS published_at, e.payload_sha256
+      FROM events e JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+      WHERE e.problem_id = ? AND e.object_id = ? AND e.object_kind = 'claim'
+        AND e.type IN ('claim.created', 'claim.revised')
+        AND (? IS NULL OR e.object_version = ?)
+      ORDER BY e.object_version DESC, e.seq DESC LIMIT 1
+    )
+    SELECT publication.*, c.payload_json FROM publication
+    JOIN event_content c ON c.event_id = publication.id
+      AND c.payload_sha256 = publication.payload_sha256 AND c.redacted_at IS NULL
+  `)
+    .bind(problemId, claimId, versionText ?? null, versionText ?? null)
+    .first<{
+      version: number;
+      type: string;
+      fellow_id: string;
+      published_at: string;
+      payload_sha256: string;
+      payload_json: string;
+    }>();
+  if (!row) return null;
+  try {
+    const payload = await checkedScientificPayload(row);
+    if (
+      payload.claim_id !== claimId ||
+      (row.type === "claim.created"
+        ? row.version !== 1 || payload.kind !== "claim"
+        : payload.base_version !== row.version - 1) ||
+      typeof payload.statement !== "string"
+    )
+      return null;
+    const observedAt = new Date().toISOString();
+    const request = {
+      claim: {
+        problemId,
+        claimId: claimId as string,
+        statement: payload.statement,
+        statementVersion: row.version,
+        authorFellowId: row.fellow_id,
+        publishedAt: row.published_at,
+      },
+      origin: "https://asimposium.org",
+      accessDate: observedAt.slice(0, 10),
+      observedAt,
+    };
+    return {
+      body: format === "bib" ? bibtexForClaim(request) : JSON.stringify(cslForClaim(request)),
+      mediaType:
+        format === "bib"
+          ? "application/x-bibtex; charset=utf-8"
+          : "application/vnd.citationstyles.csl+json; charset=utf-8",
+      filename: `${citeKeyFor(problemId, claimId as string, row.version)}.${format}`,
+    };
+  } catch (error) {
+    if (error instanceof ScientificInputError || error instanceof CitationInputError) return null;
+    throw error;
+  }
 }
 
 function canonicalizeIndexTimestamp(ts: string): string {
@@ -606,6 +700,31 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/claims/:target", async (c) => {
     const spelling = c.req.param("target");
+    const citationTarget = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(bib|csl\.json)$/.exec(spelling);
+    if (citationTarget) {
+      const citation = await loadClaimCitation(
+        c.env.DB,
+        c.req.param("id"),
+        citationTarget[1] as string,
+        citationTarget[2] as "bib" | "csl.json",
+      );
+      if (citation !== null) {
+        const etag = await strongEtag(citation.mediaType, citation.body);
+        const headers = {
+          "content-type": citation.mediaType,
+          "content-disposition": `attachment; filename="${citation.filename}"`,
+          "cache-control": "public, max-age=0, must-revalidate",
+          "x-content-type-options": "nosniff",
+          etag,
+        };
+        if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+          return new Response(null, { status: 304, headers });
+        return new Response(c.req.method === "HEAD" ? null : citation.body, {
+          status: 200,
+          headers,
+        });
+      }
+    }
     const matched = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(md|json|html)$/.exec(spelling);
     const projection = matched
       ? await loadClaimFace(c.env.DB, c.req.param("id"), matched[1] as string)

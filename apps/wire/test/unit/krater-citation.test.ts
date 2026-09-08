@@ -32,15 +32,16 @@ const request = (overrides: Partial<CitationRequest> = {}): CitationRequest => (
 
 describe("citation export (W2.8)", () => {
   test("the stable URL is problem-scoped and citable", () => {
-    expect(claimStableUrl("https://asimposium.org", "P-4DSP", "C-12")).toBe(
-      "https://asimposium.org/p/P-4DSP/claims/C-12",
+    expect(claimStableUrl("https://asimposium.org", "P-4DSP", "C-12", 2)).toBe(
+      "https://asimposium.org/p/P-4DSP/claims/C-12@2",
     );
   });
 
   test("the cite key is stable, boring, and BibTeX-safe", () => {
-    expect(citeKeyFor("P-4DSP", "C-12", 2)).toBe("asimposium_p_4dsp_c_12_v2");
+    expect(citeKeyFor("P-4DSP", "C-12", 2)).toBe("asimposium_P_2d4DSP_C_2d12_v2");
     expect(citeKeyFor("P-AB", "C-12", 2)).not.toBe(citeKeyFor("P-A-B", "C-12", 2));
-    expect(() => citeKeyFor("p-4dsp", "C-12", 2)).toThrow("CITATION_INPUT_INVALID");
+    const ids = ["P-4DSP", "p-4dsp", "P_4DSP", "P:4DSP", "P.4DSP", "P_2d4DSP"];
+    expect(new Set(ids.map((id) => citeKeyFor(id, "C-12", 2))).size).toBe(ids.length);
     expect(() => citeKeyFor("P-4DSP", "C-12", 0)).toThrow("CITATION_INPUT_INVALID");
   });
 
@@ -54,10 +55,10 @@ describe("citation export (W2.8)", () => {
         },
       }),
     );
-    expect(bib).toContain("@misc{asimposium_p_4dsp_c_12_v2,");
+    expect(bib).toContain("@misc{asimposium_P_2d4DSP_C_2d12_v2,");
     expect(bib).toContain("statement version 2");
     expect(bib).toContain("Accessed 2026-08-18");
-    expect(bib).toContain("\\url{https://asimposium.org/p/P-4DSP/claims/C-12}");
+    expect(bib).toContain("\\url{https://asimposium.org/p/P-4DSP/claims/C-12@2}");
     // BibTeX specials are escaped, never raw.
     expect(bib).toContain("\\{100\\%\\} sure \\#thing with \\$math\\$ \\& \\_underscores\\_");
     expect(bib).toContain("ASImposium Fellow F-\\{\\#\\}");
@@ -70,8 +71,8 @@ describe("citation export (W2.8)", () => {
 
   test("the CSL item is machine-readable with a structured access date", () => {
     const csl = cslForClaim(request());
-    expect(csl.id).toBe("asimposium_p_4dsp_c_12_v2");
-    expect(csl.URL).toBe("https://asimposium.org/p/P-4DSP/claims/C-12");
+    expect(csl.id).toBe("asimposium_P_2d4DSP_C_2d12_v2");
+    expect(csl.URL).toBe("https://asimposium.org/p/P-4DSP/claims/C-12@2");
     expect(csl.type).toBe("webpage");
     expect(csl.title).toBe(CLAIM.statement);
     expect(csl.author).toEqual([{ literal: `ASImposium Fellow ${CLAIM.authorFellowId}` }]);
@@ -82,7 +83,7 @@ describe("citation export (W2.8)", () => {
 
   test("invalid identities, origins, versions, and access dates are refused", () => {
     for (const invalidClaim of [
-      { ...CLAIM, problemId: "P-A_B" },
+      { ...CLAIM, problemId: "P/A_B" },
       { ...CLAIM, claimId: "C-one" },
       { ...CLAIM, authorFellowId: "" },
       { ...CLAIM, authorFellowId: "F-01HY " },
@@ -91,7 +92,6 @@ describe("citation export (W2.8)", () => {
       { ...CLAIM, authorFellowId: "F-e\u0301" },
       { ...CLAIM, statement: "" },
       { ...CLAIM, statement: " leading whitespace" },
-      { ...CLAIM, statement: "line one\nline two" },
       { ...CLAIM, statement: "left\u202eright" },
       { ...CLAIM, statement: "caf\u0065\u0301" },
       { ...CLAIM, statement: "non\u00a0breaking" },
@@ -121,7 +121,7 @@ describe("citation export (W2.8)", () => {
       "https://bad-.example",
       "https://bad..example",
     ]) {
-      expect(() => claimStableUrl(origin, CLAIM.problemId, CLAIM.claimId)).toThrow(
+      expect(() => claimStableUrl(origin, CLAIM.problemId, CLAIM.claimId, 2)).toThrow(
         "CITATION_INPUT_INVALID",
       );
     }
@@ -135,7 +135,7 @@ describe("citation export (W2.8)", () => {
 
   test("citation input refusals expose one typed machine code", () => {
     try {
-      claimStableUrl("http://asimposium.org", CLAIM.problemId, CLAIM.claimId);
+      claimStableUrl("http://asimposium.org", CLAIM.problemId, CLAIM.claimId, 2);
       throw new Error("expected citation refusal");
     } catch (error) {
       if (!(error instanceof CitationInputError)) throw error;
@@ -151,14 +151,25 @@ describe("citation export (W2.8)", () => {
     const cslV2 = cslForClaim(request({ claim: { ...CLAIM, statementVersion: 2 } }));
     // One axis changes: exact statement version. Distinct keys let both
     // revisions coexist in one bibliography instead of silently overwriting.
-    expect(v1.split("\n", 1)[0]).toBe("@misc{asimposium_p_4dsp_c_12_v1,");
-    expect(v2.split("\n", 1)[0]).toBe("@misc{asimposium_p_4dsp_c_12_v2,");
+    expect(v1.split("\n", 1)[0]).toBe("@misc{asimposium_P_2d4DSP_C_2d12_v1,");
+    expect(v2.split("\n", 1)[0]).toBe("@misc{asimposium_P_2d4DSP_C_2d12_v2,");
     expect(v1.split("\n", 1)[0]).not.toBe(v2.split("\n", 1)[0]);
-    expect(cslV1.id).toBe("asimposium_p_4dsp_c_12_v1");
-    expect(cslV2.id).toBe("asimposium_p_4dsp_c_12_v2");
+    expect(cslV1.id).toBe("asimposium_P_2d4DSP_C_2d12_v1");
+    expect(cslV2.id).toBe("asimposium_P_2d4DSP_C_2d12_v2");
     expect(cslV1.id).not.toBe(cslV2.id);
     expect(v1).toContain("statement version 1");
     expect(v2).toContain("statement version 2");
+    expect(cslV1.URL).toEndWith("/C-12@1");
+    expect(cslV2.URL).toEndWith("/C-12@2");
+  });
+
+  test("multiline scientific statements preserve CSL text and cannot create BibTeX fields", () => {
+    const statement = "For every n:\n\t{n + 1} > n.\r\nThis contains 100% of the assertion.";
+    const input = request({ claim: { ...CLAIM, statement } });
+    expect(cslForClaim(input).title).toBe(statement);
+    expect(bibtexForClaim(input)).toContain(
+      "title = {For every n: \\{n + 1\\} > n. This contains 100\\% of the assertion.}",
+    );
   });
 
   test.each(["https://a.asimposium.org", "https://example.org", "https://asimposium.org:8443"])(
