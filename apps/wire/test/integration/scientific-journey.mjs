@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { ClaimFaceResponseSchema } from "../../../../packages/contracts/src/ledger.ts";
+import {
+  ClaimCitationCslSchema,
+  ClaimFaceResponseSchema,
+} from "../../../../packages/contracts/src/ledger.ts";
 import { PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
 import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
 
@@ -110,6 +113,66 @@ export async function scientificJourney({
     "science-promote",
   );
   assert.equal(claim.version, 1);
+  const authorIdentity = await call("/v1/hello", undefined, author.token);
+  const citationEtags = new Map();
+  async function checkCitation(target, version, expectedStatement) {
+    const publication = await env.DB.prepare(
+      "SELECT created_at FROM events WHERE problem_id = ? AND object_id = ? AND object_version = ? AND object_kind = 'claim'",
+    )
+      .bind(problem, claim.claim_id, version)
+      .first();
+    assert.ok(publication);
+    for (const suffix of ["bib", "csl.json"]) {
+      const url = `${origin}/p/${problem}/claims/${target}.${suffix}`;
+      const response = await worker.fetch(url, { headers: { "user-agent": userAgent } });
+      assert.equal(response.status, 200, `Anonymous citation ${target}.${suffix}`);
+      const body = await response.text();
+      const exactUrl = `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@${version}`;
+      assert.ok(body.includes(exactUrl));
+      for (const privateValue of [privateCanary, author.token, reviewer.token])
+        assert.ok(!body.includes(privateValue));
+      assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+      assert.ok(response.headers.get("content-disposition").startsWith("attachment; filename="));
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      if (suffix === "csl.json") {
+        assert.ok(
+          response.headers
+            .get("content-type")
+            .startsWith("application/vnd.citationstyles.csl+json"),
+        );
+        const csl = ClaimCitationCslSchema.parse(JSON.parse(body));
+        assert.equal(csl.title, expectedStatement);
+        assert.equal(csl.URL, exactUrl);
+        assert.deepEqual(csl.author, [
+          { literal: `ASImposium Fellow ${authorIdentity.fellow.fellow_id}` },
+        ]);
+        assert.deepEqual(csl.issued["date-parts"], [
+          publication.created_at.slice(0, 10).split("-").map(Number),
+        ]);
+        assert.ok(csl.id.endsWith(`_v${version}`));
+      } else {
+        assert.ok(response.headers.get("content-type").startsWith("application/x-bibtex"));
+        assert.ok(body.includes(expectedStatement.replace(/[\t\r\n]+/g, " ")));
+        assert.ok(body.includes(`statement version ${version}`));
+      }
+      const etag = response.headers.get("etag");
+      assert.ok(etag);
+      citationEtags.set(`${version}.${suffix}`, etag);
+      const head = await worker.fetch(url, {
+        method: "HEAD",
+        headers: { "user-agent": userAgent },
+      });
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get("etag"), etag);
+      assert.equal(await head.text(), "");
+      const unchanged = await worker.fetch(url, {
+        headers: { "user-agent": userAgent, "if-none-match": etag },
+      });
+      assert.equal(unchanged.status, 304);
+      assert.equal(await unchanged.text(), "");
+    }
+  }
+  await checkCitation(claim.claim_id, 1, statement);
   async function pack(actor, profile = "working", target) {
     const query = new URLSearchParams({
       profile,
@@ -546,6 +609,7 @@ export async function scientificJourney({
 
   // Revision and an old-pin review overlap. The old review may land before or
   // after the revision, but neither can carry support into the new version.
+  const revisedStatement = statement.replace(", ", ",\n");
   await fixtures.pauseScreening();
   const screenBeforeRace = await fixtures.screeningCalls();
   const [oldReview, revision] = await Promise.all([
@@ -562,7 +626,7 @@ export async function scientificJourney({
         claim_id: claim.claim_id,
         base_version: 1,
         kind: "conjecture",
-        statement,
+        statement: revisedStatement,
         falsifier: `${falsifier} Check the exact weak inequality at n=0 and n=1.`,
         scientific_provenance: author.provenance,
       },
@@ -574,6 +638,9 @@ export async function scientificJourney({
   await fixtures.resumeScreening();
   assert.equal(await fixtures.screeningCalls(), screenBeforeRace + 2);
   assert.equal(revision.version, 2);
+  await checkCitation(claim.claim_id, 2, revisedStatement);
+  await checkCitation(`${claim.claim_id}@1`, 1, statement);
+  await checkCitation(`${claim.claim_id}@2`, 2, revisedStatement);
   assert.equal(oldReview.target_version, 1);
   await standing("open");
   const pinnedBeforeWithdrawal = await worker.fetch(
@@ -900,6 +967,36 @@ export async function scientificJourney({
   );
   assert.equal(hiddenStatement.claim_state.stale, true);
   assert.equal(hiddenStatement.items.length, 0);
+  assert.ok(!hiddenStatement.next_actions.some((action) => action.url.endsWith(".bib")));
+  for (const target of [claim.claim_id, `${claim.claim_id}@2`]) {
+    for (const suffix of ["bib", "csl.json"]) {
+      const response = await worker.fetch(`${origin}/p/${problem}/claims/${target}.${suffix}`, {
+        headers: { "user-agent": userAgent, "if-none-match": citationEtags.get(`2.${suffix}`) },
+      });
+      assert.equal(
+        response.status,
+        404,
+        "Withdrawn head must neither return 304 nor fall back to version 1",
+      );
+      const body = await response.text();
+      assert.equal(JSON.parse(body).code, "CLAIM_NOT_FOUND");
+      assert.ok(!body.includes(statement));
+      assert.ok(!body.includes(revisedStatement));
+    }
+  }
+  await checkCitation(`${claim.claim_id}@1`, 1, statement);
+  await fixtures.redactPublicContent(detail.event);
+  for (const suffix of ["bib", "csl.json"]) {
+    const response = await worker.fetch(
+      `${origin}/p/${problem}/claims/${claim.claim_id}@1.${suffix}`,
+      {
+        method: "HEAD",
+        headers: { "user-agent": userAgent, "if-none-match": citationEtags.get(`1.${suffix}`) },
+      },
+    );
+    assert.equal(response.status, 404);
+    assert.equal(await response.text(), "");
+  }
   assert.ok(hiddenStatement.omitted.some((item) => item.reason === "content_unavailable"));
   for (const suffix of ["md", "html"]) {
     const response = await worker.fetch(
@@ -951,6 +1048,7 @@ export async function scientificJourney({
         "stale read parity",
         "anonymous md/json/html scientific standing and privacy parity",
         "historical version standing, withdrawal and conditional-read invalidation",
+        "anonymous version-pinned BibTeX/CSL downloads, multiline revision and withdrawal without fallback",
         "immutable identity refuses sponsor rewrite",
         "lost-response replay",
         "concurrent revision",

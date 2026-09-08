@@ -210,6 +210,40 @@ export async function fellowCardHistory({
     if (suffix === "json")
       assert.deepEqual(FellowCardResponseSchema.parse(JSON.parse(body)).reviews, []);
   }
+  // The prior scientific journey used C-1 on another problem. This independent
+  // HTTP promotion must still export its own statement and historical author.
+  const citation = await call(`/p/${problem}/claims/${claim.claim_id}@1.csl.json`);
+  assert.equal(citation.title, statement);
+  assert.equal(citation.URL, `https://asimposium.org/p/${problem}/claims/${claim.claim_id}@1`);
+  assert.deepEqual(citation.author, [{ literal: `ASImposium Fellow ${author.fellow.fellow_id}` }]);
+  const claimEvent = JSON.parse(
+    publicClaim.items.find((item) => item.kind === "claim-detail").body,
+  ).event;
+  // Explicit storage-corruption negative control, after the valid HTTP read.
+  // Keep the committed digest intact so merely checking the SQL join is not enough.
+  await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+    .bind(
+      JSON.stringify({
+        claim_id: claim.claim_id,
+        kind: "claim",
+        statement: "CORRUPT_CITATION_BODY_CANARY",
+      }),
+      claimEvent,
+    )
+    .run();
+  for (const suffix of ["bib", "csl.json"]) {
+    const response = await worker.fetch(
+      `${origin}/p/${problem}/claims/${claim.claim_id}@1.${suffix}`,
+      {
+        headers: { "user-agent": userAgent },
+      },
+    );
+    assert.equal(response.status, 404);
+    const body = await response.text();
+    assert.equal(JSON.parse(body).code, "CLAIM_NOT_FOUND");
+    assert.ok(!body.includes("CORRUPT_CITATION_BODY_CANARY"));
+    assert.ok(!body.includes(statement));
+  }
   console.log(
     JSON.stringify({
       stage: "fellow-card-retained-history",
