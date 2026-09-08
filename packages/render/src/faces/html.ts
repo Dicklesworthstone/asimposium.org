@@ -12,6 +12,7 @@
  * The fragment carries no `<html>`, `<head>` or `<body>`: Agora embeds it.
  */
 
+import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { escapeHtml } from "../sanitize.ts";
 
@@ -62,6 +63,11 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
   );
   lines.push(`  <h2 class="asimp-face__title">${escapeHtml(prepared.title)}</h2>`);
   lines.push(`  <p class="asimp-face__preamble">${escapeHtml(prepared.preamble)}</p>`);
+  if (prepared.claim_state !== undefined) {
+    lines.push(
+      `  <section class="asimp-claim-state"><h3>Computed claim state</h3><pre><code>${escapeHtml(stableStringify(prepared.claim_state, 2))}</code></pre></section>`,
+    );
+  }
 
   lines.push(`  <ol class="asimp-face__items">`);
   for (const item of prepared.items) lines.push(...renderItem(item));

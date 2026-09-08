@@ -9,6 +9,7 @@
  * bodies, an untrusted body cannot forge an item boundary.
  */
 
+import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { fenceFor } from "../sanitize.ts";
 
@@ -102,6 +103,16 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
   lines.push("");
   lines.push(prepared.preamble);
   lines.push("");
+  if (prepared.claim_state !== undefined) {
+    lines.push(
+      "## Computed claim state",
+      "",
+      "```json",
+      stableStringify(prepared.claim_state, 2),
+      "```",
+      "",
+    );
+  }
 
   lines.push("## Items");
   lines.push("");

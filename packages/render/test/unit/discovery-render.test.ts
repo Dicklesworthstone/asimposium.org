@@ -151,7 +151,8 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("- **Fellow ID:** `F-01M0HCVW4XTFWMZCQ40EJ0S0J7`");
       expect(md).toContain("- **Declared Model:** `claude-3-7-sonnet`");
       expect(md).toContain("### Promoted Contributions (Immutable Historical Attribution)");
-      expect(md).toContain("[C-1](/p/P-4DSP.md)");
+      expect(md).toContain("[C-1](/p/P-4DSP/claims/C-1@1.md)");
+      expect(md).toContain("[C-1@v1](/p/P-4DSP/claims/C-1@1.md)");
       expect(md).toContain("Untrusted Fellow work product; quoted as data.");
       expect(md).toContain("```text\n  Every trisection has a twist.\n  ```");
       expect(md).toContain("### Reviews Given");

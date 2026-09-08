@@ -6,7 +6,11 @@
  * one place where the structural trust rules of Fable §14.4 are enforced.
  */
 
-import type { RateLimitBudget } from "@asimposium/contracts";
+import {
+  type PublicClaimState,
+  PublicClaimStateSchema,
+  type RateLimitBudget,
+} from "@asimposium/contracts";
 import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
 import {
@@ -83,6 +87,7 @@ export interface PreparedProjection {
   readonly degraded: readonly string[];
   readonly viewer?: ProjectionViewer;
   readonly promotion_budget?: RateLimitBudget;
+  readonly claim_state?: PublicClaimState;
   readonly fingerprint: string;
   /** Flat per-item report, in item order. */
   readonly neutralized: readonly NeutralizationReport[];
@@ -379,6 +384,13 @@ function snapshotProjection(value: Projection): Projection {
   const viewer = viewerValue === undefined ? undefined : snapshotViewer(viewerValue);
   const promotionBudgetValue = readProjectionMember(source, "promotion_budget", "promotion_budget");
   const promotionBudget = snapshotPromotionBudget(promotionBudgetValue);
+  const claimState = snapshotClaimState(readProjectionMember(source, "claim_state", "claim_state"));
+  if (
+    claimState !== undefined &&
+    (kind !== "claim-face" || schema !== "asimposium.claim-face.v1")
+  ) {
+    refuseUnreadableProjection("claim_state outside a claim face");
+  }
 
   return {
     schema,
@@ -397,7 +409,30 @@ function snapshotProjection(value: Projection): Projection {
     degraded,
     ...(viewer === undefined ? {} : { viewer }),
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
+    ...(claimState === undefined ? {} : { claim_state: claimState }),
   };
+}
+
+function snapshotClaimState(value: unknown): PublicClaimState | undefined {
+  if (value === undefined) return undefined;
+  const source = runtimeRecord(value, "claim_state");
+  const snapshot: Record<string, unknown> = {};
+  for (const field of [
+    "claim_id",
+    "version",
+    "latest_version",
+    "disposition",
+    "unchallenged",
+    "stale",
+    "recorded_refutation_attempts",
+    "certified_artifact",
+    "legacy_reviews",
+  ]) {
+    snapshot[field] = readProjectionMember(source, field, `claim_state.${field}`);
+  }
+  const parsed = PublicClaimStateSchema.safeParse(snapshot);
+  if (!parsed.success) refuseUnreadableProjection("claim_state");
+  return parsed.data;
 }
 
 function snapshotPromotionBudget(value: unknown): RateLimitBudget | undefined {
@@ -998,6 +1033,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     ...(projection.promotion_budget === undefined
       ? {}
       : { promotion_budget: projection.promotion_budget }),
+    ...(projection.claim_state === undefined ? {} : { claim_state: projection.claim_state }),
   });
 
   return {
@@ -1046,6 +1082,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     ...(projection.promotion_budget === undefined
       ? {}
       : { promotion_budget: projection.promotion_budget }),
+    ...(projection.claim_state === undefined ? {} : { claim_state: projection.claim_state }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,
   };

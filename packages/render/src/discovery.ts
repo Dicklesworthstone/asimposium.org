@@ -302,7 +302,7 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
   } else {
     for (const c of data.promoted_contributions) {
       lines.push(
-        `- **[${safeInlineProse(c.id)}](/p/${encodeURIComponent(c.problem_id)}.md)** (${safeCodeSpan(c.kind)} @v${c.version}) on [${safeInlineProse(c.problem_id)}](/p/${encodeURIComponent(c.problem_id)}.md) *(sponsor at promotion: ${safeCodeSpan(c.sponsor_at_event)})*:`,
+        `- **[${safeInlineProse(c.id)}](/p/${encodeURIComponent(c.problem_id)}/claims/${encodeURIComponent(c.id)}@${c.version}.md)** (${safeCodeSpan(c.kind)} @v${c.version}) on [${safeInlineProse(c.problem_id)}](/p/${encodeURIComponent(c.problem_id)}.md) *(sponsor at promotion: ${safeCodeSpan(c.sponsor_at_event)})*:`,
       );
       lines.push(...renderFencedUntrustedBlock(c.statement));
     }
@@ -315,7 +315,7 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
   } else {
     for (const r of data.reviews) {
       lines.push(
-        `- **Review ${safeCodeSpan(r.review_id)}** on [${safeInlineProse(r.problem_id)}](/p/${encodeURIComponent(r.problem_id)}.md), claim ${safeCodeSpan(r.target_claim_id)}@v${r.target_version}: verdict ${safeCodeSpan(r.verdict)} (tier ${r.tier}, sponsor at event: ${safeCodeSpan(r.sponsor_at_event)}):`,
+        `- **Review ${safeCodeSpan(r.review_id)}** on [${safeInlineProse(r.problem_id)}](/p/${encodeURIComponent(r.problem_id)}.md), claim [${safeInlineProse(r.target_claim_id)}@v${r.target_version}](/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md): verdict ${safeCodeSpan(r.verdict)} (tier ${r.tier}, sponsor at event: ${safeCodeSpan(r.sponsor_at_event)}):`,
       );
       lines.push(...renderFencedUntrustedBlock(r.basis));
     }
@@ -389,7 +389,7 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
         `      <li id="claim-${encodeURIComponent(c.problem_id)}-${encodeURIComponent(c.id)}-v${c.version}" class="asimp-contribution-card" data-untrusted="true">`,
       );
       lines.push(
-        `        <h4><a href="/p/${encodeURIComponent(c.problem_id)}.md">${escapeHtml(c.id)}</a> ` +
+        `        <h4><a href="/p/${encodeURIComponent(c.problem_id)}/claims/${encodeURIComponent(c.id)}@${c.version}.md">${escapeHtml(c.id)}</a> ` +
           `<code>${escapeHtml(c.kind)}</code> @v${c.version} on <a href="/p/${encodeURIComponent(c.problem_id)}.md">${escapeHtml(c.problem_id)}</a></h4>`,
       );
       lines.push(`        <pre class="asimp-body"><code>${escapeHtml(neut.text)}</code></pre>`);
@@ -419,7 +419,7 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
       );
       lines.push(
         `        <h4>Review <code>${escapeHtml(r.review_id)}</code> on ` +
-          `<a href="/p/${encodeURIComponent(r.problem_id)}.md">${escapeHtml(r.target_claim_id)}</a>@v${r.target_version} ` +
+          `<a href="/p/${encodeURIComponent(r.problem_id)}/claims/${encodeURIComponent(r.target_claim_id)}@${r.target_version}.md">${escapeHtml(r.target_claim_id)}</a>@v${r.target_version} ` +
           `· verdict <code>${escapeHtml(r.verdict)}</code> (tier ${escapeHtml(r.tier)})</h4>`,
       );
       lines.push(`        <pre class="asimp-body"><code>${escapeHtml(neut.text)}</code></pre>`);

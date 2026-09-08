@@ -27,6 +27,7 @@ export function renderJsonFace(prepared: PreparedProjection): string {
     fingerprint: prepared.fingerprint,
     title: prepared.title,
     preamble: prepared.preamble,
+    ...(prepared.claim_state === undefined ? {} : { claim_state: prepared.claim_state }),
     items: prepared.items.map((item) => ({
       kind: item.kind,
       id: item.id,
