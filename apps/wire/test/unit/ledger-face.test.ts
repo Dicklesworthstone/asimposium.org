@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
-import { ClaimFaceResponseSchema } from "@asimposium/contracts";
+import { ClaimCitationCslSchema, ClaimFaceResponseSchema } from "@asimposium/contracts";
 import type { Projection } from "@asimposium/render";
-import { renderBudgetedClaimFace } from "../../src/ledger-face.ts";
+import type { Env } from "../../src/env.ts";
+import { sha256Hex } from "../../src/krater/krater.ts";
+import { createLedgerFaceRoutes, renderBudgetedClaimFace } from "../../src/ledger-face.ts";
 
 const base = ClaimFaceResponseSchema.parse(
   await Bun.file(
@@ -11,6 +13,48 @@ const base = ClaimFaceResponseSchema.parse(
     ),
   ).json(),
 );
+
+test("citation route verifies payload bytes and pins before exposing export content (unit row double)", async () => {
+  const payload = { claim_id: "C-1", kind: "claim", statement: "Two is a positive even integer." };
+  const original = JSON.stringify(payload);
+  const row = {
+    type: "claim.created",
+    version: 1,
+    fellow_id: "F-UNIT-CITATION",
+    published_at: "2026-01-01T00:00:00.000Z",
+    payload_json: original,
+    payload_sha256: await sha256Hex(original),
+  };
+  const statement = { bind: () => statement, first: async () => row };
+  const env = { DB: { prepare: () => statement } } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+  const url = "https://a.asimposium.org/p/P-UNIT/claims/C-1@1.csl.json";
+  const get = () =>
+    app.request(
+      url,
+      { headers: { "user-agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" } },
+      env,
+    );
+  const valid = await get();
+  expect(valid.status).toBe(200);
+  expect(ClaimCitationCslSchema.parse(await valid.json()).title).toBe(payload.statement);
+  // A matching stored digest column alone does not prove the content bytes.
+  row.payload_json = JSON.stringify({ ...payload, statement: "CORRUPT_CITATION_BODY_CANARY" });
+  const mismatch = await get();
+  expect(mismatch.status).toBe(404);
+  expect(await mismatch.text()).not.toContain("CORRUPT_CITATION_BODY_CANARY");
+  for (const invalid of [
+    { ...payload, claim_id: "C-2" },
+    { ...payload, statement: undefined },
+    null,
+  ]) {
+    row.payload_json = JSON.stringify(invalid);
+    row.payload_sha256 = await sha256Hex(row.payload_json);
+    const response = await get();
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain(payload.statement);
+  }
+});
 
 test("public claim byte budgets retain whole stable records across Unicode and HTML expansion", () => {
   const claim = base.items[0];

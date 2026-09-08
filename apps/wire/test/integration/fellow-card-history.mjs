@@ -219,18 +219,18 @@ export async function fellowCardHistory({
   const claimEvent = JSON.parse(
     publicClaim.items.find((item) => item.kind === "claim-detail").body,
   ).event;
-  // Explicit storage-corruption negative control, after the valid HTTP read.
-  // Keep the committed digest intact so merely checking the SQL join is not enough.
-  await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
-    .bind(
-      JSON.stringify({
-        claim_id: claim.claim_id,
-        kind: "claim",
-        statement: "CORRUPT_CITATION_BODY_CANARY",
-      }),
-      claimEvent,
-    )
-    .run();
+  // The real schema refuses arbitrary content rewrites. Do not disable that
+  // trigger to manufacture a corruption case; hash-mismatch defense also has
+  // an explicitly unit-level route test.
+  await assert.rejects(
+    env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+      .bind("CORRUPT_CITATION_BODY_CANARY", claimEvent)
+      .run(),
+    /KRATER_CONTENT_REDACTION_INVALID/,
+  );
+  const preservedCitation = await call(`/p/${problem}/claims/${claim.claim_id}@1.csl.json`);
+  assert.deepEqual(preservedCitation, citation);
+  await fixtures.redactPublicContent(claimEvent);
   for (const suffix of ["bib", "csl.json"]) {
     const response = await worker.fetch(
       `${origin}/p/${problem}/claims/${claim.claim_id}@1.${suffix}`,

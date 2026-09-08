@@ -124,6 +124,7 @@ export async function scientificJourney({
     assert.ok(publication);
     for (const suffix of ["bib", "csl.json"]) {
       const url = `${origin}/p/${problem}/claims/${target}.${suffix}`;
+      const beforeDate = new Date().toISOString().slice(0, 10);
       const response = await worker.fetch(url, { headers: { "user-agent": userAgent } });
       assert.equal(response.status, 200, `Anonymous citation ${target}.${suffix}`);
       const body = await response.text();
@@ -150,6 +151,10 @@ export async function scientificJourney({
           publication.created_at.slice(0, 10).split("-").map(Number),
         ]);
         assert.ok(csl.id.endsWith(`_v${version}`));
+        const accessed = csl.accessed["date-parts"][0]
+          .map((part, i) => String(part).padStart(i === 0 ? 4 : 2, "0"))
+          .join("-");
+        assert.ok([beforeDate, new Date().toISOString().slice(0, 10)].includes(accessed));
       } else {
         assert.ok(response.headers.get("content-type").startsWith("application/x-bibtex"));
         assert.ok(body.includes(expectedStatement.replace(/[\t\r\n]+/g, " ")));
@@ -757,7 +762,7 @@ export async function scientificJourney({
     },
     statement_comparison: {
       declaration: formalArtifact.declaration,
-      statement,
+      statement: revisedStatement,
       result: "equivalent",
       explanation:
         "Both statements quantify n : Nat, then a prime p with n≤p. No inequality or quantifier is weakened.",

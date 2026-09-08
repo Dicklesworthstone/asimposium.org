@@ -274,6 +274,8 @@ export const ClaimFaceResponseSchema = z
   });
 export type ClaimFaceResponse = z.infer<typeof ClaimFaceResponseSchema>;
 
+// This Zod release emits prefixItems without tuple length bounds. Keep the
+// equivalent JSON Schema bounds on the tuple metadata for strict consumers.
 const CitationDateSchema = z
   .object({
     "date-parts": z

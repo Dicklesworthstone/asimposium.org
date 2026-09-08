@@ -31,6 +31,21 @@ test("claim citation exports require an exact public version and real calendar d
     { workshop: "private material" },
   ])
     expect(ClaimCitationCslSchema.safeParse({ ...good, ...patch }).success).toBe(false);
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.claim_citation_csl);
+  expect(published(good)).toBe(true);
+  for (const patch of [
+    { URL: good.URL.replace("@2", "") },
+    { author: [] },
+    { author: [...good.author, ...good.author] },
+    { accessed: { "date-parts": [[2026, 9]] } },
+    { accessed: { "date-parts": [[2026, 9, 8, 0]] } },
+  ]) {
+    expect(ClaimCitationCslSchema.safeParse({ ...good, ...patch }).success).toBe(false);
+    expect(published({ ...good, ...patch })).toBe(false);
+  }
 });
 
 test("public exact claim faces reject private material, asserted truth and inconsistent pins", async () => {

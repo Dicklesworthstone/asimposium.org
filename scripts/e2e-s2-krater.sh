@@ -208,6 +208,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/app.ts
   apps/wire/src/env.ts
   apps/wire/src/ledger-face.ts
+  apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts

@@ -455,7 +455,7 @@ function generatedLedgerJsonSchema(): string {
     description:
       "W6.1 public read faces: a problems index, bounded problem digest, and exact-version claim statement, computed standing, evidence and reviews. omitted[] is mandatory on every face.",
     $comment:
-      "Runtime Zod additionally checks canonical UTC instants, unique item ids, claim/version agreement, latest_version >= version, unchallenged-state consistency and an explicit omission when claim text is absent. These relational checks are not expressed by this Draft 2020-12 projection.",
+      "Runtime Zod additionally checks canonical UTC instants, real CSL calendar dates, unique item ids, claim/version agreement, latest_version >= version, unchallenged-state consistency and an explicit omission when claim text is absent. These relational checks are not expressed by this Draft 2020-12 projection.",
     ...z.toJSONSchema(LedgerContractsSchema),
   };
   return formatJson(withExamples("ledger", document));

@@ -38,10 +38,10 @@ describe("citation export (W2.8)", () => {
   });
 
   test("the cite key is stable, boring, and BibTeX-safe", () => {
-    expect(citeKeyFor("P-4DSP", "C-12", 2)).toBe("asimposium_P_2d4DSP_C_2d12_v2");
+    expect(citeKeyFor("P-4DSP", "C-12", 2)).toBe("asimposium_502d34445350_432d3132_v2");
     expect(citeKeyFor("P-AB", "C-12", 2)).not.toBe(citeKeyFor("P-A-B", "C-12", 2));
     const ids = ["P-4DSP", "p-4dsp", "P_4DSP", "P:4DSP", "P.4DSP", "P_2d4DSP"];
-    expect(new Set(ids.map((id) => citeKeyFor(id, "C-12", 2))).size).toBe(ids.length);
+    expect(new Set(ids.map((id) => citeKeyFor(id, "C-12", 2).toLowerCase())).size).toBe(ids.length);
     expect(() => citeKeyFor("P-4DSP", "C-12", 0)).toThrow("CITATION_INPUT_INVALID");
   });
 
@@ -55,7 +55,7 @@ describe("citation export (W2.8)", () => {
         },
       }),
     );
-    expect(bib).toContain("@misc{asimposium_P_2d4DSP_C_2d12_v2,");
+    expect(bib).toContain("@misc{asimposium_502d34445350_432d3132_v2,");
     expect(bib).toContain("statement version 2");
     expect(bib).toContain("Accessed 2026-08-18");
     expect(bib).toContain("\\url{https://asimposium.org/p/P-4DSP/claims/C-12@2}");
@@ -71,7 +71,7 @@ describe("citation export (W2.8)", () => {
 
   test("the CSL item is machine-readable with a structured access date", () => {
     const csl = cslForClaim(request());
-    expect(csl.id).toBe("asimposium_P_2d4DSP_C_2d12_v2");
+    expect(csl.id).toBe("asimposium_502d34445350_432d3132_v2");
     expect(csl.URL).toBe("https://asimposium.org/p/P-4DSP/claims/C-12@2");
     expect(csl.type).toBe("webpage");
     expect(csl.title).toBe(CLAIM.statement);
@@ -103,6 +103,7 @@ describe("citation export (W2.8)", () => {
       { ...CLAIM, statementVersion: 1.5 },
       { ...CLAIM, publishedAt: "2025-11-03" },
       { ...CLAIM, publishedAt: "2025-02-30T00:00:00.000Z" },
+      { ...CLAIM, publishedAt: "0000-01-01T00:00:00.000Z" },
     ]) {
       expect(() => bibtexForClaim(request({ claim: invalidClaim }))).toThrow(
         "CITATION_INPUT_INVALID",
@@ -151,11 +152,11 @@ describe("citation export (W2.8)", () => {
     const cslV2 = cslForClaim(request({ claim: { ...CLAIM, statementVersion: 2 } }));
     // One axis changes: exact statement version. Distinct keys let both
     // revisions coexist in one bibliography instead of silently overwriting.
-    expect(v1.split("\n", 1)[0]).toBe("@misc{asimposium_P_2d4DSP_C_2d12_v1,");
-    expect(v2.split("\n", 1)[0]).toBe("@misc{asimposium_P_2d4DSP_C_2d12_v2,");
+    expect(v1.split("\n", 1)[0]).toBe("@misc{asimposium_502d34445350_432d3132_v1,");
+    expect(v2.split("\n", 1)[0]).toBe("@misc{asimposium_502d34445350_432d3132_v2,");
     expect(v1.split("\n", 1)[0]).not.toBe(v2.split("\n", 1)[0]);
-    expect(cslV1.id).toBe("asimposium_P_2d4DSP_C_2d12_v1");
-    expect(cslV2.id).toBe("asimposium_P_2d4DSP_C_2d12_v2");
+    expect(cslV1.id).toBe("asimposium_502d34445350_432d3132_v1");
+    expect(cslV2.id).toBe("asimposium_502d34445350_432d3132_v2");
     expect(cslV1.id).not.toBe(cslV2.id);
     expect(v1).toContain("statement version 1");
     expect(v2).toContain("statement version 2");
@@ -170,6 +171,9 @@ describe("citation export (W2.8)", () => {
     expect(bibtexForClaim(input)).toContain(
       "title = {For every n: \\{n + 1\\} > n. This contains 100\\% of the assertion.}",
     );
+    const legacyId = request({ claim: { ...CLAIM, problemId: "P_CALIBRATION" } });
+    expect(bibtexForClaim(legacyId)).toContain("on P\\_CALIBRATION, statement version 2");
+    expect(cslForClaim(legacyId).URL).toContain("/P_CALIBRATION/");
   });
 
   test.each(["https://a.asimposium.org", "https://example.org", "https://asimposium.org:8443"])(

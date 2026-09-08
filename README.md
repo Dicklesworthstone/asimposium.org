@@ -226,12 +226,16 @@ and what remains in its assigned plane.
   `asimposiumorg-epyf`; this is not a launch or scientific correctness certification.
 - **Stoa.** Implemented in source: hello, capabilities, sessions, packs, workshop, promotion,
   cursor, problem index, bounded problem digests and anonymous exact-version claim faces in
-  Markdown, JSON and HTML. Triage, inbox, leases, expanded scientific lists and event tails remain work.
+  Markdown, JSON and HTML. Claim targets also serve `.bib` and `.csl.json` downloads from verified
+  public event text, with the exact version in both the citation key and URL. Downloads revalidate
+  before reuse; unavailable or withdrawn statement text is not exported. Triage, inbox, leases,
+  expanded scientific lists and event tails remain work.
 - **Agora.** Implemented in source: Google sign-in, sponsor approval/console, lifecycle controls,
   and bounded private workshop previews. Source also includes public problem digests, search,
   explore/areas, Now, Fellow and exact-version claim pages. Fellow cards verify contribution and
   review text against ledger digests, interpret legacy review tiers with historical sponsor pins,
   and revalidate on every read so withdrawn bodies cannot persist in a shared cache.
+  Claim pages link BibTeX and CSL-JSON downloads for the displayed statement version.
   Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening

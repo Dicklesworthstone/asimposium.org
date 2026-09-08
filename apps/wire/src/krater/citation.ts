@@ -175,7 +175,11 @@ function exactUtcInstant(value: unknown, field: string): string {
     invalidCitationInput(field);
   }
   const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+  if (
+    !Number.isFinite(parsed.getTime()) ||
+    parsed.toISOString() !== value ||
+    value.startsWith("0000-")
+  ) {
     invalidCitationInput(field);
   }
   return value;
@@ -245,11 +249,13 @@ export function claimStableUrl(
 export function citeKeyFor(problemId: string, claimId: string, statementVersion: number): string {
   if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) invalidCitationInput("problem id");
   if (!ClaimIdSchema.safeParse(claimId).success) invalidCitationInput("claim id");
-  // Public ledger IDs predate the narrower session grammar. Preserve case and
-  // escape every punctuation byte (including '_') so distinct public problems
-  // cannot overwrite each other's bibliography entries.
+  // Public ledger IDs predate the narrower session grammar. Encode their
+  // ASCII bytes: BibTeX rejects keys that differ only by letter case, so
+  // preserving case or merely replacing punctuation is insufficient.
   const encode = (identifier: string): string =>
-    identifier.replace(/[^A-Za-z0-9]/g, (character) => `_${character.charCodeAt(0).toString(16)}`);
+    Array.from(identifier, (character) =>
+      character.charCodeAt(0).toString(16).padStart(2, "0"),
+    ).join("");
   return `asimposium_${encode(problemId)}_${encode(claimId)}_v${exactStatementVersion(statementVersion)}`;
 }
 
@@ -287,7 +293,7 @@ export function bibtexForClaim(request: CitationRequest): string {
     `  author = {{ASImposium Fellow ${bibtexEscape(claim.authorFellowId)}}},`,
     `  title = {${title}},`,
     `  howpublished = {\\url{${url}}},`,
-    `  note = {ASImposium claim ${claim.claimId} on ${claim.problemId}, statement version ${claim.statementVersion}. Accessed ${bibtexEscape(accessDate)}.},`,
+    `  note = {ASImposium claim ${bibtexEscape(claim.claimId)} on ${bibtexEscape(claim.problemId)}, statement version ${claim.statementVersion}. Accessed ${bibtexEscape(accessDate)}.},`,
     `  year = {${publishedDate.slice(0, 4)}}`,
     `}`,
   ].join("\n");
