@@ -231,7 +231,7 @@ export async function readPublicClaimSnapshot(
   const rows = results[4]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, 4), problemId, target),
+    section: await composeTargetClaimPack(results.slice(0, 4), problemId, target, cursor),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -353,6 +353,7 @@ async function composeTargetClaimPack(
   results: D1Result[],
   problemId: string,
   target: string,
+  through?: number,
 ): Promise<LedgerPackSection> {
   type TargetRow = {
     id: string;
@@ -444,7 +445,7 @@ async function composeTargetClaimPack(
               );
             projected.statement = payload.statement;
             projected.parent_target = target;
-            projected.read_url = `/p/${problemId}/claims/${row.id}.md`;
+            projected.read_url = `/p/${problemId}/claims/${row.id}.md${through === undefined ? "" : `?through=${through}`}`;
           } else if (kind === "claim-review") {
             if (
               payload.target_claim_id !== claimId ||

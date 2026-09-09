@@ -117,6 +117,102 @@ export async function scientificJourney({
     "science-promote",
   );
   assert.equal(claim.version, 1);
+  // A statement pin alone does not freeze its review window. Retain the same
+  // real public cut in all faces, then append evidence, reviews and revisions.
+  const claimPath = `/p/${problem}/claims/${claim.claim_id}`;
+  const snapshotRead = (path, init = {}) =>
+    worker.fetch(`${origin}${path}`, {
+      ...init,
+      headers: { "User-Agent": userAgent, ...init.headers },
+    });
+  async function retainSnapshot() {
+    const live = ClaimFaceResponseSchema.parse(await call(`${claimPath}.json`));
+    const retained = { cursor: live.cursor, faces: new Map(), live };
+    for (const suffix of ["json", "md", "html"]) {
+      const path = `${claimPath}@1.${suffix}?through=${live.cursor}`;
+      const response = await snapshotRead(path);
+      assert.equal(response.status, 200);
+      retained.faces.set(suffix, {
+        path,
+        body: await response.text(),
+        etag: response.headers.get("etag"),
+      });
+    }
+    return retained;
+  }
+  async function unchangedSnapshot(snapshot) {
+    for (const [suffix, prior] of snapshot.faces) {
+      const response = await snapshotRead(prior.path);
+      assert.equal(response.status, 200);
+      assert.equal(
+        await response.text(),
+        prior.body,
+        `Later events must not alter retained ${suffix} scientific context`,
+      );
+      assert.equal(response.headers.get("etag"), prior.etag);
+      assert.equal(
+        (await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } })).status,
+        304,
+      );
+      const head = await snapshotRead(prior.path, { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get("etag"), prior.etag);
+      assert.equal(await head.text(), "");
+      const implicitVersion = await snapshotRead(
+        `${claimPath}.${suffix}?through=${snapshot.cursor}`,
+      );
+      assert.equal(
+        await implicitVersion.text(),
+        prior.body,
+        "Unversioned targets must select the head at the retained cursor",
+      );
+    }
+  }
+  const initialSnapshot = await retainSnapshot();
+  assert.equal(initialSnapshot.live.claim_state.disposition, "open");
+  // A bare, unsupported claim displays "open". The unchallenged qualifier is
+  // for support without a refutation attempt, per the existing disposition law.
+  assert.equal(initialSnapshot.live.claim_state.unchallenged, false);
+  assert.equal(initialSnapshot.live.claim_state.recorded_refutation_attempts, 0);
+  assert.deepEqual(
+    initialSnapshot.live.items.map((item) => item.kind),
+    ["claim-detail"],
+  );
+  for (const query of [
+    "",
+    "01",
+    "-1",
+    "+1",
+    "1.0",
+    "1e2",
+    "9007199254740992",
+    `${initialSnapshot.cursor + 1}`,
+    "asimp_ag_query_canary",
+  ]) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await snapshotRead(
+        `${claimPath}@1.json?through=${encodeURIComponent(query)}`,
+        { method },
+      );
+      assert.equal(response.status, 400);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      const body = await response.text();
+      assert.ok(!body.includes("asimp_ag_query_canary"));
+      if (method === "HEAD") assert.equal(body, "");
+      else {
+        const error = JSON.parse(body);
+        assert.equal(error.code, "CURSOR_INVALID");
+        for (const field of ["fix_hint", "rule", "schema", "example"]) assert.ok(error[field]);
+      }
+    }
+  }
+  for (const path of [
+    `${claimPath}.json?through=1&through=1`,
+    `${claimPath}@1.bib?through=${initialSnapshot.cursor}`,
+    `${claimPath}@1.csl.json?through=${initialSnapshot.cursor}`,
+  ])
+    assert.equal((await snapshotRead(path)).status, 400);
+  assert.equal((await snapshotRead(`${claimPath}.json?through=0`)).status, 404);
   const authorIdentity = await call("/v1/hello", undefined, author.token);
   const citationEtags = new Map();
   const searchEtags = new Map();
@@ -649,6 +745,10 @@ export async function scientificJourney({
   );
   await standing("strongly-supported");
 
+  const supportedSnapshot = await retainSnapshot();
+  assert.equal(supportedSnapshot.live.claim_state.disposition, "strongly-supported");
+  await unchangedSnapshot(initialSnapshot);
+
   // A private draft and a published known-false inequality travel through the
   // same production admission path. Its n=1 witness must keep it disputed.
   const falseDraft = await call(
@@ -747,6 +847,12 @@ export async function scientificJourney({
   await fixtures.resumeScreening();
   assert.equal(await fixtures.screeningCalls(), screenBeforeRace + 2);
   assert.equal(revision.version, 2);
+  await unchangedSnapshot(initialSnapshot);
+  await unchangedSnapshot(supportedSnapshot);
+  assert.equal(
+    (await snapshotRead(`${claimPath}@2.json?through=${supportedSnapshot.cursor}`)).status,
+    404,
+  );
   await checkCitation(claim.claim_id, 2, revisedStatement);
   await checkCitation(`${claim.claim_id}@1`, 1, statement);
   await checkCitation(`${claim.claim_id}@2`, 2, revisedStatement);
@@ -975,6 +1081,27 @@ export async function scientificJourney({
   );
   await standing("open · stale");
   await fixtures.redactPublicContent(proofDetail.event);
+  for (const prior of supportedSnapshot.faces.values()) {
+    assert.ok(prior.body.includes(proofDetail.locator));
+    const withdrawn = await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } });
+    assert.equal(
+      withdrawn.status,
+      200,
+      "Present-day withdrawal overrides the retained scientific window",
+    );
+    assert.notEqual(withdrawn.headers.get("etag"), prior.etag);
+    // The fixture intentionally repeats the argument in other published review
+    // bodies. Withdrawal removes this evidence record, not independent records
+    // that happen to contain the same prose; its source locator is unique.
+    assert.ok(!(await withdrawn.text()).includes(proofDetail.locator));
+  }
+  const withdrawnSnapshot = ClaimFaceResponseSchema.parse(
+    await call(`${claimPath}@1.json?through=${supportedSnapshot.cursor}`),
+  );
+  assert.equal(withdrawnSnapshot.claim_state.stale, true);
+  assert.notEqual(withdrawnSnapshot.claim_state.disposition, "strongly-supported");
+  assert.ok(!withdrawnSnapshot.items.some((item) => item.id === proof.evidence_id));
+  await unchangedSnapshot(initialSnapshot);
   await standing("open · stale");
   const withdrawnPinnedResponse = await worker.fetch(
     `${origin}/p/${problem}/claims/${claim.claim_id}@1.json`,
@@ -1109,6 +1236,14 @@ export async function scientificJourney({
   }
   await checkCitation(`${claim.claim_id}@1`, 1, statement);
   await fixtures.redactPublicContent(detail.event);
+  for (const prior of initialSnapshot.faces.values()) {
+    const withdrawn = await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } });
+    assert.equal(withdrawn.status, 200);
+    assert.notEqual(withdrawn.headers.get("etag"), prior.etag);
+    const body = await withdrawn.text();
+    assert.ok(!body.includes(statement));
+    assert.ok(body.includes("content_unavailable"));
+  }
   await missingCitationSearch(`${claim.claim_id}@1`, 1);
   for (const suffix of ["bib", "csl.json"]) {
     const response = await worker.fetch(
@@ -1172,6 +1307,7 @@ export async function scientificJourney({
         "stale read parity",
         "anonymous md/json/html scientific standing and privacy parity",
         "historical version standing, withdrawal and conditional-read invalidation",
+        "retained public cursor freezes head, evidence, reviews and standing across later writes; withdrawal still wins",
         "anonymous version-pinned BibTeX/CSL downloads, multiline revision and withdrawal without fallback",
         "canonical and version-pinned citation search, exact history, problem scoping and withdrawal revalidation",
         "immutable identity refuses sponsor rewrite",

@@ -380,8 +380,16 @@ not a claim that the deployed revision includes them. Public claim bodies and co
 share one D1 batch and the problem's captured cursor. Historical reads still honor present-day
 content withdrawal; each response must revalidate its ETag. Revised statements start with their
 own standing. Evidence and reviews are capped at 20 records each, every face is bounded to 64 KB,
-and omitted records are disclosed. Dependencies, complete history and review-request lifecycle
+and omitted records are disclosed. Transitive dependencies, complete history and review-request lifecycle
 remain outside this face.
+
+To retain the evidence and review window for a synthesis or later check, copy the face's
+`cursor` into `?through=42`. Stoa md/json/html and the Agora claim page then read through that
+problem-local public sequence; even an unversioned target selects its head at that cut.
+Face and premise links retain the cursor. Later publications cannot change the snapshot;
+present-day content withdrawal still can. Invalid or future cursors are refused. BibTeX and CSL
+cite the statement publication only and do not accept `through`. This source-reading path does
+not publish a synthesis; its draft, approval and anchored publication lifecycle remains open.
 
 The `review-queue` pack now lists public claim versions this Fellow did not author
 and has not yet reviewed at the pack cursor. It shows a prospective independence

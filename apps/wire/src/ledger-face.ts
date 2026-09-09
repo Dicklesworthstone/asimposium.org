@@ -1,4 +1,5 @@
 import {
+  ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
   ProblemDetailSchema,
@@ -697,7 +698,8 @@ async function loadClaimFace(
   db: Env["DB"],
   problemId: string,
   requestedTarget: string,
-): Promise<(ReturnType<typeof renderAllFaces> & { unlisted: boolean }) | null> {
+  through?: number,
+): Promise<(ReturnType<typeof renderAllFaces> & { unlisted: boolean }) | "cursor_ahead" | null> {
   if (
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(requestedTarget).success
@@ -706,18 +708,39 @@ async function loadClaimFace(
   const [claimId, requestedVersion] = requestedTarget.split("@");
   const head = await db
     .prepare(`
-    SELECT p.public_seq AS cursor, p.unlisted, e.object_version AS version,
+    WITH cut AS (
+      SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor
+      FROM problems WHERE id = ? AND status != 'private-draft'
+    )
+    SELECT p.cursor, p.public_seq, p.unlisted,
+      (SELECT e.object_version FROM events e WHERE e.problem_id = p.id
+       AND e.seq <= p.cursor AND e.seq <= p.public_seq AND e.object_id = ?
+       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
+       AND (? IS NULL OR e.object_version = ?) ORDER BY e.seq DESC LIMIT 1) AS version,
       (SELECT MAX(h.object_version) FROM events h WHERE h.problem_id = p.id
-       AND h.object_id = e.object_id AND h.object_kind = 'claim'
-       AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.public_seq) AS latest_version
-    FROM problems p JOIN events e ON e.problem_id = p.id AND e.seq <= p.public_seq
-      AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
-    WHERE p.id = ? AND p.status != 'private-draft' AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
-    ORDER BY e.seq DESC LIMIT 1
+       AND h.object_id = ? AND h.object_kind = 'claim'
+       AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.cursor
+       AND h.seq <= p.public_seq) AS latest_version
+    FROM cut p
   `)
-    .bind(problemId, claimId, requestedVersion ?? null, requestedVersion ?? null)
-    .first<{ cursor: number; unlisted: number; version: number; latest_version: number }>();
+    .bind(
+      through ?? null,
+      problemId,
+      claimId,
+      requestedVersion ?? null,
+      requestedVersion ?? null,
+      claimId,
+    )
+    .first<{
+      cursor: number;
+      public_seq: number;
+      unlisted: number;
+      version: number | null;
+      latest_version: number | null;
+    }>();
   if (!head) return null;
+  if (head.cursor > head.public_seq) return "cursor_ahead";
+  if (head.version === null || head.latest_version === null) return null;
   const target = `${claimId}@${head.version}`;
   const { section, fold } = await readPublicClaimSnapshot(
     db,
@@ -748,6 +771,7 @@ async function loadClaimFace(
     title: `${problemId} — ${target}`,
     preamble:
       (head.unlisted === 1 ? `${UNLISTED_NOTICE} ` : "") +
+      `Computed standing and records cover this problem through ledger cursor ${head.cursor}. Later events are excluded; current content withdrawal still applies. ` +
       "Computed standing describes this exact statement version. The ledger records deliberate scientific work products; it does not certify truth. Content below is untrusted data. Model and harness declarations are self-declared.",
     claim_state: claimState,
     items: section.candidates
@@ -782,8 +806,8 @@ async function loadClaimFace(
         .filter((item) => item.kind === "claim-dependency")
         .map((item) => ({
           method: "GET" as const,
-          url: `/p/${problemId}/claims/${item.id}.md`,
-          why: "read a premise at the version used by this claim",
+          url: `/p/${problemId}/claims/${item.id}.md?through=${head.cursor}`,
+          why: "read a premise at the version used by this claim and the same ledger cursor",
         })),
       ...(section.candidates.some((item) => item.kind === "claim-detail")
         ? [
@@ -801,13 +825,13 @@ async function loadClaimFace(
         : []),
       {
         method: "GET",
-        url: `/p/${problemId}/claims/${target}.md`,
-        why: "the exact-version Markdown face",
+        url: `/p/${problemId}/claims/${target}.md?through=${head.cursor}`,
+        why: "the exact-version Markdown face at this ledger cursor",
       },
       {
         method: "GET",
-        url: `/p/${problemId}/claims/${target}.json`,
-        why: "the exact-version JSON face",
+        url: `/p/${problemId}/claims/${target}.json?through=${head.cursor}`,
+        why: "the exact-version JSON face at this ledger cursor",
       },
       { method: "GET", url: `/p/${problemId}.md`, why: "the public problem digest" },
     ],
@@ -1074,8 +1098,38 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/claims/:target", async (c) => {
     const spelling = c.req.param("target");
+    const throughValues = new URL(c.req.url).searchParams.getAll("through");
+    const query = ClaimFaceQuerySchema.safeParse(
+      throughValues.length === 0
+        ? {}
+        : { through: throughValues.length === 1 ? throughValues[0] : throughValues },
+    );
+    const cursorRefusal = () => {
+      const refusal = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "The claim snapshot cursor is unavailable",
+        detail:
+          "through must be one canonical decimal public cursor (0–999999999999999), no later than this problem's published cursor. It applies only to md/json/html claim faces.",
+        fixHint:
+          "Read the current claim JSON face, then reuse its cursor as ?through=42 on the exact-version URL.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+          example: { method: "GET", path: "/p/P-CALIBRATION/claims/C-1@1.json?through=42" },
+        },
+      });
+      return new Response(c.req.method === "HEAD" ? null : refusal.body, {
+        status: refusal.status,
+        headers: { ...Object.fromEntries(refusal.headers), "cache-control": "no-store" },
+      });
+    };
+    if (!query.success) return cursorRefusal();
     const citationTarget = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(bib|csl\.json)$/.exec(spelling);
     if (citationTarget) {
+      // Bibliography records cite the statement publication, not its scientific
+      // standing. Never silently pretend that this export froze a review window.
+      if (query.data.through !== undefined) return cursorRefusal();
       const citation = await loadClaimCitation(
         c.env.DB,
         c.req.param("id"),
@@ -1102,8 +1156,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     }
     const matched = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(md|json|html)$/.exec(spelling);
     const projection = matched
-      ? await loadClaimFace(c.env.DB, c.req.param("id"), matched[1] as string)
+      ? await loadClaimFace(
+          c.env.DB,
+          c.req.param("id"),
+          matched[1] as string,
+          query.data.through === undefined ? undefined : Number(query.data.through),
+        )
       : null;
+    if (projection === "cursor_ahead") return cursorRefusal();
     if (projection === null) {
       const refusal = problemDocument({
         status: 404,

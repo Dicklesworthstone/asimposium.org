@@ -229,6 +229,8 @@ export {
   ClaimDependencyPinsSchema,
   type ClaimDisposition,
   ClaimDispositionSchema,
+  type ClaimFaceQuery,
+  ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,

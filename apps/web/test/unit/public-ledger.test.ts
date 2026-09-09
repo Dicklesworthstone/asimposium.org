@@ -259,12 +259,14 @@ describe("public-ledger client", () => {
     );
     expect(html).toContain("open · unchallenged");
     expect(html).toContain("Read version 2");
-    expect(html).toContain('href="/p/P-CALIBRATION/claims/C-2@3"');
+    expect(html).toContain(`href="/p/P-CALIBRATION/claims/C-2@3?through=${face.cursor}"`);
     expect(html).toContain("Read this premise version");
     expect(html).toContain("claim_face_scope");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
-    expect(html).toContain(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.json`);
+    expect(html).toContain(
+      `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.json?through=${face.cursor}"`,
+    );
     expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.bib"`);
     expect(html).toContain(
       `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.csl.json"`,
@@ -310,6 +312,49 @@ describe("public-ledger client", () => {
       Response.json({ status: 404, code: "ROUTE_NOT_FOUND" }, { status: 404 }),
     );
     expect((await stoaFetchClaimFace("P-CALIBRATION", "C-1")).state).toBe("unavailable");
+  });
+
+  test("claim pages retain the requested public cursor and refuse a different snapshot (unit fetch double)", async () => {
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const through = String(face.cursor);
+    let reads = 0;
+    setMockFetch(async (input) => {
+      reads++;
+      expect(String(input)).toBe(
+        `${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json?through=${through}`,
+      );
+      return Response.json(face);
+    });
+    const props = {
+      params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }),
+      searchParams: Promise.resolve({ through }),
+    };
+    const html = renderToStaticMarkup(await ClaimPage(props));
+    expect(html).toContain(
+      `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.md?through=${through}"`,
+    );
+    expect(html).toContain(`href="/p/P-CALIBRATION/claims/C-1@1?through=${through}"`);
+    expect(html).toContain("Read the latest public record");
+    expect((await claimMetadata(props)).robots).toBeUndefined();
+    expect(reads).toBe(2);
+    for (const invalid of ["01", "-1", "9007199254740992", [through, through]]) {
+      expect(
+        (await stoaFetchClaimFace("P-CALIBRATION", "C-1@1", undefined, { through: invalid })).state,
+      ).toBe("unavailable");
+    }
+    expect(reads).toBe(2);
+    face.cursor++;
+    expect((await stoaFetchClaimFace("P-CALIBRATION", "C-1@1", undefined, { through })).state).toBe(
+      "unavailable",
+    );
   });
 
   test("stoaFetchProblemFace returns parsed ProblemFaceResponse on 200", async () => {

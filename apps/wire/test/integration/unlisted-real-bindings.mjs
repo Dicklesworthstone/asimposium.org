@@ -40,6 +40,17 @@ export async function unlistedJourney({
   for (const suffix of ["json", "md"]) {
     assert.equal((await fetch(`/p/${id}.${suffix}`)).status, 404);
   }
+  for (const suffix of ["json", "md", "html"]) {
+    for (const through of ["0", "999999999999999"]) {
+      const hidden = await fetch(`/p/${id}/claims/C-1.${suffix}?through=${through}`);
+      assert.equal(
+        hidden.status,
+        404,
+        "Private problem cursors and claim bodies remain undisclosed",
+      );
+      assert.ok(!(await hidden.text()).includes(proposal.statement));
+    }
+  }
   await sponsorCall(sponsor, "POST", `/v1/sponsors/problems/${id}/lifecycle`, "problem-lifecycle", {
     action: "publish",
   });
@@ -129,6 +140,14 @@ export async function unlistedJourney({
       ),
     ),
   ];
+  const claimCut = ClaimFaceResponseSchema.parse(
+    await call(`/p/${id}/claims/${claim.claim_id}.json`),
+  ).cursor;
+  paths.push(
+    ...["json", "md", "html"].map(
+      (suffix) => `/p/${id}/claims/${claim.claim_id}@1.${suffix}?through=${claimCut}`,
+    ),
+  );
   const etags = new Map();
   for (const path of paths) {
     const response = await fetch(path);
@@ -140,7 +159,7 @@ export async function unlistedJourney({
       !body.includes(privateCanary) && !body.includes(author) && !body.includes(reviewer),
       path,
     );
-    if (path.endsWith(".json") && !path.endsWith(".csl.json")) {
+    if (path.split("?")[0].endsWith(".json") && !path.endsWith(".csl.json")) {
       (path.includes("/claims/") ? ClaimFaceResponseSchema : ProblemFaceResponseSchema).parse(
         JSON.parse(body),
       );

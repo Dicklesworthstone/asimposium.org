@@ -117,6 +117,19 @@ export const PublicClaimTargetSchema = z
   .regex(PUBLIC_CLAIM_TARGET_PATTERN)
   .refine((value) => !value.includes("@") || Number.isSafeInteger(Number(value.split("@")[1])));
 
+/** A public scientific snapshot through one problem-local ledger sequence.
+ * Decimal URL spelling is canonical and bounded below JS's safe-integer limit.
+ * The server also requires that this cursor has actually been published. */
+export const ClaimFaceQuerySchema = z
+  .object({
+    through: z
+      .string()
+      .regex(/^(?:0|[1-9][0-9]{0,14})$/)
+      .optional(),
+  })
+  .strict();
+export type ClaimFaceQuery = z.infer<typeof ClaimFaceQuerySchema>;
+
 /** Direct premises captured at publication, scoped by the parent problem. */
 export const ClaimDependencyPinSchema = z
   .object({
@@ -408,6 +421,7 @@ export const LedgerContractsSchema = z
     problems_index_response: ProblemsIndexResponseSchema,
     problem_face_response: ProblemFaceResponseSchema,
     claim_face_response: ClaimFaceResponseSchema.optional(),
+    claim_face_query: ClaimFaceQuerySchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
     claim_dependency_pins: ClaimDependencyPinsSchema.optional(),
     search_query_request: SearchQueryRequestSchema.optional(),

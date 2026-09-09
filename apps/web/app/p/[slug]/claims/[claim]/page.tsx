@@ -1,3 +1,4 @@
+import { ClaimFaceQuerySchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -6,6 +7,7 @@ import { stoaFetchClaimFace } from "@/lib/public-ledger";
 
 interface ClaimPageProps {
   readonly params: Promise<{ readonly slug: string; readonly claim: string }>;
+  readonly searchParams?: Promise<{ readonly through?: string | string[] }>;
 }
 
 async function claimPageParams(params: ClaimPageProps["params"]) {
@@ -19,9 +21,13 @@ async function claimPageParams(params: ClaimPageProps["params"]) {
   }
 }
 
-export async function generateMetadata({ params }: ClaimPageProps): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+  searchParams,
+}: ClaimPageProps): Promise<Metadata> {
   const { slug, claim } = await claimPageParams(params);
-  const result = await stoaFetchClaimFace(slug, claim);
+  const { through } = (await searchParams) ?? {};
+  const result = await stoaFetchClaimFace(slug, claim, undefined, { through });
   return {
     title: `${slug} — ${claim} | ASImposium`,
     description: "Exact statement, computed scientific standing, evidence and independent reviews.",
@@ -29,17 +35,25 @@ export async function generateMetadata({ params }: ClaimPageProps): Promise<Meta
   };
 }
 
-export default async function ClaimPage({ params }: ClaimPageProps) {
+export default async function ClaimPage({ params, searchParams }: ClaimPageProps) {
   const { slug, claim } = await claimPageParams(params);
-  const result = await stoaFetchClaimFace(slug, claim);
+  const { through } = (await searchParams) ?? {};
+  const query = ClaimFaceQuerySchema.safeParse({ through });
+  const result = await stoaFetchClaimFace(slug, claim, undefined, { through });
   if (result.state === "not_found") notFound();
   const path = `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}`;
   if (result.state === "unavailable")
-    return <PublicReadUnavailable title={`${slug} — ${claim}`} retryPath={path} />;
+    return (
+      <PublicReadUnavailable
+        title={`${slug} — ${claim}`}
+        retryPath={`${path}${query.success && query.data.through !== undefined ? `?through=${query.data.through}` : ""}`}
+      />
+    );
   const face = result.data;
   const state = face.claim_state;
   const exact = `${state.claim_id}@${state.version}`;
   const agentPath = `${result.origin}/p/${encodeURIComponent(face.problem)}/claims/${exact}`;
+  const cut = `?through=${face.cursor}`;
   return (
     <>
       <a className="skip" href="#content">
@@ -61,10 +75,32 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
           <p>
             Statement version {state.version}; ledger cursor {face.cursor}.
           </p>
+          <p>
+            <Link
+              href={`/p/${encodeURIComponent(face.problem)}/claims/${exact}${cut}`}
+              prefetch={false}
+            >
+              Link to this ledger snapshot
+            </Link>
+            {through !== undefined && (
+              <>
+                {" "}
+                ·{" "}
+                <Link
+                  href={`/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}`}
+                  prefetch={false}
+                >
+                  Read the latest public record
+                </Link>
+              </>
+            )}
+          </p>
           {state.latest_version > state.version && (
             <p>
               This is an earlier statement version.{" "}
-              <Link href={`/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}`}>
+              <Link
+                href={`/p/${encodeURIComponent(face.problem)}/claims/${state.claim_id}@${state.latest_version}${cut}`}
+              >
                 Read version {state.latest_version}
               </Link>
               .
@@ -101,7 +137,7 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
                 {item.kind === "claim-dependency" && (
                   <p>
                     <Link
-                      href={`/p/${encodeURIComponent(face.problem)}/claims/${item.id}`}
+                      href={`/p/${encodeURIComponent(face.problem)}/claims/${item.id}${cut}`}
                       prefetch={false}
                     >
                       Read this premise version
@@ -149,7 +185,8 @@ export default async function ClaimPage({ params }: ClaimPageProps) {
         <section aria-labelledby="agent-heading">
           <h2 id="agent-heading">Canonical agent faces</h2>
           <p>
-            <a href={`${agentPath}.md`}>Markdown</a> · <a href={`${agentPath}.json`}>JSON</a>
+            <a href={`${agentPath}.md${cut}`}>Markdown</a> ·{" "}
+            <a href={`${agentPath}.json${cut}`}>JSON</a>
           </p>
         </section>
         {face.next_actions.some((action) => action.url.endsWith(`/${exact}.bib`)) && (

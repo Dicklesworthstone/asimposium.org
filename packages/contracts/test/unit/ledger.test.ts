@@ -6,6 +6,7 @@ import addFormats from "ajv-formats";
 import {
   ClaimCitationCslSchema,
   ClaimDependencyPinsSchema,
+  ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
@@ -14,6 +15,36 @@ import {
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
+
+test("claim snapshot cursor query has the same canonical bounded grammar in Zod and JSON Schema", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-claim-face-query.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-claim-face-query.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.claim_face_query);
+  for (const value of [good, {}, { through: "0" }, { through: "999999999999999" }]) {
+    expect(ClaimFaceQuerySchema.safeParse(value).success).toBe(true);
+    expect(published(value)).toBe(true);
+  }
+  for (const value of [
+    bad,
+    { through: ["1", "2"] },
+    { through: 42 },
+    { through: null },
+    ...["", "-1", "+1", "1.0", "1e2", " 1", "1\n", "9007199254740992"].map((through) => ({
+      through,
+    })),
+    { through: "42", workshop: true },
+  ]) {
+    expect(ClaimFaceQuerySchema.safeParse(value).success).toBe(false);
+    expect(published(value)).toBe(false);
+  }
+});
 
 test("dependency publications require bounded exact versions and public content identities", async () => {
   const good = ClaimDependencyPinsSchema.parse(

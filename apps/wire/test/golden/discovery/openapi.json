@@ -1135,7 +1135,7 @@
     },
     "/p/{id}/claims/{target}": {
       "get": {
-        "summary": "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews; .bib/.csl.json download a version-pinned citation.",
+        "summary": "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
         "tags": [
           "public-reads"
         ],
@@ -1185,6 +1185,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "One published problem-local cursor for md/json/html faces. Later events are excluded; present-day content withdrawal still applies. Not accepted on bibliography exports.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_face_query/properties/through"
             }
           }
         ],

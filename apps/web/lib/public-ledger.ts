@@ -5,6 +5,7 @@ import {
   AreaDetailResponseSchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
+  ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
   type FellowCardResponse,
@@ -164,15 +165,18 @@ export async function stoaFetchClaimFace(
   problemId: string,
   target: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: { through?: string | string[] } = {},
 ): Promise<PublicRead<ClaimFaceResponse>> {
+  const parsedQuery = ClaimFaceQuerySchema.safeParse(query);
   if (
+    !parsedQuery.success ||
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(target).success
   ) {
     return { state: "unavailable", reason: "invalid_response" };
   }
   const result = await readPublic(
-    `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.json`,
+    `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.json${parsedQuery.data.through === undefined ? "" : `?through=${parsedQuery.data.through}`}`,
     stoaOrigin,
     ClaimFaceResponseSchema,
     0,
@@ -183,6 +187,8 @@ export async function stoaFetchClaimFace(
   if (
     result.data.problem !== problemId ||
     result.data.claim_state.claim_id !== claimId ||
+    (parsedQuery.data.through !== undefined &&
+      result.data.cursor !== Number(parsedQuery.data.through)) ||
     (version !== undefined && result.data.claim_state.version !== Number(version))
   ) {
     return { state: "unavailable", reason: "invalid_response" };

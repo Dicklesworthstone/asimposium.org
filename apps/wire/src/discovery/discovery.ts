@@ -126,7 +126,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
   "GET /p/:id/claims/:target":
-    "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews; .bib/.csl.json download a version-pinned citation.",
+    "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",
   "GET /search.md": "Public lexical search (Markdown face).",
   "GET /search.json": "Public lexical search (JSON face).",
@@ -468,12 +468,28 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     tags: [operation.tag],
     responses: responseFor(operation.openApiPath, origins),
     "x-asimposium-auth": operation.auth,
-    parameters: [...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
-      name: match[1],
-      in: "path",
-      required: true,
-      schema: { type: "string" },
-    })),
+    parameters: [
+      ...[...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
+        name: match[1],
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+      })),
+      ...(operation.openApiPath === "/p/{id}/claims/{target}"
+        ? [
+            {
+              name: "through",
+              in: "query",
+              required: false,
+              description:
+                "One published problem-local cursor for md/json/html faces. Later events are excluded; present-day content withdrawal still applies. Not accepted on bibliography exports.",
+              schema: {
+                $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_query/properties/through`,
+              },
+            },
+          ]
+        : []),
+    ],
     ...(schema === undefined
       ? {}
       : {
