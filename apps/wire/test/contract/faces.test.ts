@@ -684,9 +684,7 @@ describe("face wire format", () => {
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
-    expect(response.headers.get("cache-control")).toBe(
-      "public, max-age=60, stale-while-revalidate=300",
-    );
+    expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
     const jsonEtag = response.headers.get("etag");
     expect(jsonEtag).toMatch(/^"[0-9a-f]{64}"$/);
     const jsonBody = await response.text();
@@ -1029,6 +1027,9 @@ describe("face wire format", () => {
         "CREATE TABLE problem_statement_versions (problem_id TEXT, version INTEGER, statement TEXT, falsifier TEXT, motivation TEXT, PRIMARY KEY (problem_id, version))",
       );
       db.run(
+        "CREATE TABLE problem_statement_reviews (problem_id TEXT, version INTEGER, reviewer_fellow_id TEXT, verdict TEXT, basis TEXT, created_at TEXT)",
+      );
+      db.run(
         "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL, payload_sha256 TEXT NOT NULL DEFAULT 'sha256:fixture')",
       );
       db.run(
@@ -1067,6 +1068,20 @@ describe("face wire format", () => {
       db.run(
         "INSERT INTO event_content VALUES ('E-4', 'sha256:wrong', NULL), ('E-3', 'sha256:fixture', NULL)",
       );
+      // This isolated SQLite query fixture must also model the columns read
+      // by statement-review evidence. The production migrations are exercised
+      // separately by the actual Workerd/D1 journey.
+      for (const column of [
+        "object_version INTEGER",
+        "actor_fellow_id TEXT",
+        "actor_sponsor_id TEXT",
+        "actor_session_id TEXT",
+        "model_string_self_declared TEXT",
+        "harness TEXT",
+        "created_at TEXT",
+      ])
+        db.run(`ALTER TABLE events ADD COLUMN ${column}`);
+      db.run("ALTER TABLE event_content ADD COLUMN payload_json TEXT");
 
       let capturedSql: string | undefined;
       let formulationRows = 0;

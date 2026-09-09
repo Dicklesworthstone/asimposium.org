@@ -1,8 +1,11 @@
 import {
   ClaimFaceResponseSchema,
+  EnrollmentDeclaredRuntimeSchema,
   ProblemDetailSchema,
   ProblemFaceResponseSchema,
   type ProblemIndexEntry,
+  ProblemIndexTimestampSchema,
+  ProblemStatementReviewEventSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
   PublicClaimStateSchema,
@@ -90,6 +93,7 @@ function indexingHeaders(unlisted: boolean): Record<string, string> {
 }
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
+const STATEMENT_REVIEW_LIMIT = 20;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
   p.public_seq AS public_seq,
@@ -99,6 +103,35 @@ const PROBLEM_DIGEST_SELECT = `SELECT
       'title', p.title, 'current_statement_version', v.version,
       'statement', v.statement, 'falsifier', v.falsifier, 'motivation', v.motivation
     ) END AS formulation_json,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
+    SELECT json_group_array(json(review_json)) FROM (
+      SELECT json_object(
+        'version', r.version, 'reviewer', r.reviewer_fellow_id, 'verdict', r.verdict,
+        'basis', CASE WHEN length(CAST(r.basis AS BLOB)) <= 32768 THEN r.basis END,
+        'created_at', r.created_at, 'event_id', e.id, 'seq', e.seq,
+        'fellow', e.actor_fellow_id, 'sponsor', e.actor_sponsor_id,
+        'session', e.actor_session_id, 'model', e.model_string_self_declared,
+        'harness', e.harness, 'event_created_at', e.created_at,
+        'payload_sha256', e.payload_sha256,
+        'payload_json', CASE WHEN c.redacted_at IS NULL
+          AND c.payload_sha256 = e.payload_sha256
+          AND length(CAST(c.payload_json AS BLOB)) <= 65536 THEN c.payload_json END
+      ) AS review_json
+      FROM problem_statement_reviews r
+      LEFT JOIN events e ON e.id = (
+        SELECT source.id FROM events source
+        WHERE source.problem_id = p.id AND source.object_id = p.id
+          AND source.object_kind = 'problem' AND source.type = 'problem.statement-reviewed'
+          AND source.object_version = r.version AND source.actor_fellow_id = r.reviewer_fellow_id
+          AND source.seq <= p.public_seq
+        ORDER BY source.seq ASC LIMIT 1
+      )
+      LEFT JOIN event_content c ON c.event_id = e.id
+      WHERE r.problem_id = p.id
+      ORDER BY e.seq IS NULL, e.seq ASC, r.version ASC, r.reviewer_fellow_id ASC
+      LIMIT ${STATEMENT_REVIEW_LIMIT + 1}
+    )
+  ) END AS statement_reviews_json,
   claims.id AS claim_id,
   CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN claims.statement END AS statement,
   claims.source_seq AS source_seq
@@ -117,6 +150,7 @@ interface ProblemDigestRow {
   readonly public_seq: number;
   readonly unlisted: number;
   readonly formulation_json: string | null;
+  readonly statement_reviews_json: string | null;
   readonly claim_id: string | null;
   readonly statement: string | null;
   readonly source_seq: number | null;
@@ -134,6 +168,126 @@ const FormulationSchema = ProblemDetailSchema.pick({
   falsifier: true,
   motivation: true,
 });
+
+interface StatementReviewRow {
+  version: number;
+  reviewer: string;
+  verdict: string;
+  basis: string | null;
+  created_at: string;
+  event_id: string | null;
+  seq: number;
+  fellow: string;
+  sponsor: string;
+  session: string;
+  model: string;
+  harness: string;
+  event_created_at: string;
+  payload_sha256: string;
+  payload_json: string | null;
+}
+
+/** No current identity lookup: attribution belongs to the publication. Legacy
+ * projection rows cannot acquire a made-up session or today's sponsor. */
+async function statementReviewCandidates(first: ProblemDigestRow, currentVersion: number | null) {
+  const rows: StatementReviewRow[] = JSON.parse(first.statement_reviews_json ?? "[]");
+  const candidates = [];
+  const reasons = new Set<string>();
+  if (rows.length > STATEMENT_REVIEW_LIMIT) reasons.add("statement_review_limit");
+  for (const row of rows.slice(0, STATEMENT_REVIEW_LIMIT)) {
+    if (row.event_id === null) {
+      reasons.add("statement_review_attribution_unavailable");
+      continue;
+    }
+    if (row.payload_json === null) {
+      reasons.add("statement_review_content_unavailable");
+      continue;
+    }
+    try {
+      const payload = ProblemStatementReviewEventSchema.safeParse(
+        await checkedScientificPayload({ ...row, payload_json: row.payload_json }),
+      );
+      if (
+        !payload.success ||
+        payload.data.problem_id !== first.problem_id ||
+        payload.data.statement_version !== row.version ||
+        (currentVersion !== null && row.version > currentVersion) ||
+        payload.data.session_id !== row.session ||
+        payload.data.verdict !== row.verdict ||
+        payload.data.basis !== row.basis ||
+        row.fellow !== row.reviewer ||
+        row.event_created_at !== row.created_at ||
+        !ProblemIndexTimestampSchema.safeParse(row.created_at).success ||
+        !Number.isSafeInteger(row.seq) ||
+        row.seq < 1 ||
+        row.seq > first.public_seq
+      ) {
+        reasons.add("statement_review_source_mismatch");
+        continue;
+      }
+      if (
+        ![row.fellow, row.sponsor, row.event_id].every(
+          (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value),
+        ) ||
+        !EnrollmentDeclaredRuntimeSchema.safeParse(row.model).success ||
+        !EnrollmentDeclaredRuntimeSchema.safeParse(row.harness).success
+      ) {
+        reasons.add("statement_review_attribution_unavailable");
+        continue;
+      }
+      candidates.push({
+        kind: "statement-review",
+        id: `SR-${row.seq}`,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        body: JSON.stringify(
+          {
+            problem: first.problem_id,
+            statement_version: payload.data.statement_version,
+            verdict: payload.data.verdict,
+            basis: payload.data.basis,
+            previous_status: payload.data.previous_status,
+            status: payload.data.status,
+            event: row.event_id,
+            seq: row.seq,
+            created_at: row.event_created_at,
+            fellow: row.fellow,
+            sponsor: row.sponsor,
+            session: row.session,
+            model_self_declared: row.model,
+            harness_self_declared: row.harness,
+          },
+          null,
+          2,
+        ),
+        why_included:
+          currentVersion === null
+            ? `review of statement S@${row.version}; current formulation unavailable`
+            : row.version === currentVersion
+              ? `review of current statement S@${row.version}`
+              : `review of earlier statement S@${row.version}; current formulation is S@${currentVersion}`,
+        stable_prefix: 4 + candidates.length,
+      });
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      reasons.add("statement_review_source_mismatch");
+    }
+  }
+  const detail: Record<string, string> = {
+    statement_review_limit: `Only the first ${STATEMENT_REVIEW_LIMIT} statement reviews are considered, in ledger sequence order; legacy rows follow attributed events.`,
+    statement_review_attribution_unavailable:
+      "Statement reviews without a complete matching publication attribution are omitted, including legacy projection-only rows.",
+    statement_review_content_unavailable:
+      "Statement review content is withdrawn, missing, oversized or detached from its immutable event digest.",
+    statement_review_source_mismatch:
+      "Statement review content fails its event digest, version, session or projection consistency check.",
+  };
+  return {
+    candidates,
+    omitted: [...reasons].sort().map((reason) => ({ reason, detail: detail[reason] })),
+  };
+}
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
@@ -292,6 +446,10 @@ async function loadProblemFace(
     first.formulation_json == null ? null : JSON.parse(first.formulation_json),
   );
   const formulation = parsedFormulation.success ? parsedFormulation.data : null;
+  const reviews = await statementReviewCandidates(
+    first,
+    formulation?.current_statement_version ?? null,
+  );
   const formulationItems =
     formulation === null
       ? []
@@ -316,6 +474,7 @@ async function loadProblemFace(
     viewer: { audience: "public", membership: "none", effective_permissions: [] },
     candidates: [
       ...formulationItems,
+      ...reviews.candidates,
       ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
         kind: "claim",
         id: claim.id,
@@ -324,7 +483,7 @@ async function loadProblemFace(
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4,
+        stable_prefix: index + 4 + reviews.candidates.length,
       })),
     ],
     action_candidates: [
@@ -358,6 +517,7 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...reviews.omitted,
       ...(formulation === null
         ? [
             {
@@ -393,7 +553,10 @@ async function loadProblemFace(
   const unlisted = first.unlisted === 1;
   const faces = renderBudgetedProblemFace({
     ...composed,
-    preamble: unlisted ? `${UNLISTED_NOTICE} ${composed.preamble}` : composed.preamble,
+    preamble:
+      (unlisted ? `${UNLISTED_NOTICE} ` : "") +
+      composed.preamble +
+      " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
   });
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return { ...faces, unlisted };
@@ -905,7 +1068,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", faces.json.body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": "public, max-age=0, must-revalidate",
       ...indexingHeaders(faces.unlisted),
       etag,
     };
@@ -923,7 +1086,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", faces.markdown.body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": "public, max-age=0, must-revalidate",
       ...indexingHeaders(faces.unlisted),
       etag,
     };

@@ -236,6 +236,7 @@ export {
   ProblemFaceResponseSchema,
   type ProblemIndexEntry,
   ProblemIndexEntrySchema,
+  ProblemIndexTimestampSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
   type PublicClaimState,

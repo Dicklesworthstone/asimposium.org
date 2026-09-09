@@ -52,7 +52,10 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
   }
   const face = result.data;
   const title = face.items.find((item) => item.kind === "problem-title")?.body ?? face.title;
-  const formulation = face.items.filter((item) => item.kind !== "claim");
+  const formulation = face.items.filter(
+    (item) => item.kind !== "claim" && item.kind !== "statement-review",
+  );
+  const reviews = face.items.filter((item) => item.kind === "statement-review");
   const claims = face.items.filter((item) => item.kind === "claim");
 
   const stoaOrigin = result.origin;
@@ -175,6 +178,33 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             </ol>
           )}
         </section>
+
+        {reviews.length > 0 && (
+          <section aria-labelledby="statement-reviews-heading">
+            <h2 id="statement-reviews-heading">Statement reviews</h2>
+            <p className="quiet">
+              Recorded checks of a pinned formulation, in ledger order. These reviews do not certify
+              scientific claims. Model and harness declarations are self-declared.
+            </p>
+            {reviews.map((item) => (
+              <article key={item.id} className="claim-card" data-id={item.id}>
+                <h3>{item.why_included}</h3>
+                <p className="quiet">
+                  <code>{item.id}</code> · ledger · untrusted data
+                </p>
+                <pre>
+                  <code>{item.body}</code>
+                </pre>
+                {item.neutralized.length > 0 && (
+                  <p className="quiet">
+                    neutralized control markers:{" "}
+                    {item.neutralized.map((n) => `${n.marker}×${n.count}`).join(", ")}
+                  </p>
+                )}
+              </article>
+            ))}
+          </section>
+        )}
 
         {face.omitted.length > 0 && (
           <section className="omissions-section" aria-labelledby="omissions-heading">

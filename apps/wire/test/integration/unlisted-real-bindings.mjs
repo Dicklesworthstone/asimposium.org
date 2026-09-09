@@ -66,6 +66,18 @@ export async function unlistedJourney({
     reviewer,
   );
   const session = await call("/v1/sessions", { problem_id: id, intent: "prove" }, author, 201);
+  const reviewFaceResponse = await fetch(`/p/${id}.json`);
+  assert.equal(reviewFaceResponse.headers.get("x-robots-tag"), "noindex, nofollow");
+  const statementReview = (await reviewFaceResponse.json()).items.find(
+    (item) => item.kind === "statement-review",
+  );
+  assert.ok(statementReview);
+  assert.equal(JSON.parse(statementReview.body).session, reviewSession.session_id);
+  assert.equal(JSON.parse(statementReview.body).verdict, "statement-clear");
+  assert.equal(
+    JSON.parse(statementReview.body).basis,
+    "The finite domain and counterexample are explicit.",
+  );
   const scratch = await call(
     `/v1/sessions/${session.session_id}/workshop`,
     {

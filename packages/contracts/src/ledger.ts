@@ -164,7 +164,7 @@ export type PublicClaimState = z.infer<typeof PublicClaimStateSchema>;
 /**
  * The per-problem read face (W6.1): the JSON face of a problem-face projection
  * rendered through `@asimposium/render`. Every field emitted by the mounted
- * `/p/<id>.json` digest is pinned. Public items are formulations or claims and untrusted
+ * `/p/<id>.json` digest is pinned. Public items are formulations, statement reviews or claims and untrusted
  * by construction; the shape cannot admit workshop or trusted-body leakage.
  */
 const FaceItemSchema = z
@@ -181,6 +181,10 @@ const FaceItemSchema = z
 
 const ProblemFaceItemSchema = z.discriminatedUnion("kind", [
   FaceItemSchema,
+  FaceItemSchema.extend({
+    kind: z.literal("statement-review"),
+    id: z.string().regex(/^SR-[1-9][0-9]{0,15}$/),
+  }),
   FaceItemSchema.extend({
     kind: z.literal("problem-title"),
     id: z.string().regex(/^S@[1-9][0-9]{0,15}-title$/),

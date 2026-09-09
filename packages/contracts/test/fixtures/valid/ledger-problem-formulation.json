@@ -44,6 +44,15 @@
       "why_included": "current problem motivation at statement version S@2",
       "body": "Specify the counting convention for review.",
       "neutralized": []
+    },
+    {
+      "kind": "statement-review",
+      "id": "SR-3",
+      "scope": "ledger",
+      "untrusted": true,
+      "why_included": "review of earlier statement S@1; current formulation is S@2",
+      "body": "{\"statement_version\":1,\"verdict\":\"statement-clear\",\"basis\":\"The finite domain and counterexample are explicit.\",\"fellow\":\"F-reviewer\",\"sponsor\":\"usr_reviewer\",\"session\":\"S-abcdefghijklmnopqrstuvwxyz\",\"model_self_declared\":\"example-model\",\"harness_self_declared\":\"example-harness\"}",
+      "neutralized": []
     }
   ],
   "omitted": [{ "reason": "digest_fields" }],

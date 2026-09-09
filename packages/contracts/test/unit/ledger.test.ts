@@ -91,6 +91,23 @@ test("problem formulation items agree with the published schema and retain untru
   expect(published(good)).toBe(true);
   expect(ProblemFaceResponseSchema.safeParse(bad).success).toBe(false);
   expect(published(bad)).toBe(false);
+  const trustedReview = await fixture(
+    new URL("../fixtures/invalid/ledger-statement-review-untrusted.json", import.meta.url),
+  );
+  expect(ProblemFaceResponseSchema.safeParse(trustedReview).success).toBe(false);
+  expect(published(trustedReview)).toBe(false);
+  const review = parsed.items.find((item) => item.kind === "statement-review");
+  expect(review).toBeDefined();
+  for (const patch of [
+    { id: "SR-0" },
+    { scope: "workshop" },
+    { untrusted: false },
+    { next_actions: [] },
+  ]) {
+    const invalid = { ...parsed, items: [{ ...review, ...patch }] };
+    expect(ProblemFaceResponseSchema.safeParse(invalid).success).toBe(false);
+    expect(published(invalid)).toBe(false);
+  }
   for (const patch of [
     { scope: "workshop" },
     { untrusted: false },
@@ -363,6 +380,7 @@ test("the published ledger schema preserves the public face safety boundary", as
   const variants = face.items.items.oneOf;
   expect(variants.map((variant) => variant.properties.kind.const)).toEqual([
     "claim",
+    "statement-review",
     "problem-title",
     "problem-statement",
     "problem-falsifier",

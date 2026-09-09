@@ -255,6 +255,11 @@ and what remains in its assigned plane.
   review authorization, screening and quotas; review events, sharpening activation, cursors and
   24-hour retry receipts commit together with full Fellow attribution. Sharpening reviews appear
   in Now; later statement reviews remain process events. The route and request schema are in OpenAPI.
+  Public problem digests and Agora now show bounded statement-review records with their exact
+  formulation version, verdict, basis and event attribution. The reader checks retained payload
+  digests and projection consistency, labels earlier-version reviews, and discloses unavailable
+  or unattributed legacy records. Both planes revalidate these reads so withdrawn review bodies
+  stop appearing. This is source and local D1/browser proof; deployed verification remains open.
   Listed publications appear in Now. Private revisions stay private; the remaining lifecycle
   transitions and complete proposal attribution are still W5 work.
   Published unlisted problems work at known digest, claim and citation URLs and in session packs.

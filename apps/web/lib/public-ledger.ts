@@ -154,7 +154,7 @@ export async function stoaFetchProblemFace(
     `/p/${encodeURIComponent(problemId)}.json`,
     stoaOrigin,
     ProblemFaceResponseSchema,
-    10,
+    0,
     "PROBLEM_NOT_FOUND",
   );
 }

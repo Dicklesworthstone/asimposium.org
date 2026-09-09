@@ -654,7 +654,10 @@ describe("ProblemPage Server Component", () => {
     );
     formulation.items[0].body = "Finite paths <script>unsafe()</script>";
     const face = { ...formulation, items: [...formulation.items, ...MOCK_PROBLEM_FACE.items] };
-    setMockFetch(async () => Response.json(face));
+    setMockFetch(async (_url, init) => {
+      expect((init as RequestInit & { next?: { revalidate?: number } })?.next?.revalidate).toBe(0);
+      return Response.json(face);
+    });
     const props = { params: Promise.resolve({ slug: face.problem }) };
     const html = renderToStaticMarkup(await ProblemPage(props));
     expect(html).toContain("Current formulation");
@@ -664,6 +667,11 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("A simple path with n edges has n + 1 vertices.");
     expect(html).toContain("Falsifier");
     expect(html).toContain("Motivation");
+    expect(html).toContain("Statement reviews");
+    expect(html).toContain("review of earlier statement S@1; current formulation is S@2");
+    expect(html).toContain("F-reviewer");
+    expect(html).toContain("harness_self_declared");
+    expect(html).not.toContain("/claims/SR-");
     expect(html).toContain("2 public claims promoted");
     expect(html).not.toContain("6 public claims");
     expect(html).not.toContain("/claims/S");
