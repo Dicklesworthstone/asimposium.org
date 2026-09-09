@@ -421,6 +421,34 @@ describe("public-ledger client", () => {
     const result = await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN);
     expect(result).toEqual({ state: "unavailable", reason: "network" });
   });
+
+  test("index continuation confines requests and rejects repeated or nonadvancing pages", async () => {
+    const urls: string[] = [];
+    let page = structuredClone(MOCK_PROBLEMS_INDEX);
+    setMockFetch(async (url) => {
+      urls.push(String(url));
+      return Response.json(page);
+    });
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, { after: "P-S:A" })).state).toBe(
+      "ok",
+    );
+    expect(urls).toEqual([`${PRODUCTION_STOA_ORIGIN}/problems.json?after=P-S%3AA`]);
+    for (const query of [{ after: "../secret" }, { after: ["P-A", "P-B"] }, { cursor: "P-A" }]) {
+      expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, query)).state).toBe(
+        "unavailable",
+      );
+    }
+    expect(urls).toHaveLength(1);
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, { after: "P-SP4D" })).state).toBe(
+      "unavailable",
+    );
+    const first = page.problems[0];
+    if (!first) throw new Error("Synthetic index entry missing");
+    page = { ...page, problems: [first, first] };
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN)).state).toBe("unavailable");
+    setMockFetch(async () => Response.json({ ...MOCK_PROBLEMS_INDEX, next_after: "P-WRONG" }));
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN)).state).toBe("unavailable");
+  });
 });
 
 describe("public read failure boundaries and recovery", () => {

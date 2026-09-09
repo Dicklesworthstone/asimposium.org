@@ -1,5 +1,6 @@
-import type { Metadata } from "next";
+import { LedgerContractsSchema } from "@asimposium/contracts";
 import { neutralizeUntrustedBody } from "@asimposium/render";
+import type { Metadata } from "next";
 import Link from "next/link";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchProblemsIndex } from "@/lib/public-ledger";
@@ -11,15 +12,34 @@ export const metadata: Metadata = {
   description: "Public scientific problems on the ASImposium append-only ledger.",
 };
 
-export default async function ProblemsPage() {
-  const problemsResponse = await stoaFetchProblemsIndex();
-  if (problemsResponse.state !== "ok") {
-    return <PublicReadUnavailable title="Public Problems" retryPath="/problems" />;
+export default async function ProblemsPage({
+  searchParams,
+}: {
+  readonly searchParams?: Promise<Record<string, string | string[] | undefined>>;
+} = {}) {
+  const query = LedgerContractsSchema.shape.problems_index_query
+    .unwrap()
+    .safeParse((await searchParams) ?? {});
+  if (!query.success) {
+    return (
+      <main className="landing col problems-page">
+        <h1>Invalid problem index query</h1>
+        <p>
+          Use a next-page link or return to the <Link href="/problems">first page</Link>.
+        </p>
+      </main>
+    );
   }
-  const { problems, omitted } = problemsResponse.data;
+  const { after } = query.data;
+  const suffix = after === undefined ? "" : `?after=${encodeURIComponent(after)}`;
+  const problemsResponse = await stoaFetchProblemsIndex(undefined, query.data);
+  if (problemsResponse.state !== "ok") {
+    return <PublicReadUnavailable title="Public Problems" retryPath={`/problems${suffix}`} />;
+  }
+  const { problems, omitted, next_after } = problemsResponse.data;
   const stoaOrigin = problemsResponse.origin;
-  const problemsMdUrl = `${stoaOrigin}/problems.md`;
-  const problemsJsonUrl = `${stoaOrigin}/problems.json`;
+  const problemsMdUrl = `${stoaOrigin}/problems.md${suffix}`;
+  const problemsJsonUrl = `${stoaOrigin}/problems.json${suffix}`;
 
   return (
     <>
@@ -53,13 +73,17 @@ export default async function ProblemsPage() {
             <span className="gr" aria-hidden="true">
               α
             </span>
-            Problems directory ({problems.length})
+            Problems on this page ({problems.length})
           </h2>
 
           {problems.length === 0 ? (
             <div className="empty-state" role="status">
               <p>
-                <strong>No public problems currently on the ledger.</strong>
+                <strong>
+                  {after === undefined
+                    ? "No public problems currently on the ledger."
+                    : "No public problems after this position."}
+                </strong>
               </p>
               <p className="quiet">
                 Problems appear once admitted by a sponsor and validated by the Stoa protocol.
@@ -121,6 +145,16 @@ export default async function ProblemsPage() {
                 </li>
               ))}
             </ul>
+          )}
+          {(after !== undefined || next_after !== undefined) && (
+            <nav aria-label="Problem index pages" className="card-footer-row">
+              {after !== undefined && <Link href="/problems">First page</Link>}
+              {next_after !== undefined && (
+                <Link href={`/problems?after=${encodeURIComponent(next_after)}`} rel="next">
+                  Next page →
+                </Link>
+              )}
+            </nav>
           )}
         </section>
 

@@ -11,6 +11,7 @@ import {
   type FellowCardResponse,
   FellowCardResponseSchema,
   isTrustedStoaOrigin,
+  LedgerContractsSchema,
   type NowStripResponse,
   NowStripResponseSchema,
   type ProblemFaceResponse,
@@ -202,8 +203,26 @@ export async function stoaFetchClaimFace(
  */
 export async function stoaFetchProblemsIndex(
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<ProblemsIndexResponse>> {
-  return readPublic("/problems.json", stoaOrigin, ProblemsIndexResponseSchema, 10);
+  const parsed = LedgerContractsSchema.shape.problems_index_query.unwrap().safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const after = parsed.data.after;
+  const result = await readPublic(
+    `/problems.json${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`,
+    stoaOrigin,
+    ProblemsIndexResponseSchema,
+    10,
+  );
+  if (result.state !== "ok") return result;
+  const { problems, next_after } = result.data;
+  if (
+    problems.some((entry, i) => entry.id <= (problems[i - 1]?.id ?? after ?? "")) ||
+    (next_after !== undefined && next_after !== problems.at(-1)?.id)
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return result;
 }
 
 /**
