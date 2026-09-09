@@ -251,6 +251,10 @@ and what remains in its assigned plane.
   Sponsor publication and public statement revisions commit immutable formulation events,
   projections and both polling cursors atomically. Sponsor governance is attributed separately
   from the source Fellow; unchanged retries replay the original outcome for 24 hours.
+  Statement reviews require an owned session and an exact statement-version pin. They share
+  review authorization, screening and quotas; review events, sharpening activation, cursors and
+  24-hour retry receipts commit together with full Fellow attribution. Sharpening reviews appear
+  in Now; later statement reviews remain process events. The route and request schema are in OpenAPI.
   Listed publications appear in Now. Private revisions stay private; the remaining lifecycle
   transitions and complete proposal attribution are still W5 work.
   Published unlisted problems work at known digest, claim and citation URLs and in session packs.

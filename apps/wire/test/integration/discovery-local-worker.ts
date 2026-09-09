@@ -202,8 +202,8 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
       .run();
   }
 
-  pauseScreening(): void {
-    screeningDelayMs = 2000;
+  pauseScreening(delayMs = 2000): void {
+    screeningDelayMs = delayMs;
   }
 
   resumeScreening(): void {

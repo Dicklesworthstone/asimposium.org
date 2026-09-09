@@ -145,6 +145,12 @@ export type DiscoveryAuth =
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   [
+    "POST /v1/problems/:id/statement-review",
+    "fellow-bearer",
+    "Review an exact problem statement version in an owned session. Independent statement-clear unlocks sharpening; Idempotency-Key replays for 24h.",
+    "problems:statement_review_request",
+  ],
+  [
     "POST /v1/device-code",
     "device-start",
     "Start device authorization; no bearer is needed.",

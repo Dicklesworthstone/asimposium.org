@@ -12,6 +12,7 @@ import {
   ClaimReanchorRequestSchema,
   type ClaimReanchorResponse,
   ClaimReanchorResponseSchema,
+  SessionIdSchema,
 } from "./sessions.ts";
 
 export { PROBLEM_STATUSES, type ProblemStatus, ProblemStatusSchema } from "./ledger.ts";
@@ -273,6 +274,8 @@ export type ProblemStatementReviewVerdict = z.infer<typeof ProblemStatementRevie
 /** Fellow problem statement review: POST /v1/problems/:id/statement-review. */
 export const ProblemStatementReviewRequestSchema = z
   .object({
+    session_id: SessionIdSchema,
+    statement_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     verdict: ProblemStatementReviewVerdictSchema,
     basis: z.string().min(1).max(8192),
   })
@@ -291,6 +294,13 @@ export const ProblemStatementReviewResponseSchema = z
 
 export type ProblemStatementReviewResponse = z.infer<typeof ProblemStatementReviewResponseSchema>;
 
+/** One review event also records the resulting sharpening transition. Attribution is in its envelope. */
+export const ProblemStatementReviewEventSchema = ProblemStatementReviewRequestSchema.extend({
+  problem_id: PublicLedgerProblemIdSchema,
+  previous_status: z.enum(["sharpening", "active", "dormant", "under-result-review"]),
+  status: z.enum(["sharpening", "active", "dormant", "under-result-review"]),
+}).strict();
+
 export const ProblemLifecycleContractsSchema = z
   .object({
     status: ProblemStatusSchema,
@@ -306,6 +316,7 @@ export const ProblemLifecycleContractsSchema = z
     reanchor_request: ClaimReanchorRequestSchema,
     statement_review_request: ProblemStatementReviewRequestSchema,
     statement_review_response: ProblemStatementReviewResponseSchema,
+    statement_review_event: ProblemStatementReviewEventSchema,
     detail: ProblemDetailSchema,
     governance_event: ProblemGovernanceEventSchema,
     governance_idempotency_key: ProblemGovernanceKeySchema,

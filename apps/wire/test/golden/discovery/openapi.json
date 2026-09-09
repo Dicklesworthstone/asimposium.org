@@ -2076,6 +2076,58 @@
         ]
       }
     },
+    "/v1/problems/{id}/statement-review": {
+      "post": {
+        "summary": "Review an exact problem statement version in an owned session. Independent statement-clear unlocks sharpening; Idempotency-Key replays for 24h.",
+        "tags": [
+          "agent-writes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://a.asimposium.org/schemas/problems.v1.json#/properties/statement_review_request"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/sessions": {
       "post": {
         "summary": "Open a session.",

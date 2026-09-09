@@ -255,10 +255,21 @@ export async function problemLifecycleJourney({
   assert.equal(lockedRefusal.rule, "P3");
 
   // --- Step 5: Statement Review & Sharpening Unlock ---
+  const sessionB1 = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "review" },
+    fellowB1Token,
+    201,
+  );
   // Author fellow attempts review -> 422 REVIEWER_IS_AUTHOR (rule P1)
   const selfReview = await call(
     `/v1/problems/${problemId}/statement-review`,
-    { verdict: "statement-clear", basis: "I assert my own statement is clear." },
+    {
+      session_id: sessionA1.session_id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "I assert my own statement is clear.",
+    },
     fellowA1Token,
     422,
   );
@@ -271,6 +282,8 @@ export async function problemLifecycleJourney({
     {
       verdict: "statement-clear",
       basis: "The formulation is rigorous, types are exact, and falsifier is sharp.",
+      session_id: sessionB1.session_id,
+      statement_version: 1,
     },
     fellowB1Token,
     200,
@@ -286,6 +299,15 @@ export async function problemLifecycleJourney({
     .first();
   assert.ok(persistedReview, "Statement review must be persisted in D1");
   assert.equal(persistedReview.verdict, "statement-clear");
+  const statementEvent = await env.DB.prepare(
+    "SELECT * FROM events WHERE problem_id = ? AND type = 'problem.statement-reviewed'",
+  )
+    .bind(problemId)
+    .first();
+  assert.ok(statementEvent, "Statement review and activation must append a ledger event");
+  assert.equal(statementEvent.actor_fellow_id, persistedReview.reviewer_fellow_id);
+  assert.equal(statementEvent.actor_sponsor_id, sponsorB);
+  assert.ok(statementEvent.actor_session_id, "Statement review must retain its actual session");
   assert.equal(
     persistedReview.basis,
     "The formulation is rigorous, types are exact, and falsifier is sharp.",
@@ -297,6 +319,8 @@ export async function problemLifecycleJourney({
     {
       verdict: "statement-clear",
       basis: "A duplicate review attempt.",
+      session_id: sessionB1.session_id,
+      statement_version: 1,
     },
     fellowB1Token,
     409,
@@ -310,6 +334,8 @@ export async function problemLifecycleJourney({
     {
       verdict: "statement-clear",
       basis: "",
+      session_id: sessionB1.session_id,
+      statement_version: 1,
     },
     fellowB1Token,
     422,
@@ -360,12 +386,6 @@ export async function problemLifecycleJourney({
   assert.equal(driftedClaimRow.statement_drift, 1);
 
   // Review on drifted claim is refused (P9)
-  const sessionB1 = await call(
-    "/v1/sessions",
-    { problem_id: problemId, intent: "review" },
-    fellowB1Token,
-    201,
-  );
   const driftedReview = await call(
     `/v1/sessions/${sessionB1.session_id}/review`,
     {
@@ -693,6 +713,12 @@ export async function problemLifecycleJourney({
     200,
   );
 
+  const boundarySession = await call(
+    "/v1/sessions",
+    { problem_id: boundaryReviewId, intent: "review" },
+    fellowB1Token,
+    201,
+  );
   async function problemWriteDigest() {
     const rows = await env.DB.batch([
       env.DB.prepare("SELECT * FROM problems ORDER BY id"),
@@ -722,7 +748,12 @@ export async function problemLifecycleJourney({
       name: "statement-review",
       path: `/v1/problems/${boundaryReviewId}/statement-review`,
       token: fellowB1Token,
-      payload: { verdict: "statement-clear", basis: "BYTE_SENTINEL · independently checked." },
+      payload: {
+        session_id: boundarySession.session_id,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "BYTE_SENTINEL · independently checked.",
+      },
       malformedCode: "REVIEW_BODY_INVALID",
       acceptedStatus: 200,
     },

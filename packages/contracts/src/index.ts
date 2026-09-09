@@ -297,6 +297,7 @@ export {
   ProblemNoClaimBoundarySchema,
   type ProblemResolutionDirection,
   ProblemResolutionDirectionSchema,
+  ProblemStatementReviewEventSchema,
   type ProblemStatementReviewRequest,
   ProblemStatementReviewRequestSchema,
   type ProblemStatementReviewResponse,

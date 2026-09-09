@@ -49,9 +49,20 @@ export async function unlistedJourney({
   assert.equal(digest.status, 200, "A published unlisted problem must have a readable known URL");
   ProblemFaceResponseSchema.parse(await digest.json());
 
+  const reviewSession = await call(
+    "/v1/sessions",
+    { problem_id: id, intent: "review" },
+    reviewer,
+    201,
+  );
   await call(
     `/v1/problems/${id}/statement-review`,
-    { verdict: "statement-clear", basis: "The finite domain and counterexample are explicit." },
+    {
+      session_id: reviewSession.session_id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The finite domain and counterexample are explicit.",
+    },
     reviewer,
   );
   const session = await call("/v1/sessions", { problem_id: id, intent: "prove" }, author, 201);
@@ -75,12 +86,6 @@ export async function unlistedJourney({
       falsifier: "A simple three-vertex path with a different number of edges.",
     },
     author,
-    201,
-  );
-  const reviewSession = await call(
-    "/v1/sessions",
-    { problem_id: id, intent: "review" },
-    reviewer,
     201,
   );
   const pack = await call(
@@ -199,9 +204,20 @@ export async function unlistedJourney({
     "problem-lifecycle",
     { action: "publish" },
   );
+  const listedReviewSession = await call(
+    "/v1/sessions",
+    { problem_id: listedId, intent: "review" },
+    reviewer,
+    201,
+  );
   await call(
     `/v1/problems/${listedId}/statement-review`,
-    { verdict: "statement-clear", basis: "The simple cycle domain is explicit." },
+    {
+      session_id: listedReviewSession.session_id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "The simple cycle domain is explicit.",
+    },
     reviewer,
   );
   const listedSession = await call(

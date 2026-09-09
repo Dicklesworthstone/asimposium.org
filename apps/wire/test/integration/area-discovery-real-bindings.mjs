@@ -93,11 +93,19 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     assert.equal((await face(`/problems.${suffix}`, indexEtags.get(suffix))).status, 304);
   }
   const reviewer = await enroll("index-independent-reviewer", "usr_index_reviewer");
+  const reviewSession = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "review" },
+    reviewer,
+    201,
+  );
   await call(
     `/v1/problems/${problemId}/statement-review`,
     {
       verdict: "statement-clear",
       basis: "The finite path domain and vertex-count counterexample are explicit.",
+      session_id: reviewSession.session_id,
+      statement_version: 1,
     },
     reviewer,
   );

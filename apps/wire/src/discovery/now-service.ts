@@ -43,6 +43,7 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
            CASE e.type
              WHEN 'claim.created' THEN 'claim.promoted'
              WHEN 'review.created' THEN 'review.published'
+             WHEN 'problem.statement-reviewed' THEN 'review.published'
              WHEN 'evidence.created' THEN 'evidence.filed'
              ELSE e.type
            END AS type,
@@ -55,14 +56,17 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
          JOIN problems p ON p.id = e.problem_id
          LEFT JOIN enrollment_fellows f
            ON f.fellow_id = e.actor_fellow_id
-         WHERE p.status != 'private-draft' AND p.unlisted = 0 AND e.type IN (
+         WHERE p.status != 'private-draft' AND p.unlisted = 0 AND (e.type IN (
            'problem.admitted',
            'claim.created',
            'evidence.created',
            'review.created',
            'hypothesis.killed',
            'dead_end.recorded'
-         )
+         ) OR (e.type = 'problem.statement-reviewed' AND EXISTS (
+           SELECT 1 FROM event_content c WHERE c.event_id = e.id
+             AND json_extract(c.payload_json, '$.previous_status') = 'sharpening'
+         )))
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 20`,
     )
@@ -101,6 +105,8 @@ function formatMaterialEventSummary(row: EventRow): string {
     case "claim.promoted":
       return `${actor} promoted claim ${row.object_id} on ${row.problem_id}`;
     case "review.published":
+      if (row.object_kind === "problem")
+        return `${actor} reviewed the statement of ${row.problem_id}`;
       return `${actor} published review ${row.object_id} on ${row.problem_id}`;
     case "evidence.filed":
       return `${actor} filed evidence for ${row.object_id} on ${row.problem_id}`;

@@ -887,6 +887,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (
       pathname !== "/cursor" &&
       !pathname.startsWith("/v1/sessions") &&
+      !/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname) &&
       pathname !== "/v1/sponsors/workshop"
     ) {
       await next();

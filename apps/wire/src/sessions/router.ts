@@ -17,6 +17,10 @@ import {
   type PackProfile,
   PackResponseSchema,
   PackTargetQuerySchema,
+  type ProblemCode,
+  ProblemStatementReviewEventSchema,
+  ProblemStatementReviewRequestSchema,
+  ProblemStatementReviewResponseSchema,
   PromoteRequestSchema,
   PromoteResponseSchema,
   type RateLimitBudget,
@@ -614,6 +618,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "gaps/close": ["gaps", GapClosedResponseSchema],
     relations: ["relations", RelationFiledResponseSchema],
     review: ["review", ReviewResponseSchema],
+    "statement-review": ["review", ProblemStatementReviewResponseSchema],
     hypotheses: ["hypotheses", HypothesisResponseSchema],
     "hypothesis-kill": ["hypothesis-kill", HypothesisKillResponseSchema],
     evidence: ["evidence", EvidenceResponseSchema],
@@ -980,10 +985,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                FROM idempotency
                WHERE problem_id = ? AND idempotency_key = ?
                  AND event_id = ? AND event_seq = ?
-                 AND EXISTS (
-                   SELECT 1 FROM fellow_tokens
-                   WHERE credential_id = ? AND revoked_at IS NULL
-                 )
+                 AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
                ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
             )
             .bind(
@@ -1143,12 +1145,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
     });
 
+  // SQL's current clock is evaluated inside the publication transaction, after
+  // any screening wait. A pause or expiry need not revoke the token itself.
+  const LIVE_LEDGER_CREDENTIAL_SQL = `SELECT 1 AS live FROM fellow_tokens t
+    JOIN enrollment_fellows f ON f.fellow_id = t.fellow_id AND f.sponsor_id = t.sponsor_id
+    WHERE t.credential_id = ? AND t.revoked_at IS NULL AND f.status = 'active'
+      AND t.issued_at <= unixepoch('subsec') * 1000
+      AND t.expires_at > unixepoch('subsec') * 1000
+      AND COALESCE(json_extract(t.granted_resources_json, '$.fellowGrantExpiresAt'),
+                   json_extract(t.granted_resources_json, '$.fellow_grant_expires_at'),
+                   t.expires_at) > unixepoch('subsec') * 1000`;
+
   async function credentialIsLiveAtCommit(db: Env["DB"], credentialId: string): Promise<boolean> {
     const row = await db
-      .prepare(
-        `SELECT 1 AS live FROM fellow_tokens
-         WHERE credential_id = ? AND revoked_at IS NULL`,
-      )
+      .prepare(LIVE_LEDGER_CREDENTIAL_SQL)
       .bind(credentialId)
       .first<{ live: number }>();
     return row !== null && row !== undefined;
@@ -1331,6 +1341,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/hypotheses/:hid/kill",
     "/v1/sessions/:id/evidence",
     "/v1/sessions/:id/close",
+    "/v1/problems/:id/statement-review",
   ] as const;
   for (const path of FELLOW_WRITE_RECEIPT_PATHS) {
     app.use(path, async (c, next) => {
@@ -4972,6 +4983,325 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       }
       throw error;
+    }
+  });
+
+  // Statement review is a Fellow session write even though its URL names the problem.
+  app.post("/v1/problems/:id/statement-review", async (c) => {
+    const refuse = (
+      code: ProblemCode,
+      status: number,
+      detail: string,
+      fixHint: string,
+      rule: "A5" | "P1" = "A5",
+    ) =>
+      validatedProblem({
+        code,
+        status,
+        title: "Statement review could not be applied",
+        detail,
+        fixHint,
+        rule,
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problems.v1.json",
+          example: {
+            session_id: "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            statement_version: 1,
+            verdict: "statement-clear",
+            basis: "The domain and counterexample are explicit.",
+          },
+        },
+      });
+    try {
+      const auth = await authenticate(c.req.raw);
+      if (!auth.ok) return auth.response;
+      const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+      if (key instanceof Response) return key;
+      const rawBody = await readJsonBody(c.req.raw);
+      if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+      const parsed = ProblemStatementReviewRequestSchema.safeParse(rawBody);
+      if (!parsed.success)
+        return refuse(
+          "REVIEW_BODY_INVALID",
+          422,
+          "Statement review requires an owned session, exact statement version, verdict and non-empty basis.",
+          "Open a session, read the current formulation and send session_id, statement_version, verdict and basis.",
+        );
+      const db = c.env.DB;
+      const problemId = c.req.param("id");
+      const digest = await writeRequestDigest(c.req.path, parsed.data);
+      const replay = () =>
+        replayResponseBeforeMutablePreconditions(
+          db,
+          "review",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+          (raw) => ProblemStatementReviewResponseSchema.parse(JSON.parse(raw)),
+        );
+      try {
+        const previous = await replay();
+        if (previous) return previous;
+      } catch (error) {
+        if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw error;
+      }
+      const session = await openSessionOf(db, parsed.data.session_id, auth.binding.fellowId);
+      if (session instanceof Response) return session;
+      if (session.problem_id !== problemId)
+        return refuse(
+          "SESSION_NOT_FOUND",
+          404,
+          "No owned session on this problem has this id.",
+          "Open a session on the problem being reviewed.",
+        );
+      const problem = await db
+        .prepare(`SELECT status, current_statement_version, sponsor_id,
+        created_by_fellow_id, unlisted FROM problems WHERE id = ?`)
+        .bind(problemId)
+        .first<{
+          status: string;
+          current_statement_version: number;
+          sponsor_id: string | null;
+          created_by_fellow_id: string | null;
+          unlisted: number;
+        }>();
+      if (!problem || problem.status === "private-draft")
+        return refuse(
+          "PROBLEM_NOT_FOUND",
+          404,
+          "No published problem with this id is available.",
+          "Review a published problem formulation.",
+        );
+      const decision = authorizeFellowWrite({
+        effect: "review",
+        credential: auth.binding,
+        target: {
+          kind: "existing-problem",
+          problemId,
+          publication: "published",
+          unlisted: problem.unlisted === 1,
+          membershipRole: await membershipRoleOf(db, problemId, auth.binding.fellowId),
+        },
+        usage: {
+          eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+          artifactBytesRecorded: 0,
+        },
+        now: Date.now(),
+      });
+      if (decision.decision !== "allow") return writeRefusedProblem();
+      if (
+        auth.binding.fellowId === problem.created_by_fellow_id ||
+        auth.binding.sponsorId === problem.sponsor_id
+      )
+        return refuse(
+          "REVIEWER_IS_AUTHOR",
+          422,
+          "A proposer or its sponsor cannot certify its own formulation.",
+          "Have an independent Fellow from a different sponsor review the statement.",
+          "P1",
+        );
+      const stale = () =>
+        refuse(
+          "OBJECT_VERSION_CONFLICT",
+          409,
+          "The problem state or statement version no longer admits this review.",
+          "Read the current formulation and submit a new review with a new Idempotency-Key.",
+        );
+      if (
+        !["sharpening", "active", "dormant", "under-result-review"].includes(problem.status) ||
+        problem.current_statement_version !== parsed.data.statement_version
+      )
+        return stale();
+      const duplicate = async () =>
+        (await db
+          .prepare(`SELECT 1 FROM problem_statement_reviews
+        WHERE problem_id = ? AND version = ? AND reviewer_fellow_id = ?`)
+          .bind(problemId, parsed.data.statement_version, auth.binding.fellowId)
+          .first()) !== null;
+      const duplicateRefusal = () =>
+        refuse(
+          "REVIEWER_ALREADY_REVIEWED",
+          409,
+          "This Fellow already reviewed this statement version.",
+          "Review a later version or another problem.",
+          "P1",
+        );
+      if (await duplicate()) return duplicateRefusal();
+      const screened = await screenWithQuota(
+        c.env,
+        {
+          fellowId: auth.binding.fellowId,
+          problemId,
+          sponsorId: auth.binding.sponsorId,
+          sessionId: session.session_id,
+          route: "statement-review",
+          replayTarget: c.req.path,
+          idempotencyKey: key,
+          requestDigest: digest,
+        },
+        {
+          problemId,
+          fellowId: auth.binding.fellowId,
+          kind: "review",
+          statement: JSON.stringify(parsed.data),
+          falsifier: null,
+        },
+      );
+      if ("error" in screened) return screened.error;
+      const { screening, reservation } = screened;
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
+      const createdAt = new Date().toISOString();
+      const status =
+        problem.status === "sharpening" && parsed.data.verdict === "statement-clear"
+          ? "active"
+          : problem.status;
+      const payload = ProblemStatementReviewEventSchema.parse({
+        ...parsed.data,
+        problem_id: problemId,
+        previous_status: problem.status,
+        status,
+      });
+      try {
+        await writeLedgerEvent(
+          db,
+          {
+            problemId,
+            eventId,
+            idempotencyKey: kraterIdempotencyKey,
+            requestDigest: digest,
+            eventType: "problem.statement-reviewed",
+            objectKind: "problem",
+            objectId: problemId,
+            objectVersion: parsed.data.statement_version,
+            payloadJson: canonicalJson(payload),
+            createdAt,
+            attribution: {
+              fellowId: auth.binding.fellowId,
+              sponsorId: auth.binding.sponsorId,
+              sessionId: session.session_id,
+              modelSelfDeclared: auth.binding.model,
+              harness: auth.binding.harness,
+              credentialId: auth.binding.credentialId,
+            },
+          },
+          {
+            preconditionSql: ` AND status = ? AND current_statement_version = ?
+            AND sponsor_id IS ? AND created_by_fellow_id IS ?
+            AND EXISTS (SELECT 1 FROM sessions WHERE session_id = ? AND problem_id = ?
+              AND fellow_id = ? AND closed_at IS NULL)
+            AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)`,
+            preconditionBindings: [
+              problem.status,
+              parsed.data.statement_version,
+              problem.sponsor_id,
+              problem.created_by_fellow_id,
+              session.session_id,
+              problemId,
+              auth.binding.fellowId,
+            ],
+            statementsAfterEvent: () => [
+              db
+                .prepare(`INSERT INTO problem_statement_reviews
+              (problem_id, version, reviewer_fellow_id, verdict, basis, created_at)
+              SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+                .bind(
+                  problemId,
+                  parsed.data.statement_version,
+                  auth.binding.fellowId,
+                  parsed.data.verdict,
+                  parsed.data.basis,
+                  createdAt,
+                  eventId,
+                ),
+              db
+                .prepare(
+                  `UPDATE problems SET status = ? WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+                )
+                .bind(status, problemId, eventId),
+            ],
+          },
+          {},
+          atomicLedgerReplayCompanion({
+            db,
+            scope: "review",
+            screening,
+            principal: auth.binding.fellowId,
+            target: c.req.path,
+            callerKey: key,
+            requestDigest: digest,
+            claimToken,
+            kraterIdempotencyKey,
+            credentialId: auth.binding.credentialId,
+            session,
+            reservationId: reservation.reservationId,
+            responseFor: () =>
+              ProblemStatementReviewResponseSchema.parse({
+                reviewed: true,
+                problem_id: problemId,
+                verdict: parsed.data.verdict,
+                status,
+              }),
+          }),
+        );
+        const settled = await replay();
+        if (!settled) throw new Error("Statement review committed without its atomic replay");
+        scheduleCommittedPromotionNudge(c);
+        return settled;
+      } catch (error) {
+        try {
+          const winner = await replay();
+          if (winner) return winner;
+        } catch (replayError) {
+          await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+          if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+          throw replayError;
+        }
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (
+          isEventBudgetAbort(error) ||
+          !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+        )
+          return writeRefusedProblem();
+        if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+        const currentSession = await openSessionOf(db, session.session_id, auth.binding.fellowId);
+        if (currentSession instanceof Response) return currentSession;
+        if (await duplicate()) return duplicateRefusal();
+        const currentProblem = await db
+          .prepare(`SELECT status, current_statement_version, sponsor_id,
+          created_by_fellow_id FROM problems WHERE id = ?`)
+          .bind(problemId)
+          .first<{
+            status: string;
+            current_statement_version: number;
+            sponsor_id: string | null;
+            created_by_fellow_id: string | null;
+          }>();
+        if (
+          !currentProblem ||
+          currentProblem.status !== problem.status ||
+          currentProblem.current_statement_version !== problem.current_statement_version ||
+          currentProblem.sponsor_id !== problem.sponsor_id ||
+          currentProblem.created_by_fellow_id !== problem.created_by_fellow_id
+        )
+          return stale();
+        if (error instanceof KraterLedgerPreconditionError) return stale();
+        throw error;
+      }
+    } catch {
+      return privateNoStore(
+        validatedProblem({
+          status: 500,
+          code: "INTERNAL_ERROR",
+          title: "Statement review is unavailable",
+          detail: "The Worker could not complete this request safely.",
+          fixHint:
+            "Retry the identical request with the same Idempotency-Key to recover a committed outcome.",
+        }),
+      );
     }
   });
 

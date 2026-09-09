@@ -48,7 +48,7 @@
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 32949
+      "body_bytes": 34663
     },
     {
       "id": "rubrics",

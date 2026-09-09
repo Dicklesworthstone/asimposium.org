@@ -794,6 +794,15 @@
     "statement_review_request": {
       "type": "object",
       "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
         "verdict": {
           "type": "string",
           "enum": [
@@ -808,6 +817,8 @@
         }
       },
       "required": [
+        "session_id",
+        "statement_version",
         "verdict",
         "basis"
       ],
@@ -849,6 +860,65 @@
         "reviewed",
         "problem_id",
         "verdict",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "statement_review_event": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "statement-clear",
+            "statement-unclear"
+          ]
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "problem_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "previous_status": {
+          "type": "string",
+          "enum": [
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review"
+          ]
+        }
+      },
+      "required": [
+        "session_id",
+        "statement_version",
+        "verdict",
+        "basis",
+        "problem_id",
+        "previous_status",
         "status"
       ],
       "additionalProperties": false
@@ -1235,6 +1305,7 @@
     "reanchor_request",
     "statement_review_request",
     "statement_review_response",
+    "statement_review_event",
     "detail",
     "governance_event",
     "governance_idempotency_key"

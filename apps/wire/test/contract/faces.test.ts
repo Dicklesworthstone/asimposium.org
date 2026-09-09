@@ -566,6 +566,7 @@ describe("face wire format", () => {
     }
     expect([...body.agent_writes].sort()).toEqual(
       [
+        "POST /v1/problems/{id}/statement-review",
         "POST /v1/device-code",
         "POST /v1/device-token",
         "POST /v1/fellows",

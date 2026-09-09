@@ -12,6 +12,7 @@ import {
   ProblemLifecycleContractsSchema,
   ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
+  ProblemStatementReviewEventSchema,
   ProblemStatementReviewRequestSchema,
   ProblemStatementReviewResponseSchema,
   ProblemStatementVersionSchema,
@@ -20,6 +21,25 @@ import {
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
 } from "../../src/problems.ts";
+
+test("statement review requests and events pin an attributed public formulation", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  for (const [name, contract, property] of [
+    ["statement-review", ProblemStatementReviewRequestSchema, "statement_review_request"],
+    ["statement-review-event", ProblemStatementReviewEventSchema, "statement_review_event"],
+  ] as const) {
+    const published = new Ajv2020({ strict: true }).compile(schema.properties[property]);
+    for (const directory of ["valid", "invalid"] as const) {
+      const fixture = JSON.parse(
+        readFileSync(new URL(`../fixtures/${directory}/${name}.json`, import.meta.url), "utf8"),
+      );
+      expect(contract.safeParse(fixture).success).toBe(directory === "valid");
+      expect(published(fixture)).toBe(directory === "valid");
+    }
+  }
+});
 
 test("public governance events preserve the sponsor actor and exact formulation transition", () => {
   const valid = JSON.parse(
@@ -259,6 +279,8 @@ test("W5.1 Claim reanchor request validates claim_id and base_version", () => {
 
 test("W5.1 Problem statement review contracts validate verdict and basis", () => {
   const validRequest = {
+    session_id: "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    statement_version: 1,
     verdict: "statement-clear",
     basis: "The formulation is rigorous, types are exact, and falsifier is sharp.",
   };

@@ -131,21 +131,22 @@ const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
 /**
  * The raw bundle is evidence, not a diagnostic. A one-command measurement of
- * the exact production/counterfactual build on 2026-09-09 observed 1,445,603
- * and 1,492,222 raw canonical-evidence bytes after public index metadata was
- * served; the old 1.49 MB limit truncated the counterfactual graph proof.
+ * the exact production/counterfactual build on 2026-09-09 observed 1,451,882
+ * and 1,498,500 raw canonical-evidence bytes after attributed statement reviews
+ * were connected; the 1.495 MB limit truncated the counterfactual graph proof.
  *
  * Keep the ordinary owned-command diagnostics at 1 MB. This narrowly gives
- * the isolated graph proof 2,778 bytes above its measured raw maximum. Its
- * canonical fresh result remains below the existing 3 MB pinned-result cap:
+ * the isolated graph proof a bounded 2 MB transport so ordinary feature growth
+ * does not require a succession of kilobyte cap changes. Its canonical fresh
+ * result remains below a bounded 5 MB pinned-result cap:
  * strict canonical JSON cannot contain a literal control byte, and nesting it
  * in the result JSON expands only quote/backslash bytes, at most twofold. The
  * derived bound below verifies that relationship. A future larger bundle fails
  * closed at the isolated limit rather than widening any other transport.
  */
-const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 1_495_000;
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = 2_000_000;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
-const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 3 * S3_OWNED_OUTPUT_BYTES;
+const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 5 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
 const S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES = 64 * 1024;
 const S3_FRESH_RUNTIME_BOOTSTRAP_NAME = "bootstrap.json";
