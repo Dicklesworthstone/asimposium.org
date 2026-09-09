@@ -40,7 +40,8 @@ test("W5.1 Problem lifecycle contracts validate all states and directions", () =
 test("W5.1 Famous-problem guardrail enforces canonical formulation and standing banner", () => {
   const validGuardrail = {
     canonical_formulation: "Every even integer > 2 is the sum of two primes.",
-    variant_distinctions: "Distinct from the weak Goldbach conjecture which applies to odd numbers.",
+    variant_distinctions:
+      "Distinct from the weak Goldbach conjecture which applies to odd numbers.",
     authoritative_references: ["https://doi.org/10.1000/182"],
     standing_banner: "Resolutions require extraordinary independent verification.",
   };
@@ -48,7 +49,8 @@ test("W5.1 Famous-problem guardrail enforces canonical formulation and standing 
 
   // Empty references refused
   expect(
-    ProblemFamousGuardrailSchema.safeParse({ ...validGuardrail, authoritative_references: [] }).success,
+    ProblemFamousGuardrailSchema.safeParse({ ...validGuardrail, authoritative_references: [] })
+      .success,
   ).toBe(false);
 });
 
@@ -86,9 +88,13 @@ test("W5.1 Problem statement versions enforce hash and positive version", () => 
   expect(ProblemStatementVersionSchema.safeParse(validVersion).success).toBe(true);
 
   // Version <= 0 refused
-  expect(ProblemStatementVersionSchema.safeParse({ ...validVersion, version: 0 }).success).toBe(false);
+  expect(ProblemStatementVersionSchema.safeParse({ ...validVersion, version: 0 }).success).toBe(
+    false,
+  );
   // Malformed norm_hash refused
-  expect(ProblemStatementVersionSchema.safeParse({ ...validVersion, norm_hash: "not-sha" }).success).toBe(false);
+  expect(
+    ProblemStatementVersionSchema.safeParse({ ...validVersion, norm_hash: "not-sha" }).success,
+  ).toBe(false);
 });
 
 test("W5.1 Sponsor problem brief enforces fields and status", () => {
@@ -106,7 +112,9 @@ test("W5.1 Sponsor problem brief enforces fields and status", () => {
     updated_at: "2026-09-08T12:00:00.000Z",
   };
   expect(SponsorProblemBriefSchema.safeParse(validBrief).success).toBe(true);
-  expect(SponsorProblemBriefSchema.safeParse({ ...validBrief, status: "invalid" }).success).toBe(false);
+  expect(SponsorProblemBriefSchema.safeParse({ ...validBrief, status: "invalid" }).success).toBe(
+    false,
+  );
 });
 
 test("W5.1 Fellow propose problem request validates inputs", () => {
@@ -124,7 +132,9 @@ test("W5.1 Fellow propose problem request validates inputs", () => {
     ProposeProblemRequestSchema.safeParse({ ...validProposal, title: "a".repeat(121) }).success,
   ).toBe(false);
   // Empty areas refused
-  expect(ProposeProblemRequestSchema.safeParse({ ...validProposal, areas: [] }).success).toBe(false);
+  expect(ProposeProblemRequestSchema.safeParse({ ...validProposal, areas: [] }).success).toBe(
+    false,
+  );
 });
 
 test("W5.1 Problem lifecycle action discriminated union parses valid transitions", () => {

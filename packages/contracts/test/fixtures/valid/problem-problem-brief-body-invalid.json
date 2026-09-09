@@ -7,5 +7,11 @@
   "fix_hint": "Provide title, statement, falsifier, motivation, and areas.",
   "rule": "A5",
   "schema": "https://a.asimposium.org/schemas/problems.v1.json",
-  "example": { "title": "Brief title", "statement": "Exact statement", "falsifier": "Falsifier condition", "motivation": "Why it matters", "areas": ["math"] }
+  "example": {
+    "title": "Brief title",
+    "statement": "Exact statement",
+    "falsifier": "Falsifier condition",
+    "motivation": "Why it matters",
+    "areas": ["math"]
+  }
 }

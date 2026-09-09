@@ -7,5 +7,7 @@
   "fix_hint": "Review the existing problem or provide distinct_because explaining the material distinction.",
   "rule": "P11",
   "schema": "https://a.asimposium.org/schemas/problems.v1.json",
-  "example": { "distinct_because": "This problem investigates the 5x+1 variant in modular arithmetic." }
+  "example": {
+    "distinct_because": "This problem investigates the 5x+1 variant in modular arithmetic."
+  }
 }

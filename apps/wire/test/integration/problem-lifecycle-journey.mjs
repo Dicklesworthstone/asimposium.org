@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 
 /**
  * W5.1 Problem Lifecycle & Statement Drift Journey:
@@ -38,7 +40,8 @@ export async function problemLifecycleJourney({
     title: "Collatz 3x+1 Modular Cycles",
     statement: "Every non-trivial cycle in the 3x+1 mapping modulo 2^k has length bounded by k.",
     falsifier: "A cycle modulo 2^k with length strictly exceeding k.",
-    motivation: "Bounding modular cycle length constrains non-trivial integer cycles in the Collatz map.",
+    motivation:
+      "Bounding modular cycle length constrains non-trivial integer cycles in the Collatz map.",
     areas: ["number-theory", "dynamical-systems"],
   };
 
@@ -52,6 +55,55 @@ export async function problemLifecycleJourney({
   );
   assert.ok(savedBrief.brief.id.startsWith("brief-"));
   assert.equal(savedBrief.brief.status, "active");
+
+  async function storedBrief(id) {
+    return env.DB.prepare("SELECT * FROM sponsor_problem_briefs WHERE id = ?").bind(id).first();
+  }
+  function briefDigest(row) {
+    return createHash("sha256").update(JSON.stringify(row)).digest("hex");
+  }
+  async function refuseBriefEdit(sponsor, id, title) {
+    const before = briefDigest(await storedBrief(id));
+    const refused = await sponsorCall(
+      sponsor,
+      "POST",
+      "/v1/sponsors/problem-briefs",
+      "save-problem-brief",
+      { ...briefPayload, id, title },
+      404,
+    );
+    assert.equal(refused.code, "BRIEF_NOT_FOUND");
+    assert.equal(
+      briefDigest(await storedBrief(id)),
+      before,
+      "A refused brief edit must preserve every stored field",
+    );
+  }
+
+  // A valid signature identifies the caller; it must not authorize edits to
+  // another sponsor's known brief ID. Compare hashes without logging drafts.
+  await refuseBriefEdit(sponsorB, savedBrief.brief.id, "Cross-sponsor overwrite attempt");
+  const fellowA = await call("/v1/hello", undefined, fellowA1Token);
+  const editedBrief = await sponsorCall(
+    sponsorA,
+    "POST",
+    "/v1/sponsors/problem-briefs",
+    "save-problem-brief",
+    {
+      ...briefPayload,
+      id: savedBrief.brief.id,
+      title: "Assigned modular-cycle brief",
+      assigned_fellow_id: fellowA.fellow.fellow_id,
+    },
+    201,
+  );
+  const storedEditedBrief = await storedBrief(savedBrief.brief.id);
+  assert.equal(editedBrief.brief.created_at, savedBrief.brief.created_at);
+  assert.equal(editedBrief.brief.status, storedEditedBrief.status);
+  assert.equal(editedBrief.brief.assigned_fellow_id, fellowA.fellow.fellow_id);
+  assert.equal(storedEditedBrief.assigned_fellow_id, fellowA.fellow.fellow_id);
+  assert.ok(storedEditedBrief.title === "Assigned modular-cycle brief");
+  assert.ok(editedBrief.brief.title === storedEditedBrief.title);
 
   const briefList = await sponsorCall(
     sponsorA,
@@ -81,6 +133,7 @@ export async function problemLifecycleJourney({
     200,
   );
   assert.equal(withdrawRes.withdrawn, true);
+  await refuseBriefEdit(sponsorA, withdrawableBrief.brief.id, "Edit after withdrawal");
 
   // --- Step 2: Problem Proposal & Private Draft ---
   const proposalPayload = {
@@ -102,25 +155,27 @@ export async function problemLifecycleJourney({
   };
 
   // Cross-sponsor fellow cannot adopt Sponsor A's brief
-  const unassignedRefusal = await call(
-    "/v1/problems",
-    proposalPayload,
-    fellowB1Token,
-    403,
-  );
+  const unassignedRefusal = await call("/v1/problems", proposalPayload, fellowB1Token, 403);
   assert.equal(unassignedRefusal.code, "BRIEF_NOT_ASSIGNED");
 
   // Authorized Fellow A1 adopts the brief and proposes the problem
-  const proposed = await call(
-    "/v1/problems",
-    proposalPayload,
-    fellowA1Token,
-    201,
-  );
+  const proposed = await call("/v1/problems", proposalPayload, fellowA1Token, 201);
   const problemId = proposed.problem.id;
   assert.ok(problemId.startsWith("P-COLLATZ"));
   assert.equal(proposed.problem.status, "private-draft");
   assert.equal(proposed.problem.current_statement_version, 1);
+  await refuseBriefEdit(sponsorA, savedBrief.brief.id, "Edit after adoption");
+  console.log(
+    JSON.stringify({
+      stage: "problem-brief-write-isolation",
+      status: "pass",
+      refused_edits: ["other-sponsor", "withdrawn", "adopted"],
+      own_edit: "persisted",
+      assignment: "persisted",
+      created_at: "preserved",
+      boundary: "real local D1 and signed sponsor ingress; no OAuth or deployment claim",
+    }),
+  );
 
   // P11 duplicate screening: identical statement refuses without distinct_because
   const dupRefusal = await call(
@@ -172,7 +227,12 @@ export async function problemLifecycleJourney({
   assert.ok(publicIndexAfterPublish.problems.some((p) => p.id === problemId));
 
   // --- Step 4: P3 Claims Board Gate (Locked in Sharpening) ---
-  const sessionA1 = await call("/v1/sessions", { problem_id: problemId, intent: "prove" }, fellowA1Token, 201);
+  const sessionA1 = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "prove" },
+    fellowA1Token,
+    201,
+  );
   const draftA1 = await call(
     `/v1/sessions/${sessionA1.session_id}/workshop`,
     { type: "draft", title: "Sharpening claim draft", body_md: "Draft text", relates_to: [] },
@@ -208,7 +268,10 @@ export async function problemLifecycleJourney({
   // Independent Fellow B1 submits statement-clear review
   const independentReview = await call(
     `/v1/problems/${problemId}/statement-review`,
-    { verdict: "statement-clear", basis: "The formulation is rigorous, types are exact, and falsifier is sharp." },
+    {
+      verdict: "statement-clear",
+      basis: "The formulation is rigorous, types are exact, and falsifier is sharp.",
+    },
     fellowB1Token,
     200,
   );
@@ -259,7 +322,12 @@ export async function problemLifecycleJourney({
   assert.equal(driftedClaimRow.statement_drift, 1);
 
   // Review on drifted claim is refused (P9)
-  const sessionB1 = await call("/v1/sessions", { problem_id: problemId, intent: "review" }, fellowB1Token, 201);
+  const sessionB1 = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "review" },
+    fellowB1Token,
+    201,
+  );
   const driftedReview = await call(
     `/v1/sessions/${sessionB1.session_id}/review`,
     {
@@ -274,6 +342,51 @@ export async function problemLifecycleJourney({
   );
   assert.equal(driftedReview.code, "STATEMENT_DRIFT");
   assert.equal(driftedReview.rule, "P9");
+
+  async function claimLedgerDigest() {
+    const rows = await env.DB.batch([
+      env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? ORDER BY id").bind(problemId),
+      env.DB.prepare(
+        "SELECT * FROM claim_versions WHERE problem_id = ? ORDER BY claim_id, version",
+      ).bind(problemId),
+      env.DB.prepare("SELECT * FROM events WHERE problem_id = ? ORDER BY seq").bind(problemId),
+    ]);
+    return createHash("sha256")
+      .update(JSON.stringify(rows.map((row) => row.results)))
+      .digest("hex");
+  }
+
+  let policyFace;
+  async function refuseClaimWrite(path, body, token, code = "WRITE_REFUSED") {
+    const before = await claimLedgerDigest();
+    const refused = await call(path, body, token, code === "WRITE_REFUSED" ? 403 : 422);
+    assert.equal(refused.code, code);
+    assert.ok(ProblemDocumentSchema.safeParse(refused).success);
+    if (code === "WRITE_REFUSED") {
+      assert.equal(refused.detail, "This credential may not perform this write now.");
+      assert.equal(
+        refused.fix_hint,
+        "Check the console for the credential state or contact your sponsor.",
+      );
+      const encoded = JSON.stringify(refused);
+      if (policyFace === undefined) policyFace = encoded;
+      else assert.equal(encoded, policyFace, "Policy causes must share one coarse refusal face");
+    } else {
+      assert.equal(refused.schema, "https://a.asimposium.org/schemas/sessions.v1.json");
+    }
+    assert.equal(await claimLedgerDigest(), before, "Refusals must not mutate claims or events");
+  }
+
+  await refuseClaimWrite(
+    `/v1/sessions/${sessionB1.session_id}/reanchor`,
+    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    fellowB1Token,
+  );
+  await refuseClaimWrite(
+    `/v1/sessions/${sessionB1.session_id}/reanchor`,
+    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    fellowB1Token,
+  );
 
   // Re-anchor by author fellow clears statement_drift to 0
   const reanchorRes = await call(
@@ -388,7 +501,8 @@ export async function problemLifecycleJourney({
           remaining_external_validation: ["Full integer Collatz map"],
         },
       },
-      external_expert_review_proof: "Lean 4 formalized proof independently verified by 2 external experts.",
+      external_expert_review_proof:
+        "Lean 4 formalized proof independently verified by 2 external experts.",
     },
     200,
   );
@@ -401,7 +515,7 @@ export async function problemLifecycleJourney({
     fellowA1Token,
     201,
   );
-  const closedRefusal = await call(
+  await refuseClaimWrite(
     `/v1/sessions/${sessionA1.session_id}/promote`,
     {
       workshop_id: postResolveDraft.workshop_id,
@@ -410,9 +524,39 @@ export async function problemLifecycleJourney({
       falsifier: "Counterexample.",
     },
     fellowA1Token,
-    422,
+    "CLAIMS_BOARD_LOCKED",
   );
-  assert.equal(closedRefusal.code, "WRITE_REFUSED");
+  await refuseClaimWrite(
+    `/v1/sessions/${sessionA1.session_id}/revise`,
+    {
+      claim_id: promotedClaim.claim_id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "A revised conjecture on the resolved problem.",
+      falsifier: "A counterexample to the revised conjecture.",
+    },
+    fellowA1Token,
+    "CLAIMS_BOARD_LOCKED",
+  );
+  await refuseClaimWrite(
+    `/v1/sessions/${sessionA1.session_id}/reanchor`,
+    { claim_id: promotedClaim.claim_id, base_version: 1 },
+    fellowA1Token,
+    "CLAIMS_BOARD_LOCKED",
+  );
+  process.stdout.write(
+    `${JSON.stringify({
+      stage: "lifecycle-refusal-contracts",
+      status: "pass",
+      refused_writes: [
+        "wrong-author-reanchor",
+        "closed-promote",
+        "closed-revise",
+        "closed-reanchor",
+      ],
+      claim_and_event_mutations: 0,
+    })}\n`,
+  );
 
   // --- Step 9: Problem Retirement ---
   const retiredProblemProp = await call(

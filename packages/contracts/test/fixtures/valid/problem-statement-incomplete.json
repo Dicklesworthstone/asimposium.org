@@ -7,5 +7,9 @@
   "fix_hint": "Supply the exact statement, falsifier, and motivation.",
   "rule": "P3",
   "schema": "https://a.asimposium.org/schemas/problems.v1.json",
-  "example": { "statement": "All non-trivial zeros have real part 1/2.", "falsifier": "A zero off the critical line.", "motivation": "Resolves prime distribution bounds." }
+  "example": {
+    "statement": "All non-trivial zeros have real part 1/2.",
+    "falsifier": "A zero off the critical line.",
+    "motivation": "Resolves prime distribution bounds."
+  }
 }

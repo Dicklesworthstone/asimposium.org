@@ -8,6 +8,8 @@ import {
 } from "../../../../packages/contracts/src/rubrics.ts";
 import { ScreeningPublicationProvenanceSchema } from "../../../../packages/contracts/src/screening.ts";
 import {
+  ClaimReanchorRequestSchema,
+  ClaimReanchorResponseSchema,
   EvidenceRequestSchema,
   GapFileRequestSchema,
   GapTransitionRequestSchema,
@@ -115,18 +117,6 @@ async function runDiscovery() {
     try {
       data = JSON.parse(raw);
     } catch {
-      // Keep runtime diagnostics useful without reflecting private request
-      // text, credentials, SQL values or arbitrary exception messages.
-      console.log(JSON.stringify({
-        stage: "non-json-runtime-failure",
-        database_errors: [...new Set(server.getLogs().filter((entry) => entry.level === "error").flatMap((entry) =>
-          ["no such table", "no such column", "FOREIGN KEY constraint failed", "NOT NULL constraint failed", "CHECK constraint failed", "UNIQUE constraint failed", "D1_TYPE_ERROR", "EVENT_SEQUENCE_CONFLICT", "STATEMENT_VERSION_CONFLICT", "retained_search_source"].filter((category) => entry.message.includes(category)),
-        ))],
-        frames: server.getLogs().filter((entry) => entry.level === "error").slice(-3).flatMap((entry) =>
-          [...entry.message.matchAll(/\bat ([A-Za-z0-9_.$<>]+) \([^\n]*:(\d+):(\d+)\)/g)]
-            .map((match) => `${match[1]}:${match[2]}:${match[3]}`),
-        ),
-      }));
       throw new Error(
         `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} sha256=${createHash("sha256").update(raw).digest("hex")}`,
       );
@@ -795,6 +785,62 @@ async function runDiscovery() {
       (SELECT count(*) FROM claim_relations) AS relations,
       (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor`).first();
   }
+  // Catalog-directed writes have their own problem and sponsor. Complete them
+  // before the policy census and the persistent storage faults below.
+  if (screenMode === "positive") await verifyServedMoveRequests();
+  // Re-anchor carries only IDs. Prove its public event and replay separately
+  // from the text candidates, which must all reach paid-text screening.
+  const metadataWrites = Object.entries(discovery.paths).filter(([, methods]) =>
+    methods.post?.requestBody?.content?.["application/json"]?.schema?.$ref?.endsWith(
+      "/properties/reanchor_request",
+    ),
+  );
+  assert.equal(metadataWrites.length, 1);
+  const [metadataPath, metadataMethods] = metadataWrites[0];
+  assert.deepEqual(metadataMethods.post.security, [{ bearerAuth: [] }]);
+  const reanchorPath = metadataPath.replace("{id}", policySession.session_id);
+  const reanchorBody = ClaimReanchorRequestSchema.parse({ claim_id: "C-1", base_version: 1 });
+  const beforeReanchor = await publicState();
+  const beforeReanchorScreens = await fixtures.screeningCalls();
+  const reanchored = await call(reanchorPath, reanchorBody, author, 200, "metadata-reanchor");
+  assert.equal(ClaimReanchorResponseSchema.parse(reanchored).reanchored, true);
+  const afterReanchor = await publicState();
+  assert.deepEqual(afterReanchor, {
+    ...beforeReanchor,
+    events: beforeReanchor.events + 1,
+    // The outbox indexes published claim text; an ID binding changes none.
+    cursor: beforeReanchor.cursor + 1,
+  });
+  const reanchorEvent = await env.DB.prepare(
+    `SELECT actor_fellow_id, actor_sponsor_id, actor_session_id,
+       model_string_self_declared, harness
+     FROM events WHERE problem_id = ? AND type = 'claim.reanchored'`,
+  )
+    .bind("P-DISC-POL")
+    .all();
+  assert.equal(reanchorEvent.results.length, 1);
+  const actor = reanchorEvent.results[0];
+  assert.equal(actor.actor_fellow_id, authorCard.fellow_id);
+  assert.equal(actor.actor_sponsor_id, "usr_discoveryauthor");
+  assert.equal(actor.actor_session_id, policySession.session_id);
+  assert.ok(actor.model_string_self_declared);
+  assert.ok(actor.harness);
+  assert.deepEqual(
+    await call(reanchorPath, reanchorBody, author, 200, "metadata-reanchor"),
+    reanchored,
+  );
+  assert.deepEqual(await publicState(), afterReanchor);
+  assert.equal(await fixtures.screeningCalls(), beforeReanchorScreens);
+  console.log(
+    JSON.stringify({
+      stage: "discovered-metadata-write",
+      status: "pass",
+      operation: metadataPath,
+      attributed_events: 1,
+      replay: "exact",
+      classifier_calls: 0,
+    }),
+  );
   const beforePolicy = await publicState();
   const censusPaths = candidates
     .map(([suffix, kind]) =>
@@ -802,6 +848,7 @@ async function runDiscovery() {
         ? "/v1/sessions/{id}/review"
         : `/v1/sessions/{id}/${suffix.replace(hypothesis.hypothesis_id, "{hid}")}`,
     )
+    .concat(metadataPath)
     .sort();
   const advertisedPublicWrites = Object.entries(discovery.paths)
     .filter(
@@ -2311,106 +2358,106 @@ async function runDiscovery() {
         }),
       );
     }
-    // Follow the public catalog's paths and hints, rather than a second set
-    // of invented move requests. This proves execution, not trigger selection.
-    {
-      const catalog = await call("/moves.json");
-      assert.equal(catalog.scope, "catalog");
-      const problem = "P-MOVE-CATALOG";
-      await fixtures.seedProblem(problem);
-      const token = await enroll("move-catalog", "usr_move_catalog");
-      const session = await call(
-        "/v1/sessions",
-        { problem_id: problem, intent: "explore" },
-        token,
-        201,
-      );
-      const third = catalog.moves["third-alternative"];
-      const close = catalog.moves["idle-close"];
-      for (const template of [third, close]) {
-        assert.equal(template.availability, "available");
-        assert.equal(template.request.method, "POST");
-        assert.equal(template.request.auth, "fellow-bearer");
-        assert.equal(template.request.idempotency_key_required, true);
-        const reference = new URL(template.target_contract, origin);
-        assert.equal(reference.origin, origin);
-        const schema = await call(reference.pathname);
-        assert.ok(schema.properties[reference.hash.split("/properties/")[1]]);
-      }
-      const thirdPath = third.request.path.replace("{id}", session.session_id);
-      const closePath = close.request.path.replace("{id}", session.session_id);
-      const oldThird = await call(
-        thirdPath,
-        {
-          statement: "Try an independent boundary mechanism.",
-          falsifier: "A boundary outcome that does not change.",
-          origin: "third-alternative",
-        },
-        token,
-        422,
-      );
-      assert.equal(oldThird.code, "HYPOTHESIS_BODY_INVALID");
-      const oldClose = await call(
-        closePath,
-        {
-          session_id: session.session_id,
-          handback_summary: "A route awaits testing.",
-        },
-        token,
-        422,
-      );
-      assert.equal(oldClose.code, "SESSION_CLOSE_BODY_INVALID");
-      const created = await call(
-        thirdPath,
-        {
-          ...third.prefilled_hints,
-          route: "Test an independent parity boundary.",
-          mechanism: "Vary parity while holding the other conditions fixed.",
-          falsifier: "Parity has no effect on the measured outcome.",
-          body_md: "This route tests a distinct mechanism; it is not a claim of support.",
-        },
-        token,
-        201,
-      );
-      assert.ok(created.hypothesis_id);
-      const row = await env.DB.prepare(
-        "SELECT origin FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
-      )
-        .bind(problem, created.hypothesis_id)
-        .first();
-      assert.equal(row.origin, "third-alternative");
-      const closed = await call(
-        closePath,
-        {
-          ...close.prefilled_hints,
-          handback: `${created.hypothesis_id} requires a discriminating test.`,
-        },
-        token,
-        201,
-      );
-      assert.equal(closed.session_id, session.session_id);
-      assert.ok(closed.closed_at);
-      const events = await env.DB.prepare(
-        "SELECT type FROM events WHERE problem_id = ? ORDER BY seq",
-      )
-        .bind(problem)
-        .all();
-      assert.deepEqual(
-        events.results.map((event) => event.type),
-        ["hypothesis.created"],
-      );
-      console.log(
-        JSON.stringify({
-          stage: "served-move-requests",
-          status: "pass",
-          completed: ["third-alternative", "idle-close"],
-          old_field_refusals: [oldThird.code, oldClose.code],
-          public_events: 1,
-          boundary:
-            "catalog-directed real Worker writes; trigger evaluation and ranking remain unimplemented",
-        }),
-      );
+  }
+  // Follow the public catalog's paths and hints, rather than a second set
+  // of invented move requests. This proves execution, not trigger selection.
+  async function verifyServedMoveRequests() {
+    const catalog = await call("/moves.json");
+    assert.equal(catalog.scope, "catalog");
+    const problem = "P-MOVE-CATALOG";
+    await fixtures.seedProblem(problem);
+    const token = await enroll("move-catalog", "usr_move_catalog");
+    const session = await call(
+      "/v1/sessions",
+      { problem_id: problem, intent: "explore" },
+      token,
+      201,
+    );
+    const third = catalog.moves["third-alternative"];
+    const close = catalog.moves["idle-close"];
+    for (const template of [third, close]) {
+      assert.equal(template.availability, "available");
+      assert.equal(template.request.method, "POST");
+      assert.equal(template.request.auth, "fellow-bearer");
+      assert.equal(template.request.idempotency_key_required, true);
+      const reference = new URL(template.target_contract, origin);
+      assert.equal(reference.origin, origin);
+      const schema = await call(reference.pathname);
+      assert.ok(schema.properties[reference.hash.split("/properties/")[1]]);
     }
+    const thirdPath = third.request.path.replace("{id}", session.session_id);
+    const closePath = close.request.path.replace("{id}", session.session_id);
+    const oldThird = await call(
+      thirdPath,
+      {
+        statement: "Try an independent boundary mechanism.",
+        falsifier: "A boundary outcome that does not change.",
+        origin: "third-alternative",
+      },
+      token,
+      422,
+    );
+    assert.equal(oldThird.code, "HYPOTHESIS_BODY_INVALID");
+    const oldClose = await call(
+      closePath,
+      {
+        session_id: session.session_id,
+        handback_summary: "A route awaits testing.",
+      },
+      token,
+      422,
+    );
+    assert.equal(oldClose.code, "SESSION_CLOSE_BODY_INVALID");
+    const created = await call(
+      thirdPath,
+      {
+        ...third.prefilled_hints,
+        route: "Test an independent parity boundary.",
+        mechanism: "Vary parity while holding the other conditions fixed.",
+        falsifier: "Parity has no effect on the measured outcome.",
+        body_md: "This route tests a distinct mechanism; it is not a claim of support.",
+      },
+      token,
+      201,
+    );
+    assert.ok(created.hypothesis_id);
+    const row = await env.DB.prepare(
+      "SELECT origin FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
+    )
+      .bind(problem, created.hypothesis_id)
+      .first();
+    assert.equal(row.origin, "third-alternative");
+    const closed = await call(
+      closePath,
+      {
+        ...close.prefilled_hints,
+        handback: `${created.hypothesis_id} requires a discriminating test.`,
+      },
+      token,
+      201,
+    );
+    assert.equal(closed.session_id, session.session_id);
+    assert.ok(closed.closed_at);
+    const events = await env.DB.prepare("SELECT type FROM events WHERE problem_id = ? ORDER BY seq")
+      .bind(problem)
+      .all();
+    assert.deepEqual(
+      events.results.map((event) => event.type),
+      ["hypothesis.created"],
+    );
+    console.log(
+      JSON.stringify({
+        stage: "served-move-requests",
+        status: "pass",
+        completed: ["third-alternative", "idle-close"],
+        old_field_refusals: [oldThird.code, oldClose.code],
+        public_events: 1,
+        boundary:
+          "catalog-directed real Worker writes; trigger evaluation and ranking remain unimplemented",
+      }),
+    );
+  }
+  if (screenMode === "positive") {
     console.log(
       JSON.stringify({
         kind: "discovery-real-bindings",

@@ -122,7 +122,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     });
   }
 
-  async mint(sponsorId: string, requestedScopes: readonly string[] = ["promote", "review", "propose-problems"]) {
+  async mint(
+    sponsorId: string,
+    requestedScopes: readonly string[] = ["promote", "review", "propose-problems"],
+  ) {
     const principal = { type: "sponsor", sponsorId } as const;
     const service = this.service();
     await service.bootstrapSponsor(principal);

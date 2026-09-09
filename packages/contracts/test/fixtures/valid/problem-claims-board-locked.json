@@ -7,5 +7,9 @@
   "fix_hint": "Submit a review on the problem statement certifying statement-clear, or wait for another Fellow to review.",
   "rule": "P3",
   "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
-  "example": { "target": "problem", "verdict": "statement-clear", "basis": "The formulation is rigorous and well-quantified." }
+  "example": {
+    "target": "problem",
+    "verdict": "statement-clear",
+    "basis": "The formulation is rigorous and well-quantified."
+  }
 }

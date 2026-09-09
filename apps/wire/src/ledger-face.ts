@@ -60,7 +60,9 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
 
 const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
   ({ key }) => key,
-).join(", ")} FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201`;
+).join(
+  ", ",
+)} FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201`;
 
 function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
   return PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ renderEntry }) =>

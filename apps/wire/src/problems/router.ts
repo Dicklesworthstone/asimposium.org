@@ -3,6 +3,7 @@ import {
   ProblemLifecycleActionRequestSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
+  SponsorProblemBriefSchema,
 } from "@asimposium/contracts";
 import { type Context, Hono } from "hono";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
@@ -44,7 +45,9 @@ async function readJsonBody(request: Request): Promise<unknown> {
 export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
-  async function authenticateFellow(request: Request): Promise<
+  async function authenticateFellow(
+    request: Request,
+  ): Promise<
     | { readonly ok: true; readonly binding: FellowCredentialBinding }
     | { readonly ok: false; readonly response: Response }
   > {
@@ -166,8 +169,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           status: 403,
           code: "BRIEF_NOT_ASSIGNED",
           title: "Problem brief is not assigned to this Fellow",
-          detail: "This problem brief was created by another sponsor or assigned to a different Fellow.",
-          fixHint: "Adopt only briefs assigned to your Fellow or created by your accountable sponsor.",
+          detail:
+            "This problem brief was created by another sponsor or assigned to a different Fellow.",
+          fixHint:
+            "Adopt only briefs assigned to your Fellow or created by your accountable sponsor.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -201,7 +206,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         code: "POSSIBLE_DUPLICATE",
         title: "A duplicate or near-duplicate problem already exists",
         detail: `The problem statement matches existing problem '${duplicateMatches.results[0]?.id ?? ""}'.`,
-        fixHint: "Review the existing problem or provide distinct_because explaining the material distinction.",
+        fixHint:
+          "Review the existing problem or provide distinct_because explaining the material distinction.",
         rule: "P11",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -213,13 +219,12 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    const rawSlug =
-      parsed.data.title
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "-")
-        .replace(/-+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 20);
+    const rawSlug = parsed.data.title
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 20);
     const slug = rawSlug.replace(/-+$/, "") || "PROB";
     const problemId = `P-${slug}-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
     const now = new Date().toISOString();
@@ -314,25 +319,22 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const db = c.env.DB;
     const problemId = c.req.param("id");
 
-    const problem = await db
-      .prepare("SELECT * FROM problems WHERE id = ?")
-      .bind(problemId)
-      .first<{
-        id: string;
-        public_seq: number;
-        status: string;
-        unlisted: number;
-        sponsor_id: string | null;
-        created_by_fellow_id: string | null;
-        title: string;
-        current_statement_version: number;
-        resolution_direction: string | null;
-        resolution_summary: string | null;
-        resolution_no_claim_boundary: string | null;
-        famous_guardrail: string | null;
-        created_at: string;
-        updated_at: string;
-      }>();
+    const problem = await db.prepare("SELECT * FROM problems WHERE id = ?").bind(problemId).first<{
+      id: string;
+      public_seq: number;
+      status: string;
+      unlisted: number;
+      sponsor_id: string | null;
+      created_by_fellow_id: string | null;
+      title: string;
+      current_statement_version: number;
+      resolution_direction: string | null;
+      resolution_summary: string | null;
+      resolution_no_claim_boundary: string | null;
+      famous_guardrail: string | null;
+      created_at: string;
+      updated_at: string;
+    }>();
 
     if (!problem) {
       return validatedProblem({
@@ -446,15 +448,12 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const db = c.env.DB;
     const problemId = c.req.param("id");
 
-    const problem = await db
-      .prepare("SELECT * FROM problems WHERE id = ?")
-      .bind(problemId)
-      .first<{
-        id: string;
-        status: string;
-        sponsor_id: string | null;
-        created_by_fellow_id: string | null;
-      }>();
+    const problem = await db.prepare("SELECT * FROM problems WHERE id = ?").bind(problemId).first<{
+      id: string;
+      status: string;
+      sponsor_id: string | null;
+      created_by_fellow_id: string | null;
+    }>();
 
     if (!problem) {
       return validatedProblem({
@@ -475,12 +474,17 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         status: 422,
         code: "REVIEWER_IS_AUTHOR",
         title: "Proposer cannot review own problem statement",
-        detail: "P1 forbids self-certification; a problem statement must be reviewed by an independent Fellow.",
-        fixHint: "Have an independent Fellow from a different sponsor review the problem statement.",
+        detail:
+          "P1 forbids self-certification; a problem statement must be reviewed by an independent Fellow.",
+        fixHint:
+          "Have an independent Fellow from a different sponsor review the problem statement.",
         rule: "P1",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { verdict: "statement-clear", basis: "The formulation is clear and well-typed." },
+          example: {
+            verdict: "statement-clear",
+            basis: "The formulation is clear and well-typed.",
+          },
         },
       });
     }
@@ -500,7 +504,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { verdict: "statement-clear", basis: "The formulation is clear and well-typed." },
+          example: {
+            verdict: "statement-clear",
+            basis: "The formulation is clear and well-typed.",
+          },
         },
       });
     }
@@ -598,20 +605,26 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       ? JSON.stringify(parsed.data.famous_guardrail)
       : null;
 
-    await db
+    // Ownership and private state are checked by the same statement that
+    // changes the brief, including concurrent requests sharing a caller ID.
+    const saved = await db
       .prepare(
         `INSERT INTO sponsor_problem_briefs (
            id, sponsor_id, assigned_fellow_id, title, statement, falsifier,
            motivation, areas, famous_guardrail, status, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
          ON CONFLICT(id) DO UPDATE SET
+           assigned_fellow_id = excluded.assigned_fellow_id,
            title = excluded.title,
            statement = excluded.statement,
            falsifier = excluded.falsifier,
            motivation = excluded.motivation,
            areas = excluded.areas,
            famous_guardrail = excluded.famous_guardrail,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at
+         WHERE sponsor_problem_briefs.sponsor_id = excluded.sponsor_id
+           AND sponsor_problem_briefs.status = 'active'
+         RETURNING *`,
       )
       .bind(
         briefId,
@@ -626,24 +639,46 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         now,
         now,
       )
-      .run();
+      .first<{
+        id: string;
+        sponsor_id: string;
+        assigned_fellow_id: string | null;
+        title: string;
+        statement: string;
+        falsifier: string;
+        motivation: string;
+        areas: string;
+        famous_guardrail: string | null;
+        status: string;
+        created_at: string;
+        updated_at: string;
+      }>();
+
+    if (!saved) {
+      return validatedProblem({
+        status: 404,
+        code: "BRIEF_NOT_FOUND",
+        title: "Editable brief not found",
+        detail: "No active private brief with this id is available to this sponsor.",
+        fixHint:
+          "Use an active brief from your sponsor brief list, or omit id to create a new one.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: { method: "GET", path: "/v1/sponsors/problem-briefs" },
+        },
+        headers: { "cache-control": "private, no-store" },
+      });
+    }
 
     return c.json(
       {
-        brief: {
-          id: briefId,
-          sponsor_id: sponsor.sponsorId,
-          assigned_fellow_id: parsed.data.assigned_fellow_id,
-          title: parsed.data.title,
-          statement: parsed.data.statement,
-          falsifier: parsed.data.falsifier,
-          motivation: parsed.data.motivation,
-          areas: parsed.data.areas,
-          famous_guardrail: parsed.data.famous_guardrail,
-          status: "active",
-          created_at: now,
-          updated_at: now,
-        },
+        brief: SponsorProblemBriefSchema.parse({
+          ...saved,
+          assigned_fellow_id: saved.assigned_fellow_id ?? undefined,
+          areas: JSON.parse(saved.areas),
+          famous_guardrail: saved.famous_guardrail ? JSON.parse(saved.famous_guardrail) : undefined,
+        }),
       },
       201,
       { "cache-control": "private, no-store" },
@@ -702,11 +737,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
   // --- POST /v1/sponsors/problem-briefs/:id/withdraw ------------------------
   app.post("/v1/sponsors/problem-briefs/:id/withdraw", async (c) => {
     const briefId = c.req.param("id");
-    const verified = await options.verifiedSponsor(
-      c.req.raw,
-      c.req.path,
-      "withdraw-problem-brief",
-    );
+    const verified = await options.verifiedSponsor(c.req.raw, c.req.path, "withdraw-problem-brief");
     if (verified instanceof Response) return verified;
     const sponsor = verified.principal;
     const db = c.env.DB;
@@ -728,7 +759,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     const now = new Date().toISOString();
     await db
-      .prepare("UPDATE sponsor_problem_briefs SET status = 'withdrawn', updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE sponsor_problem_briefs SET status = 'withdrawn', updated_at = ? WHERE id = ?",
+      )
       .bind(now, briefId)
       .run();
 
@@ -745,23 +778,20 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const sponsor = verified.principal;
     const db = c.env.DB;
 
-    const problem = await db
-      .prepare("SELECT * FROM problems WHERE id = ?")
-      .bind(problemId)
-      .first<{
-        id: string;
-        public_seq: number;
-        status: string;
-        unlisted: number;
-        sponsor_id: string | null;
-        created_by_fellow_id: string | null;
-        title: string;
-        current_statement_version: number;
-        resolution_direction: string | null;
-        resolution_summary: string | null;
-        resolution_no_claim_boundary: string | null;
-        famous_guardrail: string | null;
-      }>();
+    const problem = await db.prepare("SELECT * FROM problems WHERE id = ?").bind(problemId).first<{
+      id: string;
+      public_seq: number;
+      status: string;
+      unlisted: number;
+      sponsor_id: string | null;
+      created_by_fellow_id: string | null;
+      title: string;
+      current_statement_version: number;
+      resolution_direction: string | null;
+      resolution_summary: string | null;
+      resolution_no_claim_boundary: string | null;
+      famous_guardrail: string | null;
+    }>();
 
     if (!problem) {
       return validatedProblem({
@@ -803,7 +833,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         code: "PROBLEM_LIFECYCLE_BODY_INVALID",
         title: "Invalid problem lifecycle request body",
         detail: "The request body did not match the problem lifecycle action contract.",
-        fixHint: "Specify a valid lifecycle action: publish, revise-statement, enter-result-review, resolve, or retire.",
+        fixHint:
+          "Specify a valid lifecycle action: publish, revise-statement, enter-result-review, resolve, or retire.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -898,9 +929,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
             now,
           ),
         db
-          .prepare(
-            "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?",
-          )
+          .prepare("UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?")
           .bind(nextVersion, now, problemId),
         // Monotonicity law: open claims addressing older versions are flagged statement_drift!
         db
@@ -955,8 +984,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           status: 422,
           code: "PREMATURE_RESOLUTION",
           title: "Resolution cannot be recorded before result review",
-          detail: "The problem must enter under-result-review and complete verification before resolution.",
-          fixHint: "Transition the problem to under-result-review and ensure independent reviews are recorded.",
+          detail:
+            "The problem must enter under-result-review and complete verification before resolution.",
+          fixHint:
+            "Transition the problem to under-result-review and ensure independent reviews are recorded.",
           rule: "P3",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -971,13 +1002,15 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           status: 422,
           code: "PREMATURE_RESOLUTION",
           title: "Famous problems require external-expert review proof before resolution",
-          detail: "A problem with a famous-problem guardrail requires external-expert review proof before any resolution-shaped status language appears.",
+          detail:
+            "A problem with a famous-problem guardrail requires external-expert review proof before any resolution-shaped status language appears.",
           fixHint: "Provide external_expert_review_proof detailing the external validation.",
           rule: "P3",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
             example: {
-              external_expert_review_proof: "Lean 4 machine-checked proof independently verified by 2 external reviewers.",
+              external_expert_review_proof:
+                "Lean 4 machine-checked proof independently verified by 2 external reviewers.",
             },
           },
         });
@@ -995,13 +1028,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
                updated_at = ?
            WHERE id = ?`,
         )
-        .bind(
-          action.direction,
-          action.closing_synthesis.summary,
-          noClaimJson,
-          now,
-          problemId,
-        )
+        .bind(action.direction, action.closing_synthesis.summary, noClaimJson, now, problemId)
         .run();
 
       return c.json(

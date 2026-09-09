@@ -95,7 +95,7 @@ async function runProblemLifecycleProof() {
       data = JSON.parse(raw);
     } catch {
       throw new Error(
-        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} text=${raw} sha256=${createHash("sha256").update(raw).digest("hex")}`,
+        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} sha256=${createHash("sha256").update(raw).digest("hex")}`,
       );
     }
 
@@ -103,11 +103,8 @@ async function runProblemLifecycleProof() {
       assert.equal(
         response.status,
         expected,
-        `${path}: status=${response.status} expected=${expected} code=${data.code ?? "none"} detail=${data.detail ?? ""}`,
+        `${path}: status=${response.status} expected=${expected} code=${data.code ?? "none"}`,
       );
-    }
-    if (typeof data === "object" && data !== null) {
-      data._status = response.status;
     }
     return data;
   }
@@ -168,14 +165,23 @@ async function runProblemLifecycleProof() {
       ...(body === undefined ? {} : { body: raw }),
     });
     const text = await response.text();
-    if (response.status !== expected) {
-      console.error(`sponsorCall failure on ${method} ${path}: status=${response.status} expected=${expected} body=${text}`);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(text)} sha256=${createHash("sha256").update(text).digest("hex")}`,
+      );
     }
-    assert.equal(response.status, expected, `Signed sponsor call expected ${expected}: ${text}`);
+    assert.equal(
+      response.status,
+      expected,
+      `${path}: signed sponsor call status=${response.status} expected=${expected} code=${data.code ?? "none"}`,
+    );
     if (expected >= 200 && expected < 300) {
       assert.equal(response.headers.get("cache-control"), "private, no-store");
     }
-    return JSON.parse(text);
+    return data;
   }
 
   try {
@@ -197,7 +203,9 @@ async function runProblemLifecycleProof() {
 
 runProblemLifecycleProof()
   .then((receipt) => {
-    console.log(JSON.stringify({ kind: "problem-lifecycle-real-bindings-complete", status: "pass", receipt }));
+    console.log(
+      JSON.stringify({ kind: "problem-lifecycle-real-bindings-complete", status: "pass", receipt }),
+    );
     process.exit(0);
   })
   .catch((err) => {
