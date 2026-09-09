@@ -169,7 +169,16 @@ async function runClaimsProof() {
     return response.json();
   }
 
-  async function sponsorCall(sponsorId, method, path, action, body, expected = 200) {
+  let sponsorKeySeq = 0;
+  async function sponsorCall(
+    sponsorId,
+    method,
+    path,
+    action,
+    body,
+    expected = 200,
+    idempotencyKey,
+  ) {
     const raw = JSON.stringify(body);
     const envelope = await mintServiceEnvelope({
       privateKey: signingKeys.privateKey,
@@ -187,6 +196,7 @@ async function runClaimsProof() {
         ...serviceEnvelopeHeaders(envelope),
         "User-Agent": userAgent,
         "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey ?? `sponsor-claims-${++sponsorKeySeq}`,
       },
       body: raw,
     });

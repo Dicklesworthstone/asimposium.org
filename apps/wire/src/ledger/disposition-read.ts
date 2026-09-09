@@ -45,6 +45,12 @@ export type VersionedClaimTimelineEvent =
       readonly version: number;
     }
   | {
+      readonly kind: "claim-retracted";
+      readonly sequence: number;
+      readonly targetVersion: number;
+      readonly retractionId: string;
+    }
+  | {
       readonly kind: "review-created";
       readonly sequence: number;
       readonly targetVersion: number;
@@ -172,6 +178,10 @@ export function computeCurrentClaimDisposition(
     if (currentVersion === null || event.targetVersion !== currentVersion) {
       // Old/future pins remain visible on their own timelines but never move
       // the current head merely because the identity later revised.
+      continue;
+    }
+    if (event.kind === "claim-retracted") {
+      apply({ kind: "author-withdrawal" });
       continue;
     }
     if (event.kind === "certified-artifact") {

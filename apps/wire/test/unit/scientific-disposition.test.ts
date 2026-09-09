@@ -136,6 +136,57 @@ test("grounded current-policy reviews earn support and redacted proof revokes it
   expect(fold.context.has_certified_artifact).toBe(false);
 });
 
+test("unavailable claim content cannot regain support through retraction authorship lookup", async () => {
+  for (const legacy of [false, true]) {
+    const rows = await corpus(legacy);
+    const creation = rows[0];
+    if (!creation) throw new Error("Expected a claim creation");
+    for (const unavailable of [
+      { ...creation, payload_json: null },
+      { ...creation, payload_sha256: "0".repeat(64) },
+    ]) {
+      const selected = [unavailable, ...rows.slice(1)];
+      const folded = await foldScientificRows(selected);
+      expect(folded.disposition).toBe("open");
+      expect(folded.stale).toBe(true);
+      expect(folded.context.recorded_refutation_attempts).toBe(0);
+      expect(folded.context.verified_reviews).toEqual([]);
+      const retraction = await row(
+        10,
+        "object.retracted",
+        {
+          retraction_id: "R-1",
+          target_object: "C-1",
+          reason: "Original author corrects the record.",
+        },
+        { object_id: "R-1" },
+      );
+      expect((await foldScientificRows([...selected, retraction])).disposition).toBe("withdrawn");
+      expect(
+        (await foldScientificRows([...selected, { ...retraction, fellow_id: "F-imposter" }]))
+          .disposition,
+      ).toBe("open");
+    }
+  }
+});
+
+test("a retraction payload cannot withdraw a different version from its recorded target", async () => {
+  const rows = await corpus();
+  const wrongPin = await row(
+    10,
+    "object.retracted",
+    {
+      retraction_id: "R-1",
+      target_object: "C-1@2",
+      reason: "Withdraw only the second version.",
+    },
+    { object_id: "R-1", target_version: 1 },
+  );
+  const folded = await foldScientificRows([...rows, wrongPin]);
+  expect(folded.disposition).toBe("strongly-supported");
+  expect(folded.stale).toBe(true);
+});
+
 test("duplicate publications of one check count once; assertion-only checks do not count", async () => {
   const rows = await corpus();
   const check = rows[2];
@@ -245,4 +296,116 @@ test("digest corruption, invalid JSON and selection-contaminated proof cannot ca
     expect(fold.disposition, mutation).toBe("open");
     expect(fold.stale, mutation).toBe(true);
   }
+});
+
+test("author retraction transitions claim to withdrawn, while non-author retraction is ignored", async () => {
+  const baseRows = await corpus();
+  // Valid author retraction
+  const authorRetraction = await row(
+    10,
+    "object.retracted",
+    {
+      retraction_id: "R-1",
+      target_object: "C-1",
+      retraction_kind: "self-corrected",
+      reason: "Calculation error in equality premise.",
+    },
+    { object_id: "R-1", fellow_id: "F-author" },
+  );
+  const folded = await foldScientificRows([...baseRows, authorRetraction]);
+  expect(folded.disposition).toBe("withdrawn");
+  expect(folded.stale).toBe(false);
+
+  // Non-author retraction attempt
+  const nonAuthorRetraction = await row(
+    10,
+    "object.retracted",
+    {
+      retraction_id: "R-2",
+      target_object: "C-1",
+      retraction_kind: "self-corrected",
+      reason: "Attempt by non-author to retract.",
+    },
+    { object_id: "R-2", fellow_id: "F-imposter" },
+  );
+  const foldedNonAuthor = await foldScientificRows([...baseRows, nonAuthorRetraction]);
+  // Claim remains supported by the valid reviews
+  expect(foldedNonAuthor.disposition).toBe("strongly-supported");
+});
+
+test("redacted retraction payload marks stale but never cosmetically restores support", async () => {
+  const baseRows = await corpus();
+  // Retraction with redacted payload (payload_json is null)
+  const redactedRetraction: Row = {
+    claim_id: "C-1",
+    event_id: "EVENT-10",
+    seq: 10,
+    type: "object.retracted",
+    object_id: "R-REDACTED",
+    object_version: 1,
+    target_version: 1,
+    payload_json: null,
+    payload_sha256: "0".repeat(64),
+    fellow_id: "F-author",
+    sponsor_id: "S-author",
+    content_digest: null,
+    statement: null,
+    direction: null,
+  };
+  const folded = await foldScientificRows([...baseRows, redactedRetraction]);
+  // Stays withdrawn, marked stale
+  expect(folded.disposition).toBe("withdrawn");
+  expect(folded.stale).toBe(true);
+});
+
+test("author retraction transitions disputed claim to withdrawn, and terminal withdrawal resists subsequent reviews", async () => {
+  const baseRows = await corpus();
+  // Add a refuting evidence row that disputes the claim
+  const refutingEvidence = await row(
+    6,
+    "evidence.created",
+    {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      kind: "counterexample",
+      direction: "refutes",
+      body_md: "Two does not equal three.",
+    },
+    { object_id: "E-REFUTE", direction: "refutes" },
+  );
+  // Author retracts
+  const authorRetraction = await row(
+    7,
+    "object.retracted",
+    {
+      retraction_id: "R-3",
+      target_object: "C-1",
+      retraction_kind: "externally-refuted",
+      reason: "Conceding after counterexample.",
+    },
+    { object_id: "R-3", fellow_id: "F-author" },
+  );
+  // A subsequent review attempts to corroborate
+  const lateReview = await row(
+    8,
+    "review.created",
+    {
+      tier: "T2",
+      capable_of_failure: "An unequal result.",
+      verdict: "confirm",
+      independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+      scientific_provenance: { model_family_self_declared: "claude" },
+    },
+    { object_id: "R-LATE", fellow_id: "F-reviewer", sponsor_id: "S-other" },
+  );
+
+  const folded = await foldScientificRows([
+    ...baseRows,
+    refutingEvidence,
+    authorRetraction,
+    lateReview,
+  ]);
+  // Withdrawn is terminal; subsequent reviews cannot revive it
+  expect(folded.disposition).toBe("withdrawn");
 });

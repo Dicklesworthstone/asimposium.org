@@ -50,6 +50,12 @@ export async function claimsJourney({
 
   // 1. Enroll synthetic Fellows with isolated quotas
   const kindsFellow = await createFellow("claims-kinds-author", "usr_claims_sponsor_1");
+  const authorFellowRow = await env.DB.prepare(
+    "SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = 'usr_claims_sponsor_1' AND status = 'active' LIMIT 1",
+  ).first();
+  await env.DB.prepare("UPDATE problems SET created_by_fellow_id = ?, title = ? WHERE id = ?")
+    .bind(authorFellowRow.fellow_id, "Goldbach Conjecture Verification", problem)
+    .run();
   const raceFellow = await createFellow("claims-race-author", "usr_claims_sponsor_2");
   const revFellow = await createFellow("claims-rev-author", "usr_claims_sponsor_3");
   const nonAuthorFellow = await createFellow("claims-non-author", "usr_claims_sponsor_4");

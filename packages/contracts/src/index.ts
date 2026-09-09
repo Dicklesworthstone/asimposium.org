@@ -43,6 +43,8 @@ export {
 } from "./conflicts.ts";
 export {
   DEAD_ENDS_SCHEMA_ID,
+  type DeadEndId,
+  DeadEndIdSchema,
   type DeadEndItem,
   DeadEndItemSchema,
   type DeadEndRetryWhen,

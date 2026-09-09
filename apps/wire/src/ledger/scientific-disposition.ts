@@ -93,7 +93,28 @@ export function prepareScientificDispositions(
     )
     SELECT s.id AS claim_id, e.id AS event_id, e.seq, e.type, e.object_id, e.object_version,
       CASE WHEN e.object_kind = 'claim' THEN e.object_version
-        WHEN e.object_kind = 'review' THEN r.target_version ELSE x.bears_on_version END AS target_version,
+        WHEN e.object_kind = 'review' THEN r.target_version
+        WHEN e.object_kind = 'retraction' THEN (
+          CASE WHEN instr(ret.target_object, '@') > 0
+            THEN CAST(substr(ret.target_object, instr(ret.target_object, '@') + 1) AS INTEGER)
+            ELSE COALESCE(
+              (
+                SELECT MAX(cv.version)
+                FROM claim_versions cv
+                JOIN events ce ON ce.problem_id = cv.problem_id
+                  AND ce.object_id = cv.claim_id
+                  AND ce.object_version = cv.version
+                  AND ce.type IN ('claim.created', 'claim.revised')
+                WHERE cv.problem_id = e.problem_id
+                  AND cv.claim_id = s.id
+                  AND ce.seq <= e.seq
+              ),
+              1
+            )
+          END
+        )
+        ELSE x.bears_on_version
+      END AS target_version,
       e.payload_sha256, c.payload_json, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
@@ -104,14 +125,27 @@ export function prepareScientificDispositions(
     LEFT JOIN evidence x ON x.source_event_id = e.id AND x.problem_id = e.problem_id
       AND x.evidence_id = e.object_id AND x.source_seq = e.seq
       AND x.bears_on_kind = 'claim' AND e.type = 'evidence.created'
-    JOIN selected_claims s ON s.id = CASE WHEN e.object_kind = 'claim' THEN e.object_id
-      WHEN e.object_kind = 'review' THEN r.target_claim_id ELSE x.bears_on_id END
+    LEFT JOIN retractions ret ON ret.problem_id = e.problem_id
+      AND ret.retraction_id = e.object_id
+      AND ret.seq = e.seq AND ret.author_fellow_id = e.actor_fellow_id
+      AND e.object_kind = 'retraction' AND e.type = 'object.retracted'
+    JOIN selected_claims s ON s.id = CASE
+      WHEN e.object_kind = 'claim' THEN e.object_id
+      WHEN e.object_kind = 'review' THEN r.target_claim_id
+      WHEN e.object_kind = 'retraction' THEN (
+        CASE WHEN instr(ret.target_object, '@') > 0
+          THEN substr(ret.target_object, 1, instr(ret.target_object, '@') - 1)
+          ELSE ret.target_object
+        END
+      )
+      ELSE x.bears_on_id
+    END
     LEFT JOIN claim_versions v ON v.problem_id = e.problem_id AND v.claim_id = s.id
       AND v.version = e.object_version AND e.object_kind = 'claim'
     LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       AND c.redacted_at IS NULL
     WHERE e.problem_id = ? AND e.seq <= ?
-      AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created')
+      AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created', 'object.retracted')
     ORDER BY e.seq ASC
   `)
     .bind(problemId, cursor, target?.claimId ?? claimLimit, problemId, cursor);
@@ -122,6 +156,11 @@ export async function foldScientificRows(
 ): Promise<ScientificDisposition> {
   const contents = new Map<string, Record<string, unknown>>();
   const claims = new Map<number, ScientificClaim>();
+  // Withdrawal needs immutable creation authorship even if the claim text is
+  // unavailable. Such an envelope must never become readable scientific input.
+  const originalAuthor = rows.find(
+    (row) => row.type === "claim.created" && row.object_version === 1,
+  )?.fellow_id;
   const evidence = new Map<string, ScientificEvidence & { sequence: number }>();
   let stale = false;
   let legacyReviews = 0;
@@ -207,6 +246,29 @@ export async function foldScientificRows(
         kind: row.type === "claim.created" ? "claim-created" : "claim-revised",
         sequence: row.seq,
         version: row.object_version,
+      });
+      continue;
+    }
+    if (row.type === "object.retracted") {
+      if (!originalAuthor || originalAuthor !== row.fellow_id) {
+        continue;
+      }
+      if (payload) {
+        const targetObject = payload.target_object;
+        if (
+          typeof targetObject !== "string" ||
+          (targetObject !== row.claim_id &&
+            targetObject !== `${row.claim_id}@${row.target_version}`)
+        ) {
+          markStale(row);
+          continue;
+        }
+      }
+      timeline.push({
+        kind: "claim-retracted",
+        sequence: row.seq,
+        targetVersion: row.target_version,
+        retractionId: row.object_id,
       });
       continue;
     }

@@ -20,7 +20,7 @@ await runLocalWorkerJourney(async (context) => {
   const sponsorB = "usr_qr_sponsor_b";
   const reviewerB = await enroll("qr-reviewer-b", sponsorB);
   const helloB = await call("/v1/hello", undefined, reviewerB);
-  const fellowIdB = helloB.fellow.fellow_id;
+  const _fellowIdB = helloB.fellow.fellow_id;
 
   // 1. Propose and publish problem
   const created = await call(
@@ -494,7 +494,7 @@ await runLocalWorkerJourney(async (context) => {
   const claim2Id = claim2.claim_id;
 
   // Reviewer B posts refuting review on Claim 2
-  const workshopB = await call(
+  await call(
     `/v1/sessions/${sessionIdB}/workshop`,
     {
       type: "note",
@@ -610,6 +610,105 @@ await runLocalWorkerJourney(async (context) => {
     assert.equal(res.status, 404);
   }
 
+  // 18. Scientific claim standing reflection & history preservation (W5.8d / uyf.4)
+  // 18.1 Claim 1 exact-version JSON face reflects withdrawn
+  const claim1FaceRes = await worker.fetch(`${origin}/p/${problemId}/claims/${claim1Id}@1.json`);
+  assert.equal(claim1FaceRes.status, 200);
+  const claim1FaceJson = await claim1FaceRes.json();
+  assert.equal(claim1FaceJson.claim_state.disposition, "withdrawn");
+  assert.equal(claim1FaceJson.claim_state.stale, false);
+
+  // 18.2 Claim 1 unversioned JSON face reflects withdrawn
+  const claim1HeadRes = await worker.fetch(`${origin}/p/${problemId}/claims/${claim1Id}.json`);
+  assert.equal(claim1HeadRes.status, 200);
+  const claim1HeadJson = await claim1HeadRes.json();
+  assert.equal(claim1HeadJson.claim_state.disposition, "withdrawn");
+
+  // 18.3 Claim 1 Markdown face contains withdrawn
+  const claim1MdRes = await worker.fetch(`${origin}/p/${problemId}/claims/${claim1Id}@1.md`);
+  assert.equal(claim1MdRes.status, 200);
+  const claim1Md = await claim1MdRes.text();
+  assert.ok(claim1Md.includes("withdrawn"), "claim markdown face must reflect withdrawn standing");
+  const claim1HtmlRes = await worker.fetch(`${origin}/p/${problemId}/claims/${claim1Id}@1.html`);
+  assert.equal(claim1HtmlRes.status, 200);
+  assert.ok(
+    (await claim1HtmlRes.text()).includes("withdrawn"),
+    "the original claim HTML face must reflect the same withdrawn standing",
+  );
+
+  // 18.4 Historical pre-retraction cut via ?through preserves original open standing
+  const preRetractSeq = retract1.seq - 1;
+  const preRetractRes = await worker.fetch(
+    `${origin}/p/${problemId}/claims/${claim1Id}@1.json?through=${preRetractSeq}`,
+  );
+  assert.equal(preRetractRes.status, 200);
+  const preRetractJson = await preRetractRes.json();
+  assert.equal(
+    preRetractJson.claim_state.disposition,
+    "open",
+    "historical cut prior to retraction must show open",
+  );
+
+  // 18.5 Working pack surfaces retracted claim with withdrawn standing
+  const packRes = await call(`/v1/sessions/${sessionIdA}/pack?profile=working`, undefined, authorA);
+  const packClaim1 = packRes.items.find((item) => item.id === claim1Id);
+  assert.ok(packClaim1, "pack must include retracted claim");
+  assert.ok(
+    packClaim1.body.includes("withdrawn"),
+    "pack candidate body must include withdrawn disposition",
+  );
+
+  // 18.6 Content redaction of retraction event marks claim stale but never cosmetically restores support
+  const retractionEvent = await env.DB.prepare(
+    "SELECT id, payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'object.retracted'",
+  )
+    .bind(problemId, retraction1Id)
+    .first();
+  assert.ok(retractionEvent);
+
+  // Redact the retraction event content lawfully
+  await env.DB.prepare(
+    "UPDATE event_content SET payload_json = '{\"control\":\"redacted\"}', redacted_at = '2026-09-09T00:00:00.000Z', redaction_reason = 'privacy' WHERE event_id = ? AND payload_sha256 = ?",
+  )
+    .bind(retractionEvent.id, retractionEvent.payload_sha256)
+    .run();
+
+  const redactedClaim1Res = await worker.fetch(
+    `${origin}/p/${problemId}/claims/${claim1Id}@1.json`,
+  );
+  assert.equal(redactedClaim1Res.status, 200);
+  const redactedClaim1Json = await redactedClaim1Res.json();
+  assert.equal(
+    redactedClaim1Json.claim_state.disposition,
+    "withdrawn",
+    "redaction must never cosmetically restore support to open",
+  );
+  assert.equal(redactedClaim1Json.claim_state.stale, true, "redaction must mark standing stale");
+
+  // A new version preserves withdrawal and the readable original statement.
+  const revised = await call(
+    `/v1/sessions/${sessionIdA}/revise`,
+    {
+      claim_id: claim1Id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "The cycle length modulo 2^k is bounded by 3k for every integer k above one.",
+      falsifier: "An integer k above one with a modular cycle longer than 3k.",
+      depends_on: [],
+    },
+    authorA,
+    201,
+  );
+  assert.equal(revised.version, 2);
+  for (const target of [claim1Id, `${claim1Id}@1`, `${claim1Id}@2`]) {
+    const response = await worker.fetch(`${origin}/p/${problemId}/claims/${target}.json`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).claim_state.disposition, "withdrawn");
+  }
+  const original = await worker.fetch(`${origin}/p/${problemId}/claims/${claim1Id}@1.md`);
+  assert.equal(original.status, 200);
+  assert.ok((await original.text()).includes("strictly bounded by 2k"));
+
   console.log(
     JSON.stringify({
       stage: "questions-retractions-real-bindings",
@@ -626,6 +725,10 @@ await runLocalWorkerJourney(async (context) => {
       self_corrected_vs_externally_refuted_verified: true,
       diptych_faces_verified: true,
       private_draft_secrecy_verified: true,
+      claim_standing_reflection_verified: true,
+      historical_pre_retraction_cut_verified: true,
+      redaction_staleness_without_cosmetic_restore_verified: true,
+      revision_cannot_restore_withdrawn_standing_verified: true,
     }),
   );
 });
