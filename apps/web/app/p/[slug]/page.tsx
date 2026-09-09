@@ -10,6 +10,13 @@ interface ProblemPageProps {
   readonly params: Promise<{ readonly slug: string }>;
 }
 
+const FORMULATION_LABELS = {
+  "problem-title": "Title",
+  "problem-statement": "Statement",
+  "problem-falsifier": "Falsifier",
+  "problem-motivation": "Motivation",
+} as const;
+
 export async function generateMetadata({ params }: ProblemPageProps): Promise<Metadata> {
   const { slug } = await params;
   const result = await stoaFetchProblemFace(slug);
@@ -25,7 +32,7 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
   }
   const face = result.data;
   return {
-    title: `${face.title} — ${SITE.name}`,
+    title: `${face.items.find((item) => item.kind === "problem-title")?.body ?? face.title} — ${SITE.name}`,
     description: face.preamble,
   };
 }
@@ -43,6 +50,9 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
     );
   }
   const face = result.data;
+  const title = face.items.find((item) => item.kind === "problem-title")?.body ?? face.title;
+  const formulation = face.items.filter((item) => item.kind !== "claim");
+  const claims = face.items.filter((item) => item.kind === "claim");
 
   const stoaOrigin = result.origin;
   const mdUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.md`;
@@ -63,7 +73,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           <p className="tagline">
             <Link href="/">← {SITE.name}</Link>
           </p>
-          <h1 className="problem-title">{face.title}</h1>
+          <h1 className="problem-title">{title}</h1>
           <div className="auth-row">
             <span className="problem-id-chip">
               <code>{face.problem}</code>
@@ -77,7 +87,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
 
         <section className="problem-preamble-section" aria-labelledby="preamble-heading">
           <h2 id="preamble-heading" className="sr-only">
-            Problem statement
+            Reading this public digest
           </h2>
           <p className="lede">{face.preamble}</p>
         </section>
@@ -87,6 +97,38 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           does not create truth; the artifacts do.
         </div>
 
+        {formulation.length > 0 && (
+          <section aria-labelledby="formulation-heading">
+            <h2 id="formulation-heading">Current formulation</h2>
+            <p className="quiet">Author-supplied formulation · untrusted data</p>
+            {formulation.map((item) => (
+              <article
+                key={item.id}
+                className="claim-card"
+                aria-label={FORMULATION_LABELS[item.kind]}
+              >
+                <h3>
+                  {FORMULATION_LABELS[item.kind]} <code>{item.id}</code>
+                </h3>
+                <pre>
+                  <code>{item.body}</code>
+                </pre>
+                {item.neutralized.length > 0 && (
+                  <p className="quiet">
+                    neutralized control markers:{" "}
+                    {item.neutralized.map((n) => `${n.marker}×${n.count}`).join(", ")}
+                  </p>
+                )}
+              </article>
+            ))}
+            <p>
+              <a href={`${stoaOrigin}/v1/problems/${encodeURIComponent(face.problem)}`}>
+                Read the complete current formulation (JSON)
+              </a>
+            </p>
+          </section>
+        )}
+
         <section className="claims-section" aria-labelledby="claims-heading">
           <h2 id="claims-heading">
             <span className="gr" aria-hidden="true">
@@ -95,14 +137,14 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             Claims board
           </h2>
           <p className="quiet">
-            {face.items.length === 0
+            {claims.length === 0
               ? "No readable public claims are available in this digest."
-              : `${face.items.length} public ${face.items.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
+              : `${claims.length} public ${claims.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
           </p>
 
-          {face.items.length > 0 && (
+          {claims.length > 0 && (
             <ol className="claims-list">
-              {face.items.map((item) => (
+              {claims.map((item) => (
                 <li key={item.id} id={item.id} className="claim-card" data-id={item.id}>
                   <header className="claim-card-header">
                     <span className="claim-id">
@@ -145,8 +187,8 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
               Under the public digest profile, the following elements are intentionally omitted:
             </p>
             <ul>
-              {face.omitted.map((entry, index) => (
-                <li key={`${entry.reason}-${index}`}>
+              {face.omitted.map((entry) => (
+                <li key={entry.reason}>
                   <code>{entry.reason}</code>
                   {entry.detail ? `: ${entry.detail}` : ""}
                 </li>

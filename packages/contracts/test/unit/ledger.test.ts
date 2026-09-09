@@ -76,6 +76,35 @@ test("claim citation exports require an exact public version and real calendar d
   }
 });
 
+test("problem formulation items agree with the published schema and retain untrusted versioned identities", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-problem-formulation.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-problem-formulation.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.problem_face_response);
+  const parsed = ProblemFaceResponseSchema.parse(good);
+  expect(published(good)).toBe(true);
+  expect(ProblemFaceResponseSchema.safeParse(bad).success).toBe(false);
+  expect(published(bad)).toBe(false);
+  for (const patch of [
+    { scope: "workshop" },
+    { untrusted: false },
+    { id: "S@0-title" },
+    { id: "S@2-statement" },
+    { kind: "system" },
+    { next_actions: [] },
+  ]) {
+    const invalid = { ...parsed, items: [{ ...parsed.items[0], ...patch }] };
+    expect(ProblemFaceResponseSchema.safeParse(invalid).success).toBe(false);
+    expect(published(invalid)).toBe(false);
+  }
+});
+
 test("public exact claim faces reject private material, asserted truth and inconsistent pins", async () => {
   const good = ClaimFaceResponseSchema.parse(
     await fixture(new URL("../fixtures/valid/ledger-claim-face.json", import.meta.url)),
@@ -238,13 +267,16 @@ test("the published ledger schema preserves the public face safety boundary", as
           items: {
             maxItems?: number;
             items: {
-              properties: {
-                kind: { const?: string };
-                id: { maxLength?: number; pattern?: string };
-                scope: { const?: string };
-                untrusted: { const?: boolean };
-                tokens?: unknown;
-              };
+              oneOf: {
+                properties: {
+                  kind: { const?: string };
+                  id: { maxLength?: number; pattern?: string };
+                  scope: { const?: string };
+                  untrusted: { const?: boolean };
+                  tokens?: unknown;
+                };
+                additionalProperties?: boolean;
+              }[];
             };
           };
           next_actions: {
@@ -288,12 +320,25 @@ test("the published ledger schema preserves the public face safety boundary", as
   expect(publishedProblemId.test("P-alpha")).toBe(true);
   expect(publishedProblemId.test("P-X--FORGED")).toBe(false);
 
-  const itemId = face.items.items.properties.id;
+  const variants = face.items.items.oneOf;
+  expect(variants.map((variant) => variant.properties.kind.const)).toEqual([
+    "claim",
+    "problem-title",
+    "problem-statement",
+    "problem-falsifier",
+    "problem-motivation",
+  ]);
+  const claimItem = variants[0];
+  if (claimItem === undefined) throw new Error("Published schema has no claim item");
+  const itemId = claimItem.properties.id;
   expect(face.items.maxItems).toBe(200);
-  expect(face.items.items.properties.kind.const).toBe("claim");
-  expect(face.items.items.properties.scope.const).toBe("ledger");
-  expect(face.items.items.properties.untrusted.const).toBe(true);
-  expect("tokens" in face.items.items.properties).toBe(false);
+  expect(claimItem.properties.kind.const).toBe("claim");
+  for (const variant of variants) {
+    expect(variant.properties.scope.const).toBe("ledger");
+    expect(variant.properties.untrusted.const).toBe(true);
+    expect("tokens" in variant.properties).toBe(false);
+    expect(variant.additionalProperties).toBe(false);
+  }
   expect(itemId.maxLength).toBe(128);
   expect(typeof itemId.pattern).toBe("string");
   const publishedItemId = new RegExp(itemId.pattern as string);

@@ -1,5 +1,6 @@
 import {
   ClaimFaceResponseSchema,
+  ProblemDetailSchema,
   ProblemFaceResponseSchema,
   type ProblemIndexEntry,
   type ProblemsIndexResponse,
@@ -76,10 +77,17 @@ const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
   p.public_seq AS public_seq,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1
+    AND v.version IS NOT NULL THEN json_object(
+      'title', p.title, 'current_statement_version', v.version,
+      'statement', v.statement, 'falsifier', v.falsifier, 'motivation', v.motivation
+    ) END AS formulation_json,
   claims.id AS claim_id,
   CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN claims.statement END AS statement,
   claims.source_seq AS source_seq
 FROM problems p
+LEFT JOIN problem_statement_versions v
+  ON v.problem_id = p.id AND v.version = p.current_statement_version
 LEFT JOIN claims
   ON claims.problem_id = p.id
  AND claims.source_seq <= p.public_seq
@@ -90,6 +98,7 @@ LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 interface ProblemDigestRow {
   readonly problem_id: string;
   readonly public_seq: number;
+  readonly formulation_json: string | null;
   readonly claim_id: string | null;
   readonly statement: string | null;
   readonly source_seq: number | null;
@@ -99,6 +108,14 @@ interface ProblemFaceFaces {
   readonly json: RenderedFace;
   readonly markdown: RenderedFace;
 }
+
+const FormulationSchema = ProblemDetailSchema.pick({
+  title: true,
+  current_statement_version: true,
+  statement: true,
+  falsifier: true,
+  motivation: true,
+});
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
@@ -250,6 +267,26 @@ async function loadProblemFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
+  // One SQL snapshot binds the current formulation to the claim head. The
+  // window expression returns these potentially large bodies only once, even
+  // when the digest considers hundreds of claims. Legacy formulations may be incomplete.
+  const parsedFormulation = FormulationSchema.safeParse(
+    first.formulation_json == null ? null : JSON.parse(first.formulation_json),
+  );
+  const formulation = parsedFormulation.success ? parsedFormulation.data : null;
+  const formulationItems =
+    formulation === null
+      ? []
+      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
+          kind: `problem-${field}`,
+          id: `S@${formulation.current_statement_version}-${field}`,
+          scope: "ledger" as const,
+          tokens: 1,
+          untrusted: true,
+          body: formulation[field],
+          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
+          stable_prefix: rank,
+        }));
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
@@ -259,17 +296,30 @@ async function loadProblemFace(
     cursor: first.public_seq,
     requested_max_tokens: PROBLEM_DIGEST_TOKEN_BUDGET,
     viewer: { audience: "public", membership: "none", effective_permissions: [] },
-    candidates: claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim) => ({
-      kind: "claim",
-      id: claim.id,
-      scope: "ledger",
-      tokens: 1,
-      untrusted: true,
-      body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
-      why_included: "a public claim on this problem in ledger sequence order",
-      stable_prefix: claim.seq,
-    })),
+    candidates: [
+      ...formulationItems,
+      ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
+        kind: "claim",
+        id: claim.id,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
+        why_included: "a public claim on this problem in ledger sequence order",
+        stable_prefix: index + 4,
+      })),
+    ],
     action_candidates: [
+      ...(formulation === null
+        ? []
+        : [
+            {
+              method: "GET" as const,
+              url: `/v1/problems/${first.problem_id}`,
+              why: "the complete current formulation, including fields omitted by the digest budget",
+              public_read: true,
+            },
+          ]),
       ...claims.slice(0, 4).map((claim) => ({
         method: "GET" as const,
         url: `/p/${first.problem_id}/claims/${claim.id}.json`,
@@ -290,6 +340,14 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...(formulation === null
+        ? [
+            {
+              reason: "formulation_unavailable",
+              detail: "The stored current formulation is incomplete or unavailable.",
+            },
+          ]
+        : []),
       ...(contentUnavailable
         ? [
             {

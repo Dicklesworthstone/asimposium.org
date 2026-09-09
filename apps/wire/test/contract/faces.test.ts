@@ -1022,7 +1022,10 @@ describe("face wire format", () => {
     const db = new Database(":memory:");
     try {
       db.run(
-        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', current_statement_version INTEGER NOT NULL DEFAULT 1)",
+      );
+      db.run(
+        "CREATE TABLE problem_statement_versions (problem_id TEXT, version INTEGER, statement TEXT, falsifier TEXT, motivation TEXT, PRIMARY KEY (problem_id, version))",
       );
       db.run(
         "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL, payload_sha256 TEXT NOT NULL DEFAULT 'sha256:fixture')",
@@ -1034,6 +1037,12 @@ describe("face wire format", () => {
         "CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, redacted_at TEXT)",
       );
       db.prepare("INSERT INTO problems (id, public_seq) VALUES (?, ?)").run("P-4DSP", 7);
+      db.run(
+        "UPDATE problems SET title = 'Current formulation title', current_statement_version = 2",
+      );
+      db.run(
+        "INSERT INTO problem_statement_versions VALUES ('P-4DSP', 1, 'OLD-FORMULATION-CANARY', 'Old falsifier', 'Old motivation'), ('P-4DSP', 2, 'Current problem statement', 'Current problem falsifier', 'Current problem motivation')",
+      );
       const insertClaim = db.prepare(
         "INSERT INTO claims (id, problem_id, statement, source_seq) VALUES (?, ?, ?, ?)",
       );
@@ -1059,13 +1068,20 @@ describe("face wire format", () => {
       );
 
       let capturedSql: string | undefined;
+      let formulationRows = 0;
       const env = trustedStoaEnv();
       env.DB = {
         prepare(query: string) {
           capturedSql = query;
           return {
             bind: (problemId: string) => ({
-              all: async () => ({ results: db.query(query).all(problemId) }),
+              all: async () => {
+                const results = db
+                  .query<{ formulation_json: string | null }, [string]>(query)
+                  .all(problemId);
+                formulationRows = results.filter((row) => row.formulation_json !== null).length;
+                return { results };
+              },
             }),
           };
         },
@@ -1080,7 +1096,17 @@ describe("face wire format", () => {
       expect(response.status).toBe(200);
       const body = await response.text();
       const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
-      expect(face.items.map((item) => item.id)).toEqual(["C-7"]);
+      expect(formulationRows).toBe(1);
+      expect(face.items.map((item) => item.id)).toEqual([
+        "S@2-title",
+        "S@2-statement",
+        "S@2-falsifier",
+        "S@2-motivation",
+        "C-7",
+      ]);
+      expect(face.items.find((item) => item.kind === "problem-statement")?.body).toBe(
+        "Current problem statement",
+      );
       expect(body).toContain(visibleClaim);
       expect(body).not.toContain(unleakedFuture);
       expect(body).not.toContain("CANARY");

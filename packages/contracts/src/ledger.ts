@@ -144,7 +144,7 @@ export type PublicClaimState = z.infer<typeof PublicClaimStateSchema>;
 /**
  * The per-problem read face (W6.1): the JSON face of a problem-face projection
  * rendered through `@asimposium/render`. Every field emitted by the mounted
- * `/p/<id>.json` digest is pinned. Public items are ledger claims and untrusted
+ * `/p/<id>.json` digest is pinned. Public items are formulations or claims and untrusted
  * by construction; the shape cannot admit workshop or trusted-body leakage.
  */
 const FaceItemSchema = z
@@ -158,6 +158,26 @@ const FaceItemSchema = z
     neutralized: z.array(PackNeutralizationSchema),
   })
   .strict();
+
+const ProblemFaceItemSchema = z.discriminatedUnion("kind", [
+  FaceItemSchema,
+  FaceItemSchema.extend({
+    kind: z.literal("problem-title"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-title$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-statement"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-statement$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-falsifier"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-falsifier$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-motivation"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-motivation$/),
+  }),
+]);
 
 const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 // biome-ignore lint/complexity/useRegexLiterals: RegExp constructor avoids literal ASCII control characters in regex literal
@@ -230,7 +250,7 @@ export const ProblemFaceResponseSchema = z
     fingerprint: z.string().regex(/^fnv1a64:[0-9a-f]{16}$/),
     title: z.string().min(1),
     preamble: z.string().min(1),
-    items: z.array(FaceItemSchema).max(200),
+    items: z.array(ProblemFaceItemSchema).max(200),
     omitted: z
       .array(
         z

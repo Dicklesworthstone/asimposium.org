@@ -239,6 +239,9 @@ and what remains in its assigned plane.
   review text against ledger digests, interpret legacy review tiers with historical sponsor pins,
   and revalidate on every read so withdrawn bodies cannot persist in a shared cache.
   Claim pages link BibTeX and CSL-JSON downloads for the displayed statement version.
+  Problem digests and pages include the stored current title, statement, falsifier and motivation
+  as versioned untrusted records. Whole fields that exceed the digest budget are disclosed as
+  omitted, with a link to the complete formulation; legacy missing formulations are labeled.
   Area discovery reads saved problem assignments and current statement excerpts after sponsor
   publication. Its counts exclude private, unlisted and dormant problems; bounded lists disclose
   omissions, and missing scientific-need data is labeled unavailable.

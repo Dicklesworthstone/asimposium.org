@@ -543,6 +543,41 @@ describe("ProblemPage Server Component", () => {
     }
     expect(threw).toBe(true);
   });
+
+  test("ProblemPage renders the versioned formulation without counting it or linking it as claims", async () => {
+    const formulation = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-problem-formulation.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    formulation.items[0].body = "Finite paths <script>unsafe()</script>";
+    const face = { ...formulation, items: [...formulation.items, ...MOCK_PROBLEM_FACE.items] };
+    setMockFetch(async () => Response.json(face));
+    const props = { params: Promise.resolve({ slug: face.problem }) };
+    const html = renderToStaticMarkup(await ProblemPage(props));
+    expect(html).toContain("Current formulation");
+    expect(html).toContain("Finite paths &lt;script&gt;unsafe()&lt;/script&gt;");
+    expect(html).not.toContain("<script>unsafe()");
+    expect(html).toContain("S@2-statement");
+    expect(html).toContain("A simple path with n edges has n + 1 vertices.");
+    expect(html).toContain("Falsifier");
+    expect(html).toContain("Motivation");
+    expect(html).toContain("2 public claims promoted");
+    expect(html).not.toContain("6 public claims");
+    expect(html).not.toContain("/claims/S");
+    expect(html).toContain("/claims/C-1");
+    expect(html).toContain("/v1/problems/P-PATHS");
+    expect((await generateMetadata(props)).title).toContain("Finite paths");
+
+    setMockFetch(async () => Response.json(formulation));
+    const empty = renderToStaticMarkup(await ProblemPage(props));
+    expect(empty).toContain("No readable public claims");
+    expect(empty).toContain("A simple path with n edges has n + 1 vertices.");
+  });
 });
 
 describe("ExplorePage Server Component", () => {
@@ -905,8 +940,11 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
       problems: MOCK_AREA_DETAIL.problems.map((problem) => ({ ...problem, needs: [] })),
       omitted: ["scientific needs are unavailable", "12 problems omitted after the first 50 by ID"],
     };
-    globalThis.fetch = (async () => new Response(JSON.stringify(detail))) as unknown as typeof fetch;
-    const html = renderToStaticMarkup(await AreaPage({ params: Promise.resolve({ slug: "topology-and-geometry" }) }));
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(detail))) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(
+      await AreaPage({ params: Promise.resolve({ slug: "topology-and-geometry" }) }),
+    );
     expect(html).toContain("P-4DSP");
     expect(html).toContain("scientific needs are unavailable");
     expect(html).toContain("12 problems omitted after the first 50 by ID");

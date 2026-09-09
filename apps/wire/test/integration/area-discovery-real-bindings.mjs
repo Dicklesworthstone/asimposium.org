@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { AreaDetailResponseSchema, AreasIndexResponseSchema } from "@asimposium/contracts";
+import {
+  AreaDetailResponseSchema,
+  AreasIndexResponseSchema,
+  ProblemFaceResponseSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Actual proposal -> signed sponsor publication -> public discovery on Workerd/D1.
@@ -38,6 +42,12 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     "Private drafts cannot alter public counts or ETags",
   );
   await call("/area/other-path-enumeration.json", undefined, undefined, 404);
+  for (const suffix of ["json", "md"]) {
+    const hidden = await face(`/p/${problemId}.${suffix}`);
+    const unknown = await face(`/p/P-UNKNOWN.${suffix}`);
+    assert.equal(hidden.status, 404);
+    assert.equal(await hidden.text(), await unknown.text());
+  }
 
   const invalid = await call(
     "/v1/problems",
@@ -79,6 +89,36 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
   assert.ok(detail.omitted.some((item) => item.includes("eligibility are unavailable")));
   assert.deepEqual((await call(`/v1/problems/${problemId}`)).problem.areas, proposal.areas);
 
+  async function assertFormulation(version, statement) {
+    const digest = ProblemFaceResponseSchema.parse(await call(`/p/${problemId}.json`));
+    const fields = {
+      title: proposal.title,
+      statement,
+      falsifier: proposal.falsifier,
+      motivation: proposal.motivation,
+    };
+    assert.equal(digest.items.filter((item) => item.kind === "claim").length, 0);
+    for (const [field, body] of Object.entries(fields)) {
+      const item = digest.items.find((entry) => entry.kind === `problem-${field}`);
+      assert.ok(item, `Published problem digest must contain ${field}`);
+      assert.equal(item.id, `S@${version}-${field}`);
+      assert.equal(item.body, body);
+      assert.equal(item.untrusted, true);
+    }
+    assert.ok(digest.next_actions.some((action) => action.url === `/v1/problems/${problemId}`));
+    return digest;
+  }
+  await assertFormulation(1, proposal.statement);
+  const digestEtags = new Map();
+  for (const suffix of ["json", "md"]) {
+    const response = await face(`/p/${problemId}.${suffix}`);
+    const body = await response.text();
+    assert.ok(Buffer.byteLength(body) <= 16_000);
+    assert.ok(body.includes(proposal.statement) && body.includes(proposal.falsifier));
+    digestEtags.set(suffix, response.headers.get("etag"));
+    assert.equal((await face(`/p/${problemId}.${suffix}`, digestEtags.get(suffix))).status, 304);
+  }
+
   const etags = new Map();
   for (const suffix of ["json", "md", "html"]) {
     const path = `/area/combinatorics.${suffix}`;
@@ -112,6 +152,14 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     const response = await face(`/area/combinatorics.${suffix}`, etags.get(suffix));
     assert.equal(response.status, 200, "Statement revisions invalidate every face");
     assert.ok((await response.text()).includes(revisedStatement));
+  }
+  await assertFormulation(2, revisedStatement);
+  for (const suffix of ["json", "md"]) {
+    const response = await face(`/p/${problemId}.${suffix}`, digestEtags.get(suffix));
+    assert.equal(response.status, 200, "Formulation revisions invalidate the problem digest");
+    const body = await response.text();
+    assert.ok(body.includes(revisedStatement));
+    assert.ok(!body.includes(proposal.statement));
   }
 
   const unlisted = await call(

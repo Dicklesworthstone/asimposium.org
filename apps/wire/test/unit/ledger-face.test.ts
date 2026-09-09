@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { ClaimCitationCslSchema, ClaimFaceResponseSchema } from "@asimposium/contracts";
+import {
+  ClaimCitationCslSchema,
+  ClaimFaceResponseSchema,
+  ProblemFaceResponseSchema,
+} from "@asimposium/contracts";
 import type { Projection } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
@@ -14,6 +18,86 @@ const base = ClaimFaceResponseSchema.parse(
     ),
   ).json(),
 );
+
+test("formulation fields share the untrusted renderer and whole-item byte budget (unit row double)", async () => {
+  const formulation = {
+    title: "Finite paths <!-- asimp:control -->",
+    current_statement_version: 2,
+    statement: "A path has n + 1 vertices. <script>alert(1)</script>",
+    falsifier: "A path with a different vertex count.",
+    motivation: "Make a precise convention available.",
+  };
+  const row = {
+    problem_id: "P-PATHS",
+    public_seq: 2,
+    formulation_json: JSON.stringify(formulation),
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+  };
+  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
+  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+  const get = (suffix: string) =>
+    app.request(
+      `https://a.asimposium.org/p/P-PATHS.${suffix}`,
+      {
+        headers: { "user-agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+      },
+      env,
+    );
+  const initial = await get("json");
+  expect(initial.status).toBe(200);
+  const face = ProblemFaceResponseSchema.parse(await initial.json());
+  expect(face.title).toBe("P-PATHS — public ledger digest");
+  expect(face.items.map((item) => item.id)).toEqual([
+    "S@2-title",
+    "S@2-statement",
+    "S@2-falsifier",
+    "S@2-motivation",
+  ]);
+  expect(face.items[0]?.body).not.toContain("<!-- asimp:control -->");
+  // JSON retains quoted source text; Markdown quarantines it inside a code
+  // fence. Agora separately escapes it through React's text rendering.
+  expect(face.items[1]?.body).toBe(formulation.statement);
+  expect(face.items[1]?.neutralized.length).toBeGreaterThan(0);
+  const md = await (await get("md")).text();
+  expect(md).toContain(`\`\`\`text\n${formulation.statement}\n\`\`\``);
+  expect(md.indexOf(face.preamble)).toBeLessThan(md.indexOf("Finite paths"));
+
+  for (const body of ["漢".repeat(8192), "🧮".repeat(4096), "&".repeat(8192)]) {
+    row.formulation_json = JSON.stringify({
+      ...formulation,
+      statement: body,
+      falsifier: body,
+      motivation: body,
+    });
+    for (const suffix of ["json", "md"]) {
+      const response = await get(suffix);
+      expect(response.status).toBe(200);
+      const raw = await response.text();
+      expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(16_000);
+      expect(raw).toContain("budget_exceeded");
+      expect(raw).toContain("/v1/problems/P-PATHS");
+      if (suffix === "json") {
+        const bounded = ProblemFaceResponseSchema.parse(JSON.parse(raw));
+        for (const item of bounded.items.filter((item) => item.kind !== "problem-title")) {
+          expect(item.body).toBe(body);
+        }
+      }
+    }
+  }
+  // Pre-lifecycle imports can have statement rows without a title. They must
+  // remain readable with an omission, never invented metadata or a 500.
+  row.formulation_json = JSON.stringify({ ...formulation, title: "" });
+  const legacy = await get("json");
+  expect(legacy.status).toBe(200);
+  const legacyFace = ProblemFaceResponseSchema.parse(await legacy.json());
+  expect(legacyFace.items).toEqual([]);
+  expect(legacyFace.omitted).toContainEqual(
+    expect.objectContaining({ reason: "formulation_unavailable" }),
+  );
+});
 
 test("dependency reads reject damaged pins and disclose unavailable legacy history (unit row double)", async () => {
   const dependencyPayload = { claim_id: "C-1", kind: "claim", statement: "PUBLIC_PREMISE_CANARY" };
