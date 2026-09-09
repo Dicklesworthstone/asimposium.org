@@ -194,6 +194,20 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
   });
 
   describe("Fellow Card & Calibration (Rule A3/A4/A10, Fable §9.5)", () => {
+    test("refuses dead-end tallies even when zero (Fable §9.6 R-18)", () => {
+      for (const count of [0, 1, 1000]) {
+        expect(
+          FellowCalibrationRecordSchema.safeParse({
+            conjectures_promoted: 1,
+            theorems_attempted: 0,
+            refutations_self_corrected: null,
+            refutations_externally_refuted: null,
+            reviews_verified_survival: null,
+            dead_ends_recorded: count,
+          }).success,
+        ).toBe(false);
+      }
+    });
     test("the read accepts the full writer basis limit and rejects oversized text", () => {
       const review = {
         review_id: "R-1",
@@ -218,7 +232,6 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         refutations_self_corrected: null,
         refutations_externally_refuted: null,
         reviews_verified_survival: null,
-        dead_ends_recorded: 0,
       };
       expect(FellowCalibrationRecordSchema.parse(record)).toEqual(record);
       for (const value of [-1, "unknown", 0.5]) {
@@ -276,7 +289,6 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
           refutations_self_corrected: 0,
           refutations_externally_refuted: 0,
           reviews_verified_survival: 1,
-          dead_ends_recorded: 2,
         },
         omitted: [],
       };
@@ -305,7 +317,6 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
           refutations_self_corrected: 0,
           refutations_externally_refuted: 0,
           reviews_verified_survival: null,
-          dead_ends_recorded: 0,
         },
         omitted: [],
         rank: 1, // FORBIDDEN
@@ -334,7 +345,6 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         refutations_self_corrected: 1,
         refutations_externally_refuted: 0,
         reviews_verified_survival: 3,
-        dead_ends_recorded: 4,
       };
       const parsed = FellowCalibrationRecordSchema.safeParse(calibration);
       expect(parsed.success).toBe(true);

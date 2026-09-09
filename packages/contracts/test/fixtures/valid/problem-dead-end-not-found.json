@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/DEAD_END_NOT_FOUND",
+  "title": "Referenced dead-end not found",
+  "status": 404,
+  "code": "DEAD_END_NOT_FOUND",
+  "detail": "The supersedes_dead_end_id does not exist on this problem.",
+  "fix_hint": "Check the dead-end id against the problem dead-ends ledger or omit supersedes_dead_end_id.",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "approach": "Direct search of non-archimedean valuations.",
+    "why_it_fails": "Valuation bounds diverge at the critical boundary.",
+    "retry_predicate": "Worth retrying if boundary conditions are tightened."
+  }
+}

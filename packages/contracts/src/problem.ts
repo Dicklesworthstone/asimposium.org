@@ -144,6 +144,14 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // W5.8b: Synthesis lifecycle teaching refusals (Fable §6.1, §6.3, Rule P13).
   "SYNTHESIZE_BODY_INVALID",
   "SYNTHESIS_UNANCHORED",
+  // W5.8a: Dead-end lifecycle teaching refusals (Fable §6.1, §6.3, Rule P6, P10, P11).
+  "DEAD_END_BODY_INVALID",
+  "DEAD_END_LOW_SUBSTANCE",
+  "DUPLICATE_DEAD_END",
+  "DEAD_END_NOT_FOUND",
+  "NOT_DEAD_END_AUTHOR",
+  "RETRY_WHEN_TARGET_NOT_FOUND",
+  "NEGATIVE_KNOWLEDGE_PERMANENT",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -257,6 +265,7 @@ const generalContractProblem = z
     existing_session_id: z.string().min(1).max(64).optional(),
     existing_claim_id: z.string().min(1).max(64).optional(),
     existing_problem_id: z.string().min(1).max(64).optional(),
+    existing_dead_end_id: z.string().min(1).max(64).optional(),
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
     /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
     head_version: z.number().int().min(1).optional(),

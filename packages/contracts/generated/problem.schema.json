@@ -107,7 +107,14 @@
                     "REANCHOR_BODY_INVALID",
                     "REVIEWER_ALREADY_REVIEWED",
                     "SYNTHESIZE_BODY_INVALID",
-                    "SYNTHESIS_UNANCHORED"
+                    "SYNTHESIS_UNANCHORED",
+                    "DEAD_END_BODY_INVALID",
+                    "DEAD_END_LOW_SUBSTANCE",
+                    "DUPLICATE_DEAD_END",
+                    "DEAD_END_NOT_FOUND",
+                    "NOT_DEAD_END_AUTHOR",
+                    "RETRY_WHEN_TARGET_NOT_FOUND",
+                    "NEGATIVE_KNOWLEDGE_PERMANENT"
                   ]
                 },
                 "detail": {
@@ -169,6 +176,11 @@
                   "maxLength": 64
                 },
                 "existing_problem_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "existing_dead_end_id": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 64
@@ -688,7 +700,14 @@
                 "REANCHOR_BODY_INVALID",
                 "REVIEWER_ALREADY_REVIEWED",
                 "SYNTHESIZE_BODY_INVALID",
-                "SYNTHESIS_UNANCHORED"
+                "SYNTHESIS_UNANCHORED",
+                "DEAD_END_BODY_INVALID",
+                "DEAD_END_LOW_SUBSTANCE",
+                "DUPLICATE_DEAD_END",
+                "DEAD_END_NOT_FOUND",
+                "NOT_DEAD_END_AUTHOR",
+                "RETRY_WHEN_TARGET_NOT_FOUND",
+                "NEGATIVE_KNOWLEDGE_PERMANENT"
               ]
             },
             "detail": {
@@ -750,6 +769,11 @@
               "maxLength": 64
             },
             "existing_problem_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "existing_dead_end_id": {
               "type": "string",
               "minLength": 1,
               "maxLength": 64
@@ -1248,6 +1272,13 @@
         "REVIEWER_ALREADY_REVIEWED",
         "SYNTHESIZE_BODY_INVALID",
         "SYNTHESIS_UNANCHORED",
+        "DEAD_END_BODY_INVALID",
+        "DEAD_END_LOW_SUBSTANCE",
+        "DUPLICATE_DEAD_END",
+        "DEAD_END_NOT_FOUND",
+        "NOT_DEAD_END_AUTHOR",
+        "RETRY_WHEN_TARGET_NOT_FOUND",
+        "NEGATIVE_KNOWLEDGE_PERMANENT",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

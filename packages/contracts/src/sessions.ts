@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  type RecordDeadEndRequest,
+  RecordDeadEndRequestSchema,
+  type RecordDeadEndResponse,
+  RecordDeadEndResponseSchema,
+} from "./dead-ends.ts";
 import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
 import {
   ClaimScientificProvenanceSchema,
@@ -8,7 +14,14 @@ import {
   ScientificVerificationSchema,
 } from "./scientific-provenance.ts";
 
-export { type RateLimitBudget, RateLimitBudgetSchema };
+export {
+  type RateLimitBudget,
+  RateLimitBudgetSchema,
+  type RecordDeadEndRequest,
+  RecordDeadEndRequestSchema,
+  type RecordDeadEndResponse,
+  RecordDeadEndResponseSchema,
+};
 
 /**
  * Session-protocol contracts (Fable §7). The session is the unit of work; a
@@ -1002,6 +1015,8 @@ export const SessionsContractsSchema = z
     reanchor_response: ClaimReanchorResponseSchema,
     synthesize_request: SynthesizeRequestSchema,
     synthesize_response: SynthesizeResponseSchema,
+    record_dead_end_request: RecordDeadEndRequestSchema,
+    record_dead_end_response: RecordDeadEndResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

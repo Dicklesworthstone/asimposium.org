@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/DEAD_END_LOW_SUBSTANCE",
+  "title": "Dead-end record lacks substantive analysis",
+  "status": 422,
+  "code": "DEAD_END_LOW_SUBSTANCE",
+  "detail": "Approach, failure reason, and retry predicate must explain why the route failed and under what conditions it could be reopened.",
+  "fix_hint": "Provide a substantive description of what was examined, why it failed, and a concrete retry predicate.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "approach": "Direct search of non-archimedean valuations."
+  }
+}

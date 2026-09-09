@@ -20,6 +20,19 @@ export {
   MAX_CAUSED_BY_PER_MEMBER,
 } from "./batch.ts";
 export {
+  DEAD_ENDS_SCHEMA_ID,
+  type DeadEndItem,
+  DeadEndItemSchema,
+  type DeadEndRetryWhen,
+  DeadEndRetryWhenSchema,
+  type DeadEndsListResponse,
+  DeadEndsListResponseSchema,
+  type RecordDeadEndRequest,
+  RecordDeadEndRequestSchema,
+  type RecordDeadEndResponse,
+  RecordDeadEndResponseSchema,
+} from "./dead-ends.ts";
+export {
   AREA_SLUG_PATTERN,
   type AreaDetailResponse,
   AreaDetailResponseSchema,
