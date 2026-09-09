@@ -176,6 +176,17 @@ describe("discovery generators (W1.6)", () => {
     });
   });
 
+  test("dead-end discovery links the response schema on the configured Worker", () => {
+    for (const agent of [DISCOVERY_ORIGINS.agent, "https://a.staging.asimposium.org"]) {
+      const doc = JSON.parse(generateOpenApiDocument({ ...DISCOVERY_ORIGINS, agent }));
+      const operation = doc.paths["/p/{id}/dead-ends.json"].get;
+      expect(operation.security).toEqual([]);
+      expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
+        `${agent}/schemas/dead-ends.v1.json`,
+      );
+    }
+  });
+
   test("complete workshop recovery is explicitly private and schema-backed", () => {
     const doc = JSON.parse(generateOpenApiDocument());
     const operation = doc.paths["/v1/sessions/{id}/workshop/{workshopId}"].get;

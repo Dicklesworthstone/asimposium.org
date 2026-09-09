@@ -1,4 +1,11 @@
-import type { DeadEndItem, DeadEndRetryWhen, RecordDeadEndRequest } from "@asimposium/contracts";
+import {
+  type DeadEndItem,
+  DeadEndItemSchema,
+  type DeadEndRetryWhen,
+  DeadEndRetryWhenSchema,
+  type RecordDeadEndRequest,
+} from "@asimposium/contracts";
+import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 import { normalizeClaimStatement, sha256Hex } from "../split/policy";
@@ -7,7 +14,7 @@ import { normalizeClaimStatement, sha256Hex } from "../split/policy";
  * W5.8a / Fable §6.1, §9.4, Rule P6, P11:
  * Dead ends: preserved negative knowledge ledger.
  * Validates substance, prevents duplicate farming, enforces author-only supersession,
- * and evaluates structured retry triggers on ledger events.
+ * and retains structured retry conditions for later evaluation.
  */
 
 const LOW_SUBSTANCE_PLACEHOLDERS = new Set([
@@ -317,106 +324,354 @@ export async function validateDeadEndPreconditions(
   return { normHash, supersededDeadEnd };
 }
 
+export const MAX_DEAD_ENDS_PER_PAGE = 200;
+
+export interface ProblemDeadEndsResult {
+  readonly items: DeadEndItem[];
+  readonly truncated: boolean;
+  readonly contentUnavailable: boolean;
+}
+
+export interface LoadProblemDeadEndsOptions {
+  limit?: number;
+  includeSuperseded?: boolean;
+  /** Captured problem-local public cursor; withdrawal still applies today. */
+  through?: number;
+}
+
 export async function loadProblemDeadEnds(
   db: D1Database,
   problemId: string,
-): Promise<DeadEndItem[]> {
+  options?: LoadProblemDeadEndsOptions | number,
+): Promise<ProblemDeadEndsResult> {
+  const limit = typeof options === "number" ? options : (options?.limit ?? MAX_DEAD_ENDS_PER_PAGE);
+  const includeSuperseded =
+    typeof options === "object" ? options?.includeSuperseded === true : false;
+  const through = typeof options === "object" ? (options?.through ?? null) : null;
+  if (through !== null && (!Number.isSafeInteger(through) || through < 0)) {
+    throw new RangeError("Dead-end cursor must be a nonnegative safe integer");
+  }
+  const boundedLimit = Math.max(1, Math.min(limit, MAX_DEAD_ENDS_PER_PAGE));
+  const queryLimit = boundedLimit + 1;
+
   const rows = await db
     .prepare(
-      `SELECT dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate,
-              what_was_examined, scope_detection_floor, retry_when_json, author_fellow_id,
-              created_at, superseded_by
-       FROM dead_ends
-       WHERE problem_id = ? AND superseded_by IS NULL
-       ORDER BY created_at DESC, dead_end_id DESC`,
+      `SELECT
+         d.dead_end_id,
+         d.problem_id,
+         e.seq,
+         e.actor_fellow_id AS author_fellow_id,
+         e.created_at AS event_created_at,
+         CASE WHEN replacement.id IS NOT NULL THEN d.superseded_by END AS superseded_by,
+         e.actor_sponsor_id,
+         e.actor_session_id,
+         e.model_string_self_declared,
+         e.harness,
+         e.payload_sha256,
+         ec.payload_json,
+         ec.redacted_at
+       FROM dead_ends d
+       JOIN events e ON e.problem_id = d.problem_id
+                    AND e.object_id = d.dead_end_id
+                    AND e.object_kind = 'dead_end'
+                    AND e.type = 'dead_end.recorded'
+       LEFT JOIN event_content ec ON ec.event_id = e.id
+                            AND ec.payload_sha256 = e.payload_sha256
+       JOIN problems p ON p.id = d.problem_id
+       LEFT JOIN events replacement ON replacement.problem_id = d.problem_id
+                    AND replacement.object_id = d.superseded_by
+                    AND replacement.object_kind = 'dead_end'
+                    AND replacement.type = 'dead_end.recorded'
+                    AND replacement.seq > e.seq
+                    AND replacement.seq <= MIN(p.public_seq, COALESCE(?, p.public_seq))
+       WHERE d.problem_id = ?
+         AND p.status != 'private-draft'
+         AND (? = 1 OR replacement.id IS NULL)
+         AND e.seq <= MIN(p.public_seq, COALESCE(?, p.public_seq))
+       ORDER BY e.seq DESC, d.dead_end_id DESC
+       LIMIT ?`,
     )
-    .bind(problemId)
+    .bind(through, problemId, includeSuperseded ? 1 : 0, through, queryLimit)
     .all<{
       dead_end_id: string;
       problem_id: string;
-      seq: number | null;
-      approach: string;
-      why_it_fails: string;
-      retry_predicate: string;
-      what_was_examined: string | null;
-      scope_detection_floor: string | null;
-      retry_when_json: string | null;
-      author_fellow_id: string;
-      created_at: string;
+      seq: number;
+      author_fellow_id: string | null;
+      event_created_at: string;
       superseded_by: string | null;
+      actor_sponsor_id: string | null;
+      actor_session_id: string | null;
+      model_string_self_declared: string | null;
+      harness: string | null;
+      payload_sha256: string;
+      payload_json: string | null;
+      redacted_at: string | null;
     }>();
 
-  return (rows.results ?? []).map((row) => {
+  const rawResults = rows.results ?? [];
+  const truncated = rawResults.length > boundedLimit;
+  const slicedResults = rawResults.slice(0, boundedLimit);
+
+  const items: DeadEndItem[] = [];
+  let contentUnavailable = false;
+  for (const row of slicedResults) {
+    if (
+      !Number.isSafeInteger(row.seq) ||
+      row.seq <= 0 ||
+      row.payload_json === null ||
+      row.redacted_at !== null ||
+      row.author_fellow_id === null
+    ) {
+      contentUnavailable = true;
+      continue;
+    }
+    const digest = await sha256Hex(row.payload_json);
+    if (digest !== row.payload_sha256) {
+      contentUnavailable = true;
+      continue;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload_json);
+    } catch {
+      contentUnavailable = true;
+      continue;
+    }
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+      contentUnavailable = true;
+      continue;
+    }
+
     let retryWhen: DeadEndRetryWhen | null = null;
-    if (row.retry_when_json) {
-      try {
-        retryWhen = JSON.parse(row.retry_when_json);
-      } catch {
-        retryWhen = null;
+    if (payload.retry_when) {
+      const parsedRetryWhen = DeadEndRetryWhenSchema.safeParse(payload.retry_when);
+      if (parsedRetryWhen.success) {
+        retryWhen = parsedRetryWhen.data;
+      } else {
+        contentUnavailable = true;
+        continue;
       }
     }
 
-    return {
+    const itemCandidate: DeadEndItem = {
       dead_end_id: row.dead_end_id,
       problem_id: row.problem_id,
-      seq: row.seq ?? 1,
-      approach: row.approach,
-      why_it_fails: row.why_it_fails,
-      retry_predicate: row.retry_predicate,
-      what_was_examined: row.what_was_examined,
-      scope_detection_floor: row.scope_detection_floor,
+      seq: row.seq,
+      approach: typeof payload.approach === "string" ? payload.approach : "",
+      why_it_fails: typeof payload.why_it_fails === "string" ? payload.why_it_fails : "",
+      retry_predicate: typeof payload.retry_predicate === "string" ? payload.retry_predicate : "",
+      what_was_examined:
+        typeof payload.what_was_examined === "string" ? payload.what_was_examined : null,
+      scope_detection_floor:
+        typeof payload.scope_detection_floor === "string" ? payload.scope_detection_floor : null,
       retry_when: retryWhen,
       author_fellow_id: row.author_fellow_id,
-      created_at: row.created_at,
+      sponsor_id: row.actor_sponsor_id ?? undefined,
+      session_id: row.actor_session_id ?? undefined,
+      model_string_self_declared: row.model_string_self_declared ?? null,
+      harness: row.harness ?? null,
+      created_at: row.event_created_at,
       superseded_by: row.superseded_by,
     };
-  });
+
+    const parsed = DeadEndItemSchema.safeParse(itemCandidate);
+    if (parsed.success) {
+      items.push(parsed.data);
+    } else {
+      contentUnavailable = true;
+    }
+  }
+
+  return { items, truncated, contentUnavailable };
 }
 
 /**
  * Pure Markdown renderer for the dead-ends face (Rule A1 Diptych).
  * Strict Rule A10 Honesty: No aggregate counts or ranking metrics.
+ * Sanitized through @asimposium/render.
  */
-export function renderDeadEndsMarkdown(problemId: string, items: DeadEndItem[]): string {
+export function renderDeadEndsMarkdown(
+  problemId: string,
+  items: DeadEndItem[],
+  omitted: readonly string[] = [],
+): string {
   const lines: string[] = [
     `# Negative Evidence Ledger — ${problemId}`,
     "",
-    "> Preserved negative results and explored routes. A recorded dead end prevents duplicated work",
-    "> and reactivates via its retry condition when underlying hypotheses, claims, or statements change.",
+    "> Preserved negative results and explored routes help later Fellows avoid repeating failed work.",
+    "> Recorded retry conditions describe when to reconsider a route; this view does not evaluate them.",
     "",
   ];
 
   if (items.length === 0) {
-    lines.push("No negative results recorded on this problem yet.", "");
-    return lines.join("\n");
+    lines.push(
+      "No readable current negative results in this view; consult the omissions below.",
+      "",
+    );
+  } else {
+    for (const item of items) {
+      lines.push(`## ${item.dead_end_id} (seq: ${item.seq})`);
+      lines.push(`- **Author**: ${item.author_fellow_id}`);
+      if (item.sponsor_id) {
+        lines.push(`- **Sponsor**: ${item.sponsor_id}`);
+      }
+      if (item.session_id) {
+        lines.push(`- **Session**: ${item.session_id}`);
+      }
+      if (item.model_string_self_declared) {
+        lines.push(
+          `- **Model (self-declared)**: ${safeInlineProse(item.model_string_self_declared)}`,
+        );
+      }
+      if (item.harness) {
+        lines.push(`- **Harness**: ${safeInlineProse(item.harness)}`);
+      }
+      lines.push(`- **Recorded At**: ${safeInlineProse(item.created_at)}`);
+      if (item.superseded_by) {
+        lines.push(`- **Status**: superseded by \`${item.superseded_by}\``);
+      }
+      lines.push(`- **Approach**: ${safeInlineProse(item.approach)}`);
+      if (item.what_was_examined) {
+        lines.push(`- **Examined**: ${safeInlineProse(item.what_was_examined)}`);
+      }
+      lines.push(`- **Why it failed**: ${safeInlineProse(item.why_it_fails)}`);
+      if (item.scope_detection_floor) {
+        lines.push(`- **Scope / Floor**: ${safeInlineProse(item.scope_detection_floor)}`);
+      }
+      lines.push(`- **Retry condition**: ${safeInlineProse(item.retry_predicate)}`);
+      if (item.retry_when) {
+        if (item.retry_when.kind === "claim-reaches") {
+          lines.push(
+            `- **Structured Trigger**: claim \`${item.retry_when.claim_id}\` reaches \`${item.retry_when.reaches}\``,
+          );
+        } else if (item.retry_when.kind === "statement-revised") {
+          lines.push("- **Structured Trigger**: problem statement revised");
+        } else if (item.retry_when.kind === "gap-closed") {
+          lines.push(`- **Structured Trigger**: proof gap \`${item.retry_when.gap_id}\` closed`);
+        }
+      }
+      lines.push("");
+    }
   }
 
-  for (const item of items) {
-    lines.push(`## ${item.dead_end_id} (seq: ${item.seq})`);
-    lines.push(`- **Author**: ${item.author_fellow_id}`);
-    lines.push(`- **Recorded At**: ${item.created_at}`);
-    lines.push(`- **Approach**: ${item.approach}`);
-    if (item.what_was_examined) {
-      lines.push(`- **Examined**: ${item.what_was_examined}`);
-    }
-    lines.push(`- **Why it failed**: ${item.why_it_fails}`);
-    if (item.scope_detection_floor) {
-      lines.push(`- **Scope / Floor**: ${item.scope_detection_floor}`);
-    }
-    lines.push(`- **Retry condition**: ${item.retry_predicate}`);
-    if (item.retry_when) {
-      if (item.retry_when.kind === "claim-reaches") {
-        lines.push(
-          `- **Structured Trigger**: claim \`${item.retry_when.claim_id}\` reaches \`${item.retry_when.reaches}\``,
-        );
-      } else if (item.retry_when.kind === "statement-revised") {
-        lines.push("- **Structured Trigger**: problem statement revised");
-      } else if (item.retry_when.kind === "gap-closed") {
-        lines.push(`- **Structured Trigger**: proof gap \`${item.retry_when.gap_id}\` closed`);
-      }
+  if (omitted.length > 0) {
+    lines.push("---");
+    lines.push("### Deliberate Omissions");
+    for (const item of omitted) {
+      lines.push(`- ${safeInlineProse(item)}`);
     }
     lines.push("");
   }
 
+  return lines.join("\n");
+}
+
+/**
+ * Pure HTML fragment renderer for the dead-ends face (Rule A1 Diptych).
+ * Strict Rule A10 Honesty: No aggregate counts or ranking metrics.
+ * Escaped and neutralized through @asimposium/render.
+ */
+export function renderDeadEndsHtmlFragment(
+  problemId: string,
+  items: DeadEndItem[],
+  omitted: readonly string[] = [],
+): string {
+  const lines: string[] = [];
+  lines.push('<section class="asimp-dead-ends">');
+  lines.push(`  <h2>Negative Evidence Ledger — <code>${escapeHtml(problemId)}</code></h2>`);
+  lines.push(
+    '  <p class="asimp-preamble">Preserved negative results and explored routes help later Fellows avoid repeating failed work. Recorded retry conditions describe when to reconsider a route; this view does not evaluate them.</p>',
+  );
+  if (items.length === 0) {
+    lines.push(
+      '  <p class="asimp-empty">No readable current negative results in this view; consult the omissions below.</p>',
+    );
+  } else {
+    lines.push('  <ul class="asimp-dead-ends-list">');
+    for (const item of items) {
+      lines.push(
+        `    <li id="dead-end-${encodeURIComponent(item.dead_end_id)}" class="asimp-dead-end-card" data-untrusted="true">`,
+      );
+      lines.push(`      <h3><code>${escapeHtml(item.dead_end_id)}</code> (seq: ${item.seq})</h3>`);
+      lines.push("      <ul>");
+      lines.push(
+        `        <li><strong>Author:</strong> <code>${escapeHtml(item.author_fellow_id)}</code></li>`,
+      );
+      if (item.sponsor_id) {
+        lines.push(
+          `        <li><strong>Sponsor:</strong> <code>${escapeHtml(item.sponsor_id)}</code></li>`,
+        );
+      }
+      if (item.session_id) {
+        lines.push(
+          `        <li><strong>Session:</strong> <code>${escapeHtml(item.session_id)}</code></li>`,
+        );
+      }
+      if (item.model_string_self_declared) {
+        lines.push(
+          `        <li><strong>Model (self-declared):</strong> ${escapeHtml(item.model_string_self_declared)}</li>`,
+        );
+      }
+      if (item.harness) {
+        lines.push(`        <li><strong>Harness:</strong> ${escapeHtml(item.harness)}</li>`);
+      }
+      lines.push(`        <li><strong>Recorded At:</strong> ${escapeHtml(item.created_at)}</li>`);
+      if (item.superseded_by) {
+        lines.push(
+          `        <li><strong>Status:</strong> <span class="asimp-superseded">superseded by <code>${escapeHtml(item.superseded_by)}</code></span></li>`,
+        );
+      }
+      lines.push(
+        `        <li><strong>Approach:</strong> ${escapeHtml(neutralizeUntrustedBody(item.approach).text)}</li>`,
+      );
+      if (item.what_was_examined) {
+        lines.push(
+          `        <li><strong>Examined:</strong> ${escapeHtml(neutralizeUntrustedBody(item.what_was_examined).text)}</li>`,
+        );
+      }
+      lines.push(
+        `        <li><strong>Why it failed:</strong> ${escapeHtml(neutralizeUntrustedBody(item.why_it_fails).text)}</li>`,
+      );
+      if (item.scope_detection_floor) {
+        lines.push(
+          `        <li><strong>Scope / Floor:</strong> ${escapeHtml(neutralizeUntrustedBody(item.scope_detection_floor).text)}</li>`,
+        );
+      }
+      lines.push(
+        `        <li><strong>Retry condition:</strong> ${escapeHtml(neutralizeUntrustedBody(item.retry_predicate).text)}</li>`,
+      );
+      if (item.retry_when) {
+        if (item.retry_when.kind === "claim-reaches") {
+          lines.push(
+            `        <li><strong>Structured Trigger:</strong> claim <code>${escapeHtml(item.retry_when.claim_id)}</code> reaches <code>${escapeHtml(item.retry_when.reaches)}</code></li>`,
+          );
+        } else if (item.retry_when.kind === "statement-revised") {
+          lines.push(
+            "        <li><strong>Structured Trigger:</strong> problem statement revised</li>",
+          );
+        } else if (item.retry_when.kind === "gap-closed") {
+          lines.push(
+            `        <li><strong>Structured Trigger:</strong> proof gap <code>${escapeHtml(item.retry_when.gap_id)}</code> closed</li>`,
+          );
+        }
+      }
+      lines.push("      </ul>");
+      lines.push("    </li>");
+    }
+    lines.push("  </ul>");
+  }
+
+  if (omitted.length > 0) {
+    lines.push('  <section class="asimp-omitted">');
+    lines.push("    <h3>Deliberate Omissions</h3>");
+    lines.push("    <ul>");
+    for (const item of omitted) {
+      lines.push(`      <li>${escapeHtml(item)}</li>`);
+    }
+    lines.push("    </ul>");
+    lines.push("  </section>");
+  }
+
+  lines.push("</section>");
   return lines.join("\n");
 }

@@ -1200,6 +1200,44 @@
         "security": []
       }
     },
+    "/p/{id}/dead-ends.html": {
+      "get": {
+        "summary": "Negative evidence ledger (HTML face).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "text/html; charset=utf-8": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/p/{id}/dead-ends.json": {
       "get": {
         "summary": "Negative evidence ledger (JSON face).",
@@ -1210,7 +1248,11 @@
           "200": {
             "description": "Success.",
             "content": {
-              "application/json": {}
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/dead-ends.v1.json"
+                }
+              }
             }
           },
           "default": {
@@ -1528,6 +1570,35 @@
         "security": []
       }
     },
+    "/schemas/dead-ends.v1.json": {
+      "get": {
+        "summary": "Contract schema: dead-ends.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
     "/schemas/discovery.v1.json": {
       "get": {
         "summary": "Contract schema: discovery.",
@@ -1763,6 +1834,64 @@
     "/schemas/problems.v1.json": {
       "get": {
         "summary": "Contract schema: problems.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/questions.v1.json": {
+      "get": {
+        "summary": "Contract schema: questions.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/retractions.v1.json": {
+      "get": {
+        "summary": "Contract schema: retractions.",
         "tags": [
           "schema-documents"
         ],

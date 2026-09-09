@@ -1,6 +1,8 @@
 import {
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
+  DEAD_ENDS_SCHEMA_ID,
+  DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
   LedgerContractsSchema,
   ProblemDetailSchema,
@@ -14,6 +16,10 @@ import {
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
+  QUESTIONS_SCHEMA_ID,
+  QuestionsListResponseSchema,
+  RETRACTIONS_SCHEMA_ID,
+  RetractionsListResponseSchema,
 } from "@asimposium/contracts";
 import {
   type ComposedPack,
@@ -31,8 +37,23 @@ import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
-import { loadProblemDeadEnds, renderDeadEndsMarkdown } from "./ledger/dead-ends";
+import {
+  loadProblemDeadEnds,
+  MAX_DEAD_ENDS_PER_PAGE,
+  renderDeadEndsHtmlFragment,
+  renderDeadEndsMarkdown,
+} from "./ledger/dead-ends";
 import { displayClaimDisposition } from "./ledger/dispositions";
+import {
+  loadProblemQuestions,
+  renderQuestionsHtmlFragment,
+  renderQuestionsMarkdown,
+} from "./ledger/questions";
+import {
+  loadProblemRetractions,
+  renderRetractionsHtmlFragment,
+  renderRetractionsMarkdown,
+} from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
@@ -550,7 +571,9 @@ async function loadProblemFace(
   // window expression returns these potentially large bodies only once, even
   // when the digest considers hundreds of claims. Legacy formulations may be incomplete.
   const parsedFormulation = FormulationSchema.safeParse(
-    first.formulation_json == null ? null : JSON.parse(first.formulation_json),
+    first.formulation_json === null || first.formulation_json === undefined
+      ? null
+      : JSON.parse(first.formulation_json),
   );
   const formulation = parsedFormulation.success ? parsedFormulation.data : null;
   const reviews = await statementReviewCandidates(
@@ -1276,19 +1299,42 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/dead-ends.json", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare("SELECT id, unlisted FROM problems WHERE id = ?")
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
       .bind(problemId)
       .first<{ id: string; unlisted: number }>();
     if (!problem) return problemNotFound(c.req.method);
 
-    const deadEnds = await loadProblemDeadEnds(c.env.DB, problemId);
+    const includeSupersededParam = c.req.query("include_superseded");
+    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
+    const {
+      items: deadEnds,
+      truncated,
+      contentUnavailable,
+    } = await loadProblemDeadEnds(c.env.DB, problemId, {
+      includeSuperseded,
+    });
+    const omitted = [
+      ...(contentUnavailable
+        ? ["Recorded dead-end content is unavailable or could not be verified."]
+        : []),
+      ...(includeSuperseded
+        ? []
+        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+      ...(truncated
+        ? [
+            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+          ]
+        : []),
+    ];
     const body = JSON.stringify(
-      {
-        schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+      DeadEndsListResponseSchema.parse({
+        schema: DEAD_ENDS_SCHEMA_ID,
         problem_id: problemId,
         dead_ends: deadEnds,
-        omitted: ["superseded dead ends are excluded"],
-      },
+        omitted,
+      }),
       null,
       2,
     );
@@ -1305,16 +1351,234 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/dead-ends.md", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare("SELECT id, unlisted FROM problems WHERE id = ?")
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
       .bind(problemId)
       .first<{ id: string; unlisted: number }>();
     if (!problem) return problemNotFound(c.req.method);
 
-    const deadEnds = await loadProblemDeadEnds(c.env.DB, problemId);
-    const body = renderDeadEndsMarkdown(problemId, deadEnds);
+    const includeSupersededParam = c.req.query("include_superseded");
+    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
+    const {
+      items: deadEnds,
+      truncated,
+      contentUnavailable,
+    } = await loadProblemDeadEnds(c.env.DB, problemId, {
+      includeSuperseded,
+    });
+    const omitted = [
+      ...(contentUnavailable
+        ? ["Recorded dead-end content is unavailable or could not be verified."]
+        : []),
+      ...(includeSuperseded
+        ? []
+        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+      ...(truncated
+        ? [
+            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+          ]
+        : []),
+    ];
+    const body = renderDeadEndsMarkdown(problemId, deadEnds, omitted);
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const includeSupersededParam = c.req.query("include_superseded");
+    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
+    const {
+      items: deadEnds,
+      truncated,
+      contentUnavailable,
+    } = await loadProblemDeadEnds(c.env.DB, problemId, {
+      includeSuperseded,
+    });
+    const omitted = [
+      ...(contentUnavailable
+        ? ["Recorded dead-end content is unavailable or could not be verified."]
+        : []),
+      ...(includeSuperseded
+        ? []
+        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+      ...(truncated
+        ? [
+            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+          ]
+        : []),
+    ];
+    const body = renderDeadEndsHtmlFragment(problemId, deadEnds, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  // --- W5.8d Questions Diptych faces ---
+  app.on(["GET", "HEAD"], "/p/:id/questions.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { questions, omitted } = await loadProblemQuestions(c.env.DB, problemId);
+    const body = JSON.stringify(
+      QuestionsListResponseSchema.parse({
+        schema: QUESTIONS_SCHEMA_ID,
+        problem_id: problemId,
+        questions,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/questions.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { questions, omitted } = await loadProblemQuestions(c.env.DB, problemId);
+    const body = renderQuestionsMarkdown(problemId, questions, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/questions.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { questions, omitted } = await loadProblemQuestions(c.env.DB, problemId);
+    const body = renderQuestionsHtmlFragment(problemId, questions, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  // --- W5.8d Retractions Diptych faces ---
+  app.on(["GET", "HEAD"], "/p/:id/retractions.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
+    const body = JSON.stringify(
+      RetractionsListResponseSchema.parse({
+        schema: RETRACTIONS_SCHEMA_ID,
+        problem_id: problemId,
+        retractions,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/retractions.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
+    const body = renderRetractionsMarkdown(problemId, retractions, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/retractions.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
+    const body = renderRetractionsHtmlFragment(problemId, retractions, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
       "cache-control": "public, max-age=0, must-revalidate",
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,

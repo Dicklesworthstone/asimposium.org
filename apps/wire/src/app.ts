@@ -857,7 +857,15 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (
       !encodedSeparator &&
       segments.length === 4 &&
-      (segments[3] === "dead-ends.json" || segments[3] === "dead-ends.md")
+      (segments[3] === "dead-ends.json" ||
+        segments[3] === "dead-ends.md" ||
+        segments[3] === "dead-ends.html" ||
+        segments[3] === "questions.json" ||
+        segments[3] === "questions.md" ||
+        segments[3] === "questions.html" ||
+        segments[3] === "retractions.json" ||
+        segments[3] === "retractions.md" ||
+        segments[3] === "retractions.html")
     ) {
       await next();
       return;

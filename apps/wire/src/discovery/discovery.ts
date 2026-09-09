@@ -100,6 +100,18 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/events.json": true,
   "GET /p/:id/*": true,
+  // W5.8d Questions & Retractions withheld until positive coverage is landed (coordinating with census).
+  "GET /p/:id/questions.json": true,
+  "GET /p/:id/questions.md": true,
+  "GET /p/:id/questions.html": true,
+  "GET /p/:id/retractions.json": true,
+  "GET /p/:id/retractions.md": true,
+  "GET /p/:id/retractions.html": true,
+  "POST /v1/sessions/:id/questions": true,
+  "POST /v1/sessions/:id/questions/:qid/lease": true,
+  "POST /v1/sessions/:id/questions/:qid/answer": true,
+  "POST /v1/sessions/:id/questions/:qid/withdraw": true,
+  "POST /v1/sessions/:id/retract": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
@@ -127,6 +139,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
   "GET /p/:id/dead-ends.md": "Negative evidence ledger (Markdown face).",
   "GET /p/:id/dead-ends.json": "Negative evidence ledger (JSON face).",
+  "GET /p/:id/dead-ends.html": "Negative evidence ledger (HTML face).",
   "GET /p/:id/claims/:target":
     "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",
@@ -470,7 +483,25 @@ function responseFor(
               },
             },
           }
-        : { [media]: {} };
+        : openApiPath === "/p/{id}/dead-ends.json"
+          ? {
+              "application/json": {
+                schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
+              },
+            }
+          : openApiPath === "/p/{id}/questions.json"
+            ? {
+                "application/json": {
+                  schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
+                },
+              }
+            : openApiPath === "/p/{id}/retractions.json"
+              ? {
+                  "application/json": {
+                    schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                  },
+                }
+              : { [media]: {} };
   return {
     "200": {
       description: "Success.",
