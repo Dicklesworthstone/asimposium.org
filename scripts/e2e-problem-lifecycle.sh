@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Claims E2E Gate (W5.3, bead asimposiumorg-6w1).
+# Problem Lifecycle & Statement Drift E2E Gate (W5.1, bead asimposiumorg-5yu).
 # Proves:
-# 1. All 12 claim kinds are accepted and validated through the session promotion loop.
-# 2. Conjecture-class claims require a falsifier; missing falsifier is refused with 422 MISSING_FALSIFIER (rule P3).
-# 3. Math and NFKC normalization generates stable normHash across whitespace and LaTeX formatting variations ($...$ vs \(...\)).
-# 4. P11 duplicate claim gate: colliding normalized statements on the same problem are refused with 409 DUPLICATE_CLAIM naming the existing ID.
-# 5. P9 version monotonicity: revisions mint @n+1 with disposition reset to "open" and immutable content digests.
-# 6. Revision authority: non-authors are refused with 403 NOT_CLAIM_AUTHOR; stale base versions are refused with 409 OBJECT_VERSION_CONFLICT.
-# 7. P10 claim dependencies: acyclic depends_on DAG edges persist cleanly; cyclic dependencies and dangling refs are refused.
-# 8. Diptych retrieval: public .json, .md, .bib, and .csl.json faces serve canonical head and version-pinned claim representations.
-# 9. OPS.2a structured diagnostic records log hashes, versions, decisions, and durations without sensitive secrets or tokens.
+# 1. Sponsor problem brief creation, listing, assignment, and withdrawal.
+# 2. Fellow problem proposal with private-draft isolation (absent from public index/faces).
+# 3. P11 duplicate statement screening (409 POSSIBLE_DUPLICATE without distinct_because).
+# 4. Sponsor publish to public sharpening status.
+# 5. P3 claims board lock while in sharpening (422 CLAIMS_BOARD_LOCKED).
+# 6. Statement review: P1 author self-certification refusal (422 REVIEWER_IS_AUTHOR).
+# 7. Statement review: independent review (statement-clear) unlocks sharpening -> active.
+# 8. Active claims promotion on unlocked board.
+# 9. Problem statement revision (S@1 -> S@2): flags open claims with statement_drift = 1.
+# 10. P9 review refusal on drifted claims (422 STATEMENT_DRIFT).
+# 11. Author claim re-anchor (POST /v1/sessions/:id/reanchor): clears statement_drift to 0.
+# 12. Enter under-result-review and premature resolution refusal.
+# 13. Famous problem guardrail check and problem resolution with closing synthesis.
+# 14. Problem retirement.
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,8 +25,8 @@ trap 'e2e_leave_artifact_writer_leases_open_on_signal 130' INT
 trap 'e2e_leave_artifact_writer_leases_open_on_signal 143' TERM
 trap 'e2e_leave_artifact_writer_leases_open_on_signal 129' HUP
 
-suite="e2e-claims"
-reproduce="bash scripts/e2e-claims.sh"
+suite="e2e-problem-lifecycle"
+reproduce="bash scripts/e2e-problem-lifecycle.sh"
 started_ms="$(e2e_now_ms)"
 self_test=0
 write_artifacts=0
@@ -73,9 +78,9 @@ fi
 
 cd "$repository_root"
 
-# Run the claims real-bindings preflight against real Workerd / D1
-if ! node apps/wire/test/integration/claims-real-bindings.mjs; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CLAIMS_REAL_BINDINGS_FAILED" "$reproduce"
+# Run the problem lifecycle real-bindings preflight against real Workerd / D1
+if ! node apps/wire/test/integration/problem-lifecycle-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "PROBLEM_LIFECYCLE_REAL_BINDINGS_FAILED" "$reproduce"
   exit 1
 fi
 

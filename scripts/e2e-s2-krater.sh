@@ -159,6 +159,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0044_public_write_quotas.sql
   db/migrations/0045_claim_dependency_cycles.sql
   db/migrations/0046_workshop_revision.sql
+  db/migrations/0047_problem_lifecycle.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -182,6 +183,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/fellow-card.ts
   packages/contracts/src/ledger.ts
   packages/contracts/src/problem.ts
+  packages/contracts/src/problems.ts
   packages/contracts/src/schema.ts
   packages/contracts/src/screening.ts
   packages/contracts/src/scientific-provenance.ts
@@ -261,6 +263,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/router.ts
   apps/wire/src/search/markdown.ts
   apps/wire/src/search/service.ts
+  apps/wire/src/problems/router.ts
   packages/contracts/src/public-schemas.ts
   packages/contracts/generated/discovery.schema.json
   packages/contracts/generated/enrollment.schema.json
@@ -356,6 +359,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0044_public_write_quotas.sql
   0045_claim_dependency_cycles.sql
   0046_workshop_revision.sql
+  0047_problem_lifecycle.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

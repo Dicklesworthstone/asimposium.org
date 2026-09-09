@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
-import { claimsJourney } from "./claims-journey.mjs";
+import { problemLifecycleJourney } from "./problem-lifecycle-journey.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -11,7 +11,7 @@ const origin = "http://127.0.0.1:8787";
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 // Fresh local signing key exercises the actual sponsor ingress; no OAuth claim.
 const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-const keyId = "claims-local-sponsor";
+const keyId = "problem-lifecycle-local-sponsor";
 const publicKeyHex = Buffer.from(
   await crypto.subtle.exportKey("raw", signingKeys.publicKey),
 ).toString("hex");
@@ -26,21 +26,21 @@ const server = createTestHarness({
         SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: keyId, publicKeyHex, notBefore: 0 }]),
       },
       config: {
-        name: "asimposium-claims-proof",
+        name: "asimposium-problem-lifecycle-proof",
         main: `${root}/apps/wire/test/integration/discovery-local-worker.ts`,
         compatibility_date: "2026-08-13",
         compatibility_flags: ["nodejs_compat"],
         d1_databases: [
           {
             binding: "DB",
-            database_name: "claims-proof",
+            database_name: "problem-lifecycle-proof",
             database_id: "00000000-0000-0000-0000-000000000000",
             migrations_dir: `${root}/db/migrations`,
           },
         ],
         r2_buckets: [
-          { binding: "ARTIFACTS", bucket_name: "claims-private" },
-          { binding: "PUBLIC_ARTIFACTS", bucket_name: "claims-public" },
+          { binding: "ARTIFACTS", bucket_name: "problem-lifecycle-private" },
+          { binding: "PUBLIC_ARTIFACTS", bucket_name: "problem-lifecycle-public" },
         ],
         durable_objects: {
           bindings: [{ name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" }],
@@ -62,7 +62,7 @@ const server = createTestHarness({
   ],
 });
 
-async function runClaimsProof() {
+async function runProblemLifecycleProof() {
   await server.listen();
   console.log(JSON.stringify({ stage: "workerd-started" }));
   const worker = server.getWorker();
@@ -83,7 +83,7 @@ async function runClaimsProof() {
           ? {}
           : {
               "content-type": "application/json",
-              "idempotency-key": idempotencyKey ?? `claims-key-${++key}`,
+              "idempotency-key": idempotencyKey ?? `problem-key-${++key}`,
             }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -95,7 +95,7 @@ async function runClaimsProof() {
       data = JSON.parse(raw);
     } catch {
       throw new Error(
-        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} sha256=${createHash("sha256").update(raw).digest("hex")}`,
+        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} text=${raw} sha256=${createHash("sha256").update(raw).digest("hex")}`,
       );
     }
 
@@ -124,7 +124,7 @@ async function runClaimsProof() {
     return path;
   }
 
-  async function enroll(name, sponsor = "usr_sponsor_claims") {
+  async function enroll(name, sponsor = "usr_sponsor_problems") {
     const minted = await fixtures.mint(sponsor);
     const claimed = await call(
       discoveredRequest("fellow_registration_request"),
@@ -132,8 +132,8 @@ async function runClaimsProof() {
         enrollment_id: minted.enrollmentId,
         secret: minted.secret,
         name,
-        model: "synthetic-claim-model",
-        harness: "local-claims-proof",
+        model: "synthetic-problem-model",
+        harness: "local-problem-lifecycle-proof",
       },
       undefined,
       202,
@@ -146,31 +146,8 @@ async function runClaimsProof() {
     return issued.token;
   }
 
-  async function sponsorWorkshop(sponsorId, body, expected = 200) {
-    const path = "/v1/sponsors/workshop";
-    const raw = JSON.stringify(body);
-    const envelope = await mintServiceEnvelope({
-      privateKey: signingKeys.privateKey,
-      kid: keyId,
-      now: Math.floor(Date.now() / 1000),
-      method: "POST",
-      route: path,
-      action: "workshop.read",
-      principalId: sponsorId,
-      body: raw,
-    });
-    const response = await worker.fetch(`${origin}${path}`, {
-      method: "POST",
-      headers: { ...serviceEnvelopeHeaders(envelope), "User-Agent": userAgent },
-      body: raw,
-    });
-    assert.equal(response.status, expected, `Signed sponsor workshop read expected ${expected}`);
-    assert.equal(response.headers.get("cache-control"), "private, no-store");
-    return response.json();
-  }
-
   async function sponsorCall(sponsorId, method, path, action, body, expected = 200) {
-    const raw = JSON.stringify(body);
+    const raw = body === undefined ? "" : JSON.stringify(body);
     const envelope = await mintServiceEnvelope({
       privateKey: signingKeys.privateKey,
       kid: keyId,
@@ -186,17 +163,23 @@ async function runClaimsProof() {
       headers: {
         ...serviceEnvelopeHeaders(envelope),
         "User-Agent": userAgent,
-        "Content-Type": "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       },
-      body: raw,
+      ...(body === undefined ? {} : { body: raw }),
     });
-    assert.equal(response.status, expected, `Signed sponsor call expected ${expected}`);
-    assert.equal(response.headers.get("cache-control"), "private, no-store");
-    return response.json();
+    const text = await response.text();
+    if (response.status !== expected) {
+      console.error(`sponsorCall failure on ${method} ${path}: status=${response.status} expected=${expected} body=${text}`);
+    }
+    assert.equal(response.status, expected, `Signed sponsor call expected ${expected}: ${text}`);
+    if (expected >= 200 && expected < 300) {
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+    }
+    return JSON.parse(text);
   }
 
   try {
-    const result = await claimsJourney({
+    const result = await problemLifecycleJourney({
       call,
       enroll,
       fixtures,
@@ -204,7 +187,6 @@ async function runClaimsProof() {
       worker,
       origin,
       userAgent,
-      sponsorWorkshop,
       sponsorCall,
     });
     return result;
@@ -213,12 +195,12 @@ async function runClaimsProof() {
   }
 }
 
-runClaimsProof()
+runProblemLifecycleProof()
   .then((receipt) => {
-    console.log(JSON.stringify({ kind: "claims-real-bindings-complete", status: "pass", receipt }));
+    console.log(JSON.stringify({ kind: "problem-lifecycle-real-bindings-complete", status: "pass", receipt }));
     process.exit(0);
   })
   .catch((err) => {
-    console.error("Claims real bindings failed:", err);
+    console.error("Problem lifecycle real bindings failed:", err);
     process.exit(1);
   });

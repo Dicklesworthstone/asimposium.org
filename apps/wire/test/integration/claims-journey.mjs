@@ -29,6 +29,7 @@ export async function claimsJourney({
   origin,
   userAgent,
   sponsorWorkshop,
+  sponsorCall,
 }) {
   const problem = "P-CLAIMS-E2E";
   await fixtures.seedProblem(problem);
@@ -410,13 +411,9 @@ export async function claimsJourney({
   assert.ok(revWorkshopDraft.workshop_id.startsWith("W-"));
 
   // --- Requirement 7: Statement Drift and Reanchor ---
-  // The claims table head reflects head version 3 statement, while version 1 retains original.
-  // Note: Problem statement revisions (S@n+1) and open claims flagging statement_drift
-  // until re-anchor/retire belong to the Problem Lifecycle (bead asimposiumorg-5yu, W5.1),
-  // which is an upstream dependency blocking this bead. The claim-level version immutability
-  // and head drift proven here provide the foundation for that flow.
+  // 7a. The claims table head reflects head version 3 statement, while version 1 retains original.
   const claimHeadRow = await env.DB.prepare(
-    "SELECT id, statement, norm_hash FROM claims WHERE problem_id = ? AND id = ?",
+    "SELECT id, statement, norm_hash, statement_version, statement_drift FROM claims WHERE problem_id = ? AND id = ?",
   )
     .bind(problem, targetClaim.claim_id)
     .first();
@@ -434,6 +431,103 @@ export async function claimsJourney({
     "Base conjecture: every even integer greater than 2 is the sum of two prime numbers.",
     "Historical version 1 statement must remain immutable",
   );
+  assert.equal(claimHeadRow.statement_version, 1);
+  assert.equal(claimHeadRow.statement_drift, 0);
+
+  // 7b. Problem statement revision S@1 -> S@2 via sponsor lifecycle action (W5.1)
+  if (sponsorCall) {
+    const reviseStatementRes = await sponsorCall(
+      "usr_claims_sponsor_1",
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "revise-statement",
+        statement:
+          "Revised problem statement S@2: every even integer greater than 4 is the sum of two odd primes.",
+        falsifier: "An even integer > 4 not expressible as sum of two odd primes.",
+        motivation: "Refining Goldbach conjecture to exclude 4 = 2 + 2.",
+      },
+      200,
+    );
+    assert.equal(reviseStatementRes.problem.current_statement_version, 2);
+
+    // Assert that targetClaim is now flagged with statement_drift = 1!
+    const driftedClaim = await env.DB.prepare(
+      "SELECT statement_version, statement_drift FROM claims WHERE problem_id = ? AND id = ?",
+    )
+      .bind(problem, targetClaim.claim_id)
+      .first();
+    assert.equal(driftedClaim.statement_version, 1);
+    assert.equal(
+      driftedClaim.statement_drift,
+      1,
+      "Existing claim must be flagged with statement_drift on problem statement revision",
+    );
+
+    // 7c. Review on drifted claim is refused with STATEMENT_DRIFT (P9)
+    const driftedReview = await call(
+      `${reviewerFellow.path}/review`,
+      {
+        target_claim_id: targetClaim.claim_id,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Attempting review on drifted claim statement.",
+        body_md: "Looks good but statement drifted.",
+      },
+      reviewerFellow.token,
+      422,
+    );
+    assert.equal(driftedReview.code, "STATEMENT_DRIFT");
+    assert.equal(driftedReview.rule, "P9");
+
+    // 7d. Non-author cannot re-anchor (WRITE_REFUSED)
+    const unauthorizedReanchor = await call(
+      `${nonAuthorFellow.path}/reanchor`,
+      {
+        claim_id: targetClaim.claim_id,
+        base_version: 3,
+      },
+      nonAuthorFellow.token,
+      403,
+    );
+    assert.equal(unauthorizedReanchor.code, "WRITE_REFUSED");
+
+    // 7e. Stale base_version is refused (OBJECT_VERSION_CONFLICT)
+    const staleReanchor = await call(
+      `${revFellow.path}/reanchor`,
+      {
+        claim_id: targetClaim.claim_id,
+        base_version: 1, // Head is at 3!
+      },
+      revFellow.token,
+      409,
+    );
+    assert.equal(staleReanchor.code, "OBJECT_VERSION_CONFLICT");
+
+    // 7f. Author successfully re-anchors claim to current statement version (S@2)
+    const reanchorRes = await call(
+      `${revFellow.path}/reanchor`,
+      {
+        claim_id: targetClaim.claim_id,
+        base_version: 3,
+      },
+      revFellow.token,
+      200,
+    );
+    assert.equal(reanchorRes.reanchored, true);
+    assert.equal(reanchorRes.statement_version, 2);
+    assert.equal(reanchorRes.statement_drift, false);
+
+    // Verify in D1
+    const reanchoredClaim = await env.DB.prepare(
+      "SELECT statement_version, statement_drift FROM claims WHERE problem_id = ? AND id = ?",
+    )
+      .bind(problem, targetClaim.claim_id)
+      .first();
+    assert.equal(reanchoredClaim.statement_version, 2);
+    assert.equal(reanchoredClaim.statement_drift, 0, "Reanchored claim clears statement_drift");
+  }
 
   // --- Requirement 8: DAG Dependencies & Cycle Refusal (P10) ---
   const claimDef = await call(

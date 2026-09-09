@@ -122,11 +122,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     });
   }
 
-  async mint(sponsorId: string) {
+  async mint(sponsorId: string, requestedScopes: readonly string[] = ["promote", "review", "propose-problems"]) {
     const principal = { type: "sponsor", sponsorId } as const;
     const service = this.service();
     await service.bootstrapSponsor(principal);
-    return service.mint(principal, { requested_scopes: ["promote", "review"] });
+    return service.mint(principal, { requested_scopes: requestedScopes as any });
   }
 
   async approve(sponsorId: string, enrollmentId: string) {
@@ -137,13 +137,16 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     });
   }
 
-  async seedProblem(id: string) {
+  async seedProblem(id: string, sponsorId = "usr_claims_sponsor_1") {
     const at = new Date().toISOString();
     const genesis = await genesisChainDigest(id);
     await this.env.DB.batch([
       this.env.DB.prepare(
-        "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES (?, 0, ?, ?, ?, 2)",
-      ).bind(id, at, at, genesis),
+        "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version, sponsor_id) VALUES (?, 0, ?, ?, ?, 2, ?)",
+      ).bind(id, at, at, genesis, sponsorId),
+      this.env.DB.prepare(
+        "INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, created_at) VALUES (?, 1, 'Initial problem statement for ' || ?, 'sha256:init_' || ?, 'Initial falsifier', 'Initial motivation', ?)",
+      ).bind(id, id, id, at),
       this.env.DB.prepare(
         "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES (?, 'complete', 0, ?, 2)",
       ).bind(id, at),
