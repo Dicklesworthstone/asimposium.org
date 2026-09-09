@@ -176,6 +176,16 @@ describe("discovery generators (W1.6)", () => {
     });
   });
 
+  test("complete workshop recovery is explicitly private and schema-backed", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const operation = doc.paths["/v1/sessions/{id}/workshop/{workshopId}"].get;
+    expect(operation.security).toEqual([{ bearerAuth: [] }]);
+    expect(operation["x-asimposium-auth"]).toBe("fellow-bearer");
+    expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
+      "https://a.asimposium.org/schemas/sessions.v1.json#/properties/workshop_object_response",
+    );
+  });
+
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {
     expect(normalizeOpenApiPath("/p/:id{.+\\.json$}")).toBe("/p/{id}.json");
     expect(normalizeOpenApiPath("/v1/sessions/:id/promote")).toBe("/v1/sessions/{id}/promote");

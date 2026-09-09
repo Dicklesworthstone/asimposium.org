@@ -366,6 +366,18 @@ export const SponsorWorkshopObjectSchema = z
   .strict();
 export type SponsorWorkshopObject = z.infer<typeof SponsorWorkshopObjectSchema>;
 
+/** Complete private work product, recovered through an owned problem session. */
+export const WorkshopObjectResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+    object: SponsorWorkshopObjectSchema,
+    body_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export type WorkshopObjectResponse = z.infer<typeof WorkshopObjectResponseSchema>;
+
 /**
  * The private workshop read is a byte-bounded keyset page (asimposiumorg-e7j.2):
  * at most this many objects per response, newest-first, with `has_more` and a
@@ -897,6 +909,7 @@ export const SessionsContractsSchema = z
     pack_target_query: PackTargetQuerySchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
+    workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
     promote_request: PromoteRequestSchema,

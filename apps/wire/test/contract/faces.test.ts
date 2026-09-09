@@ -592,6 +592,7 @@ describe("face wire format", () => {
       "GET /v1/hello (bearer)",
       "GET /v1/sessions/{id} (bearer)",
       "GET /v1/sessions/{id}/pack (bearer)",
+      "GET /v1/sessions/{id}/workshop/{workshopId} (bearer)",
     ]);
     expect(body.not_yet).toEqual([
       "rate-limit budgets",

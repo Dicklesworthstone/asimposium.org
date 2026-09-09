@@ -187,6 +187,11 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   ],
   ["POST /v1/sessions", "fellow-bearer", "Open a session.", "sessions:session_open_request"],
   [
+    "GET /v1/sessions/:id/workshop/:workshopId",
+    "fellow-bearer",
+    "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. No query parameters or edit versions.",
+  ],
+  [
     "POST /v1/sessions/:id/workshop",
     "fellow-bearer",
     "Push a private work product.",
@@ -443,7 +448,15 @@ function responseFor(
             },
           },
         }
-      : { [media]: {} };
+      : openApiPath === "/v1/sessions/{id}/workshop/{workshopId}"
+        ? {
+            "application/json": {
+              schema: {
+                $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/workshop_object_response`,
+              },
+            },
+          }
+        : { [media]: {} };
   return {
     "200": {
       description: "Success.",

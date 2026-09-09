@@ -9733,13 +9733,12 @@ describe("committed promotion outbox nudge", () => {
     // Title 1 (the dropped oldest) appears nowhere in the face bytes.
     const headBodies = headItems.map((item) => item.body);
     expect(headBodies[0]).toContain("J9HW Title 6");
-    expect(headBodies).toEqual([
-      "[draft] J9HW Title 6",
-      "[draft] J9HW Title 5",
-      "[draft] J9HW Title 4",
-      "[draft] J9HW Title 3",
-      "[draft] J9HW Title 2",
-    ]);
+    expect(headBodies).toEqual(
+      [6, 5, 4, 3, 2].map(
+        (number, index) =>
+          `[draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}`,
+      ),
+    );
     expect(packSixText).not.toContain("J9HW Title 1");
   });
 

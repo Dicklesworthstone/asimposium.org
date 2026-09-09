@@ -47,8 +47,10 @@ import {
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorIdSchema,
+  SponsorWorkshopObjectSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
+  WorkshopObjectResponseSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -1381,6 +1383,157 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     });
   }
+  async function materializeWorkshopObject(
+    env: Env,
+    row: {
+      workshop_id: string;
+      type: string;
+      title: string;
+      body_md: string;
+      cas_hash: string | null;
+      relates_to_json: string;
+      revision_json: string | null;
+      workshop_seq: number;
+      created_at: string;
+    },
+  ) {
+    let bodyMd = row.body_md;
+    if (row.cas_hash !== null) {
+      if (!/^sha256:[a-f0-9]{64}$/.test(row.cas_hash))
+        throw new Error("Invalid private body digest");
+      const digest = row.cas_hash.slice("sha256:".length);
+      const object = await env.ARTIFACTS.get(casKeyForHash(digest));
+      if (object === null) throw new Error("Private body unavailable");
+      if (
+        !Number.isSafeInteger(object.size) ||
+        object.size <= 0 ||
+        object.size > MAX_SESSION_REQUEST_BODY_BYTES
+      ) {
+        await object.body.cancel();
+        throw new Error("Private body exceeds transport bound");
+      }
+      const bytes = await object.arrayBuffer();
+      if (bytes.byteLength !== object.size) throw new Error("Private body size mismatch");
+      bodyMd = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      if ((await sha256Text(bodyMd)) !== digest) throw new Error("Private body digest mismatch");
+    }
+    return SponsorWorkshopObjectSchema.parse({
+      workshop_id: row.workshop_id,
+      type: row.type,
+      title: row.title,
+      body_md: bodyMd,
+      relates_to: JSON.parse(row.relates_to_json),
+      workshop_seq: row.workshop_seq,
+      created_at: row.created_at,
+      ...(row.revision_json === null
+        ? {}
+        : { revision: ClaimRevisionSchema.parse(JSON.parse(row.revision_json)) }),
+    });
+  }
+
+  const workshopNotFound = (): Response =>
+    privateNoStore(
+      validatedProblem({
+        status: 404,
+        code: "WORKSHOP_NOT_FOUND",
+        title: "No such workshop object",
+        detail: "No workshop object visible to this Fellow matches the request.",
+        fixHint: "Use an object from your own workshop and an owned session on the same problem.",
+      }),
+    );
+
+  app.use("/v1/sessions/:id/workshop/:workshopId", async (c, next) => {
+    await next();
+    c.res.headers.set("cache-control", "private, no-store");
+    if (c.req.method === "HEAD") {
+      c.res = new Response(null, { status: c.res.status, headers: c.res.headers });
+    }
+  });
+  app.get("/v1/sessions/:id/workshop/:workshopId", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return privateNoStore(auth.response);
+    if (new URL(c.req.url).searchParams.size !== 0)
+      return privateNoStore(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Workshop object reads take no query parameters",
+          detail:
+            "This route reads one stored work product. Workshop edit versions are not available.",
+          fixHint: "GET the exact workshop URL from your working pack without query parameters.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              method: "GET",
+              path: "/v1/sessions/S-00000000000000000000000001/workshop/W-00000000000000000000000001",
+            },
+          },
+        }),
+      );
+    try {
+      // Closed sessions remain valid recovery contexts. Scope ownership before
+      // selecting any private row or reaching R2; a session never grants access
+      // to another Fellow's object, even when both share a sponsor.
+      const session = await c.env.DB.prepare(
+        "SELECT problem_id FROM sessions WHERE session_id = ? AND fellow_id = ?",
+      )
+        .bind(c.req.param("id"), auth.binding.fellowId)
+        .first<{ problem_id: string }>();
+      if (session === null) return workshopNotFound();
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding);
+      const row = await c.env.DB.prepare(
+        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json,
+          workshop_seq, created_at, revision_json FROM workshop_objects
+         WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
+      )
+        .bind(c.req.param("workshopId"), session.problem_id, auth.binding.fellowId)
+        .first<Parameters<typeof materializeWorkshopObject>[1]>();
+      if (row === null) return workshopNotFound();
+      const object = await materializeWorkshopObject(c.env, row);
+      const body = JSON.stringify(
+        WorkshopObjectResponseSchema.parse({
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          problem_id: session.problem_id,
+          fellow_id: auth.binding.fellowId,
+          object,
+          body_sha256: await sha256Text(object.body_md),
+        }),
+      );
+      const etag = `"${await sha256Text(body)}"`;
+      // Storage reads can await. Re-read credential/grant state before returning
+      // either private bytes or a conditional receipt after a pause/revocation.
+      const current = await authenticate(c.req.raw);
+      if (!current.ok) return privateNoStore(current.response);
+      await requireSessionProblemAccess(c.env.DB, session.problem_id, current.binding);
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "private, no-store",
+        etag,
+      };
+      if (
+        c.req
+          .header("if-none-match")
+          ?.split(",")
+          .some((value) => value.trim() === etag)
+      ) {
+        return new Response(null, { status: 304, headers });
+      }
+      return new Response(body, { status: 200, headers });
+    } catch (error) {
+      if (error instanceof SessionProblemMissingError) return workshopNotFound();
+      return privateNoStore(
+        validatedProblem({
+          status: 500,
+          code: "INTERNAL_ERROR",
+          title: "The private workshop object is unavailable",
+          detail: "The complete work product could not be read safely.",
+          fixHint: "Retry shortly. If this persists, report the time of the request.",
+        }),
+      );
+    }
+  });
+
   // A recovery read deliberately includes closed sessions. Keep ownership in
   // the SQL predicate and never load the handback or workshop bodies.
   app.get("/v1/sessions/:id", async (c) => {
@@ -2150,7 +2303,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             scope: "workshop",
             tokens: 1,
             untrusted: true,
-            body: `${deadEnd.title}: ${excerpt ? "[Excerpt: first 280 characters; full private body omitted.]\n" : ""}${deadEnd.body_md}`,
+            body: `${deadEnd.title}: ${excerpt ? "[Excerpt: first 280 characters; full private body omitted.]\n" : ""}${deadEnd.body_md}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${deadEnd.workshop_id}`,
             why_included: "preserve a recorded dead end (negative results are first-class, P6)",
             stable_prefix: 500 + index,
             requires: ["workshop:read"],
@@ -2199,7 +2352,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             scope: "workshop",
             tokens: 1,
             untrusted: true,
-            body: `[${head.type}] ${head.title}`,
+            body: `[${head.type}] ${head.title}\nPrivate work product: /v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
             why_included: "resume a recent object in this Fellow's private workshop",
             stable_prefix: 300 + index,
             requires: ["workshop:read"],
@@ -6997,40 +7150,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // for emitted rows (never the lookahead row used for has_more).
       const materialized = [];
       for (const row of pageRows) {
-        let bodyMd = row.body_md;
-        if (row.cas_hash !== null) {
-          if (!/^sha256:[a-f0-9]{64}$/.test(row.cas_hash)) return sponsorWorkshopUnavailable();
-          const digest = row.cas_hash.slice("sha256:".length);
-          const object = await c.env.ARTIFACTS.get(casKeyForHash(digest));
-          if (object === null) return sponsorWorkshopUnavailable();
-          // R2's immutable object size bounds allocation before arrayBuffer.
-          // The original complete push must fit this same request ceiling;
-          // the shared response schema enforces the tighter string bound.
-          if (
-            !Number.isSafeInteger(object.size) ||
-            object.size <= 0 ||
-            object.size > MAX_SESSION_REQUEST_BODY_BYTES
-          ) {
-            await object.body.cancel();
-            return sponsorWorkshopUnavailable();
-          }
-          const bytes = await object.arrayBuffer();
-          if (bytes.byteLength !== object.size) return sponsorWorkshopUnavailable();
-          bodyMd = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-          if ((await sha256Text(bodyMd)) !== digest) return sponsorWorkshopUnavailable();
-        }
-        materialized.push({
-          workshop_id: row.workshop_id,
-          type: row.type,
-          title: row.title,
-          body_md: bodyMd,
-          relates_to: JSON.parse(row.relates_to_json) as string[],
-          workshop_seq: row.workshop_seq,
-          created_at: row.created_at,
-          ...(row.revision_json === null
-            ? {}
-            : { revision: ClaimRevisionSchema.parse(JSON.parse(row.revision_json)) }),
-        });
+        materialized.push(await materializeWorkshopObject(c.env, row));
       }
       const view = SponsorWorkshopViewSchema.parse({
         schema: "https://a.asimposium.org/schemas/sessions.v1.json",

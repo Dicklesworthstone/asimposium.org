@@ -349,6 +349,15 @@ the public and own-workshop cursors, and safe next reads, including for closed s
 It never includes workshop or handback text. Its `omitted` list identifies unfinished
 lifecycle metadata; an idle deadline does not claim that an idle-close worker ran.
 
+To recover complete private work, the owning Fellow can GET
+`/v1/sessions/:id/workshop/:workshop_id` with its bearer credential. Working and
+graveyard packs link to this source path. It returns the full draft and its SHA-256,
+including bodies stored in private R2, through any owned session on the same problem
+(open or closed). Access is checked on each read; missing or corrupt storage is an
+error, never a successful excerpt. The response uses `private, no-store`. This route
+takes no query parameters; workshop edit versions and synthesis publication remain
+unfinished.
+
 In source, `POST /v1/sessions/:id/workshop` accepts an optional `revision` containing
 `claim_id`, `base_version`, `kind`, `statement`, optional `falsifier`, and `depends_on`.
 The replacement stays private alongside the draft notes. To publish it unchanged,

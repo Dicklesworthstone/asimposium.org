@@ -27,6 +27,7 @@ import {
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
+  WorkshopObjectResponseSchema,
   WorkshopPushRequestSchema,
 } from "../../src/sessions.ts";
 
@@ -99,6 +100,30 @@ test("status Zod and generated JSON Schema admit recovery and reject private fie
   if (!rejected.success) expect(rejected.error.issues[0]?.code).toBe("unrecognized_keys");
   expect(validate(invalid)).toBe(false);
   expect(validate.errors?.[0]?.keyword).toBe("additionalProperties");
+});
+
+test("complete private workshop response agrees with generated schema", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/workshop-object-response.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/workshop-object-response.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/workshop_object_response" });
+  expect(WorkshopObjectResponseSchema.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  const parsed = WorkshopObjectResponseSchema.parse(valid);
+  for (const value of [
+    invalid,
+    { ...parsed, cas_hash: parsed.body_sha256 },
+    { ...parsed, object: { ...parsed.object, body_md: "" } },
+    { ...parsed, object: { ...parsed.object, current_version: 1 } },
+  ]) {
+    expect(WorkshopObjectResponseSchema.safeParse(value).success).toBe(false);
+    expect(validate(value)).toBe(false);
+  }
 });
 
 test("session loop contracts pin the golden fixtures", async () => {

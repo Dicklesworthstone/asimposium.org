@@ -563,6 +563,8 @@ export {
   SponsorWorkshopViewSchema,
   type WorkshopObjectId,
   WorkshopObjectIdSchema,
+  type WorkshopObjectResponse,
+  WorkshopObjectResponseSchema,
   type WorkshopPushRequest,
   WorkshopPushRequestSchema,
   type WorkshopPushResponse,
