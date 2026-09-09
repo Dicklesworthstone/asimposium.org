@@ -2,37 +2,15 @@
  * W5.8b Synthesis lifecycle and P13 ledger anchoring (Fable §6.1, §6.3, Rule P13).
  *
  * A synthesis is a periodic state-of-the-problem digest generated from a frozen cursor.
- * Rule P13: Synthesis follows the ledger. A synthesis assertion about scientific state
- * must reference the ledger objects it summarizes; unreferenced assertions or assertions
- * referencing objects beyond covers_through fail with SYNTHESIS_UNANCHORED.
+ * Rule P13: Synthesis follows the ledger. Declared anchors that do not resolve
+ * to the specified ledger objects at covers_through fail with SYNTHESIS_UNANCHORED.
  *
- * Automated syntheses are drafts until a steward or authoring Fellow's sponsor publishes;
- * prior versions remain accessible.
+ * Reference validation establishes event identity, not the truth or completeness
+ * of free-form scientific assertions in the synthesis body.
  */
 
+import type { SynthesisAnchor } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-
-export interface SynthesisAnchorInput {
-  readonly target_kind:
-    | "claim"
-    | "evidence"
-    | "hypothesis"
-    | "gap"
-    | "conflict"
-    | "citation"
-    | "statement";
-  readonly target_id: string;
-  readonly target_version?: number;
-  readonly target_seq?: number;
-  readonly assertion_summary?: string;
-}
-
-export interface SynthesisOmittedInput {
-  readonly selection_policy: string;
-  readonly dropped_findings?: readonly string[];
-  readonly dropped_single_author_count?: number;
-  readonly reasoning?: string;
-}
 
 export interface SynthesisValidationResult {
   readonly valid: boolean;
@@ -51,7 +29,7 @@ export async function validateSynthesisAnchors(
   db: D1Database,
   problemId: string,
   coversThrough: number,
-  anchors: readonly SynthesisAnchorInput[],
+  anchors: readonly SynthesisAnchor[],
 ): Promise<SynthesisValidationResult> {
   const maxSeqRow = await db
     .prepare("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events WHERE problem_id = ?")
@@ -81,46 +59,33 @@ export async function validateSynthesisAnchors(
     return { valid: true, unanchored: [], maxLedgerSeq };
   }
 
-  const unanchoredIds: string[] = [];
-
-  for (const anchor of anchors) {
-    let sourceSeq: number | null = null;
-
-    if (anchor.target_kind === "statement") {
-      const version = anchor.target_version ?? (Number(anchor.target_id) || 1);
-      const row = await db
-        .prepare(
-          `SELECT seq FROM events
-           WHERE problem_id = ? AND object_kind = 'problem'
-             AND (object_version = ? OR type IN ('problem.created', 'problem.statement.updated'))
-           ORDER BY seq DESC LIMIT 1`,
-        )
-        .bind(problemId, version)
-        .first<{ seq: number }>();
-      sourceSeq = row?.seq ?? null;
-    } else {
-      const row = await db
-        .prepare(
-          `SELECT seq FROM events
-           WHERE problem_id = ? AND object_kind = ? AND object_id = ?
-             AND (object_version = ? OR ? IS NULL)
-           ORDER BY seq DESC LIMIT 1`,
-        )
-        .bind(
-          problemId,
-          anchor.target_kind,
-          anchor.target_id,
-          anchor.target_version ?? null,
-          anchor.target_version ?? null,
-        )
-        .first<{ seq: number }>();
-      sourceSeq = row?.seq ?? null;
-    }
-
-    if (sourceSeq === null || sourceSeq > coversThrough) {
-      unanchoredIds.push(anchor.target_id);
-    }
-  }
+  // Resolve all anchors in one bounded D1 query. Each supplied pin must match
+  // the SAME event, and later writes cannot invalidate this retained window.
+  // Statements use the problem identity and only formulation-bearing events;
+  // a statement review or lifecycle transition cannot stand in for a version.
+  const unanchored = await db
+    .prepare(
+      `SELECT json_extract(a.value, '$.target_id') AS target_id
+       FROM json_each(?) a
+       WHERE NOT EXISTS (
+         SELECT 1 FROM events e
+         WHERE e.problem_id = ? AND e.seq <= ?
+           AND e.object_id = json_extract(a.value, '$.target_id')
+           AND e.object_kind = CASE json_extract(a.value, '$.target_kind')
+             WHEN 'statement' THEN 'problem'
+             ELSE json_extract(a.value, '$.target_kind') END
+           AND (json_extract(a.value, '$.target_kind') != 'statement'
+             OR e.type IN ('problem.admitted', 'problem.statement-revised'))
+           AND (json_extract(a.value, '$.target_version') IS NULL
+             OR e.object_version = json_extract(a.value, '$.target_version'))
+           AND (json_extract(a.value, '$.target_seq') IS NULL
+             OR e.seq = json_extract(a.value, '$.target_seq'))
+       )
+       ORDER BY a.key`,
+    )
+    .bind(JSON.stringify(anchors), problemId, coversThrough)
+    .all<{ target_id: string }>();
+  const unanchoredIds = unanchored.results.map((row) => row.target_id);
 
   if (unanchoredIds.length > 0) {
     return {
@@ -177,12 +142,13 @@ export async function computeDroppedSingleAuthorCount(
     // Check if any other Fellow referenced this claim in a relation
     const otherRelations = await db
       .prepare(
-        `SELECT COUNT(*) AS count FROM claim_relations
-         WHERE problem_id = ?
-           AND (source_claim_id = ? OR target_ref LIKE ? || '@%')
-           AND asserted_by_fellow != ?`,
+        `SELECT COUNT(*) AS count FROM claim_relations r
+         JOIN events e ON e.id = r.asserted_by_event AND e.problem_id = r.problem_id
+         WHERE r.problem_id = ? AND e.seq <= ?
+           AND (r.source_claim_id = ? OR r.target_ref LIKE ? || '@%')
+           AND r.asserted_by_fellow != ?`,
       )
-      .bind(problemId, c.claim_id, c.claim_id, c.author_fellow_id)
+      .bind(problemId, coversThrough, c.claim_id, c.claim_id, c.author_fellow_id)
       .first<{ count: number }>();
 
     if ((otherRelations?.count ?? 0) > 0) continue;

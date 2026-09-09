@@ -4533,14 +4533,17 @@
               "target_id": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 128
+                "maxLength": 128,
+                "description": "Object ID within the session problem; statement anchors use the problem ID."
               },
               "target_version": {
+                "description": "When supplied, the referenced event must carry this exact object version.",
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
               },
               "target_seq": {
+                "description": "When supplied, the exact same-problem event sequence, at or before covers_through. All supplied pins must match one event. Statement events are admission or statement revision.",
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991

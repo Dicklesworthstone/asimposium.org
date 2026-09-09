@@ -2,10 +2,10 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { SynthesisAnchor } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   computeDroppedSingleAuthorCount,
-  type SynthesisAnchorInput,
   validateSynthesisAnchors,
 } from "../../src/ledger/synthesis.ts";
 
@@ -147,7 +147,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       now,
     );
 
-    const anchors: SynthesisAnchorInput[] = [
+    const anchors: SynthesisAnchor[] = [
       { target_kind: "claim", target_id: "C-1", target_version: 1 },
       { target_kind: "evidence", target_id: "E-1" },
     ];
@@ -177,7 +177,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       now,
     );
 
-    const anchors: SynthesisAnchorInput[] = [
+    const anchors: SynthesisAnchor[] = [
       { target_kind: "claim", target_id: "C-GHOST", target_version: 1 },
       { target_kind: "hypothesis", target_id: "H-NONEXISTENT" },
     ];
@@ -225,7 +225,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     await insertEvent(db, problemId, 5, "E-5", "claim.promoted", "claim", "C-LATE", 1, "F-1", now);
 
     // covers_through is 3, but claim was created at seq 5
-    const anchors: SynthesisAnchorInput[] = [
+    const anchors: SynthesisAnchor[] = [
       { target_kind: "claim", target_id: "C-LATE", target_version: 1 },
     ];
 
@@ -257,6 +257,105 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const result = await validateSynthesisAnchors(db, problemId, 100, []);
     expect(result.valid).toBe(false);
     expect(result.reason).toContain("exceeds highest recorded problem sequence");
+  });
+
+  test("binds every pin to one event inside the frozen problem window", async () => {
+    const db = createTestDb();
+    const now = new Date().toISOString();
+    const problemId = "P-SYNTH-PINS";
+    await createProblem(db, problemId, now);
+    await insertEvent(
+      db,
+      problemId,
+      1,
+      "E-PIN-1",
+      "problem.admitted",
+      "problem",
+      problemId,
+      1,
+      "F-1",
+      now,
+    );
+    await insertEvent(db, problemId, 2, "E-PIN-2", "claim.created", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(
+      db,
+      problemId,
+      3,
+      "E-PIN-3",
+      "problem.statement-reviewed",
+      "problem",
+      problemId,
+      1,
+      "F-2",
+      now,
+    );
+    await insertEvent(db, problemId, 4, "E-PIN-4", "claim.revised", "claim", "C-1", 2, "F-1", now);
+    await insertEvent(
+      db,
+      problemId,
+      5,
+      "E-PIN-5",
+      "problem.statement-revised",
+      "problem",
+      problemId,
+      2,
+      "F-1",
+      now,
+    );
+    const check = async (anchor: SynthesisAnchor, through: number, valid: boolean) => {
+      const result = await validateSynthesisAnchors(db, problemId, through, [anchor]);
+      expect(result.valid).toBe(valid);
+      expect(result.unanchored).toEqual(valid ? [] : [anchor.target_id]);
+    };
+    await check({ target_kind: "claim", target_id: "C-1" }, 2, true);
+    await check(
+      { target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: 2 },
+      5,
+      true,
+    );
+    await check(
+      { target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: 4 },
+      5,
+      false,
+    );
+    await check({ target_kind: "claim", target_id: "C-1", target_seq: 4 }, 2, false);
+    await check({ target_kind: "claim", target_id: "C-1", target_seq: 1 }, 5, false);
+    await check({ target_kind: "claim", target_id: "C-1", target_seq: 999 }, 5, false);
+    await check({ target_kind: "statement", target_id: problemId }, 1, true);
+    await check(
+      { target_kind: "statement", target_id: problemId, target_version: 1, target_seq: 1 },
+      5,
+      true,
+    );
+    await check(
+      { target_kind: "statement", target_id: problemId, target_version: 2, target_seq: 5 },
+      5,
+      true,
+    );
+    await check(
+      { target_kind: "statement", target_id: problemId, target_version: 1, target_seq: 5 },
+      5,
+      false,
+    );
+    await check({ target_kind: "statement", target_id: problemId, target_seq: 3 }, 5, false);
+    await check({ target_kind: "statement", target_id: "arbitrary" }, 5, false);
+    await check({ target_kind: "statement", target_id: "1" }, 5, false);
+    await check({ target_kind: "statement", target_id: problemId, target_version: 2 }, 2, false);
+
+    await createProblem(db, "P-OTHER", now);
+    await insertEvent(
+      db,
+      "P-OTHER",
+      1,
+      "E-OTHER",
+      "claim.created",
+      "claim",
+      "C-OTHER",
+      1,
+      "F-1",
+      now,
+    );
+    await check({ target_kind: "claim", target_id: "C-OTHER", target_seq: 1 }, 5, false);
   });
 
   test("calculates dropped single-author finding count", async () => {
@@ -337,6 +436,8 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       .run();
 
     // Since F-2 referenced C-1, C-1 is not a single-author finding even if omitted
+    // A later reference must not change an earlier synthesis's omission count.
+    expect(await computeDroppedSingleAuthorCount(db, problemId, 1, new Set())).toBe(1);
     const droppedCount = await computeDroppedSingleAuthorCount(db, problemId, 2, new Set());
     expect(droppedCount).toBe(0);
   });

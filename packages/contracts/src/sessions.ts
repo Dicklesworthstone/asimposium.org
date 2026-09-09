@@ -912,9 +912,25 @@ export type SynthesisAnchorTargetKind = z.infer<typeof SynthesisAnchorTargetKind
 export const SynthesisAnchorSchema = z
   .object({
     target_kind: SynthesisAnchorTargetKindSchema,
-    target_id: z.string().min(1).max(128),
-    target_version: z.number().int().positive().optional(),
-    target_seq: z.number().int().positive().optional(),
+    target_id: z
+      .string()
+      .min(1)
+      .max(128)
+      .describe("Object ID within the session problem; statement anchors use the problem ID."),
+    target_version: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("When supplied, the referenced event must carry this exact object version."),
+    target_seq: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "When supplied, the exact same-problem event sequence, at or before covers_through. All supplied pins must match one event. Statement events are admission or statement revision.",
+      ),
     assertion_summary: z.string().min(1).max(1024).optional(),
   })
   .strict();

@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import {
+  ScreeningPublicationProvenanceSchema,
+  SynthesizeRequestSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures }) => {
   const sponsorA = "usr_synthesis_sponsor_a";
   const author = await enroll("synthesis-author", sponsorA);
 
@@ -231,6 +236,208 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   assert.equal(synthRows[0].dropped_single_author_count, 0);
   assert.equal(synthRows[1].synthesis_id, synth2.synthesis_id);
   assert.equal(synthRows[1].dropped_single_author_count, 1);
+
+  // Freeze the source, then advance both actual production writers. A later
+  // event must neither invalidate an older anchor nor satisfy a future pin.
+  const admission = await env.DB.prepare(
+    "SELECT seq FROM events WHERE problem_id = ? AND type = 'problem.admitted'",
+  )
+    .bind(problemId)
+    .first();
+  const claimSource = await env.DB.prepare(
+    "SELECT seq FROM events WHERE problem_id = ? AND object_id = ? AND type = 'claim.created'",
+  )
+    .bind(problemId, claim1Id)
+    .first();
+  assert.ok(admission && claimSource);
+  await call(
+    `/v1/sessions/${sessionId}/revise`,
+    {
+      claim_id: claim1Id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Every integer n greater than one has a prime divisor at most n.",
+      falsifier: "An integer greater than one without a prime divisor at most itself.",
+      depends_on: [],
+    },
+    author,
+    201,
+  );
+  await govern(
+    {
+      action: "revise-statement",
+      statement: "Every integer n greater than one has a prime divisor in the interval [2, n].",
+      falsifier: "An integer n greater than one without a prime divisor in [2, n].",
+      motivation: "Expose the finite search domain explicitly.",
+    },
+    "synthesis-statement-revision",
+  );
+
+  const failures = [];
+  const check = (condition, label) => {
+    if (!condition) failures.push(label);
+    console.log(JSON.stringify({ stage: "frozen-anchor-check", label, pass: condition }));
+  };
+  async function footprint() {
+    return env.DB.prepare(`SELECT public_seq, chain_digest,
+      (SELECT COUNT(*) FROM events) AS events,
+      (SELECT COUNT(*) FROM event_content) AS content,
+      (SELECT COUNT(*) FROM syntheses) AS syntheses,
+      (SELECT COUNT(*) FROM session_write_replays) AS replays,
+      (SELECT COUNT(*) FROM screening_publications) AS screening_publications,
+      (SELECT COUNT(*) FROM outbox) AS outbox
+      FROM problems WHERE id = ?`)
+      .bind(problemId)
+      .first();
+  }
+  const cases = [
+    [
+      "claim sequence belonging to another object",
+      false,
+      { target_kind: "claim", target_id: claim1Id, target_version: 1, target_seq: admission.seq },
+    ],
+    [
+      "claim sequence beyond frozen cut",
+      false,
+      { target_kind: "claim", target_id: claim1Id, target_version: 1, target_seq: maxSeq2 + 100 },
+    ],
+    [
+      "unrelated statement identity",
+      false,
+      { target_kind: "statement", target_id: "P-DOES-NOT-EXIST", target_version: 1 },
+    ],
+    [
+      "statement sequence belonging to a claim",
+      false,
+      {
+        target_kind: "statement",
+        target_id: problemId,
+        target_version: 1,
+        target_seq: claimSource.seq,
+      },
+    ],
+    [
+      "future statement version",
+      false,
+      { target_kind: "statement", target_id: problemId, target_version: 2 },
+    ],
+    ["historical claim with implicit version", true, { target_kind: "claim", target_id: claim1Id }],
+    [
+      "historical claim with exact event",
+      true,
+      { target_kind: "claim", target_id: claim1Id, target_version: 1, target_seq: claimSource.seq },
+    ],
+    [
+      "historical statement with exact event",
+      true,
+      {
+        target_kind: "statement",
+        target_id: problemId,
+        target_version: 1,
+        target_seq: admission.seq,
+      },
+    ],
+    [
+      "admission before later statement review and revision",
+      true,
+      { target_kind: "statement", target_id: problemId },
+      admission.seq,
+    ],
+  ];
+  for (const [index, [label, allowed, anchor, through = maxSeq2]] of cases.entries()) {
+    const before = await footprint();
+    const screeningBefore = await fixtures.screeningCalls();
+    const body = {
+      covers_through: through,
+      body_md:
+        "The cited ledger record is retained at the frozen cursor; this summary does not upgrade its disposition.",
+      anchors: [anchor],
+      omitted: ["Other records are outside this focused historical summary."],
+      selection_policy: "Summarize the selected record at the retained cursor.",
+    };
+    const key = `frozen-anchor-${index}`;
+    const response = await call(`/v1/sessions/${sessionId}/synthesize`, body, author, null, key);
+    const after = await footprint();
+    if (allowed) {
+      check(typeof response.synthesis_id === "string", `${label}: accepted`);
+      check(after.events === before.events + 1, `${label}: one event`);
+      if (response.synthesis_id) {
+        const retained = await env.DB.prepare(
+          "SELECT provenance_json FROM screening_publications WHERE event_id = ?",
+        )
+          .bind(response.event_id)
+          .first();
+        assert.ok(retained, "Successful synthesis retains screening provenance atomically");
+        const provenance = ScreeningPublicationProvenanceSchema.parse(
+          JSON.parse(retained.provenance_json),
+        );
+        const screenedBytes = JSON.stringify({
+          kind: "synthesis",
+          statement: JSON.stringify(SynthesizeRequestSchema.parse(body)),
+          falsifier: null,
+        });
+        assert.equal(
+          provenance.input_digest,
+          createHash("sha256").update(screenedBytes).digest("hex"),
+          "Screening binds the complete validated public payload",
+        );
+        const replay = await call(`/v1/sessions/${sessionId}/synthesize`, body, author, 200, key);
+        assert.deepEqual(replay, response);
+        assert.deepEqual(await footprint(), after);
+        assert.equal(await fixtures.screeningCalls(), screeningBefore + 1);
+      }
+    } else {
+      check(
+        response.code === "SYNTHESIS_UNANCHORED" && response.rule === "P13",
+        `${label}: P13 refusal`,
+      );
+      check(JSON.stringify(after) === JSON.stringify(before), `${label}: no public mutation`);
+      check((await fixtures.screeningCalls()) === screeningBefore, `${label}: no paid screen`);
+    }
+  }
+  const screenable = {
+    covers_through: maxSeq2,
+    body_md: "A focused summary of the retained claim.",
+    anchors: [{ target_kind: "claim", target_id: claim1Id, target_version: 1 }],
+    omitted: [],
+    selection_policy: "Only the selected claim is summarized.",
+  };
+  // The local classifier rejects a known marker. These cases prove that all
+  // published text reaches screening; they do not measure Workers AI accuracy.
+  const canaries = [
+    ["body", { body_md: "LOCAL_POLICY_CANARY" }],
+    ["selection policy", { selection_policy: "LOCAL_POLICY_CANARY" }],
+    ["omission", { omitted: ["LOCAL_POLICY_CANARY"] }],
+    [
+      "anchor summary",
+      { anchors: [{ ...screenable.anchors[0], assertion_summary: "LOCAL_POLICY_CANARY" }] },
+    ],
+  ];
+  for (const [index, [label, override]] of canaries.entries()) {
+    const before = await footprint();
+    const screeningBefore = await fixtures.screeningCalls();
+    const denied = await call(
+      `/v1/sessions/${sessionId}/synthesize`,
+      {
+        ...screenable,
+        ...override,
+      },
+      author,
+      null,
+      `synthesis-screening-${index}`,
+    );
+    check(denied.code === "POLICY_DENIED", `${label}: policy refusal`);
+    check(
+      JSON.stringify(await footprint()) === JSON.stringify(before),
+      `${label}: no public mutation`,
+    );
+    check((await fixtures.screeningCalls()) === screeningBefore + 1, `${label}: screened once`);
+    if (denied.code === "POLICY_DENIED") {
+      assert.deepEqual(Object.keys(denied).sort(), ["appeal", "coarse_category", "code"]);
+      assert.ok(!JSON.stringify(denied).includes("LOCAL_POLICY_CANARY"));
+    }
+  }
+  assert.deepEqual(failures, [], "Frozen-anchor and screening regressions must all pass");
 
   console.log(
     JSON.stringify({

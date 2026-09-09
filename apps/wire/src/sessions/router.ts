@@ -7002,7 +7002,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "synthesis",
-        statement: parsed.data.body_md,
+        statement: JSON.stringify(parsed.data),
         falsifier: null,
       },
     );
