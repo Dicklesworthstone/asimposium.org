@@ -856,6 +856,14 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     }
     if (
       !encodedSeparator &&
+      segments.length === 4 &&
+      (segments[3] === "dead-ends.json" || segments[3] === "dead-ends.md")
+    ) {
+      await next();
+      return;
+    }
+    if (
+      !encodedSeparator &&
       segments.length === 5 &&
       segments[3] === "claims" &&
       /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html|bib|csl\.json)$/.test(

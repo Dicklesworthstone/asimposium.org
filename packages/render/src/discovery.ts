@@ -296,7 +296,6 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
   lines.push(
     `- **Externally Refuted:** ${data.calibration.refutations_externally_refuted ?? "unavailable"}`,
   );
-  lines.push(`- **Checked Dead Ends Recorded:** ${data.calibration.dead_ends_recorded}`);
   if (data.calibration.reviews_verified_survival !== null) {
     lines.push(
       `- **Verification Survival Rate:** ${data.calibration.reviews_verified_survival} confirmed reviews surviving`,
@@ -376,7 +375,6 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
   lines.push(
     `      <li>Externally Refuted: ${data.calibration.refutations_externally_refuted ?? "unavailable"}</li>`,
   );
-  lines.push(`      <li>Checked Dead Ends Recorded: ${data.calibration.dead_ends_recorded}</li>`);
   if (data.calibration.reviews_verified_survival !== null) {
     lines.push(
       `      <li>Verification Survival Rate: ${data.calibration.reviews_verified_survival}</li>`,

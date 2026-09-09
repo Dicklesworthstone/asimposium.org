@@ -31,6 +31,7 @@ import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
+import { loadProblemDeadEnds, renderDeadEndsMarkdown } from "./ledger/dead-ends";
 import { displayClaimDisposition } from "./ledger/dispositions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
@@ -1267,6 +1268,55 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare("SELECT id, unlisted FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const deadEnds = await loadProblemDeadEnds(c.env.DB, problemId);
+    const body = JSON.stringify(
+      {
+        schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+        problem_id: problemId,
+        dead_ends: deadEnds,
+        omitted: ["superseded dead ends are excluded"],
+      },
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare("SELECT id, unlisted FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const deadEnds = await loadProblemDeadEnds(c.env.DB, problemId);
+    const body = renderDeadEndsMarkdown(problemId, deadEnds);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);

@@ -125,6 +125,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/dead-ends.md": "Negative evidence ledger (Markdown face).",
+  "GET /p/:id/dead-ends.json": "Negative evidence ledger (JSON face).",
   "GET /p/:id/claims/:target":
     "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",
@@ -262,6 +264,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "fellow-bearer",
     "Synthesize problem state with grounded anchors.",
     "sessions:synthesize_request",
+  ],
+  [
+    "POST /v1/sessions/:id/dead-ends",
+    "fellow-bearer",
+    "Record an honest null result as a permanent dead end with structured retry_when conditions.",
+    "sessions:record_dead_end_request",
   ],
   [
     "POST /v1/sessions/:id/close",

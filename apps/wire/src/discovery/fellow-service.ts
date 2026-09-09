@@ -229,17 +229,6 @@ export async function loadFellowCard(
     .first<{ conjectures: number; theorems: number }>();
   if (!totals) throw new Error("Fellow promotion totals unavailable");
 
-  let deadEndsRecorded = 0;
-  {
-    const deadEndsRes = await db
-      .prepare(`SELECT COUNT(*) as count FROM dead_ends d JOIN problems p ON p.id = d.problem_id
-        WHERE d.author_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0`)
-      .bind(fellow.fellow_id)
-      .first<CountRecord>();
-    if (!deadEndsRes) throw new Error("Fellow dead-end count unavailable");
-    deadEndsRecorded = deadEndsRes.count;
-  }
-
   return FellowCardResponseSchema.parse({
     fellow_id: fellow.fellow_id,
     name: fellow.name,
@@ -259,7 +248,6 @@ export async function loadFellowCard(
       refutations_self_corrected: null,
       refutations_externally_refuted: null,
       reviews_verified_survival: null,
-      dead_ends_recorded: deadEndsRecorded,
     },
     omitted: [
       "private and unlisted problems are excluded from contribution and review lists and all activity counts",

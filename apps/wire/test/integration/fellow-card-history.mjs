@@ -169,6 +169,14 @@ export async function fellowCardHistory({
     const response = await worker.fetch(url, { headers: { "user-agent": userAgent } });
     assert.equal(response.status, 200);
     const text = await response.text();
+    assert.ok(
+      !text.includes("dead_ends_recorded"),
+      "The machine face must not publish a dead-end tally",
+    );
+    assert.ok(
+      !text.includes("Checked Dead Ends"),
+      "The readable face must not turn dead ends into a counter",
+    );
     for (const privateValue of [
       "CARD_PRIVATE_HISTORY_CANARY",
       "WRONG_PROJECTION_BASIS",

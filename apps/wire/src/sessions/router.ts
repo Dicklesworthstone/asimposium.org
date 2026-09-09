@@ -24,6 +24,8 @@ import {
   PromoteRequestSchema,
   PromoteResponseSchema,
   type RateLimitBudget,
+  RecordDeadEndRequestSchema,
+  RecordDeadEndResponseSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
   ReviewRequestSchema,
@@ -92,6 +94,7 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import { validateDeadEndPreconditions } from "../ledger/dead-ends";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { parseRelationTarget } from "../ledger/relations";
@@ -628,6 +631,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "hypothesis-kill": ["hypothesis-kill", HypothesisKillResponseSchema],
     evidence: ["evidence", EvidenceResponseSchema],
     synthesize: ["synthesize", SynthesizeResponseSchema],
+    "dead-ends": ["dead_end", RecordDeadEndResponseSchema],
   } as const;
 
   async function screenWithQuota(
@@ -734,6 +738,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "hypothesis-kill"
     | "evidence"
     | "synthesize"
+    | "dead_end"
     | "session_close";
 
   interface ReplayRecord {
@@ -927,6 +932,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "gaps"
           | "relations"
           | "synthesize"
+          | "dead_end"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1384,6 +1390,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/hypotheses/:hid/kill",
     "/v1/sessions/:id/evidence",
     "/v1/sessions/:id/synthesize",
+    "/v1/sessions/:id/dead-ends",
     "/v1/sessions/:id/close",
     "/v1/problems/:id/statement-review",
   ] as const;
@@ -7117,6 +7124,275 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const winner = await readReplayRecord(
           db,
           "synthesize",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/dead-ends (W5.8a: Dead ends & P6 negative knowledge) ---
+  app.post("/v1/sessions/:id/dead-ends", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = RecordDeadEndRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "DEAD_END_BODY_INVALID",
+        title: "Invalid dead-end request body",
+        detail: "The request body did not match the session dead-end record contract.",
+        fixHint:
+          "Provide approach, why_it_fails, and retry_predicate with optional what_was_examined, scope_detection_floor, and retry_when.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            approach: "Exhaustive branching valuation search along odd multipliers.",
+            why_it_fails: "The valuation branches diverge exponentially beyond depth 16.",
+            retry_predicate: "Worth retrying if non-archimedean metrics bound branch width.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/dead-ends", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "dead_end",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => RecordDeadEndResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot record dead-end on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Dead ends cannot be recorded on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+      });
+    }
+
+    const preconditions = await validateDeadEndPreconditions(
+      db,
+      session.problem_id,
+      auth.binding.fellowId,
+      parsed.data,
+    );
+    if (preconditions instanceof Response) return preconditions;
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "dead-ends",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "dead-end",
+        statement: `${parsed.data.approach}\n\nWhy it fails: ${parsed.data.why_it_fails}\n\nRetry predicate: ${parsed.data.retry_predicate}`,
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    const deadEndId = mintId("DE");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("dead_end", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "dead_end.recorded",
+          objectKind: "dead_end",
+          objectId: deadEndId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            dead_end_id: deadEndId,
+            approach: parsed.data.approach,
+            why_it_fails: parsed.data.why_it_fails,
+            retry_predicate: parsed.data.retry_predicate,
+            what_was_examined: parsed.data.what_was_examined ?? null,
+            scope_detection_floor: parsed.data.scope_detection_floor ?? null,
+            retry_when: parsed.data.retry_when ?? null,
+            norm_hash: preconditions.normHash,
+            supersedes_dead_end_id: parsed.data.supersedes_dead_end_id ?? null,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO dead_ends
+                   (dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate,
+                    what_was_examined, scope_detection_floor, retry_when_json, norm_hash,
+                    author_fellow_id, declared_model, supersedes_dead_end_id, superseded_by, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                deadEndId,
+                session.problem_id,
+                sequence,
+                parsed.data.approach,
+                parsed.data.why_it_fails,
+                parsed.data.retry_predicate,
+                parsed.data.what_was_examined ?? null,
+                parsed.data.scope_detection_floor ?? null,
+                parsed.data.retry_when ? JSON.stringify(parsed.data.retry_when) : null,
+                preconditions.normHash,
+                auth.binding.fellowId,
+                auth.binding.model,
+                parsed.data.supersedes_dead_end_id ?? null,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+            ...(parsed.data.supersedes_dead_end_id
+              ? [
+                  db
+                    .prepare(
+                      `UPDATE dead_ends
+                       SET superseded_by = ?
+                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL`,
+                    )
+                    .bind(deadEndId, session.problem_id, parsed.data.supersedes_dead_end_id),
+                ]
+              : []),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "dead_end",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: ({ sequence }) =>
+            RecordDeadEndResponseSchema.parse({
+              recorded: true,
+              dead_end_id: deadEndId,
+              problem_id: session.problem_id,
+              seq: sequence,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "dead_end",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("dead_end committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "dead_end",
           auth.binding.fellowId,
           key,
           digest,

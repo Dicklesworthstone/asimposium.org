@@ -70,12 +70,13 @@ cross-slice/provider proof:
 
 ## Worker configuration
 
-`infra/wrangler.toml` is local-only and retains the all-zero D1 sentinel; `bun run dev` points at
-it. `infra/environments.toml` plus the validated generator own staging/production topology and
+`bun run dev` uses `infra/environments/local.wrangler.toml`, including the configured local
+discovery origins. `infra/wrangler.toml` remains the local scaffold; its missing origin bindings
+make it unsuitable for discovery. `infra/environments.toml` plus the validated generator own the topology and
 emit DB, private/public R2, exported Durable Object, and optional Workers AI bindings only where
 declared. Staging and production declare `AI`; local deliberately does not, so local promotion
 requests hold fail-closed unless a test supplies the classifier seam. `db/migrations/` contains the
-forward-only schema through migration 0041.
+forward-only schema; apply it to the local D1 binding before exercising data-backed routes.
 
 None of that proves a remote resource is provisioned or a deployment succeeded. This package ships
 no casual production deploy shortcut; use the infrastructure runner and its same-revision receipts.
