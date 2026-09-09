@@ -45,15 +45,17 @@ const MoveTemplateContentsSchema = z.object({
 export const MoveTemplateSchema = z.discriminatedUnion("availability", [
   MoveTemplateContentsSchema.extend({
     availability: z.literal("available"),
-    target_contract: z.string().regex(
-      /^\/schemas\/sessions\.v1\.json#\/properties\/[a-z_]+_request$/,
-    ),
-    request: z.object({
-      method: z.literal("POST"),
-      path: z.string().regex(/^\/v1\/sessions\/\{id\}\/[a-z-]+(?:\/(?:[a-z-]+|\{hid\}))*$/),
-      auth: z.literal("fellow-bearer"),
-      idempotency_key_required: z.literal(true),
-    }).strict(),
+    target_contract: z
+      .string()
+      .regex(/^\/schemas\/sessions\.v1\.json#\/properties\/[a-z_]+_request$/),
+    request: z
+      .object({
+        method: z.literal("POST"),
+        path: z.string().regex(/^\/v1\/sessions\/\{id\}\/[a-z-]+(?:\/(?:[a-z-]+|\{hid\}))*$/),
+        auth: z.literal("fellow-bearer"),
+        idempotency_key_required: z.literal(true),
+      })
+      .strict(),
     required_fields: z.array(z.string().min(1)).min(1),
     prefilled_hints: z.record(z.string(), z.unknown()),
   }).strict(),
@@ -66,12 +68,14 @@ export const MoveTemplateSchema = z.discriminatedUnion("availability", [
 
 export type MoveTemplate = z.infer<typeof MoveTemplateSchema>;
 
-export const MoveTemplatesDocSchema = z.object({
-  version: z.literal("0.1.0-draft"),
-  schema: z.literal(MOVES_SCHEMA_ID),
-  scope: z.literal("catalog"),
-  moves: z.record(MoveKindSchema, MoveTemplateSchema),
-}).strict();
+export const MoveTemplatesDocSchema = z
+  .object({
+    version: z.literal("0.1.0-draft"),
+    schema: z.literal(MOVES_SCHEMA_ID),
+    scope: z.literal("catalog"),
+    moves: z.record(MoveKindSchema, MoveTemplateSchema),
+  })
+  .strict();
 
 export type MoveTemplatesDoc = z.infer<typeof MoveTemplatesDocSchema>;
 
@@ -92,7 +96,8 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Refine the statement to bind quantifiers, state regimes, and define falsifiers before other promotion proceeds.",
     availability: "unavailable",
-    unavailable_reason: "Statement sharpening has no validated request binding in this catalog yet.",
+    unavailable_reason:
+      "Statement sharpening has no validated request binding in this catalog yet.",
     next_step: "Continue the statement draft in your private workshop.",
   },
   "state-claim": {
@@ -116,7 +121,16 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     availability: "available",
     target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
     request: sessionRequest("evidence"),
-    required_fields: ["bears_on_kind", "bears_on_id", "bears_on_version", "direction", "kind", "source", "mode", "body_md"],
+    required_fields: [
+      "bears_on_kind",
+      "bears_on_id",
+      "bears_on_version",
+      "direction",
+      "kind",
+      "source",
+      "mode",
+      "body_md",
+    ],
     prefilled_hints: { bears_on_kind: "claim", direction: "refutes" },
   },
   review: {
@@ -158,7 +172,8 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Propose or run a discriminating test whose predicted outcomes diverge across surviving hypotheses.",
     availability: "unavailable",
-    unavailable_reason: "A discriminating-test request spanning several hypotheses is not implemented.",
+    unavailable_reason:
+      "A discriminating-test request spanning several hypotheses is not implemented.",
     next_step: "Draft the competing predictions and proposed test in your private workshop.",
   },
   "kill-or-stand": {
@@ -177,7 +192,8 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     move: "collapse-duplicate",
     title: "Collapse Duplicate",
     trigger: "Near-duplicate claims flagged by embedding search or P11 rule.",
-    description: "Assert an equivalence between exact claim versions with a reviewable relation. Both claims remain in the ledger.",
+    description:
+      "Assert an equivalence between exact claim versions with a reviewable relation. Both claims remain in the ledger.",
     availability: "available",
     target_contract: "/schemas/sessions.v1.json#/properties/relation_file_request",
     request: sessionRequest("relations"),
@@ -190,7 +206,8 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Statement revision minted S@n+1, drifting from older claim versions.",
     description: "Update a claim to bind to the revised active problem statement version.",
     availability: "unavailable",
-    unavailable_reason: "Statement re-anchoring has no validated request binding in this catalog yet.",
+    unavailable_reason:
+      "Statement re-anchoring has no validated request binding in this catalog yet.",
     next_step: "Keep proposed adaptations in your private workshop until the binding is available.",
   },
   "record-dead-end": {
@@ -200,8 +217,10 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Record an honest null result as a permanent dead end with structured retry_when conditions.",
     availability: "unavailable",
-    unavailable_reason: "Public dead-end records with retry conditions have no mounted write contract.",
-    next_step: "Push a private workshop object with type dead-end and retain the retry conditions in its body.",
+    unavailable_reason:
+      "Public dead-end records with retry conditions have no mounted write contract.",
+    next_step:
+      "Push a private workshop object with type dead-end and retain the retry conditions in its body.",
   },
   synthesize: {
     move: "synthesize",
@@ -223,18 +242,38 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     availability: "available",
     target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
     request: sessionRequest("evidence"),
-    required_fields: ["bears_on_kind", "bears_on_id", "bears_on_version", "direction", "kind", "source", "mode", "formal_artifact", "body_md"],
+    required_fields: [
+      "bears_on_kind",
+      "bears_on_id",
+      "bears_on_version",
+      "direction",
+      "kind",
+      "source",
+      "mode",
+      "formal_artifact",
+      "body_md",
+    ],
     prefilled_hints: { bears_on_kind: "claim", kind: "certificate" },
   },
   "add-refuter-from-friction": {
     move: "add-refuter-from-friction",
     title: "Refute from Formalization Friction",
     trigger: "Friction report contains counterexample-scent or statement-too-strong.",
-    description: "Investigate a counterexample suggested by formalization friction. Cite the friction record in body_md and report the actual result against an exact claim version.",
+    description:
+      "Investigate a counterexample suggested by formalization friction. Cite the friction record in body_md and report the actual result against an exact claim version.",
     availability: "available",
     target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
     request: sessionRequest("evidence"),
-    required_fields: ["bears_on_kind", "bears_on_id", "bears_on_version", "direction", "kind", "source", "mode", "body_md"],
+    required_fields: [
+      "bears_on_kind",
+      "bears_on_id",
+      "bears_on_version",
+      "direction",
+      "kind",
+      "source",
+      "mode",
+      "body_md",
+    ],
     prefilled_hints: { bears_on_kind: "claim", direction: "refutes" },
   },
   "close-gap": {
@@ -267,7 +306,8 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
       "Re-evaluate a previously abandoned route whose blocking condition has now cleared.",
     availability: "unavailable",
     unavailable_reason: "Public dead-end retry records and trigger evaluation are not implemented.",
-    next_step: "Record the old attempt, changed condition and proposed retry in your private workshop.",
+    next_step:
+      "Record the old attempt, changed condition and proposed retry in your private workshop.",
   },
   "back-to-the-object": {
     move: "back-to-the-object",
@@ -276,7 +316,8 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Redirect focus away from process commentary and back to the oldest open object-level need.",
     availability: "unavailable",
-    unavailable_reason: "Selecting a concrete object requires the unfinished per-problem moves engine.",
+    unavailable_reason:
+      "Selecting a concrete object requires the unfinished per-problem moves engine.",
     next_step: "Read a working pack and choose an existing claim, review or evidence task.",
   },
   "idle-close": {

@@ -1,0 +1,10 @@
+{
+  "move": "idle-close",
+  "title": "Close this session",
+  "trigger": "An open session has been quiet for three hours.",
+  "description": "Close your session with a concise handback.",
+  "availability": "available",
+  "target_contract": "/schemas/sessions.v1.json#/properties/session_close_request",
+  "required_fields": ["handback"],
+  "prefilled_hints": {}
+}

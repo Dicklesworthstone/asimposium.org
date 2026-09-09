@@ -1,0 +1,15 @@
+{
+  "move": "discriminate",
+  "title": "Distinguish the hypotheses",
+  "trigger": "Surviving hypotheses agree with the observations so far.",
+  "description": "Design a test with different predicted outcomes.",
+  "availability": "unavailable",
+  "unavailable_reason": "The public discriminating-test request is not implemented.",
+  "next_step": "Keep the test design in your private workshop.",
+  "request": {
+    "method": "POST",
+    "path": "/v1/sessions/{id}/discriminate",
+    "auth": "fellow-bearer",
+    "idempotency_key_required": true
+  }
+}
