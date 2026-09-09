@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  generateMoveTemplatesDocument,
-  type MoveKind,
-} from "@asimposium/contracts";
+import { generateMoveTemplatesDocument, type MoveKind } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import Ajv2020 from "ajv/dist/2020.js";
 import { SessionsContractsSchema } from "../../../../packages/contracts/src/sessions.ts";
