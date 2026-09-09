@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   ClaimCitationCslSchema,
   ClaimFaceResponseSchema,
+  ConflictsListResponseSchema,
   ProblemFaceResponseSchema,
 } from "@asimposium/contracts";
 import type { Projection } from "@asimposium/render";
@@ -425,4 +426,113 @@ test("public claim byte budgets retain whole stable records across Unicode and H
     for (const item of json.items.slice(1)) expect(item.body).toBe(body);
     for (const face of Object.values(faces)) expect(face.bytes).toBeLessThanOrEqual(64_000);
   }
+});
+
+test("conflicts Diptych routes serve json, md, and html faces with honest omission metadata", async () => {
+  const problemRow = { id: "P-CONFLICTS", unlisted: 0, public_seq: 10, status: "open" };
+  const conflictRows = [
+    {
+      conflict_id: "CF-1",
+      problem_id: "P-CONFLICTS",
+      seq: 1,
+      claim_a_id: "C-1",
+      claim_a_version: 1,
+      claim_b_id: "C-2",
+      claim_b_version: 1,
+      aligned_definitions: "Definitions aligned on prime gap metrics.",
+      aligned_scope: "Integers strictly greater than 2.",
+      aligned_quantifiers: "For all n > 1000.",
+      smallest_disagreement: "O(log^2 p) vs Omega(log^3 p).",
+      agreed_facts_json: JSON.stringify(["Prime number theorem holds."]),
+      discriminating_tests_json: JSON.stringify(["Direct sieve verification up to 10^12."]),
+      status: "open",
+      resolution: null,
+      author_fellow_id: "F-UNIT-CONFLICT",
+      created_at: "2026-01-01T00:00:00.000Z",
+      resolved_at: null,
+      actor_sponsor_id: "S-author",
+      actor_session_id: "SES-unit",
+      model_string_self_declared: "model-unit",
+      harness: "harness-unit",
+      payload_sha256: null,
+      payload_json: null,
+      content_available: 1,
+    },
+  ];
+
+  const db = {
+    prepare: (query: string) => {
+      return {
+        bind: (...args: unknown[]) => ({
+          first: async () => {
+            if (query.includes("FROM problems")) {
+              const id = args[0];
+              if (id === "P-CONFLICTS") return problemRow;
+              return null;
+            }
+            return null;
+          },
+          all: async () => {
+            if (query.includes("FROM conflicts")) {
+              return { results: conflictRows };
+            }
+            return { results: [] };
+          },
+        }),
+      };
+    },
+  } as unknown as Env["DB"];
+
+  const env = { DB: db } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+
+  // JSON face
+  const jsonRes = await app.request(
+    "https://a.asimposium.org/p/P-CONFLICTS/conflicts.json",
+    {},
+    env,
+  );
+  expect(jsonRes.status).toBe(200);
+  expect(jsonRes.headers.get("content-type")).toBe("application/json; charset=utf-8");
+  const jsonBody = ConflictsListResponseSchema.parse(await jsonRes.json());
+  expect(jsonBody.conflicts).toHaveLength(1);
+  expect(jsonBody.conflicts[0]?.conflict_id).toBe("CF-1");
+
+  // Markdown face
+  const mdRes = await app.request("https://a.asimposium.org/p/P-CONFLICTS/conflicts.md", {}, env);
+  expect(mdRes.status).toBe(200);
+  expect(mdRes.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+  const mdText = await mdRes.text();
+  expect(mdText).toContain("## Conflict `CF-1`");
+  expect(mdText).toContain("`C-1@1` vs `C-2@1`");
+
+  // HTML face
+  const htmlRes = await app.request(
+    "https://a.asimposium.org/p/P-CONFLICTS/conflicts.html",
+    {},
+    env,
+  );
+  expect(htmlRes.status).toBe(200);
+  expect(htmlRes.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  const htmlText = await htmlRes.text();
+  expect(htmlText).toContain("CF-1");
+  expect(htmlText).toContain("C-1@1");
+
+  // 404 for non-existent problem
+  const notFoundRes = await app.request(
+    "https://a.asimposium.org/p/P-MISSING/conflicts.json",
+    {},
+    env,
+  );
+  expect(notFoundRes.status).toBe(404);
+
+  // 304 for ETag match
+  const etag = jsonRes.headers.get("etag");
+  expect(etag).toBeTruthy();
+  const cachedRes = await app.request(
+    "https://a.asimposium.org/p/P-CONFLICTS/conflicts.json",
+    { headers: { "if-none-match": etag ?? "" } },
+    env,
+  );
+  expect(cachedRes.status).toBe(304);
 });

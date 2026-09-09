@@ -860,6 +860,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       (segments[3] === "dead-ends.json" ||
         segments[3] === "dead-ends.md" ||
         segments[3] === "dead-ends.html" ||
+        segments[3] === "conflicts.json" ||
+        segments[3] === "conflicts.md" ||
+        segments[3] === "conflicts.html" ||
         segments[3] === "questions.json" ||
         segments[3] === "questions.md" ||
         segments[3] === "questions.html" ||

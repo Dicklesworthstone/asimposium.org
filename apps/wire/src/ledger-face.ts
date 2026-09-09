@@ -1,6 +1,8 @@
 import {
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
+  CONFLICTS_SCHEMA_ID,
+  ConflictsListResponseSchema,
   DEAD_ENDS_SCHEMA_ID,
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
@@ -37,6 +39,11 @@ import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
+import {
+  loadProblemConflicts,
+  renderConflictsHtml,
+  renderConflictsMarkdown,
+} from "./ledger/conflicts";
 import {
   loadProblemDeadEnds,
   MAX_DEAD_ENDS_PER_PAGE,
@@ -1576,6 +1583,99 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
     const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
     const body = renderRetractionsHtmlFragment(problemId, retractions, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/conflicts.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const statusParam = c.req.query("status");
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+      status: statusParam,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = JSON.stringify(
+      ConflictsListResponseSchema.parse({
+        schema: CONFLICTS_SCHEMA_ID,
+        problem_id: problemId,
+        conflicts,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/conflicts.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const statusParam = c.req.query("status");
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+      status: statusParam,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderConflictsMarkdown(problemId, conflicts, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/conflicts.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const statusParam = c.req.query("status");
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+      status: statusParam,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderConflictsHtml(problemId, conflicts, omitted);
     const etag = await strongEtag("html", body);
     const headers = {
       "content-type": "text/html; charset=utf-8",
