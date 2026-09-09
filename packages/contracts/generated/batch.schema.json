@@ -61,7 +61,8 @@
               }
             },
             "required": [
-              "tempId"
+              "tempId",
+              "causedBy"
             ],
             "additionalProperties": false
           }
