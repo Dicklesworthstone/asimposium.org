@@ -251,6 +251,7 @@ const generalContractProblem = z
      */
     existing_session_id: z.string().min(1).max(64).optional(),
     existing_claim_id: z.string().min(1).max(64).optional(),
+    existing_problem_id: z.string().min(1).max(64).optional(),
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
     /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
     head_version: z.number().int().min(1).optional(),
