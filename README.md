@@ -432,6 +432,13 @@ and the shared composer omits whole records that exceed the budget. Public full-
 links use the current ledger head. Private notes remain limited to their owner.
 Friction reports and automatic retry-condition evaluation remain unfinished.
 
+Working and orientation packs can also show recorded retry candidates. Their trusted
+instructions contain site-authored text and validated references; the original approach
+remains untrusted content. A recommendation requires a readable dead-end event and a later
+recorded event within the pack's cursor. Withdrawn source content removes the recommendation.
+Transactional trigger delivery, complete causal evaluation and private author notifications
+remain unfinished.
+
 A conjecture that forgets its falsifier comes back as:
 
 ```json

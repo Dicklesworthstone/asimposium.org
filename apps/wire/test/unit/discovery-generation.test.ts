@@ -197,6 +197,35 @@ describe("discovery generators (W1.6)", () => {
     );
   });
 
+  test("question, retraction and conflict discovery exposes mounted faces and resolving write contracts", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    for (const section of ["questions", "retractions", "conflicts"]) {
+      for (const face of ["md", "json", "html"]) {
+        const op = doc.paths[`/p/{id}/${section}.${face}`]?.get;
+        expect(op?.security).toEqual([]);
+        if (face === "json")
+          expect(op.responses[200].content["application/json"].schema.$ref).toBe(
+            `https://a.asimposium.org/schemas/${section}.v1.json`,
+          );
+      }
+    }
+    for (const [suffix, property] of [
+      ["questions", "ask_question_request"],
+      ["questions/{qid}/lease", "lease_question_request"],
+      ["questions/{qid}/answer", "answer_question_request"],
+      ["questions/{qid}/withdraw", "withdraw_question_request"],
+      ["retract", "retract_request"],
+      ["conflicts", "normalize_conflict_request"],
+      ["conflicts/{cid}/resolve", "resolve_conflict_request"],
+    ]) {
+      const op = doc.paths[`/v1/sessions/{id}/${suffix}`]?.post;
+      expect(op?.security).toEqual([{ bearerAuth: [] }]);
+      expect(op?.requestBody.content["application/json"].schema.$ref).toBe(
+        `https://a.asimposium.org/schemas/sessions.v1.json#/properties/${property}`,
+      );
+    }
+  });
+
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {
     expect(normalizeOpenApiPath("/p/:id{.+\\.json$}")).toBe("/p/{id}.json");
     expect(normalizeOpenApiPath("/v1/sessions/:id/promote")).toBe("/v1/sessions/{id}/promote");

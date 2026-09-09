@@ -226,6 +226,8 @@ await runLocalWorkerJourney(
     console.log(
       JSON.stringify({
         stage: "working-review-journey-passed",
+        kind: "working-review-real-bindings",
+        status: "pass",
         exact_version_followup: true,
         review_replay_stable: true,
         retraction_excluded: true,

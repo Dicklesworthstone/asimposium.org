@@ -17,6 +17,17 @@ import {
 } from "./dead-ends.ts";
 import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
 import {
+  AnswerQuestionRequestSchema,
+  AnswerQuestionResponseSchema,
+  AskQuestionRequestSchema,
+  AskQuestionResponseSchema,
+  LeaseQuestionRequestSchema,
+  LeaseQuestionResponseSchema,
+  WithdrawQuestionRequestSchema,
+  WithdrawQuestionResponseSchema,
+} from "./questions.ts";
+import { RetractRequestSchema, RetractResponseSchema } from "./retractions.ts";
+import {
   ClaimScientificProvenanceSchema,
   FormalArtifactSchema,
   GroundedFalsificationCheckSchema,
@@ -1035,6 +1046,16 @@ export const SessionsContractsSchema = z
     synthesize_response: SynthesizeResponseSchema,
     record_dead_end_request: RecordDeadEndRequestSchema,
     record_dead_end_response: RecordDeadEndResponseSchema,
+    ask_question_request: AskQuestionRequestSchema,
+    ask_question_response: AskQuestionResponseSchema,
+    lease_question_request: LeaseQuestionRequestSchema,
+    lease_question_response: LeaseQuestionResponseSchema,
+    answer_question_request: AnswerQuestionRequestSchema,
+    answer_question_response: AnswerQuestionResponseSchema,
+    withdraw_question_request: WithdrawQuestionRequestSchema,
+    withdraw_question_response: WithdrawQuestionResponseSchema,
+    retract_request: RetractRequestSchema,
+    retract_response: RetractResponseSchema,
     normalize_conflict_request: NormalizeConflictRequestSchema,
     normalize_conflict_response: NormalizeConflictResponseSchema,
     resolve_conflict_request: ResolveConflictRequestSchema,

@@ -3,6 +3,12 @@
   "origin": "https://a.asimposium.org",
   "schemas": [
     {
+      "id": "conflicts",
+      "url": "https://a.asimposium.org/schemas/conflicts.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4967
+    },
+    {
       "id": "dead-ends",
       "url": "https://a.asimposium.org/schemas/dead-ends.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
@@ -48,7 +54,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 42654
+      "body_bytes": 44303
     },
     {
       "id": "problems",
@@ -84,7 +90,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 144183
+      "body_bytes": 155371
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."

@@ -1,6 +1,7 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
+  DeadEndIdSchema,
   getMoveTemplate,
   type PackProfile,
   PublicClaimTargetSchema,
@@ -8,7 +9,7 @@ import {
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
-import { loadProblemDeadEnds } from "../ledger/dead-ends";
+import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
   checkedScientificPayload,
@@ -350,6 +351,39 @@ export function workingReviewMove(target: string | undefined): PackCandidate | u
     why_included:
       "a concrete missing review with the mounted request contract; submission rechecks authorization",
     stable_prefix: 30,
+  };
+}
+
+/** Surfaces retry-dead-end move candidates for fired dead-end retry triggers (W5.8a / Fable §6.1, §9.4). */
+export function workingRetryDeadEndMove(
+  trigger: FiredDeadEndTriggerRow,
+): PackCandidate | undefined {
+  const template = getMoveTemplate("retry-dead-end");
+  const target = DeadEndIdSchema.safeParse(trigger.dead_end_id);
+  if (template.availability !== "available" || !target.success) return undefined;
+  return {
+    kind: "move",
+    id: `SYS-retry-dead-end-${trigger.dead_end_id}`,
+    scope: "system",
+    untrusted: false,
+    tokens: 1,
+    body: JSON.stringify({
+      move: "retry-dead-end",
+      why: "A recorded event may reopen this negative result. Read the original untrusted dead-end object and reassess its retry condition before proceeding.",
+      refs: [trigger.dead_end_id],
+      contract: {
+        ...template,
+        prefilled_hints: {
+          ...template.prefilled_hints,
+          approach: `Retry of ${trigger.dead_end_id}: `,
+          supersedes_dead_end_id: trigger.dead_end_id,
+        },
+      },
+      selection_boundary:
+        "Recorded retry candidate only; causal trigger delivery and author notifications remain incomplete. Submission rechecks authorization.",
+    }),
+    why_included: "retry-dead-end move for a fired dead end predicate",
+    stable_prefix: 31,
   };
 }
 

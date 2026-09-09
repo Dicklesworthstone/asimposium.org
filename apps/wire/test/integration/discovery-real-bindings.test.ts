@@ -15,6 +15,7 @@ test.each([
   "credential-liveness",
   "workshop-read",
   "unlisted",
+  "working-review",
 ])(
   "production ledger writes reach discovery through real local Workerd/D1/R2: %s",
   async (screenMode) => {
@@ -57,19 +58,21 @@ test.each([
         node,
         resolve(
           import.meta.dir,
-          screenMode === "workshop-read"
-            ? "workshop-read-real-bindings.mjs"
-            : screenMode === "credential-liveness"
-              ? "claim-credential-liveness-real-bindings.mjs"
-              : screenMode === "statement-review"
-                ? "statement-review-real-bindings.mjs"
-                : screenMode === "unlisted"
-                  ? "unlisted-real-bindings.mjs"
-                  : screenMode === "governance"
-                    ? "problem-lifecycle-ledger-real-bindings.mjs"
-                    : screenMode === "areas"
-                      ? "area-discovery-real-bindings.mjs"
-                      : "discovery-real-bindings.mjs",
+          screenMode === "working-review"
+            ? "working-review-real-bindings.mjs"
+            : screenMode === "workshop-read"
+              ? "workshop-read-real-bindings.mjs"
+              : screenMode === "credential-liveness"
+                ? "claim-credential-liveness-real-bindings.mjs"
+                : screenMode === "statement-review"
+                  ? "statement-review-real-bindings.mjs"
+                  : screenMode === "unlisted"
+                    ? "unlisted-real-bindings.mjs"
+                    : screenMode === "governance"
+                      ? "problem-lifecycle-ledger-real-bindings.mjs"
+                      : screenMode === "areas"
+                        ? "area-discovery-real-bindings.mjs"
+                        : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -103,23 +106,25 @@ test.each([
     for (const record of records) if (record !== null) console.info(JSON.stringify(record));
     if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
     const kind =
-      screenMode === "workshop-read"
-        ? "workshop-read-real-bindings"
-        : screenMode === "credential-liveness"
-          ? "claim-credential-liveness-real-bindings"
-          : screenMode === "statement-review"
-            ? "statement-review-real-bindings"
-            : screenMode === "unlisted"
-              ? "unlisted-real-bindings"
-              : screenMode === "governance"
-                ? "problem-lifecycle-ledger"
-                : screenMode === "areas"
-                  ? "area-discovery-real-bindings"
-                  : screenMode === "science"
-                    ? "scientific-journey-real-bindings"
-                    : screenMode === "positive"
-                      ? "discovery-real-bindings"
-                      : "discovery-screening-real-bindings";
+      screenMode === "working-review"
+        ? "working-review-real-bindings"
+        : screenMode === "workshop-read"
+          ? "workshop-read-real-bindings"
+          : screenMode === "credential-liveness"
+            ? "claim-credential-liveness-real-bindings"
+            : screenMode === "statement-review"
+              ? "statement-review-real-bindings"
+              : screenMode === "unlisted"
+                ? "unlisted-real-bindings"
+                : screenMode === "governance"
+                  ? "problem-lifecycle-ledger"
+                  : screenMode === "areas"
+                    ? "area-discovery-real-bindings"
+                    : screenMode === "science"
+                      ? "scientific-journey-real-bindings"
+                      : screenMode === "positive"
+                        ? "discovery-real-bindings"
+                        : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -129,12 +134,13 @@ test.each([
       screenMode === "unlisted" ||
       screenMode === "statement-review" ||
       screenMode === "credential-liveness" ||
-      screenMode === "workshop-read"
+      screenMode === "workshop-read" ||
+      screenMode === "working-review"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
     expect(receipt?.screening_refusals).toBe(
-      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 11,
+      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 15,
     );
   },
   240000,

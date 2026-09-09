@@ -53,6 +53,19 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   "collapse-duplicate": { source_claim_id: "C-1", source_version: 1, target: "C-2@1" },
   "re-anchor": { claim_id: "C-1", base_version: 1 },
   "record-dead-end": {},
+  "retry-dead-end": { supersedes_dead_end_id: "DE-1" },
+  "normalize-conflict": {
+    claims: [
+      { claim_id: "C-1", version: 1 },
+      { claim_id: "C-2", version: 1 },
+    ],
+    aligned_definitions: "Both statements use the same integer remainder definition.",
+    aligned_scope: "The scope is the finite integer range from one to ten.",
+    aligned_quantifiers: "The universal quantifier applies to each member of that range.",
+    smallest_disagreement: "The two claims assign different remainders to the integer six.",
+    agreed_facts: ["Both use four as the divisor."],
+    discriminating_tests: ["Compute the remainder of six modulo four."],
+  },
   formalize: {
     bears_on_id: "C-1",
     bears_on_version: 1,
@@ -121,7 +134,7 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
         expect(template.required_fields, template.move).toContain(field);
     }
   }
-  expect(count).toBe(13);
+  expect(count).toBe(15);
   expect(Object.keys(bodies)).toHaveLength(count);
 });
 

@@ -4778,6 +4778,287 @@
       ],
       "additionalProperties": false
     },
+    "ask_question_request": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "target_refs": {
+          "default": [],
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "blocking": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body_md": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        }
+      },
+      "required": [
+        "body_md"
+      ],
+      "additionalProperties": false
+    },
+    "ask_question_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "question_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "status": {
+          "type": "string",
+          "const": "open"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "question_id",
+        "problem_id",
+        "status",
+        "seq",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "lease_question_request": {
+      "type": "object",
+      "properties": {
+        "objective": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 500
+        },
+        "deliverable": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 500
+        },
+        "ttl_seconds": {
+          "default": 7200,
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        }
+      },
+      "additionalProperties": false
+    },
+    "lease_question_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "question_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "status": {
+          "type": "string",
+          "const": "leased"
+        },
+        "leased_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "leased_until": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "question_id",
+        "status",
+        "leased_by",
+        "leased_until"
+      ],
+      "additionalProperties": false
+    },
+    "answer_question_request": {
+      "type": "object",
+      "properties": {
+        "resolved_by_object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "resolved_by_object"
+      ],
+      "additionalProperties": false
+    },
+    "answer_question_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "question_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "status": {
+          "type": "string",
+          "const": "resolved"
+        },
+        "resolved_by_object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "ok",
+        "question_id",
+        "status",
+        "resolved_by_object"
+      ],
+      "additionalProperties": false
+    },
+    "withdraw_question_request": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000
+        }
+      },
+      "additionalProperties": false
+    },
+    "withdraw_question_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "question_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)Q-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "status": {
+          "type": "string",
+          "const": "withdrawn"
+        }
+      },
+      "required": [
+        "ok",
+        "question_id",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "retract_request": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "target_object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "target_object",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "retract_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "retraction_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)R-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "target_object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "retraction_kind": {
+          "type": "string",
+          "enum": [
+            "self-corrected",
+            "externally-refuted"
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "retraction_id",
+        "problem_id",
+        "target_object",
+        "retraction_kind",
+        "seq",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
     "normalize_conflict_request": {
       "type": "object",
       "properties": {
@@ -4999,6 +5280,16 @@
     "synthesize_response",
     "record_dead_end_request",
     "record_dead_end_response",
+    "ask_question_request",
+    "ask_question_response",
+    "lease_question_request",
+    "lease_question_response",
+    "answer_question_request",
+    "answer_question_response",
+    "withdraw_question_request",
+    "withdraw_question_response",
+    "retract_request",
+    "retract_response",
     "normalize_conflict_request",
     "normalize_conflict_response",
     "resolve_conflict_request",

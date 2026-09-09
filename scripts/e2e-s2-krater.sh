@@ -167,6 +167,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0052_dead_ends_and_replay_scope.sql
   db/migrations/0053_questions_and_retractions_replay_scope.sql
   db/migrations/0054_conflicts_fable_shape_and_replay_scope.sql
+  db/migrations/0055_dead_end_retry_triggers.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -257,6 +258,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/dead-ends.ts
   apps/wire/src/ledger/questions.ts
   apps/wire/src/ledger/retractions.ts
+  apps/wire/src/ledger/conflicts.ts
   apps/wire/src/krater/claim-version.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
   # (mintClaimVersion on the promote path); the mechanical walk flagged it the
@@ -388,6 +390,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0052_dead_ends_and_replay_scope.sql
   0053_questions_and_retractions_replay_scope.sql
   0054_conflicts_fable_shape_and_replay_scope.sql
+  0055_dead_end_retry_triggers.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

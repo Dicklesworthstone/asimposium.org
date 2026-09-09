@@ -15,6 +15,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
+import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
@@ -109,6 +110,10 @@ const app = createApp({
 });
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  async retryTriggersAt(problemId: string, cursor: number) {
+    return JSON.stringify(await loadFiredDeadEndTriggers(this.env.DB, problemId, 3, cursor));
+  }
+
   async deadEndPackAt(problemId: string, cursor: number) {
     return JSON.stringify(await readDeadEndPack(this.env.DB, problemId, cursor, "graveyard"));
   }

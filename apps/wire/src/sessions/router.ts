@@ -20,6 +20,8 @@ import {
   HypothesisResponseSchema,
   LeaseQuestionRequestSchema,
   LeaseQuestionResponseSchema,
+  NormalizeConflictRequestSchema,
+  NormalizeConflictResponseSchema,
   type PackProfile,
   PackResponseSchema,
   PackTargetQuerySchema,
@@ -34,6 +36,8 @@ import {
   RecordDeadEndResponseSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
+  ResolveConflictRequestSchema,
+  ResolveConflictResponseSchema,
   RetractRequestSchema,
   RetractResponseSchema,
   ReviewRequestSchema,
@@ -104,7 +108,12 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
-import { validateDeadEndPreconditions } from "../ledger/dead-ends";
+import { validateConflictSubstance } from "../ledger/conflicts";
+import {
+  evaluateAndRecordDeadEndTriggers,
+  loadFiredDeadEndTriggers,
+  validateDeadEndPreconditions,
+} from "../ledger/dead-ends";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { validateQuestionSubstance } from "../ledger/questions";
@@ -150,6 +159,7 @@ import {
   readLedgerPackSection,
   readReviewQueuePack,
   readTargetClaimPack,
+  workingRetryDeadEndMove,
   workingReviewMove,
 } from "./ledger-pack";
 import {
@@ -652,6 +662,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "dead-ends": ["dead_end", RecordDeadEndResponseSchema],
     questions: ["ask_question", AskQuestionResponseSchema],
     retract: ["retract", RetractResponseSchema],
+    conflicts: ["conflicts", NormalizeConflictResponseSchema],
+    "conflicts/resolve": ["resolve_conflict", ResolveConflictResponseSchema],
   } as const;
 
   async function screenWithQuota(
@@ -764,6 +776,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "answer_question"
     | "withdraw_question"
     | "retract"
+    | "conflicts"
+    | "resolve_conflict"
     | "session_close";
 
   interface ReplayRecord {
@@ -960,6 +974,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "dead_end"
           | "ask_question"
           | "retract"
+          | "conflicts"
+          | "resolve_conflict"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1445,6 +1461,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/questions/:qid/answer",
     "/v1/sessions/:id/questions/:qid/withdraw",
     "/v1/sessions/:id/retract",
+    "/v1/sessions/:id/conflicts",
+    "/v1/sessions/:id/conflicts/:cid/resolve",
     "/v1/sessions/:id/close",
     "/v1/problems/:id/statement-review",
   ] as const;
@@ -2527,6 +2545,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const recommendedReview =
       profile === "working" ? workingReviewMove(firstReviewTarget) : undefined;
     if (recommendedReview) candidates.push(recommendedReview);
+
+    if (profile === "working" || profile === "orient") {
+      await evaluateAndRecordDeadEndTriggers(
+        db,
+        session.problem_id,
+        `pack-eval-${cursor}`,
+        "pack.read",
+        new Date().toISOString(),
+      );
+      const firedTriggers = await loadFiredDeadEndTriggers(db, session.problem_id, 3, cursor);
+      for (const trigger of firedTriggers) {
+        const retryMove = workingRetryDeadEndMove(trigger);
+        if (retryMove) candidates.push(retryMove);
+      }
+    }
     return composePackResponse({
       schema: "asimposium.pack.v1",
       session: session.session_id,
@@ -3425,6 +3458,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // error. Nothing before this line reaches it, so a refusal, a conflict and
       // a failed commit all leave the drainer untouched.
       scheduleCommittedPromotionNudge(c);
+      await evaluateAndRecordDeadEndTriggers(
+        db,
+        session.problem_id,
+        write.eventId,
+        "claim.promoted",
+        promotedAt,
+        { claimId: write.claimId, targetDisposition: "open" },
+      );
       const replay = await readReplayRecord(
         db,
         "promote",
@@ -4954,6 +4995,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }),
       );
       scheduleCommittedPromotionNudge(c);
+      await evaluateAndRecordDeadEndTriggers(
+        db,
+        session.problem_id,
+        eventId,
+        "gap.closed",
+        new Date().toISOString(),
+        { gapId: parsed.data.gap_id },
+      );
       const replay = await readReplayRecord(
         db,
         "gaps",
@@ -8931,6 +8980,680 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const winner = await readReplayRecord(
           db,
           "retract",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  const CONFLICT_NORMALIZE_EXAMPLE = {
+    claims: [
+      { claim_id: "C-1", version: 1 },
+      { claim_id: "C-2", version: 1 },
+    ],
+    aligned_definitions: "Standard definitions of metric spaces.",
+    aligned_scope: "Compact metric spaces with non-empty interior.",
+    aligned_quantifiers: "For all epsilon > 0, there exists delta > 0.",
+    smallest_disagreement: "Disagreement on the convergence rate exponent.",
+    agreed_facts: ["The space is complete and separable."],
+    discriminating_tests: ["Run the multi-scale iteration to depth 20."],
+  };
+
+  const CONFLICT_RESOLVE_EXAMPLE = {
+    status: "resolved",
+    resolution: "Claim C-1 holds under the refined continuity assumption proven in Lemma 3.",
+  };
+
+  // --- POST /v1/sessions/:id/conflicts (W5.5 / Fable §6.1, ADR-21) ---------
+  app.post("/v1/sessions/:id/conflicts", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = NormalizeConflictRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "CONFLICT_BODY_INVALID",
+        title: "Invalid conflict request body",
+        detail: "The request body did not match the normalized conflict contract.",
+        fixHint:
+          "Provide two distinct claims, substantive aligned_definitions, aligned_scope, aligned_quantifiers, smallest_disagreement, agreed_facts, and discriminating_tests.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/conflicts", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "conflicts",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => NormalizeConflictResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    if (parsed.data.problem_id && parsed.data.problem_id !== session.problem_id) {
+      return validatedProblem({
+        status: 422,
+        code: "CONFLICT_BODY_INVALID",
+        title: "Problem mismatch",
+        detail: `The request problem_id '${parsed.data.problem_id}' does not match the session problem_id '${session.problem_id}'.`,
+        fixHint: "Omit problem_id or ensure it matches the session problem.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { problem_id: session.problem_id },
+        },
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot normalize conflict on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Conflicts cannot be opened on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { problem_id: session.problem_id },
+        },
+      });
+    }
+
+    const substance = validateConflictSubstance(parsed.data);
+    if (!substance.valid) {
+      return validatedProblem({
+        status: 422,
+        code: "CONFLICT_BODY_INVALID",
+        title: "Conflict substance validation failed",
+        detail: substance.reason,
+        fixHint:
+          "Provide substantive alignment definitions, scope, quantifiers, agreed facts, and discriminating tests.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const [claimA, claimB] = parsed.data.claims;
+    if (!claimA || !claimB) {
+      return validatedProblem({
+        status: 422,
+        code: "CONFLICT_BODY_INVALID",
+        title: "Two claims required",
+        detail: "A normalized conflict must specify exactly two claims.",
+        fixHint: "Specify exactly two conflicting claims.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    if (claimA.claim_id === claimB.claim_id) {
+      return validatedProblem({
+        status: 422,
+        code: "CONFLICT_TARGET_IDENTICAL",
+        title: "Conflicting claims must be distinct",
+        detail: `Both claims refer to the same claim ID '${claimA.claim_id}'.`,
+        fixHint: "Specify two distinct conflicting claims.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const rowA = await db
+      .prepare(
+        "SELECT claim_id, version FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = ?",
+      )
+      .bind(session.problem_id, claimA.claim_id, claimA.version)
+      .first<{ claim_id: string; version: number }>();
+
+    if (!rowA) {
+      return validatedProblem({
+        status: 404,
+        code: "CONFLICT_TARGET_UNKNOWN",
+        title: "Conflicting claim target not found",
+        detail: `Claim '${claimA.claim_id}@${claimA.version}' does not exist on problem '${session.problem_id}'.`,
+        fixHint: "Verify claim ID and version against GET /p/:id.json.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const rowB = await db
+      .prepare(
+        "SELECT claim_id, version FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = ?",
+      )
+      .bind(session.problem_id, claimB.claim_id, claimB.version)
+      .first<{ claim_id: string; version: number }>();
+
+    if (!rowB) {
+      return validatedProblem({
+        status: 404,
+        code: "CONFLICT_TARGET_UNKNOWN",
+        title: "Conflicting claim target not found",
+        detail: `Claim '${claimB.claim_id}@${claimB.version}' does not exist on problem '${session.problem_id}'.`,
+        fixHint: "Verify claim ID and version against GET /p/:id.json.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const existingConflict = await db
+      .prepare(
+        `SELECT conflict_id FROM conflicts
+         WHERE problem_id = ? AND status = 'open'
+           AND ((claim_a_id = ? AND claim_a_version = ? AND claim_b_id = ? AND claim_b_version = ?)
+             OR (claim_a_id = ? AND claim_a_version = ? AND claim_b_id = ? AND claim_b_version = ?))`,
+      )
+      .bind(
+        session.problem_id,
+        claimA.claim_id,
+        claimA.version,
+        claimB.claim_id,
+        claimB.version,
+        claimB.claim_id,
+        claimB.version,
+        claimA.claim_id,
+        claimA.version,
+      )
+      .first<{ conflict_id: string }>();
+
+    if (existingConflict) {
+      return validatedProblem({
+        status: 409,
+        code: "CONFLICT_ALREADY_NORMALIZED",
+        title: "Conflict already normalized and open",
+        detail: `An open conflict already exists between ${claimA.claim_id}@${claimA.version} and ${claimB.claim_id}@${claimB.version} (${existingConflict.conflict_id}).`,
+        fixHint:
+          "Participate in or resolve the existing open conflict instead of creating a duplicate.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          existing_conflict_id: existingConflict.conflict_id,
+          example: CONFLICT_NORMALIZE_EXAMPLE,
+        },
+      });
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "conflicts",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "conflict",
+        statement: JSON.stringify({
+          aligned_definitions: parsed.data.aligned_definitions,
+          aligned_scope: parsed.data.aligned_scope,
+          aligned_quantifiers: parsed.data.aligned_quantifiers,
+          smallest_disagreement: parsed.data.smallest_disagreement,
+          agreed_facts: parsed.data.agreed_facts,
+          discriminating_tests: parsed.data.discriminating_tests,
+        }),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    const conflictId = mintId("CF");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("conflicts", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "conflict.normalized",
+          objectKind: "conflict",
+          objectId: conflictId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            conflict_id: conflictId,
+            problem_id: session.problem_id,
+            claims: parsed.data.claims,
+            aligned_definitions: parsed.data.aligned_definitions,
+            aligned_scope: parsed.data.aligned_scope,
+            aligned_quantifiers: parsed.data.aligned_quantifiers,
+            smallest_disagreement: parsed.data.smallest_disagreement,
+            agreed_facts: parsed.data.agreed_facts,
+            discriminating_tests: parsed.data.discriminating_tests,
+            status: "open",
+            author_fellow_id: auth.binding.fellowId,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO conflicts
+                   (conflict_id, problem_id, seq, claim_a_id, claim_a_version, claim_b_id, claim_b_version,
+                    aligned_definitions, aligned_scope, aligned_quantifiers, smallest_disagreement,
+                    agreed_facts_json, discriminating_tests_json, status, resolution, author_fellow_id,
+                    created_at, resolved_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, NULL
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                conflictId,
+                session.problem_id,
+                sequence,
+                claimA.claim_id,
+                claimA.version,
+                claimB.claim_id,
+                claimB.version,
+                parsed.data.aligned_definitions,
+                parsed.data.aligned_scope,
+                parsed.data.aligned_quantifiers,
+                parsed.data.smallest_disagreement,
+                JSON.stringify(parsed.data.agreed_facts),
+                JSON.stringify(parsed.data.discriminating_tests),
+                auth.binding.fellowId,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "conflicts",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: ({ sequence }) =>
+            NormalizeConflictResponseSchema.parse({
+              ok: true,
+              conflict_id: conflictId,
+              problem_id: session.problem_id,
+              seq: sequence,
+              status: "open",
+              created_at: createdAt,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "conflicts",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("conflict normalization committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "conflicts",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/conflicts/:cid/resolve (W5.5 / Fable §6.1, ADR-21) -
+  app.post("/v1/sessions/:id/conflicts/:cid/resolve", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const conflictId = c.req.param("cid");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = ResolveConflictRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "CONFLICT_BODY_INVALID",
+        title: "Invalid conflict resolution request body",
+        detail: "The request body did not match the conflict resolution contract.",
+        fixHint:
+          "Provide status ('resolved' or 'persistent-uncertainty') and substantive resolution text (at least 10 characters).",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_RESOLVE_EXAMPLE,
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      "POST /v1/sessions/:id/conflicts/:cid/resolve",
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "resolve_conflict",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => ResolveConflictResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const conflictRow = await db
+      .prepare("SELECT conflict_id, status FROM conflicts WHERE problem_id = ? AND conflict_id = ?")
+      .bind(session.problem_id, conflictId)
+      .first<{ conflict_id: string; status: string }>();
+
+    if (!conflictRow) {
+      return validatedProblem({
+        status: 404,
+        code: "CONFLICT_NOT_FOUND",
+        title: "Conflict not found",
+        detail: `Conflict '${conflictId}' was not found on problem '${session.problem_id}'.`,
+        fixHint: "Check the conflict ID against GET /p/:id/conflicts.json.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_RESOLVE_EXAMPLE,
+        },
+      });
+    }
+
+    if (conflictRow.status !== "open") {
+      return validatedProblem({
+        status: 409,
+        code: "CONFLICT_ALREADY_SETTLED",
+        title: "Conflict already settled",
+        detail: `Conflict '${conflictId}' has already been settled with status '${conflictRow.status}'.`,
+        fixHint: "Open conflicts can be resolved only once; inspect the existing resolution.",
+        rule: "ADR-21",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: CONFLICT_RESOLVE_EXAMPLE,
+        },
+      });
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "conflicts",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "conflict",
+        statement: parsed.data.resolution,
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("resolve_conflict", claimToken);
+    const resolvedAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "conflict.resolved",
+          objectKind: "conflict",
+          objectId: conflictId,
+          objectVersion: 2,
+          payloadJson: canonicalJson({
+            conflict_id: conflictId,
+            problem_id: session.problem_id,
+            status: parsed.data.status,
+            resolution: parsed.data.resolution,
+            resolved_at: resolvedAt,
+          }),
+          createdAt: resolvedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE conflicts
+                 SET status = ?, resolution = ?, resolved_at = ?
+                 WHERE conflict_id = ? AND problem_id = ?`,
+              )
+              .bind(
+                parsed.data.status,
+                parsed.data.resolution,
+                resolvedAt,
+                conflictId,
+                session.problem_id,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "resolve_conflict",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: ({ sequence }) =>
+            ResolveConflictResponseSchema.parse({
+              ok: true,
+              conflict_id: conflictId,
+              problem_id: session.problem_id,
+              status: parsed.data.status,
+              seq: sequence,
+              resolved_at: resolvedAt,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "resolve_conflict",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("conflict resolution committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "resolve_conflict",
           auth.binding.fellowId,
           key,
           digest,

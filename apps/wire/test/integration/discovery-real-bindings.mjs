@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  AnswerQuestionRequestSchema,
+  AskQuestionRequestSchema,
+  ConflictsListResponseSchema,
+  LeaseQuestionRequestSchema,
+  NormalizeConflictRequestSchema,
+  ResolveConflictRequestSchema,
+  RetractRequestSchema,
+  WithdrawQuestionRequestSchema,
+} from "@asimposium/contracts";
 import { createTestHarness } from "wrangler";
 import {
   generateReviewRubricsDocument,
@@ -152,6 +162,300 @@ async function runDiscovery() {
     });
     assert.equal(typeof issued.token, "string");
     return issued.token;
+  }
+
+  async function verifyQuestionConflictDiscovery() {
+    await fixtures.setScreenMode("pass");
+    const problem = "P-DISC-QUEST";
+    await fixtures.seedProblem(problem);
+    const token = await enroll("question-discovery-author", "usr_question_discovery_author");
+    const answerer = await enroll("question-discovery-answerer", "usr_question_discovery_answerer");
+    const authorSession = await call("/v1/sessions", { problem_id: problem }, token, 201);
+    const answerSession = await call("/v1/sessions", { problem_id: problem }, answerer, 201);
+    const path = `/v1/sessions/${authorSession.session_id}`;
+    const draft = await call(
+      `${path}/workshop`,
+      { type: "draft", title: "Public answer candidate", body_md: "PRIVATE-QUESTION-DISCOVERY" },
+      token,
+      201,
+    );
+    const claim = await call(
+      `${path}/promote`,
+      {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement: "The integer four is divisible by two.",
+        falsifier: "Division by two leaves a nonzero remainder.",
+      },
+      token,
+      201,
+    );
+    const q1 = await call(
+      `${path}/questions`,
+      { body_md: "Which explicit computation addresses this finite parity check?" },
+      token,
+      201,
+    );
+    const q2 = await call(
+      `${path}/questions`,
+      { body_md: "Does a second route reveal a different parity obstruction?" },
+      token,
+      201,
+    );
+    const competingClaims = [];
+    for (const [statement, falsifier] of [
+      ["The integer six is divisible by four.", "Integer division of six by four has a remainder."],
+      [
+        "The integer six leaves remainder two modulo four.",
+        "The remainder is a value other than two.",
+      ],
+    ]) {
+      const work = await call(
+        `${path}/workshop`,
+        {
+          type: "draft",
+          title: "Finite arithmetic comparison",
+          body_md: "PRIVATE-QUESTION-DISCOVERY",
+        },
+        token,
+        201,
+      );
+      const published = await call(
+        `${path}/promote`,
+        { workshop_id: work.workshop_id, kind: "conjecture", statement, falsifier },
+        token,
+        201,
+      );
+      competingClaims.push({ claim_id: published.claim_id, version: 1 });
+    }
+    const conflictBody = {
+      claims: competingClaims,
+      aligned_definitions: "Divisibility means integer division with zero remainder.",
+      aligned_scope: "The domain consists of the displayed finite integers.",
+      aligned_quantifiers: "Each statement describes its specified integer only.",
+      smallest_disagreement:
+        "The claims disagree about whether the remainder of six modulo four is zero.",
+      agreed_facts: ["Four is the divisor in both claims."],
+      discriminating_tests: ["Compute six minus one times four and inspect the remainder."],
+    };
+    // A separate open conflict lets the resolution route reach screening even
+    // when the discovered normalization request is rejected below.
+    const baselineConflict = await call(
+      `${path}/conflicts`,
+      { ...conflictBody, claims: [{ claim_id: claim.claim_id, version: 1 }, competingClaims[0]] },
+      token,
+      201,
+    );
+    const schemas = {
+      ask_question_request: AskQuestionRequestSchema,
+      lease_question_request: LeaseQuestionRequestSchema,
+      answer_question_request: AnswerQuestionRequestSchema,
+      withdraw_question_request: WithdrawQuestionRequestSchema,
+      retract_request: RetractRequestSchema,
+      normalize_conflict_request: NormalizeConflictRequestSchema,
+      resolve_conflict_request: ResolveConflictRequestSchema,
+    };
+    const exercised = new Set();
+    let screeningRefusals = 0;
+    const state = () =>
+      env.DB.prepare(`SELECT public_seq AS seq,
+      (SELECT count(*) FROM events WHERE problem_id = ?) AS events,
+      (SELECT count(*) FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ?) AS screenings
+      FROM problems WHERE id = ?`)
+        .bind(problem, problem, problem)
+        .first();
+    const cases = [
+      ["lease_question_request", q1.question_id, {}, answerer, answerSession.session_id, 200],
+      [
+        "answer_question_request",
+        q1.question_id,
+        { resolved_by_object: claim.claim_id },
+        answerer,
+        answerSession.session_id,
+        200,
+      ],
+      [
+        "withdraw_question_request",
+        q2.question_id,
+        { reason: "The existing question already captures this obligation." },
+        token,
+        authorSession.session_id,
+        200,
+      ],
+      [
+        "ask_question_request",
+        undefined,
+        {
+          body_md: "What exact integer calculation establishes this finite parity observation?",
+          target_refs: [claim.claim_id],
+        },
+        token,
+        authorSession.session_id,
+        201,
+      ],
+      [
+        "retract_request",
+        undefined,
+        {
+          target_object: claim.claim_id,
+          reason: "The published argument needs a sharper finite-domain statement.",
+        },
+        token,
+        authorSession.session_id,
+        201,
+      ],
+    ];
+    cases.push(
+      ["normalize_conflict_request", undefined, conflictBody, token, authorSession.session_id, 201],
+      [
+        "resolve_conflict_request",
+        baselineConflict.conflict_id,
+        {
+          status: "persistent-uncertainty",
+          resolution: "The stated domains differ, so this comparison needs a common finite scope.",
+        },
+        token,
+        authorSession.session_id,
+        200,
+      ],
+    );
+    for (const [property, qid, raw, credential, sessionId, positiveStatus] of cases) {
+      const matches = Object.entries(discovery.paths).filter(([, methods]) =>
+        methods.post?.requestBody?.content?.["application/json"]?.schema?.$ref?.endsWith(
+          `/properties/${property}`,
+        ),
+      );
+      assert.equal(matches.length, 1, `${property}: exactly one disclosed write`);
+      const [templatePath, methods] = matches[0];
+      assert.deepEqual(methods.post.security, [{ bearerAuth: [] }]);
+      const requestPath = templatePath
+        .replace("{id}", sessionId)
+        .replace("{qid}", qid ?? "unused")
+        .replace("{cid}", qid ?? "unused");
+      const parsed = schemas[property].parse(raw);
+      const paidKind =
+        property === "ask_question_request"
+          ? "question"
+          : property === "retract_request"
+            ? "retraction"
+            : property === "normalize_conflict_request" || property === "resolve_conflict_request"
+              ? "conflict"
+              : undefined;
+      const mode = paidKind === undefined || screenMode === "positive" ? "pass" : screenMode;
+      await fixtures.setScreenMode(mode);
+      const before = await state();
+      const beforeCalls = await fixtures.screeningCalls();
+      const replayKey = `question-discovery-${property}`;
+      const response = await call(
+        requestPath,
+        parsed,
+        credential,
+        mode === "pass" ? positiveStatus : mode === "reject" ? 403 : 202,
+        replayKey,
+      );
+      assert.equal(await fixtures.screeningCalls(), beforeCalls + (paidKind === undefined ? 0 : 1));
+      if (paidKind !== undefined) {
+        const statement =
+          paidKind === "question"
+            ? parsed.body_md
+            : paidKind === "retraction"
+              ? parsed.reason
+              : property === "normalize_conflict_request"
+                ? JSON.stringify({
+                    aligned_definitions: parsed.aligned_definitions,
+                    aligned_scope: parsed.aligned_scope,
+                    aligned_quantifiers: parsed.aligned_quantifiers,
+                    smallest_disagreement: parsed.smallest_disagreement,
+                    agreed_facts: parsed.agreed_facts,
+                    discriminating_tests: parsed.discriminating_tests,
+                  })
+                : parsed.resolution;
+        const screened = await fixtures.lastScreening();
+        assert.equal(screened.kind, paidKind);
+        assert.equal(screened.problemId, problem);
+        assert.equal(
+          screened.digest,
+          createHash("sha256")
+            .update(JSON.stringify({ statement, falsifier: null }))
+            .digest("hex"),
+        );
+        if (mode === "pass") {
+          const row = await env.DB.prepare(
+            `SELECT s.provenance_json FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? AND e.seq = ?`,
+          )
+            .bind(problem, before.seq + 1)
+            .first();
+          const provenance = ScreeningPublicationProvenanceSchema.parse(
+            JSON.parse(row.provenance_json),
+          );
+          assert.equal(
+            provenance.input_digest,
+            createHash("sha256")
+              .update(JSON.stringify({ kind: paidKind, statement, falsifier: null }))
+              .digest("hex"),
+          );
+        }
+      }
+      if (mode === "pass") {
+        const after = await state();
+        assert.deepEqual(after, {
+          seq: before.seq + 1,
+          events: before.events + 1,
+          screenings: before.screenings + (paidKind === undefined ? 0 : 1),
+        });
+        assert.deepEqual(await call(requestPath, parsed, credential, 200, replayKey), response);
+        assert.deepEqual(await state(), after, "exact replay must not append another public event");
+        assert.equal(
+          await fixtures.screeningCalls(),
+          beforeCalls + (paidKind === undefined ? 0 : 1),
+        );
+      } else {
+        assert.equal(response.code, mode === "reject" ? "POLICY_DENIED" : "SCREENING_HOLD");
+        assert.deepEqual(await state(), before, "refused text must not change public state");
+        screeningRefusals++;
+      }
+      exercised.add(templatePath);
+    }
+    await fixtures.setScreenMode("pass");
+    const questions = await call(`/p/${problem}/questions.json`);
+    assert.equal(
+      questions.questions.find((q) => q.question_id === q1.question_id)?.status,
+      "resolved",
+    );
+    assert.equal(
+      questions.questions.find((q) => q.question_id === q2.question_id)?.status,
+      "withdrawn",
+    );
+    const retractions = await call(`/p/${problem}/retractions.json`);
+    assert.equal(
+      retractions.retractions.some((r) => r.target_object === claim.claim_id),
+      screenMode === "positive",
+    );
+    const conflicts = ConflictsListResponseSchema.parse(await call(`/p/${problem}/conflicts.json`));
+    assert.equal(conflicts.conflicts.length, screenMode === "positive" ? 2 : 1);
+    assert.equal(
+      conflicts.conflicts.find((item) => item.conflict_id === baselineConflict.conflict_id)?.status,
+      screenMode === "positive" ? "persistent-uncertainty" : "open",
+    );
+    for (const section of ["questions", "retractions", "conflicts"])
+      for (const face of ["md", "json", "html"]) {
+        assert.ok(discovery.paths[`/p/{id}/${section}.${face}`]?.get);
+        const response = await worker.fetch(`${origin}/p/${problem}/${section}.${face}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200);
+        assert.ok(!(await response.text()).includes("PRIVATE-QUESTION-DISCOVERY"));
+      }
+    assert.equal(exercised.size, 7);
+    console.log(
+      JSON.stringify({
+        stage: "discovered-question-retraction-conflict-writes",
+        writes_exercised: exercised.size,
+        screening_refusals: screeningRefusals,
+        positive_metadata_transitions: 3,
+      }),
+    );
+    return { paths: [...exercised], screeningRefusals };
   }
   const discovery = await call("/openapi.json");
   assert.deepEqual(discovery.servers, [{ url: origin }]);
@@ -892,6 +1196,10 @@ async function runDiscovery() {
       classifier_calls: 0,
     }),
   );
+  // Questions/retractions have their own sponsor quota and real writes. The
+  // metadata transitions do not claim paid-screening coverage; question text
+  // and retraction reasons must cross the same tested screening boundary.
+  const questionCensus = await verifyQuestionConflictDiscovery();
   const beforePolicy = await publicState();
   const censusPaths = candidates
     .map(([suffix, kind]) =>
@@ -899,7 +1207,7 @@ async function runDiscovery() {
         ? "/v1/sessions/{id}/review"
         : `/v1/sessions/{id}/${suffix.replace(hypothesis.hypothesis_id, "{hid}")}`,
     )
-    .concat(metadataPath)
+    .concat(metadataPath, ...questionCensus.paths)
     .sort();
   const advertisedPublicWrites = Object.entries(discovery.paths)
     .filter(
@@ -1025,7 +1333,7 @@ async function runDiscovery() {
         kind: "discovery-screening-real-bindings",
         status: "pass",
         screening_mode: screenMode,
-        screening_refusals: candidates.length,
+        screening_refusals: candidates.length + questionCensus.screeningRefusals,
         additional_screening_refusals: additionalScreeningRefusals,
         screening_saturation: "pass",
         boundary: "local Workerd/D1/R2; fixture classifier and sponsor setup; no live-model claim",

@@ -7403,7 +7403,10 @@ describe("session protocol routes", () => {
     expect(atCapIds.length).toBeGreaterThan(0);
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
-    expect(atCap.omitted).toEqual([{ reason: "budget_exceeded" }]);
+    expect(atCap.omitted).toEqual([
+      { reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" },
+      { reason: "budget_exceeded" },
+    ]);
 
     // One past the cap: the same ordered budgeted prefix, with the additional
     // candidate_limit omission proving that the 129th row reached and crossed
@@ -7434,6 +7437,7 @@ describe("session protocol routes", () => {
     expect(overCapIds).not.toContain("C-129");
     expect(overCap.omitted).toEqual([
       { reason: "candidate_limit", detail: "claims" },
+      { reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" },
       { reason: "budget_exceeded" },
     ]);
     // The 128-claim seed plus two full pack compositions sit close enough to

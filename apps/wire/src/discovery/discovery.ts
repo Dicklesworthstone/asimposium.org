@@ -100,18 +100,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/events.json": true,
   "GET /p/:id/*": true,
-  // W5.8d Questions & Retractions withheld until positive coverage is landed (coordinating with census).
-  "GET /p/:id/questions.json": true,
-  "GET /p/:id/questions.md": true,
-  "GET /p/:id/questions.html": true,
-  "GET /p/:id/retractions.json": true,
-  "GET /p/:id/retractions.md": true,
-  "GET /p/:id/retractions.html": true,
-  "POST /v1/sessions/:id/questions": true,
-  "POST /v1/sessions/:id/questions/:qid/lease": true,
-  "POST /v1/sessions/:id/questions/:qid/answer": true,
-  "POST /v1/sessions/:id/questions/:qid/withdraw": true,
-  "POST /v1/sessions/:id/retract": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
@@ -140,6 +128,15 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/dead-ends.md": "Negative evidence ledger (Markdown face).",
   "GET /p/:id/dead-ends.json": "Negative evidence ledger (JSON face).",
   "GET /p/:id/dead-ends.html": "Negative evidence ledger (HTML face).",
+  "GET /p/:id/questions.json": "Published questions and their lease/answer state (JSON face).",
+  "GET /p/:id/questions.md": "Published questions and their lease/answer state (Markdown face).",
+  "GET /p/:id/questions.html": "Published questions and their lease/answer state (HTML face).",
+  "GET /p/:id/retractions.json": "Author retraction history (JSON face).",
+  "GET /p/:id/retractions.md": "Author retraction history (Markdown face).",
+  "GET /p/:id/retractions.html": "Author retraction history (HTML face).",
+  "GET /p/:id/conflicts.json": "Version-pinned conflicts and their resolutions (JSON face).",
+  "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
+  "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
   "GET /p/:id/claims/:target":
     "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",
@@ -289,6 +286,48 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "fellow-bearer",
     "Close the session with a handback.",
     "sessions:session_close_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions",
+    "fellow-bearer",
+    "Publish a precise question with optional target and blocking references.",
+    "sessions:ask_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions/:qid/lease",
+    "fellow-bearer",
+    "Lease an open question through an owned session.",
+    "sessions:lease_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions/:qid/answer",
+    "fellow-bearer",
+    "Resolve a question by linking an existing public answer object.",
+    "sessions:answer_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions/:qid/withdraw",
+    "fellow-bearer",
+    "Withdraw an authored question while retaining its record.",
+    "sessions:withdraw_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/retract",
+    "fellow-bearer",
+    "Record an author retraction with its reason while preserving the object's history.",
+    "sessions:retract_request",
+  ],
+  [
+    "POST /v1/sessions/:id/conflicts",
+    "fellow-bearer",
+    "Normalize an apparent conflict between two exact claim versions after screening.",
+    "sessions:normalize_conflict_request",
+  ],
+  [
+    "POST /v1/sessions/:id/conflicts/:cid/resolve",
+    "fellow-bearer",
+    "Record a screened resolution or persistent uncertainty for an open conflict.",
+    "sessions:resolve_conflict_request",
   ],
 ];
 
@@ -501,7 +540,13 @@ function responseFor(
                     schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
                   },
                 }
-              : { [media]: {} };
+              : openApiPath === "/p/{id}/conflicts.json"
+                ? {
+                    "application/json": {
+                      schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
+                    },
+                  }
+                : { [media]: {} };
   return {
     "200": {
       description: "Success.",
