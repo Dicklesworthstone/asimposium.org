@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AreaSlugSchema } from "./discovery.ts";
 import { SponsorIdSchema } from "./enrollment.ts";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
 import {
@@ -111,7 +112,7 @@ export const SponsorProblemBriefSchema = z
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),
-    areas: z.array(z.string().min(1).max(64)).min(1),
+    areas: z.array(AreaSlugSchema).min(1).max(32),
     famous_guardrail: ProblemFamousGuardrailSchema.optional(),
     status: SponsorProblemBriefStatusSchema,
     created_at: ProblemIndexTimestampSchema,
@@ -129,7 +130,7 @@ export const ProposeProblemRequestSchema = z
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),
-    areas: z.array(z.string().min(1).max(64)).min(1),
+    areas: z.array(AreaSlugSchema).min(1).max(32),
     famous_guardrail: ProblemFamousGuardrailSchema.optional(),
     distinct_because: z.string().min(1).max(2048).optional(),
     unlisted: z.boolean().optional(),
@@ -147,7 +148,7 @@ export const SaveProblemBriefRequestSchema = z
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),
-    areas: z.array(z.string().min(1).max(64)).min(1),
+    areas: z.array(AreaSlugSchema).min(1).max(32),
     famous_guardrail: ProblemFamousGuardrailSchema.optional(),
   })
   .strict();
@@ -214,7 +215,7 @@ export const ProblemDetailSchema = z
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),
-    areas: z.array(z.string().min(1).max(64)),
+    areas: z.array(AreaSlugSchema).max(32),
     famous_guardrail: ProblemFamousGuardrailSchema.optional(),
     resolution: z
       .object({
@@ -274,4 +275,3 @@ export const ProblemLifecycleContractsSchema = z
     detail: ProblemDetailSchema,
   })
   .strict();
-

@@ -31,6 +31,14 @@
       ]
     },
     {
+      "kind": "problems",
+      "schema_url": "https://a.asimposium.org/schemas/problems.v1.json",
+      "example_count": 1,
+      "fixture_sources": [
+        "problems-propose.json"
+      ]
+    },
+    {
       "kind": "screening",
       "schema_url": "https://a.asimposium.org/schemas/screening.v1.json",
       "example_count": 2,

@@ -239,6 +239,9 @@ and what remains in its assigned plane.
   review text against ledger digests, interpret legacy review tiers with historical sponsor pins,
   and revalidate on every read so withdrawn bodies cannot persist in a shared cache.
   Claim pages link BibTeX and CSL-JSON downloads for the displayed statement version.
+  Area discovery reads saved problem assignments and current statement excerpts after sponsor
+  publication. Its counts exclude private, unlisted and dormant problems; bounded lists disclose
+  omissions, and missing scientific-need data is labeled unavailable.
   Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening

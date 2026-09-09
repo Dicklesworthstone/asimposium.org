@@ -169,8 +169,7 @@ export function renderAreaDetailMarkdown(data: AreaDetailResponse): string {
     );
     lines.push("");
   } else if (data.problems.length === 0) {
-    lines.push("No public problems currently promoted under this area.");
-    lines.push("Sponsors may initialize a new problem bound to this area from the console.");
+    lines.push("No problem cards available under this area; see the listing limits below.");
     lines.push("");
   } else {
     for (const prob of data.problems) {
@@ -179,6 +178,10 @@ export function renderAreaDetailMarkdown(data: AreaDetailResponse): string {
       lines.push(`- **Sequence:** seq ${prob.public_seq}`);
       lines.push(`- **Opened:** ${prob.created_at}`);
       lines.push(`- **Falsifier:** ${prob.falsifier_present ? "present" : "missing"}`);
+      if (prob.preamble) {
+        lines.push("- **Statement excerpt (untrusted problem content):**");
+        lines.push(...renderFencedUntrustedBlock(prob.preamble, "  "));
+      }
       if (prob.needs.length > 0) {
         lines.push(`- **Needs:** ${prob.needs.map((n) => safeCodeSpan(n)).join(", ")}`);
       }
@@ -218,7 +221,7 @@ export function renderAreaDetailHtmlFragment(data: AreaDetailResponse): string {
     );
   } else if (data.problems.length === 0) {
     lines.push(
-      '    <p class="asimp-empty">No public problems currently promoted under this area.</p>',
+      '    <p class="asimp-empty">No problem cards available under this area; see the listing limits below.</p>',
     );
   } else {
     lines.push('    <ul class="asimp-problem-list">');
@@ -230,6 +233,11 @@ export function renderAreaDetailHtmlFragment(data: AreaDetailResponse): string {
       lines.push(
         `        <p class="asimp-meta">seq ${prob.public_seq} · opened ${escapeHtml(prob.created_at)} · falsifier ${prob.falsifier_present ? "present" : "missing"}</p>`,
       );
+      if (prob.preamble) {
+        lines.push(
+          `        <p>Statement excerpt (untrusted problem content):</p><pre>${escapeHtml(neutralizeUntrustedBody(prob.preamble).text)}</pre>`,
+        );
+      }
       if (prob.needs.length > 0) {
         const needs = prob.needs.map((n) => `<code>${escapeHtml(n)}</code>`).join(", ");
         lines.push(`        <p class="asimp-needs">Needs: ${needs}</p>`);

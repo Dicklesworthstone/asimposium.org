@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type {
   ProblemFaceResponse as PackageProblemFaceResponse,
   ScreeningContracts as PackageScreeningContracts,
@@ -24,6 +25,7 @@ import {
 } from "../../src/artifacts.ts";
 import { BatchContractsSchema } from "../../src/batch.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
+import { ProposeProblemRequestSchema } from "../../src/problems.ts";
 import { ScreeningContractsSchema, ScreeningSchemaDocumentSchema } from "../../src/screening.ts";
 import { SessionsContractsSchema } from "../../src/sessions.ts";
 
@@ -795,6 +797,7 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
 /* ---------------------------------------------------------------------- */
 
 const AGENT_FACING_EXAMPLE_KINDS: Record<string, string> = {
+  "generated/problems.schema.json": "problems",
   "generated/enrollment.schema.json": "enrollment",
   "generated/ledger.schema.json": "ledger",
   "generated/problem.schema.json": "problem",
@@ -863,11 +866,23 @@ test("examples index lists every kind with loader-agreed counts", async () => {
   };
   expect(index.schema_version).toBe("1");
   const kinds = index.schemas.map((entry) => entry.kind).sort();
-  expect(kinds).toEqual(["enrollment", "ledger", "problem", "screening", "sessions"]);
+  expect(kinds).toEqual(["enrollment", "ledger", "problem", "problems", "screening", "sessions"]);
   for (const entry of index.schemas) {
     const loaded = live.embeddedExamplesFor(entry.kind);
     expect(entry.example_count).toBe(loaded.examples.length);
     expect(entry.fixture_sources).toEqual([...loaded.fixtures]);
     expect(entry.schema_url.startsWith("https://a.asimposium.org/schemas/")).toBe(true);
+  }
+});
+
+test("persisted problem areas use the same canonical taxonomy in Zod and generated JSON Schema", () => {
+  const validate = generatedValidator("problems", "propose_request");
+  for (const [file, expected] of [
+    ["valid/problems-propose.json", true],
+    ["invalid/problems-propose-area.json", false],
+  ] as const) {
+    const value = JSON.parse(readFileSync(new URL(`../fixtures/${file}`, import.meta.url), "utf8"));
+    expect(ProposeProblemRequestSchema.safeParse(value).success).toBe(expected);
+    expect(validate(value)).toBe(expected);
   }
 });

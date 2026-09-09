@@ -11,6 +11,7 @@ import {
   NowStripResponseSchema,
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
+import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-service.ts";
 import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
 import { loadNowStrip } from "../../src/discovery/now-service.ts";
 import type { Env } from "../../src/env.ts";
@@ -349,6 +350,72 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
 });
 
 describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
+  test("SQLite boundary fixture: recorded assignments have exact counts, bounded cards and honest missing metadata", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    // Deliberate SQL fixtures for volume and historical absence, not a producer proof.
+    for (let i = 0; i < 66; i++) {
+      const id = `P-AREA-${String(i).padStart(3, "0")}`;
+      raw.run(
+        "INSERT INTO problems (id, title, areas, created_at, updated_at) VALUES (?, ?, ?, '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')",
+        [
+          id,
+          `Recorded formulation ${i}`,
+          JSON.stringify([
+            "combinatorics",
+            "combinatorics",
+            `other-fixture-${String(i).padStart(3, "0")}`,
+          ]),
+        ],
+      );
+      raw.run(
+        "INSERT INTO problem_statement_versions (problem_id, version, statement, norm_hash, falsifier, motivation, created_at) VALUES (?, 1, ?, ?, ?, 'Fixture motivation', '2026-09-09T00:00:00Z')",
+        [
+          id,
+          i === 0 ? "🧮".repeat(2000) : `Stored statement ${i}`,
+          `fixture-hash-${i}`,
+          i === 0 ? "\n\t\u00a0" : "A counterexample",
+        ],
+      );
+    }
+    raw.run("UPDATE problems SET areas = '[\"combinatorics\"]' WHERE id = 'P-4DSP'");
+    raw.run(
+      "INSERT INTO problems (id, areas, status, created_at, updated_at) VALUES ('P-PRIVATE', '[\"other-private-canary\"]', 'private-draft', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')",
+    );
+    raw.run(
+      "INSERT INTO problems (id, areas, unlisted, created_at, updated_at) VALUES ('P-UNLISTED', '[\"other-unlisted-canary\"]', 1, '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')",
+    );
+    raw.run(
+      "INSERT INTO problems (id, areas, status, created_at, updated_at) VALUES ('P-DORMANT', '[\"other-dormant-canary\"]', 'dormant', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')",
+    );
+    const index = await loadAreasIndex(db);
+    expect(index.total_problems).toBe(68);
+    expect(index.total_areas).toBe(82);
+    expect(index.areas).toHaveLength(80);
+    expect(index.areas.find((area) => area.slug === "combinatorics")?.problem_count).toBe(67);
+    expect(index.omitted.join(" ")).toContain("2 custom areas omitted");
+    expect(index.omitted.join(" ")).toContain(
+      "1 visible problems have no recorded area assignments",
+    );
+    expect(JSON.stringify(index)).not.toContain("canary");
+
+    const detail = await loadAreaDetail(db, "combinatorics");
+    expect(detail?.area.problem_count).toBe(67);
+    expect(detail?.problems).toHaveLength(50);
+    expect(detail?.problems[0]?.preamble).toBe("🧮".repeat(1024));
+    expect(detail?.problems[0]?.falsifier_present).toBe(false);
+    expect(detail?.problems[1]?.falsifier_present).toBe(true);
+    expect(detail?.problems.every((problem) => problem.needs.length === 0)).toBe(true);
+    expect(detail?.omitted.join(" ")).toContain("1 assigned problems lack");
+    expect(detail?.omitted.join(" ")).toContain("16 problems omitted");
+    expect(detail?.omitted.join(" ")).toContain("excerpts are limited");
+    // Index truncation must not make a real, known area URL disappear.
+    expect((await loadAreaDetail(db, "other-fixture-065"))?.problems[0]?.id).toBe("P-AREA-065");
+    for (const slug of ["other-private-canary", "other-unlisted-canary", "other-dormant-canary"]) {
+      expect(await loadAreaDetail(db, slug)).toBeNull();
+    }
+  });
+
   test("GET /areas returns markdown by default and JSON when requested", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(raw);
@@ -376,8 +443,11 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       expect(parsed.data.total_problems).toBe(2);
       const topArea = parsed.data.areas.find((a) => a.slug === "topology-and-geometry");
       expect(topArea).toBeDefined();
-      expect(topArea?.problem_count).toBeNull();
+      expect(topArea?.problem_count).toBe(0);
       expect(topArea?.active_needs).toEqual([]);
+      expect(parsed.data.omitted.join(" ")).toContain(
+        "2 visible problems have no recorded area assignments",
+      );
     }
 
     // 3. Strong ETag and 304 Not Modified
@@ -410,7 +480,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     if (parsed.success) {
       expect(parsed.data.area.slug).toBe("topology-and-geometry");
       expect(parsed.data.problems).toHaveLength(0);
-      expect(parsed.data.area.problem_count).toBeNull();
+      expect(parsed.data.area.problem_count).toBe(0);
       expect(parsed.data.area.active_needs).toEqual([]);
       expect(parsed.data.omitted.join(" ")).toContain("unavailable");
     }
@@ -424,7 +494,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(mdRes.headers.get("content-type")).toContain("text/markdown");
     const mdText = await mdRes.text();
     expect(mdText).toContain("Area: Topology & Geometry");
-    expect(mdText).toContain("assignments unavailable");
+    expect(mdText).toContain("2 visible problems have no recorded area assignments");
     expect(mdText).not.toContain("No public problems currently promoted");
 
     // 3. A syntactically valid other-* slug is not a recorded sponsor request.

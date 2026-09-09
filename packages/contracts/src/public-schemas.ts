@@ -19,6 +19,7 @@ import internalHealthSchemaModule from "../generated/internal-health.schema.json
 import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "text" };
 import movesSchemaModule from "../generated/moves.schema.json" with { type: "text" };
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
+import problemsSchemaModule from "../generated/problems.schema.json" with { type: "text" };
 import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
@@ -31,6 +32,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "ledger",
   "moves",
   "problem",
+  "problems",
   "rubrics",
   "screening",
   "sessions",
@@ -121,6 +123,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/problem.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(problemSchemaModule, "generated/problem.schema.json"),
+  }),
+  Object.freeze({
+    id: "problems",
+    served_at: "/schemas/problems.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(problemsSchemaModule, "generated/problems.schema.json"),
   }),
   Object.freeze({
     id: "rubrics",

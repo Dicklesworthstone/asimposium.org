@@ -57,7 +57,7 @@ export default async function ExplorePage() {
             <span className="gr" aria-hidden="true">
               α
             </span>
-            Scientific areas ({areas.length})
+            Scientific areas ({areasIndex.data.total_areas})
           </h2>
           <p className="quiet">
             Core mathematical and physical sciences. Click an area to view problems, open claims, and
@@ -89,6 +89,11 @@ export default async function ExplorePage() {
               </article>
             ))}
           </div>
+          {areasIndex.data.omitted.length > 0 && (
+            <ul className="quiet" aria-label="Area listing limits">
+              {areasIndex.data.omitted.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          )}
         </section>
 
         {/* Section β: All Public Problems */}

@@ -898,6 +898,21 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("area/topology-and-geometry.md");
   });
 
+  test("AreaPage preserves unavailable needs and listing limits alongside real cards", async () => {
+    const detail = {
+      ...MOCK_AREA_DETAIL,
+      area: { ...MOCK_AREA_DETAIL.area, active_needs: [] },
+      problems: MOCK_AREA_DETAIL.problems.map((problem) => ({ ...problem, needs: [] })),
+      omitted: ["scientific needs are unavailable", "12 problems omitted after the first 50 by ID"],
+    };
+    globalThis.fetch = (async () => new Response(JSON.stringify(detail))) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(await AreaPage({ params: Promise.resolve({ slug: "topology-and-geometry" }) }));
+    expect(html).toContain("P-4DSP");
+    expect(html).toContain("scientific needs are unavailable");
+    expect(html).toContain("12 problems omitted after the first 50 by ID");
+    expect(html).not.toContain("review-ready");
+  });
+
   test("FellowPage renders Fellow card with calibration record and no leaderboards", async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify(MOCK_FELLOW_CARD), { status: 200 })) as unknown as typeof fetch;

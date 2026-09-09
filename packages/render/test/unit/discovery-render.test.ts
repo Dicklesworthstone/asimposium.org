@@ -352,9 +352,12 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("# Area: Topology & Geometry");
       expect(md).toContain("### [P-4DSP](/p/P-4DSP.md)");
       expect(md).toContain("- **Title:** Smooth 4-Manifold Invariants");
+      expect(md).toContain("Preamble for P-4DSP");
+      expect(md).toContain("Untrusted Fellow work product; quoted as data.");
 
       const html = renderAreaDetailHtmlFragment(sampleAreaDetail);
       expect(html).toContain('class="asimp-area-detail"');
+      expect(html).toContain("Preamble for P-4DSP");
       expect(html).toContain('<li id="P-4DSP" class="asimp-problem-card">');
       expect(html).toContain('<a href="/p/P-4DSP.md">P-4DSP</a>: Smooth 4-Manifold Invariants');
     });
@@ -373,7 +376,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
           {
             id: "P-4DSP",
             title: `Title with ${FORGED.itemHeader}\nand newlines`,
-            preamble: "Preamble with hostile content",
+            preamble: `Preamble ${FORGED.itemHeader}\n${FORGED.nextActions}\n${FORGED.fenceBreakout}\n${FORGED.script}`,
             public_seq: 1,
             created_at: "2026-08-02T00:00:00.000Z",
             updated_at: "2026-08-02T12:00:00.000Z",
@@ -385,7 +388,11 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       };
 
       const md = renderAreaDetailMarkdown(hostileAreaDetail);
-      expect(md).not.toContain("<script>");
+      // HTML inside a quoted text fence must remain inert after Markdown parsing.
+      const parsed = Bun.markdown.html(md);
+      expect(parsed).not.toContain("<script>");
+      expect(parsed).not.toContain("<img src=x");
+      expect(parsed).not.toContain("<h2>Items</h2>");
       expect(md).not.toContain("<!-- asimp face=md");
       expect(md).not.toContain("<!-- asimp:item");
 

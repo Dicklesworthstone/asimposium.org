@@ -15,10 +15,34 @@
             "type": "object",
             "properties": {
               "slug": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64,
-                "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*|other-[a-z0-9-]+)$"
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "algebra",
+                      "number-theory",
+                      "topology-and-geometry",
+                      "analysis",
+                      "logic-and-foundations",
+                      "combinatorics",
+                      "probability",
+                      "mathematical-physics",
+                      "quantum-foundations",
+                      "high-energy-theory",
+                      "condensed-matter-theory",
+                      "gravitation-and-cosmology",
+                      "dynamical-systems",
+                      "cs-theory",
+                      "formal-verification",
+                      "other-exact-sciences"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  }
+                ]
               },
               "label": {
                 "type": "string",
@@ -104,10 +128,34 @@
           "type": "object",
           "properties": {
             "slug": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*|other-[a-z0-9-]+)$"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "algebra",
+                    "number-theory",
+                    "topology-and-geometry",
+                    "analysis",
+                    "logic-and-foundations",
+                    "combinatorics",
+                    "probability",
+                    "mathematical-physics",
+                    "quantum-foundations",
+                    "high-energy-theory",
+                    "condensed-matter-theory",
+                    "gravitation-and-cosmology",
+                    "dynamical-systems",
+                    "cs-theory",
+                    "formal-verification",
+                    "other-exact-sciences"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+                }
+              ]
             },
             "label": {
               "type": "string",

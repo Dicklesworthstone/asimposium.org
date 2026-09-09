@@ -1,0 +1,1124 @@
+{
+  "$id": "https://a.asimposium.org/schemas/problems.v1.json",
+  "title": "ASImposium problem lifecycle contracts",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "private-draft",
+        "sharpening",
+        "active",
+        "dormant",
+        "under-result-review",
+        "resolved",
+        "retired"
+      ]
+    },
+    "resolution_direction": {
+      "type": "string",
+      "enum": [
+        "affirmed",
+        "refuted-as-stated",
+        "closed-with-negative-result"
+      ]
+    },
+    "famous_guardrail": {
+      "type": "object",
+      "properties": {
+        "canonical_formulation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "variant_distinctions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "authoritative_references": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "standing_banner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "canonical_formulation",
+        "variant_distinctions",
+        "authoritative_references",
+        "standing_banner"
+      ],
+      "additionalProperties": false
+    },
+    "no_claim_boundary": {
+      "type": "object",
+      "properties": {
+        "verified": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "mechanisms": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "independence_tiers": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50
+          }
+        },
+        "remaining_external_validation": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "required": [
+        "verified",
+        "mechanisms",
+        "independence_tiers",
+        "remaining_external_validation"
+      ],
+      "additionalProperties": false
+    },
+    "closing_synthesis": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "no_claim_boundary": {
+          "type": "object",
+          "properties": {
+            "verified": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "mechanisms": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "independence_tiers": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 50
+              }
+            },
+            "remaining_external_validation": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            }
+          },
+          "required": [
+            "verified",
+            "mechanisms",
+            "independence_tiers",
+            "remaining_external_validation"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "summary",
+        "no_claim_boundary"
+      ],
+      "additionalProperties": false
+    },
+    "statement_version": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "norm_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "motivation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "steward_accepted_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "problem_id",
+        "version",
+        "statement",
+        "norm_hash",
+        "falsifier",
+        "motivation",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "brief": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "assigned_fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "motivation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "areas": {
+          "minItems": 1,
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "algebra",
+                  "number-theory",
+                  "topology-and-geometry",
+                  "analysis",
+                  "logic-and-foundations",
+                  "combinatorics",
+                  "probability",
+                  "mathematical-physics",
+                  "quantum-foundations",
+                  "high-energy-theory",
+                  "condensed-matter-theory",
+                  "gravitation-and-cosmology",
+                  "dynamical-systems",
+                  "cs-theory",
+                  "formal-verification",
+                  "other-exact-sciences"
+                ]
+              },
+              {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+              }
+            ]
+          }
+        },
+        "famous_guardrail": {
+          "type": "object",
+          "properties": {
+            "canonical_formulation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "variant_distinctions": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "authoritative_references": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "standing_banner": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "canonical_formulation",
+            "variant_distinctions",
+            "authoritative_references",
+            "standing_banner"
+          ],
+          "additionalProperties": false
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "withdrawn",
+            "adopted"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "id",
+        "sponsor_id",
+        "title",
+        "statement",
+        "falsifier",
+        "motivation",
+        "areas",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "propose_request": {
+      "type": "object",
+      "properties": {
+        "brief_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "motivation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "areas": {
+          "minItems": 1,
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "algebra",
+                  "number-theory",
+                  "topology-and-geometry",
+                  "analysis",
+                  "logic-and-foundations",
+                  "combinatorics",
+                  "probability",
+                  "mathematical-physics",
+                  "quantum-foundations",
+                  "high-energy-theory",
+                  "condensed-matter-theory",
+                  "gravitation-and-cosmology",
+                  "dynamical-systems",
+                  "cs-theory",
+                  "formal-verification",
+                  "other-exact-sciences"
+                ]
+              },
+              {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+              }
+            ]
+          }
+        },
+        "famous_guardrail": {
+          "type": "object",
+          "properties": {
+            "canonical_formulation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "variant_distinctions": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "authoritative_references": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "standing_banner": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "canonical_formulation",
+            "variant_distinctions",
+            "authoritative_references",
+            "standing_banner"
+          ],
+          "additionalProperties": false
+        },
+        "distinct_because": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "unlisted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title",
+        "statement",
+        "falsifier",
+        "motivation",
+        "areas"
+      ],
+      "additionalProperties": false
+    },
+    "save_brief_request": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "assigned_fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "motivation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "areas": {
+          "minItems": 1,
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "algebra",
+                  "number-theory",
+                  "topology-and-geometry",
+                  "analysis",
+                  "logic-and-foundations",
+                  "combinatorics",
+                  "probability",
+                  "mathematical-physics",
+                  "quantum-foundations",
+                  "high-energy-theory",
+                  "condensed-matter-theory",
+                  "gravitation-and-cosmology",
+                  "dynamical-systems",
+                  "cs-theory",
+                  "formal-verification",
+                  "other-exact-sciences"
+                ]
+              },
+              {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+              }
+            ]
+          }
+        },
+        "famous_guardrail": {
+          "type": "object",
+          "properties": {
+            "canonical_formulation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "variant_distinctions": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "authoritative_references": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "standing_banner": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "canonical_formulation",
+            "variant_distinctions",
+            "authoritative_references",
+            "standing_banner"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "title",
+        "statement",
+        "falsifier",
+        "motivation",
+        "areas"
+      ],
+      "additionalProperties": false
+    },
+    "lifecycle_request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "publish"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "revise-statement"
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "motivation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            }
+          },
+          "required": [
+            "action",
+            "statement",
+            "falsifier",
+            "motivation"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "enter-result-review"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "resolve"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "affirmed",
+                "refuted-as-stated",
+                "closed-with-negative-result"
+              ]
+            },
+            "closing_synthesis": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "no_claim_boundary": {
+                  "type": "object",
+                  "properties": {
+                    "verified": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "mechanisms": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "independence_tiers": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50
+                      }
+                    },
+                    "remaining_external_validation": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    }
+                  },
+                  "required": [
+                    "verified",
+                    "mechanisms",
+                    "independence_tiers",
+                    "remaining_external_validation"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "summary",
+                "no_claim_boundary"
+              ],
+              "additionalProperties": false
+            },
+            "external_expert_review_proof": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "required": [
+            "action",
+            "direction",
+            "closing_synthesis"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "retire"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "required": [
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reanchor_request": {
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "base_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "claim_id",
+        "base_version"
+      ],
+      "additionalProperties": false
+    },
+    "statement_review_request": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "statement-clear",
+            "statement-unclear"
+          ]
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      },
+      "required": [
+        "verdict",
+        "basis"
+      ],
+      "additionalProperties": false
+    },
+    "statement_review_response": {
+      "type": "object",
+      "properties": {
+        "reviewed": {
+          "type": "boolean",
+          "const": true
+        },
+        "problem_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "statement-clear",
+            "statement-unclear"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "private-draft",
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review",
+            "resolved",
+            "retired"
+          ]
+        }
+      },
+      "required": [
+        "reviewed",
+        "problem_id",
+        "verdict",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "detail": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "private-draft",
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review",
+            "resolved",
+            "retired"
+          ]
+        },
+        "unlisted": {
+          "type": "boolean"
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "created_by_fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "current_statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "public_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "motivation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "areas": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "algebra",
+                  "number-theory",
+                  "topology-and-geometry",
+                  "analysis",
+                  "logic-and-foundations",
+                  "combinatorics",
+                  "probability",
+                  "mathematical-physics",
+                  "quantum-foundations",
+                  "high-energy-theory",
+                  "condensed-matter-theory",
+                  "gravitation-and-cosmology",
+                  "dynamical-systems",
+                  "cs-theory",
+                  "formal-verification",
+                  "other-exact-sciences"
+                ]
+              },
+              {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+              }
+            ]
+          }
+        },
+        "famous_guardrail": {
+          "type": "object",
+          "properties": {
+            "canonical_formulation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "variant_distinctions": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "authoritative_references": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "standing_banner": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "canonical_formulation",
+            "variant_distinctions",
+            "authoritative_references",
+            "standing_banner"
+          ],
+          "additionalProperties": false
+        },
+        "resolution": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "string",
+              "enum": [
+                "affirmed",
+                "refuted-as-stated",
+                "closed-with-negative-result"
+              ]
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "no_claim_boundary": {
+              "type": "object",
+              "properties": {
+                "verified": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "mechanisms": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "independence_tiers": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 50
+                  }
+                },
+                "remaining_external_validation": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              "required": [
+                "verified",
+                "mechanisms",
+                "independence_tiers",
+                "remaining_external_validation"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "direction",
+            "summary",
+            "no_claim_boundary"
+          ],
+          "additionalProperties": false
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status",
+        "unlisted",
+        "current_statement_version",
+        "public_seq",
+        "statement",
+        "falsifier",
+        "motivation",
+        "areas",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "status",
+    "resolution_direction",
+    "famous_guardrail",
+    "no_claim_boundary",
+    "closing_synthesis",
+    "statement_version",
+    "brief",
+    "propose_request",
+    "save_brief_request",
+    "lifecycle_request",
+    "reanchor_request",
+    "statement_review_request",
+    "statement_review_response",
+    "detail"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "propose_request": {
+        "title": "Finite path formulation",
+        "statement": "Every simple path with n edges has n + 1 vertices.",
+        "falsifier": "A simple path with a different vertex count.",
+        "motivation": "Fix the path convention before independent review.",
+        "areas": [
+          "combinatorics",
+          "other-path-enumeration"
+        ]
+      }
+    }
+  ]
+}

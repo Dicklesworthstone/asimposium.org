@@ -551,15 +551,12 @@ export async function problemLifecycleJourney({
   assert.equal(resolvedDetail.problem.status, "resolved");
   assert.ok(resolvedDetail.problem.resolution, "Problem must have resolution object");
   assert.equal(resolvedDetail.problem.resolution.direction, "affirmed");
-  assert.deepEqual(
-    resolvedDetail.problem.resolution.no_claim_boundary.verified,
-    ["Modular cycle bounds"],
-  );
+  assert.deepEqual(resolvedDetail.problem.resolution.no_claim_boundary.verified, [
+    "Modular cycle bounds",
+  ]);
 
   // Verify that a problem without resolution_no_claim_boundary does NOT fabricate resolution literals
-  await env.DB.prepare(
-    "UPDATE problems SET resolution_no_claim_boundary = NULL WHERE id = ?",
-  )
+  await env.DB.prepare("UPDATE problems SET resolution_no_claim_boundary = NULL WHERE id = ?")
     .bind(problemId)
     .run();
   const unboundaryDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
@@ -570,9 +567,7 @@ export async function problemLifecycleJourney({
     "A resolved problem with missing no-claim boundary must not synthesize fake literals",
   );
   // Restore the boundary
-  await env.DB.prepare(
-    "UPDATE problems SET resolution_no_claim_boundary = ? WHERE id = ?",
-  )
+  await env.DB.prepare("UPDATE problems SET resolution_no_claim_boundary = ? WHERE id = ?")
     .bind(
       JSON.stringify({
         verified: ["Modular cycle bounds"],
@@ -642,7 +637,7 @@ export async function problemLifecycleJourney({
       statement: "A problem statement that will be retired early.",
       falsifier: "A falsifier for retired problem.",
       motivation: "Retirement flow verification.",
-      areas: ["geometry"],
+      areas: ["topology-and-geometry"],
     },
     fellowA1Token,
     201,
@@ -668,7 +663,7 @@ export async function problemLifecycleJourney({
     statement: "Every edge in a finite matching has two distinct endpoints.",
     falsifier: "An edge in the matching with fewer than two distinct endpoints.",
     motivation: "Exercise problem ingress without oversized stored fields.",
-    areas: ["graph-theory"],
+    areas: ["combinatorics"],
   };
   const boundaryBrief = await sponsorCall(
     sponsorA,

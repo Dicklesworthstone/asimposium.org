@@ -137,6 +137,13 @@ test("W5.1 Fellow propose problem request validates inputs", () => {
   expect(ProposeProblemRequestSchema.safeParse({ ...validProposal, areas: [] }).success).toBe(
     false,
   );
+  for (const areas of [["geometry"], ["other-"], ["other--path"], Array(33).fill("algebra")]) {
+    expect(ProposeProblemRequestSchema.safeParse({ ...validProposal, areas }).success).toBe(false);
+  }
+  expect(
+    ProposeProblemRequestSchema.safeParse({ ...validProposal, areas: ["other-path-enumeration"] })
+      .success,
+  ).toBe(true);
 });
 
 test("W5.1 Problem lifecycle action discriminated union parses valid transitions", () => {
@@ -251,4 +258,3 @@ test("W5.1 Problem statement review contracts validate verdict and basis", () =>
     }).success,
   ).toBe(false);
 });
-

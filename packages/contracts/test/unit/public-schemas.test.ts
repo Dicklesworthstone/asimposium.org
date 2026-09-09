@@ -20,6 +20,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "ledger",
   "moves",
   "problem",
+  "problems",
   "rubrics",
   "screening",
   "sessions",

@@ -93,6 +93,7 @@ import {
   type ProblemDocument,
   type ProblemRule,
 } from "./problem.ts";
+import { ProblemLifecycleContractsSchema } from "./problems.ts";
 import {
   type DomainRubric,
   type ReviewRubricsDoc,
@@ -778,6 +779,21 @@ function generatedMovesTypes(): string {
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     {
+      relativePath: "generated/problems.schema.json",
+      content: formatJson(
+        withExamples("problems", {
+          $id: "https://a.asimposium.org/schemas/problems.v1.json",
+          title: "ASImposium problem lifecycle contracts",
+          ...requestAwareJsonSchema(ProblemLifecycleContractsSchema),
+        }),
+      ),
+    },
+    {
+      relativePath: "generated/problems.types.ts",
+      content:
+        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, SaveProblemBriefRequest, ProblemDetail, ProblemLifecycleActionRequest, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
+    },
+    {
       relativePath: "generated/discovery.schema.json",
       content: formatJson({
         $id: "https://a.asimposium.org/schemas/discovery.v1.json",
@@ -844,6 +860,7 @@ const EXAMPLES_SERVED_URL_BY_KIND: Readonly<Record<string, string>> = Object.fre
   enrollment: ENROLLMENT_SCHEMA_ID,
   ledger: LEDGER_SCHEMA_ID,
   problem: PROBLEM_SCHEMA_ID,
+  problems: "https://a.asimposium.org/schemas/problems.v1.json",
   screening: SCREENING_SCHEMA_ID,
   sessions: SESSIONS_SCHEMA_ID,
 });

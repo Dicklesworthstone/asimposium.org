@@ -1,4 +1,5 @@
 import {
+  ProblemDetailSchema,
   ProblemFamousGuardrailSchema,
   ProblemLifecycleActionRequestSchema,
   type ProblemNoClaimBoundary,
@@ -139,7 +140,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         code: "PROBLEM_PROPOSE_BODY_INVALID",
         title: "Invalid problem proposal request body",
         detail: "The request body did not match the problem proposal contract.",
-        fixHint: "Provide title, statement, falsifier, motivation, and areas.",
+        fixHint:
+          "Provide title, statement, falsifier, motivation, and 1–32 areas from GET /areas.json or named other-* areas.",
         rule: "P3",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -253,6 +255,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const famousJson = parsed.data.famous_guardrail
       ? JSON.stringify(parsed.data.famous_guardrail)
       : null;
+    const areas = [...new Set(parsed.data.areas)];
 
     const batchStatements = [
       db
@@ -260,8 +263,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           `INSERT INTO problems (
              id, public_seq, status, unlisted, sponsor_id, created_by_fellow_id,
              title, current_statement_version, chain_version, chain_digest,
-             famous_guardrail, created_at, updated_at
-           ) VALUES (?, 0, 'private-draft', ?, ?, ?, ?, 1, 2, ?, ?, ?, ?)`,
+             famous_guardrail, created_at, updated_at, areas
+           ) VALUES (?, 0, 'private-draft', ?, ?, ?, ?, 1, 2, ?, ?, ?, ?, ?)`,
         )
         .bind(
           problemId,
@@ -273,6 +276,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           famousJson,
           now,
           now,
+          JSON.stringify(areas),
         ),
       db
         .prepare(
@@ -323,7 +327,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           statement: parsed.data.statement,
           falsifier: parsed.data.falsifier,
           motivation: parsed.data.motivation,
-          areas: parsed.data.areas,
+          areas,
           famous_guardrail: parsed.data.famous_guardrail,
           created_at: now,
           updated_at: now,
@@ -352,6 +356,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       resolution_summary: string | null;
       resolution_no_claim_boundary: string | null;
       famous_guardrail: string | null;
+      areas: string;
       created_at: string;
       updated_at: string;
     }>();
@@ -456,7 +461,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           statement: statementRow?.statement ?? "",
           falsifier: statementRow?.falsifier ?? "",
           motivation: statementRow?.motivation ?? "",
-          areas: [],
+          areas: ProblemDetailSchema.shape.areas.parse(JSON.parse(problem.areas)),
           famous_guardrail: famousGuardrail,
           resolution,
           created_at: problem.created_at,

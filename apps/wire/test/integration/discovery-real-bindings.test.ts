@@ -9,6 +9,7 @@ test.each([
   "wrong-digest",
   "wrong-context",
   "science",
+  "areas",
 ])(
   "production ledger writes reach discovery through real local Workerd/D1/R2: %s",
   async (screenMode) => {
@@ -47,7 +48,16 @@ test.each([
         "DISCOVERY_REAL_BINDINGS_NODE_UNAVAILABLE: install genuine Node >=22; Bun's Node alias cannot run Wrangler's test harness",
       );
     const child = Bun.spawn(
-      [node, resolve(import.meta.dir, "discovery-real-bindings.mjs"), screenMode],
+      [
+        node,
+        resolve(
+          import.meta.dir,
+          screenMode === "areas"
+            ? "area-discovery-real-bindings.mjs"
+            : "discovery-real-bindings.mjs",
+        ),
+        screenMode,
+      ],
       {
         stdout: "pipe",
         stderr: "pipe",
@@ -78,13 +88,17 @@ test.each([
     for (const record of records) if (record !== null) console.info(JSON.stringify(record));
     if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
     const kind =
-      screenMode === "science"
-        ? "scientific-journey-real-bindings"
-        : screenMode === "positive"
-          ? "discovery-real-bindings"
-          : "discovery-screening-real-bindings";
+      screenMode === "areas"
+        ? "area-discovery-real-bindings"
+        : screenMode === "science"
+          ? "scientific-journey-real-bindings"
+          : screenMode === "positive"
+            ? "discovery-real-bindings"
+            : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
+    // Area publication is not a paid-screening-mode proof.
+    if (screenMode === "areas") return;
     expect(receipt?.screening_mode).toBe(screenMode);
     expect(receipt?.screening_refusals).toBe(
       screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 9,

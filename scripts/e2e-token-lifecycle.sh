@@ -91,6 +91,8 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0046_workshop_revision.sql"
   "0047_problem_lifecycle.sql"
   "0048_reanchor_replay_scope.sql"
+  "0049_problem_statement_reviews.sql"
+  "0050_problem_areas.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

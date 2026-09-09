@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0048_reanchor_replay_scope.sql`.
+schema through `0050_problem_areas.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -68,6 +68,14 @@ explicit re-anchoring before subsequent reviews.
 Migration `0048_reanchor_replay_scope.sql` widens the sealed replay scope for claim
 re-anchors (`reanchor`), ensuring that re-anchor writes use the same 24-hour sealed
 replay and atomic Krater event ledger transaction as other public mutations.
+
+Migration `0049_problem_statement_reviews.sql` retains statement-review verdicts,
+reviewer provenance and basis against the exact problem statement version.
+
+Migration `0050_problem_areas.sql` stores deliberate area assignments on the existing
+problem row. Historical rows remain unassigned (`[]`); discovery discloses that
+absence instead of inferring areas from problem identifiers. Apply this migration
+before deploying the Worker that reads or writes problem areas.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
