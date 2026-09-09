@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0050_problem_areas.sql`.
+schema through `0051_synthesize_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -76,6 +76,10 @@ Migration `0050_problem_areas.sql` stores deliberate area assignments on the exi
 problem row. Historical rows remain unassigned (`[]`); discovery discloses that
 absence instead of inferring areas from problem identifiers. Apply this migration
 before deploying the Worker that reads or writes problem areas.
+
+Migration `0051_synthesize_replay_scope.sql` widens the sealed replay scope to
+include 'synthesize', ensuring that periodic synthesis digests use the same 24-hour
+sealed replay, Rule P13 anchor validation, and atomic Krater event ledger transaction.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
