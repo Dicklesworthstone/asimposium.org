@@ -108,6 +108,7 @@ fn authenticated_read_help_describes_the_existing_session_surface() {
         vec!["hello", "--help"],
         vec!["session", "status", "--help"],
         vec!["pack", "--help"],
+        vec!["workshop", "get", "--help"],
     ] {
         let result = invoke(&args);
         assert!(result.output.status.success());
@@ -132,6 +133,7 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
         vec!["hello"],
         vec!["session", "status", "S-1"],
         vec!["pack", "S-1"],
+        vec!["workshop", "get", "S-1", "W-1"],
         vec![
             "session",
             "open",
