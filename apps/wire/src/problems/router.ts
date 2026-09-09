@@ -6,6 +6,7 @@ import {
   SponsorProblemBriefSchema,
 } from "@asimposium/contracts";
 import { type Context, Hono } from "hono";
+import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
@@ -34,9 +35,23 @@ function bearerToken(request: Request): string | undefined {
   return match ? match[1] : undefined;
 }
 
+// Match Fellow session ingress while admitting large, escaped formulations.
+const MAX_PROBLEM_REQUEST_BODY_BYTES = 512 * 1024;
+
 async function readJsonBody(request: Request): Promise<unknown> {
+  const body = await readBoundedRequestBody(request, MAX_PROBLEM_REQUEST_BODY_BYTES);
+  if (!body.ok) {
+    if (body.reason !== "too-large") return undefined;
+    return validatedProblem({
+      status: 413,
+      code: "REQUEST_BODY_TOO_LARGE",
+      title: "The problem request body is too large",
+      detail: `Problem write bodies are bounded at ${MAX_PROBLEM_REQUEST_BODY_BYTES} bytes.`,
+      fixHint: "Send only the contracted fields and keep large artifacts in the artifact store.",
+    });
+  }
   try {
-    return await request.json();
+    return parseExactJsonBytes(body.bytes);
   } catch {
     return undefined;
   }
@@ -112,6 +127,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
 
     const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody instanceof Response) return rawBody;
     const parsed = ProposeProblemRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
       return validatedProblem({
@@ -490,6 +506,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
 
     const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody instanceof Response) return rawBody;
     const body = (rawBody as any) ?? {};
     const verdict = body.verdict;
     const basis = body.basis;
