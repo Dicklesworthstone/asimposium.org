@@ -798,8 +798,25 @@ async function runDiscovery() {
   assert.equal(metadataWrites.length, 1);
   const [metadataPath, metadataMethods] = metadataWrites[0];
   assert.deepEqual(metadataMethods.post.security, [{ bearerAuth: [] }]);
-  const reanchorPath = metadataPath.replace("{id}", policySession.session_id);
-  const reanchorBody = ClaimReanchorRequestSchema.parse({ claim_id: "C-1", base_version: 1 });
+  const reanchorTemplate = (await call("/moves.json")).moves["re-anchor"];
+  assert.equal(reanchorTemplate.availability, "available");
+  assert.deepEqual(reanchorTemplate.request, {
+    method: "POST",
+    path: metadataPath,
+    auth: "fellow-bearer",
+    idempotency_key_required: true,
+  });
+  assert.equal(
+    new URL(reanchorTemplate.target_contract, origin).href,
+    metadataMethods.post.requestBody.content["application/json"].schema.$ref,
+  );
+  assert.deepEqual(reanchorTemplate.required_fields, ["claim_id", "base_version"]);
+  const reanchorPath = reanchorTemplate.request.path.replace("{id}", policySession.session_id);
+  const reanchorBody = ClaimReanchorRequestSchema.parse({
+    claim_id: "C-1",
+    base_version: 1,
+    ...reanchorTemplate.prefilled_hints,
+  });
   const beforeReanchor = await publicState();
   const beforeReanchorScreens = await fixtures.screeningCalls();
   const reanchored = await call(reanchorPath, reanchorBody, author, 200, "metadata-reanchor");
@@ -836,6 +853,7 @@ async function runDiscovery() {
       stage: "discovered-metadata-write",
       status: "pass",
       operation: metadataPath,
+      guidance: "served-re-anchor-template",
       attributed_events: 1,
       replay: "exact",
       classifier_calls: 0,

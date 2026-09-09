@@ -51,6 +51,7 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
     reason: "The recorded counterexample fires the falsifier.",
   },
   "collapse-duplicate": { source_claim_id: "C-1", source_version: 1, target: "C-2@1" },
+  "re-anchor": { claim_id: "C-1", base_version: 1 },
   formalize: {
     bears_on_id: "C-1",
     bears_on_version: 1,
@@ -118,7 +119,7 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
         expect(template.required_fields, template.move).toContain(field);
     }
   }
-  expect(count).toBe(10);
+  expect(count).toBe(11);
   expect(Object.keys(bodies)).toHaveLength(count);
 });
 

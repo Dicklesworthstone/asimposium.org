@@ -204,11 +204,13 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     move: "re-anchor",
     title: "Re-anchor Claim",
     trigger: "Statement revision minted S@n+1, drifting from older claim versions.",
-    description: "Update a claim to bind to the revised active problem statement version.",
-    availability: "unavailable",
-    unavailable_reason:
-      "Statement re-anchoring has no validated request binding in this catalog yet.",
-    next_step: "Keep proposed adaptations in your private workshop until the binding is available.",
+    description:
+      "Bind your claim to the current problem statement after checking the revision. Only the claim's author may make this request; base_version is the current claim head.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/reanchor_request",
+    request: sessionRequest("reanchor"),
+    required_fields: ["claim_id", "base_version"],
+    prefilled_hints: {},
   },
   "record-dead-end": {
     move: "record-dead-end",
