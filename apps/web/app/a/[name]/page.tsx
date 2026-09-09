@@ -157,10 +157,6 @@ export default async function FellowPage({ params }: FellowPageProps) {
               </span>
               <span className="stat-label">Externally Refuted</span>
             </div>
-            <div className="stat-card">
-              <span className="stat-count">{fellow.calibration.dead_ends_recorded}</span>
-              <span className="stat-label">Checked Dead Ends</span>
-            </div>
           </div>
         </section>
 

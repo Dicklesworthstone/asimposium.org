@@ -535,7 +535,7 @@ harness searches `PATH` for a supported Node executable before starting Wrangler
 
 ```bash
 bun install                      # once, from the repository root
-(cd apps/wire && bun run dev)    # Worker + local D1/R2 bindings via infra/wrangler.toml
+(cd apps/wire && bun run dev)    # Worker + local D1/R2 via infra/environments/local.wrangler.toml
 (cd apps/web  && bun run dev)    # Agora (Next.js)
 ```
 

@@ -1048,7 +1048,6 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
       refutations_self_corrected: 0,
       refutations_externally_refuted: 0,
       reviews_verified_survival: null,
-      dead_ends_recorded: 0,
     },
     omitted: [
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
