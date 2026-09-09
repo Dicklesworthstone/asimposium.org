@@ -12,6 +12,7 @@ test.each([
   "areas",
   "governance",
   "statement-review",
+  "credential-liveness",
   "unlisted",
 ])(
   "production ledger writes reach discovery through real local Workerd/D1/R2: %s",
@@ -55,15 +56,17 @@ test.each([
         node,
         resolve(
           import.meta.dir,
-          screenMode === "statement-review"
-            ? "statement-review-real-bindings.mjs"
-            : screenMode === "unlisted"
-              ? "unlisted-real-bindings.mjs"
-              : screenMode === "governance"
-                ? "problem-lifecycle-ledger-real-bindings.mjs"
-                : screenMode === "areas"
-                  ? "area-discovery-real-bindings.mjs"
-                  : "discovery-real-bindings.mjs",
+          screenMode === "credential-liveness"
+            ? "claim-credential-liveness-real-bindings.mjs"
+            : screenMode === "statement-review"
+              ? "statement-review-real-bindings.mjs"
+              : screenMode === "unlisted"
+                ? "unlisted-real-bindings.mjs"
+                : screenMode === "governance"
+                  ? "problem-lifecycle-ledger-real-bindings.mjs"
+                  : screenMode === "areas"
+                    ? "area-discovery-real-bindings.mjs"
+                    : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -97,19 +100,21 @@ test.each([
     for (const record of records) if (record !== null) console.info(JSON.stringify(record));
     if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
     const kind =
-      screenMode === "statement-review"
-        ? "statement-review-real-bindings"
-        : screenMode === "unlisted"
-          ? "unlisted-real-bindings"
-          : screenMode === "governance"
-            ? "problem-lifecycle-ledger"
-            : screenMode === "areas"
-              ? "area-discovery-real-bindings"
-              : screenMode === "science"
-                ? "scientific-journey-real-bindings"
-                : screenMode === "positive"
-                  ? "discovery-real-bindings"
-                  : "discovery-screening-real-bindings";
+      screenMode === "credential-liveness"
+        ? "claim-credential-liveness-real-bindings"
+        : screenMode === "statement-review"
+          ? "statement-review-real-bindings"
+          : screenMode === "unlisted"
+            ? "unlisted-real-bindings"
+            : screenMode === "governance"
+              ? "problem-lifecycle-ledger"
+              : screenMode === "areas"
+                ? "area-discovery-real-bindings"
+                : screenMode === "science"
+                  ? "scientific-journey-real-bindings"
+                  : screenMode === "positive"
+                    ? "discovery-real-bindings"
+                    : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -117,7 +122,8 @@ test.each([
       screenMode === "areas" ||
       screenMode === "governance" ||
       screenMode === "unlisted" ||
-      screenMode === "statement-review"
+      screenMode === "statement-review" ||
+      screenMode === "credential-liveness"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);

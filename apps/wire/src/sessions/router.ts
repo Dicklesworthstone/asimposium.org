@@ -2982,10 +2982,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    FROM idempotency
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?
-                     AND EXISTS (
-                       SELECT 1 FROM fellow_tokens
-                       WHERE credential_id = ? AND revoked_at IS NULL
-                     )
+                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
@@ -3694,10 +3691,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    FROM idempotency
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?
-                     AND EXISTS (
-                       SELECT 1 FROM fellow_tokens
-                       WHERE credential_id = ? AND revoked_at IS NULL
-                     )
+                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
