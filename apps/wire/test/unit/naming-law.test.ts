@@ -1,4 +1,7 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { FellowNameSchema } from "@asimposium/contracts";
 import {
   AesGcmEnrollmentReplayProtector,
@@ -6,6 +9,19 @@ import {
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+
+function initTestDatabase(): Database {
+  const sqlite = new Database(":memory:", { strict: true });
+  const migrationsDir = resolve(import.meta.dir, "../../../../db/migrations");
+  const migrationFiles = readdirSync(migrationsDir)
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+  for (const file of migrationFiles) {
+    const sql = readFileSync(join(migrationsDir, file), "utf8");
+    sqlite.run(sql);
+  }
+  return sqlite;
+}
 
 class MutableClock {
   value = 1_700_000_000_000;
@@ -309,6 +325,131 @@ describe("W3.6 Naming Law Validator", () => {
           expect(enrollmentNameFailure(suggestion)).toBeUndefined();
         }
       }
+    });
+  });
+
+  describe("Property & Table-Driven Grammar Invariants", () => {
+    const grammarMatrix: Array<{ name: string; valid: boolean; reason: string }> = [
+      // Length edge cases
+      { name: "ab", valid: false, reason: "length 2 is below minimum 3" },
+      { name: "abc", valid: true, reason: "length 3 is valid minimum" },
+      { name: "abcd", valid: true, reason: "length 4 is valid" },
+      { name: "a".repeat(31), valid: true, reason: "length 31 is valid" },
+      { name: "a".repeat(32), valid: true, reason: "length 32 is valid maximum" },
+      { name: "a".repeat(33), valid: false, reason: "length 33 is above maximum 32" },
+      // Start character edge cases
+      ...["a", "b", "m", "z"].map((c) => ({ name: `${c}bc`, valid: true, reason: `starts with lowercase ${c}` })),
+      ...["0", "1", "9"].map((c) => ({ name: `${c}bc`, valid: false, reason: `starts with digit ${c}` })),
+      ...["-", "_"].map((c) => ({ name: `${c}bc`, valid: false, reason: `starts with symbol ${c}` })),
+      // Hyphen placement
+      { name: "a-b", valid: true, reason: "single hyphen separating letters" },
+      { name: "a--b", valid: true, reason: "double hyphen satisfies regex" },
+      { name: "a-b-c-d", valid: true, reason: "multiple hyphens" },
+      { name: "a1-b2-c3", valid: true, reason: "alphanumeric with hyphens" },
+      // Characters
+      { name: "foo_bar", valid: false, reason: "underscore is illegal" },
+      { name: "foo.bar", valid: false, reason: "dot is illegal" },
+      { name: "foo bar", valid: false, reason: "space is illegal" },
+      { name: "foo/bar", valid: false, reason: "slash is illegal" },
+      { name: "foo#bar", valid: false, reason: "hash is illegal" },
+      { name: "FooBar", valid: false, reason: "uppercase letters illegal" },
+      { name: "foobar1", valid: true, reason: "ends with digit" },
+    ];
+
+    test.each(grammarMatrix)("grammar rule: $name ($reason) -> valid: $valid", ({ name, valid }) => {
+      const parsed = FellowNameSchema.safeParse(name);
+      expect(parsed.success).toBe(valid);
+      if (valid) {
+        expect(enrollmentNameFailure(name)).toBeUndefined();
+      } else {
+        expect(enrollmentNameFailure(name)).toBe("NAME_INVALID");
+      }
+    });
+
+    test("property test: random valid-grammar strings always parse successfully", () => {
+      const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-";
+      const startChars = "abcdefghijklmnopqrstuvwxyz";
+      for (let run = 0; run < 100; run++) {
+        const len = 3 + (run % 30); // 3 to 32
+        let randomName = startChars[run % startChars.length];
+        for (let j = 1; j < len; j++) {
+          randomName += alphabet[(run * 7 + j * 13) % alphabet.length];
+        }
+        expect(FellowNameSchema.safeParse(randomName).success).toBe(true);
+      }
+    });
+  });
+
+  describe("DB-Level Uniqueness & Tombstones (Enforced FOREVER)", () => {
+    test("D1 schema rejects duplicate names with case-insensitive collision", () => {
+      const db = initTestDatabase();
+      const now = Date.now();
+      const sponsorId = "usr_sponsor_naming_1";
+      db.run(
+        `INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`,
+        [sponsorId, now, now],
+      );
+      db.run(
+        `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["F-01JXYZ1111", "stellar-orbit", "test-model", "test-harness", now, "active", now, sponsorId],
+      );
+
+      // Attempt exact match insert
+      expect(() => {
+        db.run(
+          `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ["F-01JXYZ2222", "stellar-orbit", "test-model-2", "test-harness-2", now, "active", now, sponsorId],
+        );
+      }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
+
+      // Attempt case-insensitive match insert (e.g. STELLAR-ORBIT, Stellar-Orbit)
+      expect(() => {
+        db.run(
+          `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ["F-01JXYZ3333", "STELLAR-ORBIT", "test-model-2", "test-harness-2", now, "active", now, sponsorId],
+        );
+      }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
+
+      expect(() => {
+        db.run(
+          `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ["F-01JXYZ4444", "Stellar-Orbit", "test-model-2", "test-harness-2", now, "active", now, sponsorId],
+        );
+      }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
+    });
+
+    test("D1 trigger prohibits DELETE on enrollment_fellows ensuring permanent tombstones", () => {
+      const db = initTestDatabase();
+      const now = Date.now();
+      const sponsorId = "usr_sponsor_naming_2";
+      db.run(
+        `INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`,
+        [sponsorId, now, now],
+      );
+      db.run(
+        `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["F-01JXYZ5555", "quantum-wave", "test-model", "test-harness", now, "active", now, sponsorId],
+      );
+
+      // Attempting to delete must throw with trigger abort
+      expect(() => {
+        db.run("DELETE FROM enrollment_fellows WHERE name = ?", ["quantum-wave"]);
+      }).toThrow(/Fellow identity cannot be deleted/);
+
+      // Even if status is updated (e.g. revoked / tombstoned), row cannot be deleted
+      // and name is never recycled
+      expect(() => {
+        db.run(
+          `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ["F-01JXYZ6666", "quantum-wave", "other-model", "other-harness", now, "active", now, sponsorId],
+        );
+      }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
     });
   });
 });
