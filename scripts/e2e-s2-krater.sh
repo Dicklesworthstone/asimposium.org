@@ -163,6 +163,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0048_reanchor_replay_scope.sql
   db/migrations/0049_problem_statement_reviews.sql
   db/migrations/0050_problem_areas.sql
+  db/migrations/0051_synthesize_replay_scope.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -245,6 +246,7 @@ readonly -a S2_SOURCE_PATHS=(
   # Reached through `sessions/router.ts` since the claim-relations slice; the
   # mechanical walk flagged it on first run, which is this attestation working.
   apps/wire/src/ledger/relations.ts
+  apps/wire/src/ledger/synthesis.ts
   apps/wire/src/krater/claim-version.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
   # (mintClaimVersion on the promote path); the mechanical walk flagged it the
@@ -368,6 +370,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0048_reanchor_replay_scope.sql
   0049_problem_statement_reviews.sql
   0050_problem_areas.sql
+  0051_synthesize_replay_scope.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

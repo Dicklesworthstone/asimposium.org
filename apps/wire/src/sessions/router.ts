@@ -50,6 +50,8 @@ import {
   SponsorWorkshopObjectSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
+  SynthesizeRequestSchema,
+  SynthesizeResponseSchema,
   WorkshopObjectResponseSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
@@ -111,6 +113,7 @@ import {
   validateScientificVerification,
 } from "../ledger/scientific-checks";
 import { readScientificDispositions } from "../ledger/scientific-disposition";
+import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
 import {
   publicationProvenance,
   type ScreenedPublication,
@@ -624,6 +627,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     hypotheses: ["hypotheses", HypothesisResponseSchema],
     "hypothesis-kill": ["hypothesis-kill", HypothesisKillResponseSchema],
     evidence: ["evidence", EvidenceResponseSchema],
+    synthesize: ["synthesize", SynthesizeResponseSchema],
   } as const;
 
   async function screenWithQuota(
@@ -729,6 +733,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "hypotheses"
     | "hypothesis-kill"
     | "evidence"
+    | "synthesize"
     | "session_close";
 
   interface ReplayRecord {
@@ -915,7 +920,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly db: Env["DB"];
         readonly scope: Extract<
           ReplayScope,
-          "review" | "hypotheses" | "hypothesis-kill" | "evidence" | "gaps" | "relations"
+          | "review"
+          | "hypotheses"
+          | "hypothesis-kill"
+          | "evidence"
+          | "gaps"
+          | "relations"
+          | "synthesize"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1372,6 +1383,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/hypotheses",
     "/v1/sessions/:id/hypotheses/:hid/kill",
     "/v1/sessions/:id/evidence",
+    "/v1/sessions/:id/synthesize",
     "/v1/sessions/:id/close",
     "/v1/problems/:id/statement-review",
   ] as const;
@@ -6808,6 +6820,303 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const winner = await readReplayRecord(
           db,
           "evidence",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/synthesize (W5.8b: Synthesis lifecycle & P13 anchor validation) ---
+  app.post("/v1/sessions/:id/synthesize", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = SynthesizeRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "SYNTHESIZE_BODY_INVALID",
+        title: "Invalid synthesize request body",
+        detail: "The request body did not match the session synthesize contract.",
+        fixHint: "Provide covers_through, body_md, anchors, omitted, and selection_policy.",
+        rule: "P13",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            covers_through: 10,
+            body_md: "## Synthesis\n\nState of the problem.",
+            anchors: [
+              {
+                target_kind: "claim",
+                target_id: "C-1",
+                target_version: 1,
+              },
+            ],
+            omitted: [],
+            selection_policy: "Include all claims with corroborated disposition.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/synthesize", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "synthesize",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => SynthesizeResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot synthesize closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Syntheses cannot be added on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+      });
+    }
+
+    const anchorCheck = await validateSynthesisAnchors(
+      db,
+      session.problem_id,
+      parsed.data.covers_through,
+      parsed.data.anchors,
+    );
+    if (!anchorCheck.valid) {
+      return validatedProblem({
+        status: 422,
+        code: "SYNTHESIS_UNANCHORED",
+        title: "Synthesis anchors ungrounded in ledger",
+        detail:
+          "Synthesis contains assertions referencing ledger objects that do not exist or were published after covers_through.",
+        fixHint:
+          "Remove ungrounded anchors or advance covers_through to cover all referenced ledger objects.",
+        rule: "P13",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          unanchored:
+            anchorCheck.unanchored.length > 0
+              ? anchorCheck.unanchored
+              : [anchorCheck.reason ?? "covers_through exceeds ledger sequence"],
+          example: {
+            covers_through: parsed.data.covers_through,
+            body_md: parsed.data.body_md,
+            anchors: parsed.data.anchors,
+            omitted: parsed.data.omitted,
+            selection_policy: parsed.data.selection_policy,
+          },
+        },
+      });
+    }
+
+    const anchorClaimIds = new Set(
+      parsed.data.anchors.filter((a) => a.target_kind === "claim").map((a) => a.target_id),
+    );
+    const droppedSingleAuthorCount = await computeDroppedSingleAuthorCount(
+      db,
+      session.problem_id,
+      parsed.data.covers_through,
+      anchorClaimIds,
+    );
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "synthesize",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "synthesis",
+        statement: parsed.data.body_md,
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    const synthesisId = mintId("SYNTH");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("synthesize", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "synthesis.created",
+          objectKind: "synthesis",
+          objectId: synthesisId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            covers_through: parsed.data.covers_through,
+            body_md: parsed.data.body_md,
+            anchors: parsed.data.anchors,
+            omitted: parsed.data.omitted,
+            selection_policy: parsed.data.selection_policy,
+            dropped_single_author_count: droppedSingleAuthorCount,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO syntheses
+                   (synthesis_id, problem_id, covers_through, body_md, anchors_json,
+                    omitted_json, dropped_single_author_count, authoring_principal,
+                    declared_model, cas_hash, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                synthesisId,
+                session.problem_id,
+                parsed.data.covers_through,
+                parsed.data.body_md,
+                JSON.stringify(parsed.data.anchors),
+                JSON.stringify(parsed.data.omitted),
+                droppedSingleAuthorCount,
+                auth.binding.fellowId,
+                auth.binding.model,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "synthesize",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: ({ sequence }) =>
+            SynthesizeResponseSchema.parse({
+              synthesis_id: synthesisId,
+              problem_id: session.problem_id,
+              covers_through: parsed.data.covers_through,
+              anchors_count: parsed.data.anchors.length,
+              dropped_single_author_count: droppedSingleAuthorCount,
+              created_at: createdAt,
+              event_id: eventId,
+              sequence,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "synthesize",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("synthesize committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "synthesize",
           auth.binding.fellowId,
           key,
           digest,

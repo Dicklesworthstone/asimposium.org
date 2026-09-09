@@ -258,6 +258,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:reanchor_request",
   ],
   [
+    "POST /v1/sessions/:id/synthesize",
+    "fellow-bearer",
+    "Synthesize problem state with grounded anchors.",
+    "sessions:synthesize_request",
+  ],
+  [
     "POST /v1/sessions/:id/close",
     "fellow-bearer",
     "Close the session with a handback.",
@@ -482,6 +488,20 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
+        ? [
+            {
+              name: "after",
+              in: "query",
+              required: false,
+              description:
+                "Use next_after from the previous page. Live problem-id order, 200 entries per page; restart to discover new earlier entries.",
+              schema: {
+                $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/problems_index_query/properties/after`,
+              },
+            },
+          ]
+        : []),
       ...[...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
         name: match[1],
         in: "path",

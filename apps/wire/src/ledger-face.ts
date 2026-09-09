@@ -2,6 +2,7 @@ import {
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
+  LedgerContractsSchema,
   ProblemDetailSchema,
   ProblemFaceResponseSchema,
   ProblemGovernanceEventSchema,
@@ -974,7 +975,7 @@ function canonicalizeIndexTimestamp(ts: string): string {
   return ts;
 }
 
-async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
+async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexResponse> {
   // Deterministic interim order: `id ASC`. It is neither of the two tempting
   // recency proxies, because neither is honest here. `public_seq` is a
   // per-problem event cursor (DEFAULT 0), so ranking by it is volume, not
@@ -988,7 +989,11 @@ async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   //
   // One row over the face limit decides whether the index is complete; when it
   // is not, omitted[] says so rather than silently truncating.
-  const rows = await db.prepare(PROBLEM_INDEX_SELECT).all<ProblemIndexEntry>();
+  const query =
+    after === undefined
+      ? db.prepare(PROBLEM_INDEX_SELECT)
+      : db.prepare(PROBLEM_INDEX_SELECT.replace("ORDER BY", "AND id > ? ORDER BY")).bind(after);
+  const rows = await query.all<ProblemIndexEntry>();
   const truncated = rows.results.length > 200;
   const problems = rows.results.slice(0, 200).map((row) => ({
     ...row,
@@ -998,15 +1003,42 @@ async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   }));
   const omitted = [
     ...OMITTED,
-    ...(truncated ? ["results beyond the first 200 in canonical problem-id order"] : []),
+    ...(truncated ? ["results beyond this page of 200 in canonical problem-id order"] : []),
+    ...(after === undefined ? [] : ["problem ids at or before the requested after position"]),
+    "pages reflect current visibility; restart from the first page to discover new problems before your position",
     ...(problems.some((problem) => problem.title === null)
       ? ["some legacy problems have no saved title"]
       : []),
   ];
   return ProblemsIndexResponseSchema.parse({
     problems,
+    ...(truncated ? { next_after: problems[problems.length - 1]?.id } : {}),
     omitted,
   });
+}
+
+function parseIndexQuery(request: Request): { after?: string } | Response {
+  const params = new URL(request.url).searchParams;
+  const parsed = LedgerContractsSchema.shape.problems_index_query
+    .unwrap()
+    .safeParse(Object.fromEntries(params));
+  if (parsed.success && params.getAll("after").length <= 1) return parsed.data;
+  const response = problemDocument({
+    status: 400,
+    code: "CURSOR_INVALID",
+    title: "Invalid problem index query",
+    detail: "The index accepts only one optional after parameter containing a public problem id.",
+    fixHint:
+      "Use next_after from the previous JSON page as ?after=<id>, or omit the query to restart.",
+    rule: "A5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query",
+      example: { method: "GET", path: "/problems.json?after=P-4DSP" },
+    },
+  });
+  return request.method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
 }
 
 const CANONICAL_PUBLIC_CURSOR = /^(?:0|[1-9][0-9]*)$/;
@@ -1199,7 +1231,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   app.on(["GET", "HEAD"], "/problems.json", async (c) => {
-    const body = JSON.stringify(await loadIndex(c.env.DB));
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const body = JSON.stringify(await loadIndex(c.env.DB, query.after));
     const etag = await strongEtag("json", body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
@@ -1211,12 +1245,24 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   app.on(["GET", "HEAD"], "/problems.md", async (c) => {
-    const data = await loadIndex(c.env.DB);
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const data = await loadIndex(c.env.DB, query.after);
     const listing =
       data.problems.length === 0
-        ? "No problems have been promoted to the public ledger yet."
+        ? query.after === undefined
+          ? "No problems have been promoted to the public ledger yet."
+          : "No public problems after this position."
         : data.problems.map((problem) => renderProblemIndexMarkdownRow(problem)).join("\n");
-    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
+    const navigation = [
+      ...(data.next_after === undefined
+        ? []
+        : [
+            `[Next page](/problems.md?after=${encodeURIComponent(data.next_after)}) · [Next JSON page](/problems.json?after=${encodeURIComponent(data.next_after)})`,
+          ]),
+      ...(query.after === undefined ? [] : ["[First page](/problems.md)"]),
+    ].join("\n\n");
+    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",

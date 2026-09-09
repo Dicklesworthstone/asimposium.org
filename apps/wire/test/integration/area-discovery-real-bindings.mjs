@@ -267,6 +267,127 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
   assert.equal(legacyIndex.problems.find((problem) => problem.id === problemId).title, null);
   assert.ok(legacyIndex.omitted.includes("some legacy problems have no saved title"));
   assert.ok((await (await face("/problems.md")).text()).includes("title unavailable"));
+  // Explicit scale fixtures on real D1; the problem above was proposed and
+  // published through production routes. No synthetic write is claimed as a
+  // sponsor enrollment or a lifecycle transition.
+  const ids = Array.from({ length: 405 }, (_, i) => `P-IDX-${String(i).padStart(3, "0")}`);
+  const insert = (id, status = "active", unlisted = 0) =>
+    env.DB.prepare(
+      "INSERT INTO problems (id, title, status, unlisted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(
+      id,
+      "Index scale fixture",
+      status,
+      unlisted,
+      "2026-09-09T00:00:00.000Z",
+      "2026-09-09T00:00:00.000Z",
+    );
+  for (let start = 0; start < ids.length; start += 50) {
+    await env.DB.batch(ids.slice(start, start + 50).map((id) => insert(id)));
+  }
+  await env.DB.batch([
+    insert("P-IDX-199-private", "private-draft"),
+    insert("P-IDX-199-unlisted", "active", 1),
+  ]);
+  const expected = [...ids, problemId].sort();
+  const api = await call("/openapi.json");
+  const ledgerSchema = await call("/schemas/ledger.v1.json");
+  for (const path of ["/problems.json", "/problems.md"]) {
+    const parameter = api.paths[path].get.parameters.find((item) => item.name === "after");
+    assert.equal(parameter.in, "query");
+    assert.ok(parameter.schema.$ref.endsWith("/properties/problems_index_query/properties/after"));
+  }
+  assert.equal(ledgerSchema.properties.problems_index_query.additionalProperties, false);
+  assert.equal(ledgerSchema.properties.problems_index_query.properties.after.maxLength, 128);
+  const firstPage = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+  assert.deepEqual(
+    firstPage.problems.map((problem) => problem.id),
+    expected.slice(0, 200),
+  );
+  assert.equal(
+    firstPage.next_after,
+    expected[199],
+    "Overflow must supply the last returned id for continuation",
+  );
+  // A new id on either side of the current boundary cannot shift or repeat
+  // already returned entries. The earlier insertion is found on a fresh scan.
+  const before = "P-IDX-000-before";
+  const after = "P-IDX-300-after";
+  await env.DB.batch([insert(before), insert(after)]);
+  const seen = firstPage.problems.map((problem) => problem.id);
+  let position = firstPage.next_after;
+  let pages = 1;
+  while (position !== undefined) {
+    assert.ok(pages < 5, "Continuation must terminate");
+    const query = `?after=${encodeURIComponent(position)}`;
+    const response = await face(`/problems.json${query}`);
+    const page = ProblemsIndexResponseSchema.parse(await response.json());
+    assert.ok(page.problems.every((problem) => problem.id > position));
+    assert.ok(page.problems.length <= 200);
+    seen.push(...page.problems.map((problem) => problem.id));
+    for (const suffix of ["json", "md"]) {
+      const path = `/problems.${suffix}${query}`;
+      const current = await face(path);
+      const body = await current.text();
+      for (const entry of page.problems) assert.ok(body.includes(entry.id));
+      assert.ok(!body.includes("P-IDX-199-private") && !body.includes("P-IDX-199-unlisted"));
+      if (page.next_after) assert.ok(body.includes(encodeURIComponent(page.next_after)));
+      assert.equal((await face(path, current.headers.get("etag"))).status, 304);
+      const head = await worker.fetch(`${origin}${path}`, {
+        method: "HEAD",
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get("etag"), current.headers.get("etag"));
+      assert.equal(await head.text(), "");
+    }
+    position = page.next_after;
+    pages += 1;
+  }
+  assert.equal(pages, 3);
+  assert.deepEqual(seen, [...expected, after].sort());
+  assert.equal(new Set(seen).size, seen.length);
+  assert.ok((await call("/problems.json")).problems.some((problem) => problem.id === before));
+  const exhausted = await call("/problems.json?after=zzzz");
+  assert.equal(exhausted.problems.length, 0);
+  assert.equal(exhausted.next_after, undefined);
+  assert.ok(
+    (await (await face("/problems.md?after=zzzz")).text()).includes(
+      "No public problems after this position.",
+    ),
+  );
+  for (const query of [
+    "?after=",
+    "?after=P-A&after=P-B",
+    "?limit=100000",
+    "?after=../PRIVATE_QUERY_CANARY",
+    `?after=${"x".repeat(129)}`,
+  ]) {
+    for (const suffix of ["json", "md"]) {
+      const response = await face(`/problems.${suffix}${query}`);
+      assert.equal(response.status, 400);
+      const raw = await response.text();
+      assert.ok(!raw.includes("PRIVATE_QUERY_CANARY"));
+      const error = JSON.parse(raw);
+      assert.equal(error.code, "CURSOR_INVALID");
+      assert.ok(error.rule && error.fix_hint && error.schema && error.example);
+      const head = await worker.fetch(`${origin}/problems.${suffix}${query}`, {
+        method: "HEAD",
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(head.status, 400);
+      assert.equal(await head.text(), "");
+    }
+  }
+  console.log(
+    JSON.stringify({
+      stage: "index-continuation",
+      pages,
+      returned: seen.length,
+      distinct: new Set(seen).size,
+      private_excluded: true,
+    }),
+  );
   console.log(
     JSON.stringify({
       kind: "area-discovery-real-bindings",

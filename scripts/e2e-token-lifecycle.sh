@@ -93,6 +93,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0048_reanchor_replay_scope.sql"
   "0049_problem_statement_reviews.sql"
   "0050_problem_areas.sql"
+  "0051_synthesize_replay_scope.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

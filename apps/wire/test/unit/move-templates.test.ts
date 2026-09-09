@@ -70,6 +70,7 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   "add-refuter-from-friction": evidence,
   "close-gap": { gap_id: "G-1", closed_by: "C-2@1" },
   "idle-close": { handback: "C-1 needs an independent check of its boundary case." },
+  synthesize: {},
 };
 
 test("available move guidance agrees with mounted POSTs, published schemas and actual validators", () => {
@@ -119,7 +120,7 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
         expect(template.required_fields, template.move).toContain(field);
     }
   }
-  expect(count).toBe(11);
+  expect(count).toBe(12);
   expect(Object.keys(bodies)).toHaveLength(count);
 });
 

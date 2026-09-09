@@ -10366,4 +10366,95 @@ describe("committed promotion outbox nudge", () => {
       await standing("open");
     });
   });
+
+  describe("synthesis lifecycle and P13 anchor validation (W5.8b)", () => {
+    test("valid synthesis creation, idempotent replay, and unanchored anchor rejection", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `synth-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return (await response.json()) as Record<string, unknown>;
+      };
+
+      // 1. Refuses invalid request body
+      const badBody = await post(`${f.path}/synthesize`, { covers_through: -1 }, 422);
+      expect(badBody.code).toBe("SYNTHESIZE_BODY_INVALID");
+      expect(badBody.rule).toBe("P13");
+
+      // 2. Refuses unanchored synthesis (P13): referencing nonexistent claim C-999
+      const unanchored = await post(
+        `${f.path}/synthesize`,
+        {
+          covers_through: 1,
+          body_md: "## Synthesis\n\nAsserting nonexistent claim.",
+          anchors: [{ target_kind: "claim", target_id: "C-999", target_version: 1 }],
+          omitted: [],
+          selection_policy: "All corroborated claims",
+        },
+        422,
+      );
+      expect(unanchored.code).toBe("SYNTHESIS_UNANCHORED");
+      expect(unanchored.rule).toBe("P13");
+      expect(Array.isArray(unanchored.unanchored)).toBe(true);
+      expect((unanchored.unanchored as string[]).some((s) => s.includes("C-999"))).toBe(true);
+
+      // 3. Valid synthesis creation: anchored to seeded claim C-1
+      const maxSeqRow = await f.db
+        .prepare("SELECT MAX(seq) AS max_seq FROM events WHERE problem_id = 'P-4DSP'")
+        .first<{ max_seq: number }>();
+      const currentSeq = maxSeqRow?.max_seq ?? 1;
+
+      const validSynth = (await post(`${f.path}/synthesize`, {
+        covers_through: currentSeq,
+        body_md: "## State of Problem P-4DSP\n\nClaim C-1 is established.",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+        omitted: [],
+        selection_policy: "Include claims at head version",
+      })) as Record<string, unknown>;
+
+      expect(typeof validSynth.synthesis_id).toBe("string");
+      expect((validSynth.synthesis_id as string).startsWith("SYNTH-")).toBe(true);
+      expect(validSynth.problem_id).toBe("P-4DSP");
+      expect(validSynth.covers_through).toBe(currentSeq);
+      expect(validSynth.anchors_count).toBe(1);
+      expect(validSynth.dropped_single_author_count).toBe(0);
+      expect(validSynth.sequence).toBeGreaterThan(currentSeq);
+
+      // Verify row in syntheses table
+      const synthRow = await f.db
+        .prepare("SELECT * FROM syntheses WHERE synthesis_id = ?")
+        .bind(validSynth.synthesis_id)
+        .first<{
+          synthesis_id: string;
+          covers_through: number;
+          dropped_single_author_count: number;
+        }>();
+      expect(synthRow?.synthesis_id).toBe(validSynth.synthesis_id as string);
+      expect(synthRow?.covers_through).toBe(currentSeq);
+      expect(synthRow?.dropped_single_author_count).toBe(0);
+
+      // 4. Idempotent replay with same key returns 200 with identical response
+      const replayResponse = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `synth-${key}` },
+        body: JSON.stringify({
+          covers_through: currentSeq,
+          body_md: "## State of Problem P-4DSP\n\nClaim C-1 is established.",
+          anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+          omitted: [],
+          selection_policy: "Include claims at head version",
+        }),
+      });
+      expect(replayResponse.status).toBe(200);
+      expect(replayResponse.headers.get("cache-control")).toBe("private, no-store");
+      const replayJson = (await replayResponse.json()) as Record<string, unknown>;
+      expect(replayJson.synthesis_id).toBe(validSynth.synthesis_id);
+      expect(replayJson.sequence).toBe(validSynth.sequence);
+    });
+  });
 });

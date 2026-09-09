@@ -1210,7 +1210,7 @@ describe("face wire format", () => {
         "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
         "- `P-DIPTYCH-PARITY` — seq 73491, opened 2026-08-19T01:02:03.004Z, " +
         "updated 2027-09-21T05:06:07.008Z; title (untrusted) `Finite convention`; status sharpening\n\n" +
-        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded\n",
+        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n",
     );
 
     const descriptorKeys = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key);
@@ -1356,7 +1356,7 @@ describe("face wire format", () => {
         "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
         `- \`${expected.id}\` — seq ${expected.public_seq}, opened ${expected.created_at}, ` +
         `updated ${expected.updated_at}; title (untrusted) \`${expected.title}\`; status ${expected.status}\n\n` +
-        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded\n";
+        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n";
       expect(await markdown.text()).toBe(expectedBody);
       const jsonEtag = json.headers.get("etag");
       const markdownEtag = markdown.headers.get("etag");
@@ -1447,7 +1447,10 @@ describe("face wire format", () => {
       // The truncated row is the largest id, not the largest public_seq / latest
       // updated_at (which the rival sorts would have kept as their first row).
       expect(index.problems.some((entry) => entry.id === "P-200")).toBe(false);
-      expect(index.omitted).toContain("results beyond the first 200 in canonical problem-id order");
+      expect(index.omitted).toContain(
+        "results beyond this page of 200 in canonical problem-id order",
+      );
+      expect(index.next_after).toBe("P-199");
 
       // JSON/Markdown parity: same order, same truncation, same honest omission.
       const markdown = await markdownResponse.text();
@@ -1455,7 +1458,8 @@ describe("face wire format", () => {
       expect(markdown).toContain("`P-199`");
       expect(markdown).not.toContain("`P-200`");
       expect(markdown.indexOf("`P-000`")).toBeLessThan(markdown.indexOf("`P-199`"));
-      expect(markdown).toContain("results beyond the first 200 in canonical problem-id order");
+      expect(markdown).toContain("results beyond this page of 200 in canonical problem-id order");
+      expect(markdown).toContain("[Next page](/problems.md?after=P-199)");
 
       // Deterministic, stable face ETags across repeated reads, still useful for 304.
       const jsonEtag = jsonResponse.headers.get("etag");

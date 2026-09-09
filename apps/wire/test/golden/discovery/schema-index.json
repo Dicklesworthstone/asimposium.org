@@ -30,7 +30,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 41833
+      "body_bytes": 42471
     },
     {
       "id": "moves",
@@ -42,7 +42,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 38983
+      "body_bytes": 39950
     },
     {
       "id": "problems",
@@ -66,7 +66,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 136252
+      "body_bytes": 140100
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."
