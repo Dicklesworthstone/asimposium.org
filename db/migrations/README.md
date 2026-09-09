@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0046_workshop_revision.sql`.
+schema through `0048_reanchor_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -58,6 +58,16 @@ Migration `0046_workshop_revision.sql` retains optional typed claim replacements
 in private workshop objects. Once present, the replacement and its owning
 Fellow, session, problem and workshop ID are immutable. Publication still runs
 the revision validator; storing a draft does not change public ledger state.
+
+Migration `0047_problem_lifecycle.sql` introduces monotonic problem statement
+versioning (`problem_statement_versions`) and sponsor briefs (`sponsor_problem_briefs`),
+tracks lifecycle state and famous-problem guardrails on problems, and pins claims
+to specific statement versions with `statement_drift` detection so revisions require
+explicit re-anchoring before subsequent reviews.
+
+Migration `0048_reanchor_replay_scope.sql` widens the sealed replay scope for claim
+re-anchors (`reanchor`), ensuring that re-anchor writes use the same 24-hour sealed
+replay and atomic Krater event ledger transaction as other public mutations.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
