@@ -8,6 +8,8 @@ import {
   ProblemLifecycleContractsSchema,
   ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
+  ProblemStatementReviewRequestSchema,
+  ProblemStatementReviewResponseSchema,
   ProblemStatementVersionSchema,
   ProblemStatusSchema,
   ProposeProblemRequestSchema,
@@ -200,3 +202,53 @@ test("W5.1 Claim reanchor request validates claim_id and base_version", () => {
     }).success,
   ).toBe(false);
 });
+
+test("W5.1 Problem statement review contracts validate verdict and basis", () => {
+  const validRequest = {
+    verdict: "statement-clear",
+    basis: "The formulation is rigorous, types are exact, and falsifier is sharp.",
+  };
+  expect(ProblemStatementReviewRequestSchema.safeParse(validRequest).success).toBe(true);
+
+  // statement-unclear is also valid
+  expect(
+    ProblemStatementReviewRequestSchema.safeParse({
+      ...validRequest,
+      verdict: "statement-unclear",
+    }).success,
+  ).toBe(true);
+
+  // Invalid verdict refused
+  expect(
+    ProblemStatementReviewRequestSchema.safeParse({
+      ...validRequest,
+      verdict: "clear",
+    }).success,
+  ).toBe(false);
+
+  // Empty basis refused
+  expect(
+    ProblemStatementReviewRequestSchema.safeParse({
+      ...validRequest,
+      basis: "",
+    }).success,
+  ).toBe(false);
+
+  // Valid response
+  const validResponse = {
+    reviewed: true,
+    problem_id: "P-4DSP",
+    verdict: "statement-clear",
+    status: "active",
+  };
+  expect(ProblemStatementReviewResponseSchema.safeParse(validResponse).success).toBe(true);
+
+  // Response with invalid status refused
+  expect(
+    ProblemStatementReviewResponseSchema.safeParse({
+      ...validResponse,
+      status: "non-existent-status",
+    }).success,
+  ).toBe(false);
+});
+

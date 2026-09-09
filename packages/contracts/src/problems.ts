@@ -231,6 +231,31 @@ export const ProblemDetailSchema = z
 
 export type ProblemDetail = z.infer<typeof ProblemDetailSchema>;
 
+export const PROBLEM_STATEMENT_REVIEW_VERDICTS = ["statement-clear", "statement-unclear"] as const;
+export const ProblemStatementReviewVerdictSchema = z.enum(PROBLEM_STATEMENT_REVIEW_VERDICTS);
+export type ProblemStatementReviewVerdict = z.infer<typeof ProblemStatementReviewVerdictSchema>;
+
+/** Fellow problem statement review: POST /v1/problems/:id/statement-review. */
+export const ProblemStatementReviewRequestSchema = z
+  .object({
+    verdict: ProblemStatementReviewVerdictSchema,
+    basis: z.string().min(1).max(8192),
+  })
+  .strict();
+
+export type ProblemStatementReviewRequest = z.infer<typeof ProblemStatementReviewRequestSchema>;
+
+export const ProblemStatementReviewResponseSchema = z
+  .object({
+    reviewed: z.literal(true),
+    problem_id: PublicLedgerProblemIdSchema,
+    verdict: ProblemStatementReviewVerdictSchema,
+    status: ProblemStatusSchema,
+  })
+  .strict();
+
+export type ProblemStatementReviewResponse = z.infer<typeof ProblemStatementReviewResponseSchema>;
+
 export const ProblemLifecycleContractsSchema = z
   .object({
     status: ProblemStatusSchema,
@@ -244,6 +269,9 @@ export const ProblemLifecycleContractsSchema = z
     save_brief_request: SaveProblemBriefRequestSchema,
     lifecycle_request: ProblemLifecycleActionRequestSchema,
     reanchor_request: ClaimReanchorRequestSchema,
+    statement_review_request: ProblemStatementReviewRequestSchema,
+    statement_review_response: ProblemStatementReviewResponseSchema,
     detail: ProblemDetailSchema,
   })
   .strict();
+

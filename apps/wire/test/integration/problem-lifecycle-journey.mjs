@@ -278,6 +278,44 @@ export async function problemLifecycleJourney({
   assert.equal(independentReview.verdict, "statement-clear");
   assert.equal(independentReview.status, "active");
 
+  // Verify review record was persisted in problem_statement_reviews in D1
+  const persistedReview = await env.DB.prepare(
+    "SELECT * FROM problem_statement_reviews WHERE problem_id = ? AND version = 1",
+  )
+    .bind(problemId)
+    .first();
+  assert.ok(persistedReview, "Statement review must be persisted in D1");
+  assert.equal(persistedReview.verdict, "statement-clear");
+  assert.equal(
+    persistedReview.basis,
+    "The formulation is rigorous, types are exact, and falsifier is sharp.",
+  );
+
+  // Duplicate review on the same version is refused 409 REVIEWER_ALREADY_REVIEWED
+  const duplicateReview = await call(
+    `/v1/problems/${problemId}/statement-review`,
+    {
+      verdict: "statement-clear",
+      basis: "A duplicate review attempt.",
+    },
+    fellowB1Token,
+    409,
+  );
+  assert.equal(duplicateReview.code, "REVIEWER_ALREADY_REVIEWED");
+  assert.equal(duplicateReview.rule, "P1");
+
+  // Invalid review body (empty basis) is refused 422 REVIEW_BODY_INVALID
+  const invalidReview = await call(
+    `/v1/problems/${problemId}/statement-review`,
+    {
+      verdict: "statement-clear",
+      basis: "",
+    },
+    fellowB1Token,
+    422,
+  );
+  assert.equal(invalidReview.code, "REVIEW_BODY_INVALID");
+
   // Verify status is now active in D1
   const activeProblem = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
   assert.equal(activeProblem.problem.status, "active");
@@ -508,6 +546,44 @@ export async function problemLifecycleJourney({
   );
   assert.equal(resolvedProblem.problem.status, "resolved");
 
+  // Verify problem detail resolution reflects actual saved data and no fabricated fallbacks
+  const resolvedDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
+  assert.equal(resolvedDetail.problem.status, "resolved");
+  assert.ok(resolvedDetail.problem.resolution, "Problem must have resolution object");
+  assert.equal(resolvedDetail.problem.resolution.direction, "affirmed");
+  assert.deepEqual(
+    resolvedDetail.problem.resolution.no_claim_boundary.verified,
+    ["Modular cycle bounds"],
+  );
+
+  // Verify that a problem without resolution_no_claim_boundary does NOT fabricate resolution literals
+  await env.DB.prepare(
+    "UPDATE problems SET resolution_no_claim_boundary = NULL WHERE id = ?",
+  )
+    .bind(problemId)
+    .run();
+  const unboundaryDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
+  assert.equal(unboundaryDetail.problem.status, "resolved");
+  assert.equal(
+    unboundaryDetail.problem.resolution,
+    undefined,
+    "A resolved problem with missing no-claim boundary must not synthesize fake literals",
+  );
+  // Restore the boundary
+  await env.DB.prepare(
+    "UPDATE problems SET resolution_no_claim_boundary = ? WHERE id = ?",
+  )
+    .bind(
+      JSON.stringify({
+        verified: ["Modular cycle bounds"],
+        mechanisms: ["2-adic valuation"],
+        independence_tiers: ["T2"],
+        remaining_external_validation: ["Full integer Collatz map"],
+      }),
+      problemId,
+    )
+    .run();
+
   // Further promotion on resolved problem refused
   const postResolveDraft = await call(
     `/v1/sessions/${sessionA1.session_id}/workshop`,
@@ -629,6 +705,9 @@ export async function problemLifecycleJourney({
       env.DB.prepare("SELECT * FROM sponsor_problem_briefs ORDER BY id"),
       env.DB.prepare("SELECT * FROM krater_integrity_backfill ORDER BY problem_id"),
       env.DB.prepare("SELECT * FROM events ORDER BY problem_id, seq"),
+      env.DB.prepare(
+        "SELECT * FROM problem_statement_reviews ORDER BY problem_id, version, reviewer_fellow_id",
+      ),
     ]);
     return createHash("sha256")
       .update(JSON.stringify(rows.map((row) => row.results)))

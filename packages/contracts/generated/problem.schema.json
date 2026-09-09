@@ -104,7 +104,8 @@
                     "PROBLEM_PROPOSE_BODY_INVALID",
                     "PROBLEM_BRIEF_BODY_INVALID",
                     "PROBLEM_LIFECYCLE_BODY_INVALID",
-                    "REANCHOR_BODY_INVALID"
+                    "REANCHOR_BODY_INVALID",
+                    "REVIEWER_ALREADY_REVIEWED"
                   ]
                 },
                 "detail": {
@@ -669,7 +670,8 @@
                 "PROBLEM_PROPOSE_BODY_INVALID",
                 "PROBLEM_BRIEF_BODY_INVALID",
                 "PROBLEM_LIFECYCLE_BODY_INVALID",
-                "REANCHOR_BODY_INVALID"
+                "REANCHOR_BODY_INVALID",
+                "REVIEWER_ALREADY_REVIEWED"
               ]
             },
             "detail": {
@@ -1213,6 +1215,7 @@
         "PROBLEM_BRIEF_BODY_INVALID",
         "PROBLEM_LIFECYCLE_BODY_INVALID",
         "REANCHOR_BODY_INVALID",
+        "REVIEWER_ALREADY_REVIEWED",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

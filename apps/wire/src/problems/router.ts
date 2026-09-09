@@ -1,6 +1,10 @@
 import {
   ProblemFamousGuardrailSchema,
   ProblemLifecycleActionRequestSchema,
+  type ProblemNoClaimBoundary,
+  ProblemNoClaimBoundarySchema,
+  ProblemStatementReviewRequestSchema,
+  ProblemStatementReviewResponseSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
@@ -412,19 +416,29 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       ? JSON.parse(problem.famous_guardrail)
       : undefined;
 
+    let parsedNoClaimBoundary: ProblemNoClaimBoundary | undefined;
+    if (problem.resolution_no_claim_boundary) {
+      try {
+        const parsed = ProblemNoClaimBoundarySchema.safeParse(
+          JSON.parse(problem.resolution_no_claim_boundary),
+        );
+        if (parsed.success) {
+          parsedNoClaimBoundary = parsed.data;
+        }
+      } catch {
+        parsedNoClaimBoundary = undefined;
+      }
+    }
+
     const resolution =
-      problem.status === "resolved" && problem.resolution_direction && problem.resolution_summary
+      problem.status === "resolved" &&
+      problem.resolution_direction &&
+      problem.resolution_summary &&
+      parsedNoClaimBoundary !== undefined
         ? {
             direction: problem.resolution_direction as any,
             summary: problem.resolution_summary,
-            no_claim_boundary: problem.resolution_no_claim_boundary
-              ? JSON.parse(problem.resolution_no_claim_boundary)
-              : {
-                  verified: ["Resolution verified"],
-                  mechanisms: ["Review consensus"],
-                  independence_tiers: ["T2"],
-                  remaining_external_validation: ["External validation open"],
-                },
+            no_claim_boundary: parsedNoClaimBoundary,
           }
         : undefined;
 
@@ -469,6 +483,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       status: string;
       sponsor_id: string | null;
       created_by_fellow_id: string | null;
+      current_statement_version: number;
     }>();
 
     if (!problem) {
@@ -478,6 +493,11 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         title: "Problem not found",
         detail: `No problem with id '${problemId}' exists.`,
         fixHint: "Check the id against GET /problems.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
       });
     }
 
@@ -507,23 +527,48 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     const rawBody = await readJsonBody(c.req.raw);
     if (rawBody instanceof Response) return rawBody;
-    const body = (rawBody as any) ?? {};
-    const verdict = body.verdict;
-    const basis = body.basis;
-
-    if (!verdict || (verdict !== "statement-clear" && verdict !== "statement-unclear")) {
+    const parsed = ProblemStatementReviewRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
       return validatedProblem({
         status: 422,
         code: "REVIEW_BODY_INVALID",
-        title: "Invalid review verdict",
-        detail: "Statement review requires verdict 'statement-clear' or 'statement-unclear'.",
+        title: "Invalid review body",
+        detail:
+          "Statement review requires verdict 'statement-clear' or 'statement-unclear' and a non-empty basis.",
         fixHint: "Send {verdict: 'statement-clear', basis: '...'}.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          schema: "https://a.asimposium.org/schemas/problems.v1.json",
           example: {
             verdict: "statement-clear",
             basis: "The formulation is clear and well-typed.",
+          },
+        },
+      });
+    }
+    const { verdict, basis } = parsed.data;
+
+    // Check if this reviewer has already reviewed this statement version
+    const existingReview = await db
+      .prepare(
+        "SELECT 1 FROM problem_statement_reviews WHERE problem_id = ? AND version = ? AND reviewer_fellow_id = ?",
+      )
+      .bind(problemId, problem.current_statement_version, auth.binding.fellowId)
+      .first();
+
+    if (existingReview) {
+      return validatedProblem({
+        status: 409,
+        code: "REVIEWER_ALREADY_REVIEWED",
+        title: "Fellow has already reviewed this statement version",
+        detail: `Fellow '${auth.binding.fellowId}' has already submitted a statement review for version ${problem.current_statement_version}.`,
+        fixHint: "Wait for statement revision or review another problem.",
+        rule: "P1",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: {
+            verdict: "statement-clear",
+            basis: "Detailed technical justification why the problem formulation is sound.",
           },
         },
       });
@@ -532,22 +577,42 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const now = new Date().toISOString();
     let newStatus = problem.status;
 
+    const statements = [
+      db
+        .prepare(
+          `INSERT INTO problem_statement_reviews (
+             problem_id, version, reviewer_fellow_id, verdict, basis, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          problemId,
+          problem.current_statement_version,
+          auth.binding.fellowId,
+          verdict,
+          basis,
+          now,
+        ),
+    ];
+
     // statement-clear unlocks sharpening -> active!
     if (verdict === "statement-clear" && problem.status === "sharpening") {
       newStatus = "active";
-      await db
-        .prepare("UPDATE problems SET status = 'active', updated_at = ? WHERE id = ?")
-        .bind(now, problemId)
-        .run();
+      statements.push(
+        db
+          .prepare("UPDATE problems SET status = 'active', updated_at = ? WHERE id = ?")
+          .bind(now, problemId),
+      );
     }
 
+    await db.batch(statements);
+
     return c.json(
-      {
+      ProblemStatementReviewResponseSchema.parse({
         reviewed: true,
         problem_id: problemId,
         verdict,
         status: newStatus,
-      },
+      }),
       200,
       { "cache-control": "private, no-store" },
     );
