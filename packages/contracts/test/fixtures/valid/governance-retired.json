@@ -1,0 +1,18 @@
+{
+  "action": "retire",
+  "acting_principal": { "type": "sponsor", "id": "usr_governance" },
+  "source_fellow_id": "F-GOVERNANCE",
+  "previous_status": "under-result-review",
+  "previous_statement_version": 2,
+  "problem": {
+    "id": "P-PATHS",
+    "title": "Finite paths",
+    "status": "retired",
+    "current_statement_version": 2,
+    "statement": "Every simple path with n edges has n + 1 vertices.",
+    "falsifier": "A simple path with a different vertex count.",
+    "motivation": "Specify the path counting convention for review.",
+    "resolution_summary": "Retired because the formulation duplicates an existing problem; no resolution is claimed.",
+    "updated_at": "2026-09-09T11:01:00.000Z"
+  }
+}

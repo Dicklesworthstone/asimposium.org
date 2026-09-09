@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ProblemDocumentSchema } from "@asimposium/contracts";
+import { ProblemDocumentSchema, ProblemGovernanceEventSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 await runLocalWorkerJourney(
@@ -31,11 +31,50 @@ await runLocalWorkerJourney(
         checkpoints:
           "SELECT * FROM integrity_checkpoints WHERE problem_id = ? ORDER BY checkpoint_seq",
         keys: "SELECT * FROM idempotency WHERE problem_id = ? ORDER BY idempotency_key",
+        reviews:
+          "SELECT * FROM problem_statement_reviews WHERE problem_id = ? ORDER BY version, reviewer_fellow_id",
+        claims: "SELECT * FROM claims WHERE problem_id = ? ORDER BY id",
+        outbox:
+          "SELECT id, event_id, kind, dedupe_key, payload_sha256 FROM outbox WHERE problem_id = ? ORDER BY id",
       }))
         result[name] = (await env.DB.prepare(query).bind(problemId).all()).results;
       result.cursor = await call("/cursor");
       return result;
     }
+    const privateBefore = await state();
+    for (const action of [
+      { action: "enter-result-review" },
+      { action: "retire", reason: "A private retirement must not publish its formulation." },
+    ]) {
+      const refused = await govern(action, `private-${action.action}`, 409);
+      assert.equal(refused.code, "OBJECT_VERSION_CONFLICT");
+      assert.ok(ProblemDocumentSchema.safeParse(refused).success);
+      await call(`/p/${id}.json`, undefined, undefined, 404);
+      await call(`/p/${id}.md`, undefined, undefined, 404);
+      await call(`/v1/problems/${id}`, undefined, undefined, 404);
+      assert.ok(!(await call("/problems.json")).problems.some((item) => item.id === id));
+      assert.ok(!(await call("/now.json")).events.some((item) => item.problem_id === id));
+      assert.deepEqual(await state(), privateBefore);
+    }
+    const privateResolve = await govern(
+      {
+        action: "resolve",
+        direction: "closed-with-negative-result",
+        closing_synthesis: {
+          summary: "A lifecycle transition cannot authorize draft publication.",
+          no_claim_boundary: {
+            verified: ["Nothing"],
+            mechanisms: ["None"],
+            independence_tiers: ["None"],
+            remaining_external_validation: ["All scientific checks"],
+          },
+        },
+      },
+      "private-chained-resolution",
+      422,
+    );
+    assert.equal(privateResolve.code, "PREMATURE_RESOLUTION");
+    assert.deepEqual(await state(), privateBefore);
     const globalBefore = await call("/cursor");
     const published = await sponsorCall(
       sponsor,
@@ -203,6 +242,161 @@ await runLocalWorkerJourney(
     assert.ok(reused.problem.current_statement_version > revised.problem.current_statement_version);
     assert.equal((await state()).events.length, beforeExpired.events.length + 1);
 
+    // A public formulation still needs the independent statement-clear gate before result review.
+    const beforeSharpening = await state();
+    assert.equal(
+      (await govern({ action: "enter-result-review" }, "sharpening-review", 409)).code,
+      "OBJECT_VERSION_CONFLICT",
+    );
+    assert.deepEqual(await state(), beforeSharpening);
+    const reviewer = await enroll("governance-reviewer", "usr_governance_reviewer");
+    const reviewSession = await call(
+      "/v1/sessions",
+      { problem_id: id, intent: "review" },
+      reviewer,
+      201,
+    );
+    const clear = await call(
+      `/v1/problems/${id}/statement-review`,
+      {
+        session_id: reviewSession.session_id,
+        statement_version: beforeSharpening.problem[0].current_statement_version,
+        verdict: "statement-clear",
+        basis: "The finite path domain and contrary vertex count are explicit.",
+      },
+      reviewer,
+    );
+    assert.equal(clear.status, "active");
+
+    const entry = { action: "enter-result-review" };
+    const retirement = {
+      action: "retire",
+      reason: "Retain the explored formulation; no resolution is claimed.",
+    };
+    const active = await state();
+    for (const action of [entry, retirement]) {
+      for (const [label, patch, actor] of [
+        [
+          "version",
+          { current_statement_version: active.problem[0].current_statement_version - 1 },
+          sponsor,
+        ],
+        ["status", { status: "dormant" }, sponsor],
+        ["sponsor", { sponsor_id: "usr_changed_governance" }, "usr_changed_governance"],
+      ]) {
+        const stale = await fixtures.governanceFromSnapshot(
+          { ...active.problem[0], ...patch },
+          actor,
+          action,
+          `${action.action}-stale-${label}`,
+        );
+        assert.equal(stale.status, 409, `${action.action} must reject a stale ${label}`);
+        assert.equal(stale.body.code, "OBJECT_VERSION_CONFLICT");
+        assert.deepEqual(await state(), active);
+      }
+    }
+    async function assertTransition(action, key, type, nextStatus) {
+      const before = await state();
+      const face = await worker.fetch(`${origin}/p/${id}.json`, {
+        headers: { "User-Agent": userAgent },
+      });
+      const etag = face.headers.get("etag");
+      await face.arrayBuffer();
+      const outcomes = await Promise.all(Array.from({ length: 3 }, () => govern(action, key)));
+      const response = outcomes[0];
+      for (const outcome of outcomes) assert.deepEqual(outcome, response);
+      const after = await state();
+      assert.equal(after.events.length, before.events.length + 1);
+      assert.equal(after.keys.length, before.keys.length + 1);
+      assert.equal(after.cursor, before.cursor + 1);
+      assert.equal(after.problem[0].public_seq, before.problem[0].public_seq + 1);
+      assert.equal(after.problem[0].status, nextStatus);
+      assert.equal(response.problem.status, nextStatus);
+      assert.equal(after.problem[0].created_by_fellow_id, sourceFellow);
+      assert.deepEqual(after.versions, before.versions);
+      assert.deepEqual(after.claims, before.claims);
+      assert.deepEqual(after.reviews, before.reviews);
+      const event = after.events.at(-1);
+      assert.equal(event.type, type);
+      assert.equal(event.object_version, before.problem[0].current_statement_version);
+      assert.equal(event.actor_sponsor_id, sponsor);
+      for (const field of [
+        "actor_fellow_id",
+        "actor_session_id",
+        "model_string_self_declared",
+        "harness",
+        "writer_credential_id",
+      ])
+        assert.equal(event[field], null);
+      const payload = ProblemGovernanceEventSchema.parse(
+        JSON.parse(after.content.find((row) => row.event_id === event.id).payload_json),
+      );
+      assert.equal(payload.action, action.action);
+      assert.equal(payload.previous_status, before.problem[0].status);
+      assert.equal(payload.source_fellow_id, sourceFellow);
+      assert.deepEqual(payload.problem, response.problem);
+      assert.equal(payload.problem.updated_at, event.created_at);
+      const changedFace = await worker.fetch(`${origin}/p/${id}.json`, {
+        headers: { "User-Agent": userAgent, "If-None-Match": etag },
+      });
+      assert.equal(changedFace.status, 200);
+      assert.notEqual(changedFace.headers.get("etag"), etag);
+      assert.equal((await changedFace.json()).cursor, after.problem[0].public_seq);
+      assert.equal((await call(`/v1/problems/${id}`)).problem.status, nextStatus);
+      assert.equal(
+        (await call("/problems.json")).problems.find((item) => item.id === id).status,
+        nextStatus,
+      );
+      assert.deepEqual(await govern(action, key), response);
+      assert.deepEqual(await state(), after);
+      return response;
+    }
+    const entered = await assertTransition(
+      entry,
+      "result-review-key",
+      "problem.result-review-started",
+      "under-result-review",
+    );
+
+    // Fault after event insertion: SQLite must undo the complete status-only governance write.
+    await env.DB.prepare(
+      `CREATE TABLE governance_status_fault (problem_id TEXT NOT NULL, enabled INTEGER NOT NULL)`,
+    ).run();
+    await env.DB.prepare("INSERT INTO governance_status_fault VALUES (?, 1)").bind(id).run();
+    await env.DB.prepare(`CREATE TRIGGER governance_status_failure BEFORE UPDATE OF status ON problems
+      WHEN NEW.status = 'retired' AND EXISTS (SELECT 1 FROM governance_status_fault WHERE problem_id = NEW.id AND enabled = 1)
+      BEGIN SELECT RAISE(ABORT, 'private-status-rollback-proof'); END`).run();
+    const beforeStatusFailure = await state();
+    const statusFailure = await govern(retirement, "retirement-key", 500);
+    assert.equal(statusFailure.code, "INTERNAL_ERROR");
+    assert.ok(ProblemDocumentSchema.safeParse(statusFailure).success);
+    assert.ok(!JSON.stringify(statusFailure).includes("private-status-rollback-proof"));
+    assert.deepEqual(await state(), beforeStatusFailure);
+    await env.DB.prepare("UPDATE governance_status_fault SET enabled = 0").run();
+    const retired = await assertTransition(
+      retirement,
+      "retirement-key",
+      "problem.retired",
+      "retired",
+    );
+    assert.equal(retired.problem.resolution_summary, retirement.reason);
+    const afterRetired = await state();
+    assert.equal(afterRetired.problem[0].resolution_summary, retirement.reason);
+    // Lost responses replay their original state even after a terminal transition.
+    assert.deepEqual(await govern(entry, "result-review-key"), entered);
+    assert.deepEqual(await govern(retirement, "retirement-key"), retired);
+    for (const [action, key] of [
+      [{ ...retirement, reason: "Changed request" }, "retirement-key"],
+      [retirement, "result-review-key"],
+    ])
+      assert.equal((await govern(action, key, 409)).code, "IDEMPOTENCY_CONFLICT");
+    for (const action of [entry, retirement, revision, { action: "publish" }])
+      assert.equal(
+        (await govern(action, `closed-${action.action}`, 409)).code,
+        "OBJECT_VERSION_CONFLICT",
+      );
+    assert.deepEqual(await state(), afterRetired);
+
     const privateCreated = await call(
       "/v1/problems",
       { ...proposal, title: "Private governance", statement: "Private unique formulation" },
@@ -293,7 +487,7 @@ await runLocalWorkerJourney(
         kind: "problem-lifecycle-ledger",
         status: "pass",
         proof:
-          "real local D1 publication, revision, replay, concurrency, rollback, expiry and discovery isolation",
+          "real local D1 publication, revision, result-review, retirement, private-state refusal, immutable replay, stale snapshots, concurrency, rollback, expiry and discovery isolation",
         concurrent_successes: winners.length,
         concurrent_stale_refusals: losers.length,
       }),

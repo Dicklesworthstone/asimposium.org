@@ -106,6 +106,54 @@ test("W5.1 Problem lifecycle contracts validate all states and directions", () =
   expect(ProblemResolutionDirectionSchema.safeParse("proven").success).toBe(false);
 });
 
+test("governance state changes cannot publish private drafts or reopen closed problems", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.governance_event);
+  for (const name of ["governance-result-review", "governance-retired"]) {
+    for (const directory of ["valid", "invalid"]) {
+      const fixture = JSON.parse(
+        readFileSync(new URL(`../fixtures/${directory}/${name}.json`, import.meta.url), "utf8"),
+      );
+      expect(ProblemGovernanceEventSchema.safeParse(fixture).success).toBe(directory === "valid");
+      expect(published(fixture)).toBe(directory === "valid");
+      if (directory !== "valid") continue;
+      for (const previous_status of [
+        "private-draft",
+        "sharpening",
+        "active",
+        "dormant",
+        "under-result-review",
+        "resolved",
+        "retired",
+      ]) {
+        const allowed =
+          fixture.action === "retire"
+            ? ["sharpening", "active", "dormant", "under-result-review"].includes(previous_status)
+            : ["active", "dormant"].includes(previous_status);
+        const candidate = { ...fixture, previous_status };
+        expect(ProblemGovernanceEventSchema.safeParse(candidate).success).toBe(allowed);
+        expect(published(candidate)).toBe(allowed);
+      }
+      for (const problem of [
+        { ...fixture.problem, status: "active" },
+        { ...fixture.problem, invented_session: "S-abcdefghijklmnopqrstuvwxyz" },
+        { ...fixture.problem, resolution_summary: "" },
+      ]) {
+        expect(ProblemGovernanceEventSchema.safeParse({ ...fixture, problem }).success).toBe(false);
+        expect(published({ ...fixture, problem })).toBe(false);
+      }
+      expect(
+        ProblemGovernanceEventSchema.safeParse({
+          ...fixture,
+          previous_statement_version: fixture.previous_statement_version + 1,
+        }).success,
+      ).toBe(false);
+    }
+  }
+});
+
 test("W5.1 Famous-problem guardrail enforces canonical formulation and standing banner", () => {
   const validGuardrail = {
     canonical_formulation: "Every even integer > 2 is the sum of two primes.",

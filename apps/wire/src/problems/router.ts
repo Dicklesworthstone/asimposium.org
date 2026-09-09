@@ -797,6 +797,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     if (
       action.action === "publish" ||
+      action.action === "enter-result-review" ||
+      action.action === "retire" ||
       (action.action === "revise-statement" && problem.status !== "private-draft")
     ) {
       return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);
@@ -856,26 +858,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
             statement: action.statement,
             falsifier: action.falsifier,
             motivation: action.motivation,
-            updated_at: now,
-          },
-        },
-        200,
-        { "cache-control": "private, no-store" },
-      );
-    }
-
-    if (action.action === "enter-result-review") {
-      await db
-        .prepare("UPDATE problems SET status = 'under-result-review', updated_at = ? WHERE id = ?")
-        .bind(now, problemId)
-        .run();
-
-      return c.json(
-        {
-          problem: {
-            id: problemId,
-            status: "under-result-review",
-            title: problem.title,
             updated_at: now,
           },
         },
@@ -949,29 +931,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               summary: action.closing_synthesis.summary,
               no_claim_boundary: action.closing_synthesis.no_claim_boundary,
             },
-            updated_at: now,
-          },
-        },
-        200,
-        { "cache-control": "private, no-store" },
-      );
-    }
-
-    if (action.action === "retire") {
-      await db
-        .prepare(
-          "UPDATE problems SET status = 'retired', resolution_summary = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(action.reason, now, problemId)
-        .run();
-
-      return c.json(
-        {
-          problem: {
-            id: problemId,
-            status: "retired",
-            title: problem.title,
-            resolution_summary: action.reason,
             updated_at: now,
           },
         },

@@ -248,7 +248,7 @@ and what remains in its assigned plane.
   The public problem directory carries saved titles and lifecycle statuses in JSON, Markdown
   and Agora, retains its deterministic 200-entry bound, and labels missing legacy titles.
   Private and unlisted problems are excluded; dormant entries remain discoverable in the directory.
-  Sponsor publication and public statement revisions commit immutable formulation events,
+  Sponsor publication, public statement revisions, entry into result review and retirement commit immutable formulation events,
   projections and both polling cursors atomically. Sponsor governance is attributed separately
   from the source Fellow; unchanged retries replay the original outcome for 24 hours.
   Statement reviews require an owned session and an exact statement-version pin. They share
@@ -260,8 +260,11 @@ and what remains in its assigned plane.
   digests and projection consistency, labels earlier-version reviews, and discloses unavailable
   or unattributed legacy records. Both planes revalidate these reads so withdrawn review bodies
   stop appearing. This is source and local D1/browser proof; deployed verification remains open.
-  Listed publications appear in Now. Private revisions stay private; the remaining lifecycle
-  transitions and complete proposal attribution are still W5 work.
+  Result review requires an active or dormant problem; retirement requires a published, nonterminal
+  problem. Neither action can publish a private draft. Their retained outcomes preserve the exact
+  formulation and retirement reason without attributing sponsor actions to a Fellow session.
+  Listed publications appear in Now. Private revisions stay private; resolution verification,
+  closing-synthesis admission, dormancy and complete proposal attribution are still W5 work.
   Published unlisted problems work at known digest, claim and citation URLs and in session packs.
   Their reading faces explain that URLs are guessable and public; Stoa and Agora mark them
   `noindex, nofollow`. Discovery lists, search, Now, and Fellow cards exclude their work and counts.

@@ -565,6 +565,42 @@ export async function problemLifecycleJourney({
     200,
   );
   assert.equal(resolvedProblem.problem.status, "resolved");
+  const resolvedBefore = await env.DB.prepare("SELECT * FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first();
+  const resolvedEventsBefore = await env.DB.prepare(
+    "SELECT * FROM events WHERE problem_id = ? ORDER BY seq",
+  )
+    .bind(problemId)
+    .all();
+  const resolvedCursorBefore = await call("/cursor");
+  for (const action of [
+    { action: "enter-result-review" },
+    { action: "retire", reason: "Cannot replace an existing resolution." },
+  ]) {
+    const refusal = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problemId}/lifecycle`,
+      "problem-lifecycle",
+      action,
+      409,
+    );
+    assert.equal(refusal.code, "OBJECT_VERSION_CONFLICT");
+  }
+  assert.deepEqual(
+    await env.DB.prepare("SELECT * FROM problems WHERE id = ?").bind(problemId).first(),
+    resolvedBefore,
+  );
+  assert.deepEqual(
+    (
+      await env.DB.prepare("SELECT * FROM events WHERE problem_id = ? ORDER BY seq")
+        .bind(problemId)
+        .all()
+    ).results,
+    resolvedEventsBefore.results,
+  );
+  assert.equal(await call("/cursor"), resolvedCursorBefore);
 
   // Verify problem detail resolution reflects actual saved data and no fabricated fallbacks
   const resolvedDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
@@ -663,6 +699,25 @@ export async function problemLifecycleJourney({
     201,
   );
   const retiredProblemId = retiredProblemProp.problem.id;
+
+  const privateRetirement = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${retiredProblemId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "retire", reason: "Must remain private before publication." },
+    409,
+  );
+  assert.equal(privateRetirement.code, "OBJECT_VERSION_CONFLICT");
+  await call(`/p/${retiredProblemId}.json`, undefined, undefined, 404);
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${retiredProblemId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    200,
+  );
 
   const retireRes = await sponsorCall(
     sponsorA,

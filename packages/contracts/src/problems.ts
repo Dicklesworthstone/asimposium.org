@@ -227,35 +227,62 @@ export const ProblemDetailSchema = z
 
 export type ProblemDetail = z.infer<typeof ProblemDetailSchema>;
 
-/** Immutable public governance record. A sponsor action never impersonates a Fellow session. */
-export const ProblemGovernanceEventSchema = z
+const PublicGovernanceStatusSchema = z.enum([
+  "sharpening",
+  "active",
+  "dormant",
+  "under-result-review",
+]);
+const GovernanceFormulationSchema = ProblemDetailSchema.pick({
+  id: true,
+  title: true,
+  current_statement_version: true,
+  statement: true,
+  falsifier: true,
+  motivation: true,
+  updated_at: true,
+});
+const GovernanceRecordSchema = z
   .object({
-    action: z.enum(["publish", "revise-statement"]),
     acting_principal: z.object({ type: z.literal("sponsor"), id: SponsorIdSchema }).strict(),
     source_fellow_id: z.string().min(1).max(128),
-    previous_status: ProblemStatusSchema,
     previous_statement_version: z.number().int().positive(),
-    problem: ProblemDetailSchema.pick({
-      id: true,
-      title: true,
-      current_statement_version: true,
-      statement: true,
-      falsifier: true,
-      motivation: true,
-      updated_at: true,
-    })
-      .extend({ status: z.enum(["sharpening", "active", "dormant", "under-result-review"]) })
-      .strict(),
   })
-  .strict()
+  .strict();
+
+/** Immutable public governance record. A sponsor action never impersonates a Fellow session. */
+export const ProblemGovernanceEventSchema = z
+  .discriminatedUnion("action", [
+    GovernanceRecordSchema.extend({
+      action: z.literal("publish"),
+      previous_status: z.literal("private-draft"),
+      problem: GovernanceFormulationSchema.extend({ status: z.literal("sharpening") }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("revise-statement"),
+      previous_status: PublicGovernanceStatusSchema,
+      problem: GovernanceFormulationSchema.extend({ status: PublicGovernanceStatusSchema }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("enter-result-review"),
+      previous_status: z.enum(["active", "dormant"]),
+      problem: GovernanceFormulationSchema.extend({ status: z.literal("under-result-review") }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("retire"),
+      previous_status: PublicGovernanceStatusSchema,
+      problem: GovernanceFormulationSchema.extend({
+        status: z.literal("retired"),
+        resolution_summary: z.string().min(1).max(2048),
+      }),
+    }),
+  ])
   .superRefine((event, context) => {
-    const publishing = event.action === "publish";
-    const valid = publishing
-      ? event.previous_status === "private-draft" &&
-        event.problem.status === "sharpening" &&
-        event.problem.current_statement_version === event.previous_statement_version
-      : event.problem.status === event.previous_status &&
-        event.problem.current_statement_version === event.previous_statement_version + 1;
+    const revising = event.action === "revise-statement";
+    const valid =
+      event.problem.current_statement_version ===
+        event.previous_statement_version + (revising ? 1 : 0) &&
+      (!revising || event.problem.status === event.previous_status);
     if (!valid)
       context.addIssue({
         code: "custom",

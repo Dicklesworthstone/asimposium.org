@@ -2459,7 +2459,12 @@ export async function writeLedgerEvent(
     if (
       input.objectKind !== "problem" ||
       input.objectId !== input.problemId ||
-      !["problem.admitted", "problem.statement-revised"].includes(input.eventType) ||
+      ![
+        "problem.admitted",
+        "problem.statement-revised",
+        "problem.result-review-started",
+        "problem.retired",
+      ].includes(input.eventType) ||
       input.attribution.fellowId !== null ||
       input.attribution.sessionId !== null ||
       input.attribution.modelSelfDeclared !== null ||

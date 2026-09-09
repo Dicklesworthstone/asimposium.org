@@ -23,6 +23,13 @@ interface ProblemSnapshot {
   current_statement_version: number;
 }
 
+const governanceEventTypes = {
+  publish: "problem.admitted",
+  "revise-statement": "problem.statement-revised",
+  "enter-result-review": "problem.result-review-started",
+  retire: "problem.retired",
+} as const;
+
 function refusal(code: ProblemCode, status: number, detail: string, fixHint: string): Response {
   return validatedProblem({
     code,
@@ -52,7 +59,7 @@ export async function applyPublicProblemGovernance(
   db: D1Database,
   problem: ProblemSnapshot,
   sponsorId: string,
-  action: Extract<ProblemLifecycleActionRequest, { action: "publish" | "revise-statement" }>,
+  action: Extract<ProblemLifecycleActionRequest, { action: keyof typeof governanceEventTypes }>,
   request: Request,
 ): Promise<Response> {
   const key = ProblemGovernanceKeySchema.safeParse(request.headers.get("idempotency-key"));
@@ -112,8 +119,7 @@ export async function applyPublicProblemGovernance(
       event.problem.id !== problem.id ||
       event.action !== action.action ||
       event.problem.updated_at !== receipt.created_at ||
-      receipt.type !==
-        (event.action === "publish" ? "problem.admitted" : "problem.statement-revised")
+      receipt.type !== governanceEventTypes[event.action]
     )
       throw new Error("Problem governance receipt does not match its event envelope.");
     return Response.json(
@@ -125,10 +131,13 @@ export async function applyPublicProblemGovernance(
   const previous = await replay();
   if (previous) return previous;
   const publishing = action.action === "publish";
+  const revising = action.action === "revise-statement";
   if (
     publishing
       ? problem.status !== "private-draft"
-      : !["sharpening", "active", "dormant", "under-result-review"].includes(problem.status)
+      : action.action === "enter-result-review"
+        ? !["active", "dormant"].includes(problem.status)
+        : !["sharpening", "active", "dormant", "under-result-review"].includes(problem.status)
   )
     return refusal(
       "OBJECT_VERSION_CONFLICT",
@@ -145,8 +154,9 @@ export async function applyPublicProblemGovernance(
       .first<{ status: string }>();
     if (fellow?.status !== "active") return problemGovernanceRefused();
   }
-  const formulation = publishing
-    ? await db
+  const formulation = revising
+    ? action
+    : await db
         .prepare(`
     SELECT statement, falsifier, motivation FROM problem_statement_versions
     WHERE problem_id = ? AND version = ?
@@ -156,8 +166,7 @@ export async function applyPublicProblemGovernance(
           statement: string;
           falsifier: string;
           motivation: string;
-        }>()
-    : action;
+        }>();
   const parsed = ProblemGovernanceEventSchema.safeParse({
     action: action.action,
     acting_principal: { type: "sponsor", id: sponsorId },
@@ -167,11 +176,18 @@ export async function applyPublicProblemGovernance(
     problem: {
       id: problem.id,
       title: problem.title,
-      status: publishing ? "sharpening" : problem.status,
-      current_statement_version: problem.current_statement_version + (publishing ? 0 : 1),
+      status: publishing
+        ? "sharpening"
+        : action.action === "enter-result-review"
+          ? "under-result-review"
+          : action.action === "retire"
+            ? "retired"
+            : problem.status,
+      current_statement_version: problem.current_statement_version + (revising ? 1 : 0),
       statement: formulation?.statement,
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
+      ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
       updated_at: now,
     },
   });
@@ -179,13 +195,13 @@ export async function applyPublicProblemGovernance(
     return refusal(
       "STATEMENT_INCOMPLETE",
       422,
-      "Publication requires a complete, versioned problem formulation.",
-      "Provide a title, statement, falsifier and motivation before publishing.",
+      "This governance action requires a complete, versioned problem formulation.",
+      "Provide a title, statement, falsifier and motivation before changing the public lifecycle.",
     );
   const event = parsed.data;
   const next = event.problem;
   const eventId = `PG-${crypto.randomUUID()}`;
-  const statementHash = publishing ? null : `sha256:${await normHash(next.statement)}`;
+  const statementHash = revising ? `sha256:${await normHash(next.statement)}` : null;
   try {
     await writeLedgerEvent(
       db,
@@ -194,7 +210,7 @@ export async function applyPublicProblemGovernance(
         eventId,
         idempotencyKey: scopedKey,
         requestDigest: digest,
-        eventType: publishing ? "problem.admitted" : "problem.statement-revised",
+        eventType: governanceEventTypes[event.action],
         objectKind: "problem",
         objectId: problem.id,
         objectVersion: next.current_statement_version,
@@ -223,7 +239,7 @@ export async function applyPublicProblemGovernance(
           ...(publishing ? [problem.created_by_fellow_id] : []),
         ],
         statementsAfterEvent: () => [
-          ...(!publishing
+          ...(revising
             ? [
                 db
                   .prepare(`
@@ -249,9 +265,18 @@ export async function applyPublicProblemGovernance(
               ]
             : []),
           db
-            .prepare(`UPDATE problems SET status = ?, current_statement_version = ?, updated_at = ?
+            .prepare(`UPDATE problems SET status = ?, current_statement_version = ?, updated_at = ?,
+          resolution_summary = CASE WHEN ? = 'retire' THEN ? ELSE resolution_summary END
           WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
-            .bind(next.status, next.current_statement_version, now, problem.id, eventId),
+            .bind(
+              next.status,
+              next.current_statement_version,
+              now,
+              event.action,
+              "resolution_summary" in next ? next.resolution_summary : null,
+              problem.id,
+              eventId,
+            ),
           db
             .prepare(`UPDATE public_cursor SET cursor = cursor + 1
           WHERE singleton = 1 AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
