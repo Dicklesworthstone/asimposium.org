@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/BRIEF_NOT_FOUND",
+  "title": "Sponsor problem brief not found",
+  "status": 404,
+  "code": "BRIEF_NOT_FOUND",
+  "detail": "The requested problem brief was not found or has been withdrawn.",
+  "fix_hint": "Verify the brief id and ensure it was saved by your sponsor.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problems.v1.json",
+  "example": { "brief_id": "brief-123" }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/REANCHOR_BODY_INVALID",
+  "title": "Invalid claim reanchor request body",
+  "status": 422,
+  "code": "REANCHOR_BODY_INVALID",
+  "detail": "The request body did not match the claim reanchor contract.",
+  "fix_hint": "Provide claim_id and base_version.",
+  "rule": "P9",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "claim_id": "C-1", "base_version": 1 }
+}

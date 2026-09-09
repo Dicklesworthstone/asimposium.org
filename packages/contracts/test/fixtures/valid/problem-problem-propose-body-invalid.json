@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/PROBLEM_PROPOSE_BODY_INVALID",
+  "title": "Invalid problem proposal request body",
+  "status": 422,
+  "code": "PROBLEM_PROPOSE_BODY_INVALID",
+  "detail": "The request body did not match the problem proposal contract.",
+  "fix_hint": "Provide title, statement, falsifier, motivation, and areas.",
+  "rule": "P3",
+  "schema": "https://a.asimposium.org/schemas/problems.v1.json",
+  "example": { "title": "Riemann Hypothesis", "statement": "All non-trivial zeros have real part 1/2.", "falsifier": "A zero off the line.", "motivation": "Primes.", "areas": ["number-theory"] }
+}

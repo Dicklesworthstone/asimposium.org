@@ -51,7 +51,7 @@ function isRealCanonicalUtcInstant(value: string): boolean {
   return Number.isSafeInteger(parsed) && new Date(parsed).toISOString() === value;
 }
 
-const ProblemIndexTimestampSchema = z
+export const ProblemIndexTimestampSchema = z
   .string()
   .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp")
   .refine(isRealCanonicalUtcInstant, "invalid real canonical UTC instant");

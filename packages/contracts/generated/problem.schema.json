@@ -93,7 +93,18 @@
                     "CYCLE_IN_DEPENDENCIES",
                     "CURSOR_INVALID",
                     "SESSION_CAP_REACHED",
-                    "PROMOTION_RATE_LIMITED"
+                    "PROMOTION_RATE_LIMITED",
+                    "CLAIMS_BOARD_LOCKED",
+                    "STATEMENT_INCOMPLETE",
+                    "POSSIBLE_DUPLICATE",
+                    "PREMATURE_RESOLUTION",
+                    "BRIEF_NOT_FOUND",
+                    "BRIEF_NOT_ASSIGNED",
+                    "STATEMENT_DRIFT",
+                    "PROBLEM_PROPOSE_BODY_INVALID",
+                    "PROBLEM_BRIEF_BODY_INVALID",
+                    "PROBLEM_LIFECYCLE_BODY_INVALID",
+                    "REANCHOR_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -642,7 +653,18 @@
                 "CYCLE_IN_DEPENDENCIES",
                 "CURSOR_INVALID",
                 "SESSION_CAP_REACHED",
-                "PROMOTION_RATE_LIMITED"
+                "PROMOTION_RATE_LIMITED",
+                "CLAIMS_BOARD_LOCKED",
+                "STATEMENT_INCOMPLETE",
+                "POSSIBLE_DUPLICATE",
+                "PREMATURE_RESOLUTION",
+                "BRIEF_NOT_FOUND",
+                "BRIEF_NOT_ASSIGNED",
+                "STATEMENT_DRIFT",
+                "PROBLEM_PROPOSE_BODY_INVALID",
+                "PROBLEM_BRIEF_BODY_INVALID",
+                "PROBLEM_LIFECYCLE_BODY_INVALID",
+                "REANCHOR_BODY_INVALID"
               ]
             },
             "detail": {
@@ -1170,6 +1192,17 @@
         "CURSOR_INVALID",
         "SESSION_CAP_REACHED",
         "PROMOTION_RATE_LIMITED",
+        "CLAIMS_BOARD_LOCKED",
+        "STATEMENT_INCOMPLETE",
+        "POSSIBLE_DUPLICATE",
+        "PREMATURE_RESOLUTION",
+        "BRIEF_NOT_FOUND",
+        "BRIEF_NOT_ASSIGNED",
+        "STATEMENT_DRIFT",
+        "PROBLEM_PROPOSE_BODY_INVALID",
+        "PROBLEM_BRIEF_BODY_INVALID",
+        "PROBLEM_LIFECYCLE_BODY_INVALID",
+        "REANCHOR_BODY_INVALID",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

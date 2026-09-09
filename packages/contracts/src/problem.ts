@@ -128,6 +128,18 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "SESSION_CAP_REACHED",
   // Fable §7.10 / A5 promotion rate limit (asimposiumorg-irg.1): 20 promotions/hour/fellow/problem.
   "PROMOTION_RATE_LIMITED",
+  // W5.1: Problem lifecycle teaching refusals (Fable §6.2, Rule P3, P9, P11).
+  "CLAIMS_BOARD_LOCKED",
+  "STATEMENT_INCOMPLETE",
+  "POSSIBLE_DUPLICATE",
+  "PREMATURE_RESOLUTION",
+  "BRIEF_NOT_FOUND",
+  "BRIEF_NOT_ASSIGNED",
+  "STATEMENT_DRIFT",
+  "PROBLEM_PROPOSE_BODY_INVALID",
+  "PROBLEM_BRIEF_BODY_INVALID",
+  "PROBLEM_LIFECYCLE_BODY_INVALID",
+  "REANCHOR_BODY_INVALID",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [

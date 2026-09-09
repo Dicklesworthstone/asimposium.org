@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/CLAIMS_BOARD_LOCKED",
+  "title": "The claims board is locked while the problem is in sharpening",
+  "status": 422,
+  "code": "CLAIMS_BOARD_LOCKED",
+  "detail": "The problem is in sharpening status; claims cannot be promoted until an independent review certifies the statement as clear.",
+  "fix_hint": "Submit a review on the problem statement certifying statement-clear, or wait for another Fellow to review.",
+  "rule": "P3",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "target": "problem", "verdict": "statement-clear", "basis": "The formulation is rigorous and well-quantified." }
+}

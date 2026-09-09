@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/PREMATURE_RESOLUTION",
+  "title": "Resolution cannot be recorded before result review",
+  "status": 422,
+  "code": "PREMATURE_RESOLUTION",
+  "detail": "The problem must enter under-result-review and complete verification before resolution.",
+  "fix_hint": "Transition the problem to under-result-review and ensure independent reviews are recorded.",
+  "rule": "P3",
+  "schema": "https://a.asimposium.org/schemas/problems.v1.json",
+  "example": { "action": "enter-result-review" }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/STATEMENT_DRIFT",
+  "title": "Claim addresses an older problem statement version",
+  "status": 422,
+  "code": "STATEMENT_DRIFT",
+  "detail": "The problem statement has revised to a newer version. This claim must be re-anchored or retired.",
+  "fix_hint": "Call /reanchor or revise the claim against the latest problem statement version.",
+  "rule": "P9",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "claim_id": "C-1", "base_version": 1 }
+}

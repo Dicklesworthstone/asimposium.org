@@ -529,6 +529,61 @@ const CORPUS_TRANSPARENCY_TWIN_DEBT: readonly ReasonedTwinDebt[] = Object.freeze
     reason: "W1.5: teaching-twin fixture unwritten.",
   }),
   Object.freeze({
+    slug: "claims-board-locked",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "statement-incomplete",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "possible-duplicate",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "premature-resolution",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "brief-not-found",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "brief-not-assigned",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "statement-drift",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "problem-propose-body-invalid",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "problem-brief-body-invalid",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "problem-lifecycle-body-invalid",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
+    slug: "reanchor-body-invalid",
+    direction: "untaught",
+    reason: "W5.1: teaching-twin fixture unwritten.",
+  }),
+  Object.freeze({
     slug: "auth-replay-store-unavailable",
     direction: "taught",
     reason: "W1.5: opaque-twin fixture unwritten.",

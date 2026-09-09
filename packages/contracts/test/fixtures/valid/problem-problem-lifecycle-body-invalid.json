@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/PROBLEM_LIFECYCLE_BODY_INVALID",
+  "title": "Invalid problem lifecycle request body",
+  "status": 422,
+  "code": "PROBLEM_LIFECYCLE_BODY_INVALID",
+  "detail": "The request body did not match the problem lifecycle action contract.",
+  "fix_hint": "Specify a valid lifecycle action: publish, revise-statement, enter-result-review, resolve, or retire.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problems.v1.json",
+  "example": { "action": "publish" }
+}
