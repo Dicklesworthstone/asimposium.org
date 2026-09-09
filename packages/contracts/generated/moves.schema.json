@@ -13,6 +13,10 @@
       "type": "string",
       "const": "https://a.asimposium.org/schemas/moves.v1.json"
     },
+    "scope": {
+      "type": "string",
+      "const": "catalog"
+    },
     "moves": {
       "type": "object",
       "propertyNames": {
@@ -39,77 +43,181 @@
         ]
       },
       "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "move": {
-            "type": "string",
-            "enum": [
-              "sharpen-statement",
-              "state-claim",
-              "add-refuter",
-              "review",
-              "third-alternative",
-              "discriminate",
-              "kill-or-stand",
-              "collapse-duplicate",
-              "re-anchor",
-              "record-dead-end",
-              "synthesize",
-              "formalize",
-              "add-refuter-from-friction",
-              "close-gap",
-              "normalize-conflict",
-              "retry-dead-end",
-              "back-to-the-object",
-              "idle-close"
-            ]
-          },
-          "title": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "trigger": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          },
-          "description": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "target_contract": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          },
-          "required_fields": {
-            "minItems": 1,
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "prefilled_hints": {
-            "default": {},
+        "oneOf": [
+          {
             "type": "object",
-            "propertyNames": {
-              "type": "string"
+            "properties": {
+              "move": {
+                "type": "string",
+                "enum": [
+                  "sharpen-statement",
+                  "state-claim",
+                  "add-refuter",
+                  "review",
+                  "third-alternative",
+                  "discriminate",
+                  "kill-or-stand",
+                  "collapse-duplicate",
+                  "re-anchor",
+                  "record-dead-end",
+                  "synthesize",
+                  "formalize",
+                  "add-refuter-from-friction",
+                  "close-gap",
+                  "normalize-conflict",
+                  "retry-dead-end",
+                  "back-to-the-object",
+                  "idle-close"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "trigger": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "availability": {
+                "type": "string",
+                "const": "available"
+              },
+              "target_contract": {
+                "type": "string",
+                "pattern": "^\\/schemas\\/sessions\\.v1\\.json#\\/properties\\/[a-z_]+_request$"
+              },
+              "request": {
+                "type": "object",
+                "properties": {
+                  "method": {
+                    "type": "string",
+                    "const": "POST"
+                  },
+                  "path": {
+                    "type": "string",
+                    "pattern": "^\\/v1\\/sessions\\/\\{id\\}\\/[a-z-]+(?:\\/(?:[a-z-]+|\\{hid\\}))*$"
+                  },
+                  "auth": {
+                    "type": "string",
+                    "const": "fellow-bearer"
+                  },
+                  "idempotency_key_required": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "method",
+                  "path",
+                  "auth",
+                  "idempotency_key_required"
+                ],
+                "additionalProperties": false
+              },
+              "required_fields": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "prefilled_hints": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
             },
-            "additionalProperties": {}
+            "required": [
+              "move",
+              "title",
+              "trigger",
+              "description",
+              "availability",
+              "target_contract",
+              "request",
+              "required_fields",
+              "prefilled_hints"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "move": {
+                "type": "string",
+                "enum": [
+                  "sharpen-statement",
+                  "state-claim",
+                  "add-refuter",
+                  "review",
+                  "third-alternative",
+                  "discriminate",
+                  "kill-or-stand",
+                  "collapse-duplicate",
+                  "re-anchor",
+                  "record-dead-end",
+                  "synthesize",
+                  "formalize",
+                  "add-refuter-from-friction",
+                  "close-gap",
+                  "normalize-conflict",
+                  "retry-dead-end",
+                  "back-to-the-object",
+                  "idle-close"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "trigger": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "availability": {
+                "type": "string",
+                "const": "unavailable"
+              },
+              "unavailable_reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "next_step": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "move",
+              "title",
+              "trigger",
+              "description",
+              "availability",
+              "unavailable_reason",
+              "next_step"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "move",
-          "title",
-          "trigger",
-          "description",
-          "target_contract",
-          "required_fields",
-          "prefilled_hints"
-        ],
-        "additionalProperties": false
+        ]
       },
       "required": [
         "sharpen-statement",
@@ -136,6 +244,7 @@
   "required": [
     "version",
     "schema",
+    "scope",
     "moves"
   ],
   "additionalProperties": false

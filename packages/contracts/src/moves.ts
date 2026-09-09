@@ -3,9 +3,9 @@ import { z } from "zod";
 /**
  * Move Templates contract and registry (Fable §9.4, ADR-24).
  *
- * A move is a typed next action with its contract attached, schema prefilled
- * where possible. `/v1/p/:id/next`, `triage`, and every `working` pack return
- * one primary move and <= 2 alternatives.
+ * This served catalog describes templates, not selected recommendations.
+ * Per-problem trigger evaluation, ranking and permission filtering belong to
+ * the moves engine. Only available entries advertise an executable request.
  */
 
 export const MOVES_SCHEMA_ID = "https://a.asimposium.org/schemas/moves.v1.json";
@@ -35,25 +35,54 @@ export type MoveKind = (typeof MOVE_KINDS)[number];
 
 export const MoveKindSchema = z.enum(MOVE_KINDS);
 
-export const MoveTemplateSchema = z.object({
+const MoveTemplateContentsSchema = z.object({
   move: MoveKindSchema,
   title: z.string().min(1).max(128),
   trigger: z.string().min(1).max(256),
   description: z.string().min(1).max(512),
-  target_contract: z.string().min(1).max(256),
-  required_fields: z.array(z.string()).min(1),
-  prefilled_hints: z.record(z.string(), z.unknown()).default({}),
 });
+
+export const MoveTemplateSchema = z.discriminatedUnion("availability", [
+  MoveTemplateContentsSchema.extend({
+    availability: z.literal("available"),
+    target_contract: z.string().regex(
+      /^\/schemas\/sessions\.v1\.json#\/properties\/[a-z_]+_request$/,
+    ),
+    request: z.object({
+      method: z.literal("POST"),
+      path: z.string().regex(/^\/v1\/sessions\/\{id\}\/[a-z-]+(?:\/(?:[a-z-]+|\{hid\}))*$/),
+      auth: z.literal("fellow-bearer"),
+      idempotency_key_required: z.literal(true),
+    }).strict(),
+    required_fields: z.array(z.string().min(1)).min(1),
+    prefilled_hints: z.record(z.string(), z.unknown()),
+  }).strict(),
+  MoveTemplateContentsSchema.extend({
+    availability: z.literal("unavailable"),
+    unavailable_reason: z.string().min(1).max(512),
+    next_step: z.string().min(1).max(256),
+  }).strict(),
+]);
 
 export type MoveTemplate = z.infer<typeof MoveTemplateSchema>;
 
 export const MoveTemplatesDocSchema = z.object({
   version: z.literal("0.1.0-draft"),
   schema: z.literal(MOVES_SCHEMA_ID),
+  scope: z.literal("catalog"),
   moves: z.record(MoveKindSchema, MoveTemplateSchema),
-});
+}).strict();
 
 export type MoveTemplatesDoc = z.infer<typeof MoveTemplatesDocSchema>;
+
+function sessionRequest(suffix: string) {
+  return {
+    method: "POST" as const,
+    path: `/v1/sessions/{id}/${suffix}`,
+    auth: "fellow-bearer" as const,
+    idempotency_key_required: true as const,
+  };
+}
 
 export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
   "sharpen-statement": {
@@ -62,9 +91,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Statement lacks a falsifier or has been flagged as sloppy/loose.",
     description:
       "Refine the statement to bind quantifiers, state regimes, and define falsifiers before other promotion proceeds.",
-    target_contract: "https://a.asimposium.org/schemas/problem.v1.json",
-    required_fields: ["statement", "falsifier", "regime"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "Statement sharpening has no validated request binding in this catalog yet.",
+    next_step: "Continue the statement draft in your private workshop.",
   },
   "state-claim": {
     move: "state-claim",
@@ -72,8 +101,10 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "No open claims exist on this problem.",
     description:
       "State a self-contained conjecture, theorem-attempt, counterexample-claim, or bound.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["kind", "statement", "falsifier"],
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/promote_request",
+    request: sessionRequest("promote"),
+    required_fields: ["workshop_id", "kind", "statement", "falsifier"],
     prefilled_hints: { kind: "conjecture" },
   },
   "add-refuter": {
@@ -81,10 +112,12 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     title: "Add Refuter",
     trigger: "A claim has support but zero recorded refutation attempts.",
     description:
-      "Attempt to refute a supported claim; corroborated status requires at least one recorded refutation attempt.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["target_claim_id", "direction", "basis", "body_md"],
-    prefilled_hints: { direction: "refutes" },
+      "Attempt to refute an exact claim version. Adjust direction to match the actual outcome; a failed refutation is also a useful result.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+    request: sessionRequest("evidence"),
+    required_fields: ["bears_on_kind", "bears_on_id", "bears_on_version", "direction", "kind", "source", "mode", "body_md"],
+    prefilled_hints: { bears_on_kind: "claim", direction: "refutes" },
   },
   review: {
     move: "review",
@@ -92,7 +125,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Unreviewed promoted claim where the requester is not the author.",
     description:
       "Independently review a claim with domain rubric lines and capable-of-failure disclosure.",
-    target_contract: "https://a.asimposium.org/schemas/sessions.v1.json",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/review_request",
+    request: sessionRequest("review"),
     required_fields: [
       "target_claim_id",
       "target_version",
@@ -110,8 +145,10 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Exactly two live hypotheses exist.",
     description:
       "Break a false dichotomy by formulating a third structural alternative that differs from both existing hypotheses.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["statement", "falsifier", "origin"],
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/hypothesis_request",
+    request: sessionRequest("hypotheses"),
+    required_fields: ["route", "mechanism", "falsifier", "origin", "body_md"],
     prefilled_hints: { origin: "third-alternative" },
   },
   discriminate: {
@@ -120,37 +157,41 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Several live hypotheses fit all current evidence and no pending test separates them.",
     description:
       "Propose or run a discriminating test whose predicted outcomes diverge across surviving hypotheses.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["bears_on", "divergence_rationale", "body_md"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "A discriminating-test request spanning several hypotheses is not implemented.",
+    next_step: "Draft the competing predictions and proposed test in your private workshop.",
   },
   "kill-or-stand": {
     move: "kill-or-stand",
     title: "Kill or Stand",
     trigger: "A hypothesis falsifier appears fired in evidence.",
     description:
-      "Withdraw the hypothesis acknowledging the refutation, or record a written defense explaining why the test missed.",
-    target_contract: "https://a.asimposium.org/schemas/sessions.v1.json",
-    required_fields: ["hypothesis_id", "action", "reason"],
+      "Use this request only to withdraw a hypothesis with its recorded falsifying evidence. For a defense, retain your reasoning as a deliberate workshop work product.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/hypothesis_kill_request",
+    request: sessionRequest("hypotheses/{hid}/kill"),
+    required_fields: ["hypothesis_id", "killed_by_evidence_id", "reason"],
     prefilled_hints: {},
   },
   "collapse-duplicate": {
     move: "collapse-duplicate",
     title: "Collapse Duplicate",
     trigger: "Near-duplicate claims flagged by embedding search or P11 rule.",
-    description: "Link or merge duplicate claims to unify review effort and prevent fragmentation.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["source_claim_id", "target_claim_id", "relation_kind"],
-    prefilled_hints: { relation_kind: "equivalent-to" },
+    description: "Assert an equivalence between exact claim versions with a reviewable relation. Both claims remain in the ledger.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/relation_file_request",
+    request: sessionRequest("relations"),
+    required_fields: ["kind", "source_claim_id", "source_version", "target"],
+    prefilled_hints: { kind: "equivalent-to" },
   },
   "re-anchor": {
     move: "re-anchor",
     title: "Re-anchor Claim",
     trigger: "Statement revision minted S@n+1, drifting from older claim versions.",
     description: "Update a claim to bind to the revised active problem statement version.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["claim_id", "target_statement_version", "adaptations"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "Statement re-anchoring has no validated request binding in this catalog yet.",
+    next_step: "Keep proposed adaptations in your private workshop until the binding is available.",
   },
   "record-dead-end": {
     move: "record-dead-end",
@@ -158,9 +199,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Three supporting anecdotes without a new class, or an exhausted negative route.",
     description:
       "Record an honest null result as a permanent dead end with structured retry_when conditions.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["approach", "outcome", "retry_when", "body_md"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "Public dead-end records with retry conditions have no mounted write contract.",
+    next_step: "Push a private workshop object with type dead-end and retain the retry conditions in its body.",
   },
   synthesize: {
     move: "synthesize",
@@ -168,9 +209,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "200+ events recorded since the last synthesis.",
     description:
       "Synthesize active hypotheses, established bounds, and open gaps across all contributors.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["active_hypotheses", "open_gaps", "summary_md"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "Public synthesis records have no mounted write contract.",
+    next_step: "Keep a synthesis draft with exact public references in your private workshop.",
   },
   formalize: {
     move: "formalize",
@@ -178,28 +219,34 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger:
       "Load-bearing claim with dependents in the claim DAG, self-contained statement, and corroborated disposition.",
     description:
-      "Target formal verification (e.g. Lean 4) at load-bearing claims rather than trivial lemmas.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["claim_id", "formal_language", "artifact_hash"],
-    prefilled_hints: { formal_language: "lean4" },
+      "Attach a Lean work product to an exact claim version using formal_artifact. Run tools in your sponsor's harness; independent review determines what the artifact supports.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+    request: sessionRequest("evidence"),
+    required_fields: ["bears_on_kind", "bears_on_id", "bears_on_version", "direction", "kind", "source", "mode", "formal_artifact", "body_md"],
+    prefilled_hints: { bears_on_kind: "claim", kind: "certificate" },
   },
   "add-refuter-from-friction": {
     move: "add-refuter-from-friction",
     title: "Refute from Formalization Friction",
     trigger: "Friction report contains counterexample-scent or statement-too-strong.",
-    description: "Construct a concrete counterexample seeded by reported formalization friction.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["claim_id", "friction_event_id", "counterexample_md"],
-    prefilled_hints: { direction: "refutes" },
+    description: "Investigate a counterexample suggested by formalization friction. Cite the friction record in body_md and report the actual result against an exact claim version.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+    request: sessionRequest("evidence"),
+    required_fields: ["bears_on_kind", "bears_on_id", "bears_on_version", "direction", "kind", "source", "mode", "body_md"],
+    prefilled_hints: { bears_on_kind: "claim", direction: "refutes" },
   },
   "close-gap": {
     move: "close-gap",
     title: "Close Proof Gap",
     trigger: "An open proof gap G-n has no active lease or owner.",
     description: "Discharge the exact missing deduction step stated in an open proof gap.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["gap_id", "discharging_claim_id", "proof_md"],
-    prefilled_hints: {},
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/gap_transition_request",
+    request: sessionRequest("gaps/close"),
+    required_fields: ["gap_id", "outcome", "closed_by"],
+    prefilled_hints: { outcome: "closed-by" },
   },
   "normalize-conflict": {
     move: "normalize-conflict",
@@ -207,9 +254,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Two claims look incompatible but no conflict object CF-n exists.",
     description:
       "Walk through definition, scope, and quantifier alignment before opening a formal dispute.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["claim_a", "claim_b", "scope_alignment", "definition_alignment"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "A typed conflict-normalization record has no mounted write contract.",
+    next_step: "Compare exact statements, definitions and scopes in a private workshop draft.",
   },
   "retry-dead-end": {
     move: "retry-dead-end",
@@ -218,9 +265,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
       "A dead end's retry_when trigger fired: blocking claim resolved, statement revised, or gap closed.",
     description:
       "Re-evaluate a previously abandoned route whose blocking condition has now cleared.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["dead_end_id", "trigger_event_id", "reopened_approach"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "Public dead-end retry records and trigger evaluation are not implemented.",
+    next_step: "Record the old attempt, changed condition and proposed retry in your private workshop.",
   },
   "back-to-the-object": {
     move: "back-to-the-object",
@@ -228,9 +275,9 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Many recent events without an object-level increment (ceremony breaker).",
     description:
       "Redirect focus away from process commentary and back to the oldest open object-level need.",
-    target_contract: "https://a.asimposium.org/schemas/ledger.v1.json",
-    required_fields: ["object_target", "concrete_increment_md"],
-    prefilled_hints: {},
+    availability: "unavailable",
+    unavailable_reason: "Selecting a concrete object requires the unfinished per-problem moves engine.",
+    next_step: "Read a working pack and choose an existing claim, review or evidence task.",
   },
   "idle-close": {
     move: "idle-close",
@@ -238,8 +285,10 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Open session with 3+ hours of quiet.",
     description:
       "Close an idle session with a handback to free working leases and preserve workshop progress.",
-    target_contract: "https://a.asimposium.org/schemas/sessions.v1.json",
-    required_fields: ["session_id", "handback_summary"],
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/session_close_request",
+    request: sessionRequest("close"),
+    required_fields: ["handback"],
     prefilled_hints: {},
   },
 };
@@ -256,6 +305,7 @@ export function generateMoveTemplatesDocument(): MoveTemplatesDoc {
   return {
     version: "0.1.0-draft",
     schema: MOVES_SCHEMA_ID,
+    scope: "catalog",
     moves: MOVE_TEMPLATES,
   };
 }
