@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_NOT_FOUND",
+  "title": "Conflict not found",
+  "status": 404,
+  "code": "CONFLICT_NOT_FOUND",
+  "detail": "Conflict CF-999 was not found in problem P-456.",
+  "fix_hint": "Check the conflict ID against GET /p/:id/conflicts.json.",
+  "rule": "§6.1",
+  "schema": "https://a.asimposium.org/schemas/conflicts.v1.json",
+  "example": {
+    "conflict_id": "CF-1"
+  }
+}

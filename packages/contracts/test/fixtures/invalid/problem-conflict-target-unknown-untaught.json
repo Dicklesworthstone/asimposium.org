@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_TARGET_UNKNOWN",
+  "title": "Conflicting claim target unknown",
+  "status": 404,
+  "code": "CONFLICT_TARGET_UNKNOWN",
+  "detail": "Claim C-99@1 was not found in problem P-456.",
+  "fix_hint": "Ensure both conflicting claims and versions are published on this problem."
+}

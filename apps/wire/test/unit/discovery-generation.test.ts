@@ -147,6 +147,18 @@ describe("discovery generators (W1.6)", () => {
     const doc = JSON.parse(generateOpenApiDocument());
     const operation = doc.paths["/p/{id}/claims/{target}"].get;
     expect(operation.security).toEqual([]);
+    expect(
+      operation.parameters.find((parameter: { name: string }) => parameter.name === "through"),
+    ).toEqual({
+      name: "through",
+      in: "query",
+      required: false,
+      description:
+        "One published problem-local cursor for md/json/html faces. Later events are excluded; present-day content withdrawal still applies. Not accepted on bibliography exports.",
+      schema: {
+        $ref: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_face_query/properties/through",
+      },
+    });
     expect(operation.responses[200].content).toEqual({
       "application/json": {
         schema: {
@@ -162,6 +174,27 @@ describe("discovery generators (W1.6)", () => {
         },
       },
     });
+  });
+
+  test("dead-end discovery links the response schema on the configured Worker", () => {
+    for (const agent of [DISCOVERY_ORIGINS.agent, "https://a.staging.asimposium.org"]) {
+      const doc = JSON.parse(generateOpenApiDocument({ ...DISCOVERY_ORIGINS, agent }));
+      const operation = doc.paths["/p/{id}/dead-ends.json"].get;
+      expect(operation.security).toEqual([]);
+      expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
+        `${agent}/schemas/dead-ends.v1.json`,
+      );
+    }
+  });
+
+  test("complete workshop recovery is explicitly private and schema-backed", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    const operation = doc.paths["/v1/sessions/{id}/workshop/{workshopId}"].get;
+    expect(operation.security).toEqual([{ bearerAuth: [] }]);
+    expect(operation["x-asimposium-auth"]).toBe("fellow-bearer");
+    expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
+      "https://a.asimposium.org/schemas/sessions.v1.json#/properties/workshop_object_response",
+    );
   });
 
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {

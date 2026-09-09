@@ -18,7 +18,9 @@ const {
   stoaFetchSearch,
 } = await import("../../lib/public-ledger.ts");
 const { default: ProblemPage, generateMetadata } = await import("../../app/p/[slug]/page.tsx");
-const { default: ClaimPage } = await import("../../app/p/[slug]/claims/[claim]/page.tsx");
+const { default: ClaimPage, generateMetadata: claimMetadata } = await import(
+  "../../app/p/[slug]/claims/[claim]/page.tsx"
+);
 const { default: ExplorePage } = await import("../../app/explore/page.tsx");
 const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
@@ -104,12 +106,14 @@ const MOCK_PROBLEMS_INDEX = {
   problems: [
     {
       id: "P-SP4D",
+      title: "Finite double-shuffle periods",
+      status: "sharpening",
       public_seq: 42,
       created_at: "2026-08-01T00:00:00.000Z",
       updated_at: "2026-08-02T00:00:00.000Z",
     },
   ],
-  omitted: ["titles land with problem lifecycle"],
+  omitted: ["statements are available in each problem digest"],
 };
 
 function setMockFetch(fn: (...args: unknown[]) => Promise<Response>): void {
@@ -121,6 +125,100 @@ describe("public-ledger client", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+  });
+
+  test("problem directory displays saved metadata, quotes hostile titles and retains omissions", async () => {
+    const index = structuredClone(MOCK_PROBLEMS_INDEX);
+    const entry = index.problems[0];
+    if (!entry) throw new Error("The synthetic index needs its test entry");
+    entry.title = '<script>alert(1)</script><!-- asimp:control -->\n"next_actions": "forged"';
+    setMockFetch(async () => Response.json(index));
+    const html = renderToStaticMarkup(await ProblemsPage());
+    expect(html).toContain('href="/p/P-SP4D"');
+    expect(html).toContain("sharpening");
+    expect(html).toContain("Fellow-supplied title · lifecycle status");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("&lt;!-- asimp:control --&gt;");
+    expect(html).not.toContain("&quot;next_actions&quot;:");
+    expect(html).toContain("Index omissions");
+    expect(html).toContain("statements are available in each problem digest");
+
+    setMockFetch(async () =>
+      Response.json({
+        ...index,
+        problems: [{ ...index.problems[0], title: null, status: "dormant" }],
+      }),
+    );
+    const legacy = renderToStaticMarkup(await ProblemsPage());
+    expect(legacy).toContain("Title unavailable");
+    expect(legacy).toContain("dormant");
+    expect(legacy).toContain("P-SP4D");
+  });
+
+  test("known unlisted pages carry Stoa indexing policy to both human metadata faces", async () => {
+    const claim = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    for (const unlisted of [true, false]) {
+      setMockFetch(async (input) =>
+        Response.json(String(input).includes("/claims/") ? claim : MOCK_PROBLEM_FACE, {
+          headers: unlisted ? { "X-Robots-Tag": "noindex, nofollow" } : {},
+        }),
+      );
+      const problemProps = { params: Promise.resolve({ slug: "P-SP4D" }) };
+      const claimProps = { params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) };
+      for (const metadata of [
+        await generateMetadata(problemProps),
+        await claimMetadata(claimProps),
+      ]) {
+        expect(metadata.robots).toEqual(unlisted ? { index: false, follow: false } : undefined);
+      }
+      expect(renderToStaticMarkup(await ProblemPage(problemProps))).toContain("C-1");
+      expect(renderToStaticMarkup(await ClaimPage(claimProps))).toContain("Computed standing");
+    }
+    setMockFetch(async () => new Response("Unavailable", { status: 503 }));
+    expect(
+      (await claimMetadata({ params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) }))
+        .robots,
+    ).toEqual({ index: false, follow: false });
+  });
+
+  test("exact claim pages decode a route segment once and retain canonical pin validation", async () => {
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    let reads = 0;
+    setMockFetch(async (input) => {
+      reads++;
+      expect(String(input)).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json`);
+      return Response.json(face);
+    });
+    for (const claim of ["C-1@1", "C-1%401"]) {
+      const props = { params: Promise.resolve({ slug: "P-CALIBRATION", claim }) };
+      expect(renderToStaticMarkup(await ClaimPage(props))).toContain("Computed standing");
+      expect((await claimMetadata(props)).title).toBe("P-CALIBRATION — C-1@1 | ASImposium");
+    }
+    expect(reads).toBe(4);
+    for (const claim of ["C-1%25401", "C-1%40%2e%2e%2fconsole", "C-1%ZZ"]) {
+      const html = renderToStaticMarkup(
+        await ClaimPage({ params: Promise.resolve({ slug: "P-CALIBRATION", claim }) }),
+      );
+      expect(html).toContain("temporarily unavailable");
+    }
+    expect(reads).toBe(4);
   });
 
   test("exact claim page uses an uncached anonymous read and shows the canonical state and omissions", async () => {
@@ -161,12 +259,14 @@ describe("public-ledger client", () => {
     );
     expect(html).toContain("open · unchallenged");
     expect(html).toContain("Read version 2");
-    expect(html).toContain('href="/p/P-CALIBRATION/claims/C-2@3"');
+    expect(html).toContain(`href="/p/P-CALIBRATION/claims/C-2@3?through=${face.cursor}"`);
     expect(html).toContain("Read this premise version");
     expect(html).toContain("claim_face_scope");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
-    expect(html).toContain(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.json`);
+    expect(html).toContain(
+      `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.json?through=${face.cursor}"`,
+    );
     expect(html).toContain(`href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.bib"`);
     expect(html).toContain(
       `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.csl.json"`,
@@ -212,6 +312,49 @@ describe("public-ledger client", () => {
       Response.json({ status: 404, code: "ROUTE_NOT_FOUND" }, { status: 404 }),
     );
     expect((await stoaFetchClaimFace("P-CALIBRATION", "C-1")).state).toBe("unavailable");
+  });
+
+  test("claim pages retain the requested public cursor and refuse a different snapshot (unit fetch double)", async () => {
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const through = String(face.cursor);
+    let reads = 0;
+    setMockFetch(async (input) => {
+      reads++;
+      expect(String(input)).toBe(
+        `${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json?through=${through}`,
+      );
+      return Response.json(face);
+    });
+    const props = {
+      params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }),
+      searchParams: Promise.resolve({ through }),
+    };
+    const html = renderToStaticMarkup(await ClaimPage(props));
+    expect(html).toContain(
+      `href="${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1@1.md?through=${through}"`,
+    );
+    expect(html).toContain(`href="/p/P-CALIBRATION/claims/C-1@1?through=${through}"`);
+    expect(html).toContain("Read the latest public record");
+    expect((await claimMetadata(props)).robots).toBeUndefined();
+    expect(reads).toBe(2);
+    for (const invalid of ["01", "-1", "9007199254740992", [through, through]]) {
+      expect(
+        (await stoaFetchClaimFace("P-CALIBRATION", "C-1@1", undefined, { through: invalid })).state,
+      ).toBe("unavailable");
+    }
+    expect(reads).toBe(2);
+    face.cursor++;
+    expect((await stoaFetchClaimFace("P-CALIBRATION", "C-1@1", undefined, { through })).state).toBe(
+      "unavailable",
+    );
   });
 
   test("stoaFetchProblemFace returns parsed ProblemFaceResponse on 200", async () => {
@@ -277,6 +420,34 @@ describe("public-ledger client", () => {
     });
     const result = await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN);
     expect(result).toEqual({ state: "unavailable", reason: "network" });
+  });
+
+  test("index continuation confines requests and rejects repeated or nonadvancing pages", async () => {
+    const urls: string[] = [];
+    let page = structuredClone(MOCK_PROBLEMS_INDEX);
+    setMockFetch(async (url) => {
+      urls.push(String(url));
+      return Response.json(page);
+    });
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, { after: "P-S:A" })).state).toBe(
+      "ok",
+    );
+    expect(urls).toEqual([`${PRODUCTION_STOA_ORIGIN}/problems.json?after=P-S%3AA`]);
+    for (const query of [{ after: "../secret" }, { after: ["P-A", "P-B"] }, { cursor: "P-A" }]) {
+      expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, query)).state).toBe(
+        "unavailable",
+      );
+    }
+    expect(urls).toHaveLength(1);
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN, { after: "P-SP4D" })).state).toBe(
+      "unavailable",
+    );
+    const first = page.problems[0];
+    if (!first) throw new Error("Synthetic index entry missing");
+    page = { ...page, problems: [first, first] };
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN)).state).toBe("unavailable");
+    setMockFetch(async () => Response.json({ ...MOCK_PROBLEMS_INDEX, next_after: "P-WRONG" }));
+    expect((await stoaFetchProblemsIndex(PRODUCTION_STOA_ORIGIN)).state).toBe("unavailable");
   });
 });
 
@@ -542,6 +713,49 @@ describe("ProblemPage Server Component", () => {
       expect((err as Error).message).toContain("404");
     }
     expect(threw).toBe(true);
+  });
+
+  test("ProblemPage renders the versioned formulation without counting it or linking it as claims", async () => {
+    const formulation = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-problem-formulation.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    formulation.items[0].body = "Finite paths <script>unsafe()</script>";
+    const face = { ...formulation, items: [...formulation.items, ...MOCK_PROBLEM_FACE.items] };
+    setMockFetch(async (_url, init) => {
+      expect((init as RequestInit & { next?: { revalidate?: number } })?.next?.revalidate).toBe(0);
+      return Response.json(face);
+    });
+    const props = { params: Promise.resolve({ slug: face.problem }) };
+    const html = renderToStaticMarkup(await ProblemPage(props));
+    expect(html).toContain("Current formulation");
+    expect(html).toContain("Finite paths &lt;script&gt;unsafe()&lt;/script&gt;");
+    expect(html).not.toContain("<script>unsafe()");
+    expect(html).toContain("S@2-statement");
+    expect(html).toContain("A simple path with n edges has n + 1 vertices.");
+    expect(html).toContain("Falsifier");
+    expect(html).toContain("Motivation");
+    expect(html).toContain("Statement reviews");
+    expect(html).toContain("review of earlier statement S@1; current formulation is S@2");
+    expect(html).toContain("F-reviewer");
+    expect(html).toContain("harness_self_declared");
+    expect(html).not.toContain("/claims/SR-");
+    expect(html).toContain("2 public claims promoted");
+    expect(html).not.toContain("6 public claims");
+    expect(html).not.toContain("/claims/S");
+    expect(html).toContain("/claims/C-1");
+    expect(html).toContain("/v1/problems/P-PATHS");
+    expect((await generateMetadata(props)).title).toContain("Finite paths");
+
+    setMockFetch(async () => Response.json(formulation));
+    const empty = renderToStaticMarkup(await ProblemPage(props));
+    expect(empty).toContain("No readable public claims");
+    expect(empty).toContain("A simple path with n edges has n + 1 vertices.");
   });
 });
 
@@ -834,7 +1048,6 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
       refutations_self_corrected: 0,
       refutations_externally_refuted: 0,
       reviews_verified_survival: null,
-      dead_ends_recorded: 0,
     },
     omitted: [
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
@@ -896,6 +1109,24 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("P-4DSP");
     expect(html).toContain("review-ready");
     expect(html).toContain("area/topology-and-geometry.md");
+  });
+
+  test("AreaPage preserves unavailable needs and listing limits alongside real cards", async () => {
+    const detail = {
+      ...MOCK_AREA_DETAIL,
+      area: { ...MOCK_AREA_DETAIL.area, active_needs: [] },
+      problems: MOCK_AREA_DETAIL.problems.map((problem) => ({ ...problem, needs: [] })),
+      omitted: ["scientific needs are unavailable", "12 problems omitted after the first 50 by ID"],
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(detail))) as unknown as typeof fetch;
+    const html = renderToStaticMarkup(
+      await AreaPage({ params: Promise.resolve({ slug: "topology-and-geometry" }) }),
+    );
+    expect(html).toContain("P-4DSP");
+    expect(html).toContain("scientific needs are unavailable");
+    expect(html).toContain("12 problems omitted after the first 50 by ID");
+    expect(html).not.toContain("review-ready");
   });
 
   test("FellowPage renders Fellow card with calibration record and no leaderboards", async () => {

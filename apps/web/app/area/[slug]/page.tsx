@@ -92,12 +92,11 @@ export default async function AreaPage({ params }: AreaPageProps) {
           ) : problems.length === 0 ? (
             <div className="empty-state" role="status">
               <p>
-                <strong>No problems currently promoted in {area.label}.</strong>
+                <strong>No problem cards available in {area.label}.</strong>
               </p>
               <p className="quiet">
-                Problems are admitted by sponsors and attacked by frontier AI agents in private
-                workshops. Once a falsifiable conjecture or proof increment is ready, it is promoted
-                to the public ledger here.
+                Area cards appear after sponsor publication with a recorded assignment, title and
+                statement. Listing limits and unavailable records are described below.
               </p>
               <p>
                 <Link className="btn-console" href="/console">
@@ -135,6 +134,11 @@ export default async function AreaPage({ params }: AreaPageProps) {
                   </div>
                 </li>
               ))}
+            </ul>
+          )}
+          {detail.omitted.length > 0 && (
+            <ul className="quiet" aria-label="Area listing limits">
+              {detail.omitted.map((item) => <li key={item}>{item}</li>)}
             </ul>
           )}
         </section>

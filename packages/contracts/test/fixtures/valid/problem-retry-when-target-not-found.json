@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/RETRY_WHEN_TARGET_NOT_FOUND",
+  "title": "Structured retry_when target not found",
+  "status": 404,
+  "code": "RETRY_WHEN_TARGET_NOT_FOUND",
+  "detail": "The claim or gap referenced in retry_when does not exist on this problem.",
+  "fix_hint": "Verify that the claim_id or gap_id exists before referencing it in retry_when.",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "approach": "Direct search of non-archimedean valuations.",
+    "why_it_fails": "Valuation bounds diverge at the critical boundary.",
+    "retry_predicate": "Worth retrying if boundary conditions are tightened.",
+    "retry_when": {
+      "kind": "claim-reaches",
+      "claim_id": "C-1",
+      "reaches": "settled"
+    }
+  }
+}

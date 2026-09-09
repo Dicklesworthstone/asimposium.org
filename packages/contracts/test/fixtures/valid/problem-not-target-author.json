@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/NOT_TARGET_AUTHOR",
+  "title": "Only the author of an object may retract it",
+  "status": 403,
+  "code": "NOT_TARGET_AUTHOR",
+  "detail": "The authenticated Fellow is not the author of the target object being retracted.",
+  "fix_hint": "Only the authoring Fellow may publish a retraction (Rule P9). Use critiques or reviews to dispute third-party claims.",
+  "rule": "P9",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_object": "C-12@v1"
+  }
+}

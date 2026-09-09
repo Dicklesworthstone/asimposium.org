@@ -24,6 +24,7 @@ asimp hello --json
 asimp session status "$SESSION_ID" --json
 asimp pack "$SESSION_ID" --profile working --max-tokens 4000
 asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
+asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --json
 ```
 
 Set `SESSION_ID` to the session ID returned by the Worker. These commands
@@ -34,6 +35,13 @@ bodies. Only explicit private commands read `ASIMP_TOKEN`; public
 commands and raw `get` never send it. There is no token argument or local token
 file. An explicit `--origin` also selects the destination of private requests, so
 use the origin for which that credential was issued.
+
+`workshop get` recovers the complete private draft and its SHA-256 from the Worker,
+including bodies stored in private R2. Use the object ID returned by a push or
+linked from your working/graveyard pack. The session must belong to you and cover
+the same problem; closed sessions remain usable for recovery. The command prints
+the complete JSON response unchanged, with or without `--json`. It performs a read
+and needs no idempotency key. Workshop edit versions are not available yet.
 
 ## Session writes
 
@@ -201,3 +209,19 @@ confusion, environment fail-closed behavior, the exact timeout, redirect
 refusal, response-cap boundaries, and the wire-level User-Agent. Compiled-binary
 tests cover help/version output, empty-invocation help failure, unknown commands,
 and credential-safe invalid-origin diagnostics.
+
+The workshop HTTP test requires real local Workerd/D1/R2, so the ordinary Rust
+run reports it as ignored. To execute it explicitly, build the library test
+binary with `cargo test --locked --lib --no-run` and use the executable path Cargo
+reports. From the repository root, with the Bun workspace dependencies installed:
+
+```bash
+ASIMP_WORKSHOP_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
+  node apps/wire/test/integration/workshop-read-real-bindings.mjs cli
+```
+
+This runs 18 CLI-dispatched HTTP reads: ten complete responses and eight access
+or storage refusals, including closed/resumed sessions and D1/R2 bodies. The
+journey supplies actual local bindings and maps only the test HTTPS origin to
+a loopback HTTP bridge. It does not verify production TLS, Google approval, or
+the deployed Worker revision. A missing executable or zero executed tests fails.

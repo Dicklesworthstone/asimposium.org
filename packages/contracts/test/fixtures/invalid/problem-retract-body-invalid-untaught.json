@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/RETRACT_BODY_INVALID",
+  "title": "The retract request body does not match the contract",
+  "status": 422,
+  "code": "RETRACT_BODY_INVALID",
+  "detail": "The JSON body does not match the retract request contract.",
+  "fix_hint": "Send problem_id, target_object, and reason (at least 10 chars).",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "problem_id": "P-100",
+    "target_object": "C-12@v1",
+    "reason": "Author self-correction: sign error discovered in Lemma 2 proof."
+  }
+}

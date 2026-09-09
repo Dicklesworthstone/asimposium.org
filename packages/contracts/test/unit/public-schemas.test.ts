@@ -13,6 +13,8 @@ import {
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
+  "conflicts",
+  "dead-ends",
   "discovery",
   "enrollment",
   "enrollment-capsule",
@@ -20,6 +22,9 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "ledger",
   "moves",
   "problem",
+  "problems",
+  "questions",
+  "retractions",
   "rubrics",
   "screening",
   "sessions",

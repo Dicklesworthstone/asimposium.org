@@ -58,6 +58,8 @@ PROBLEM_INDEX = {
         {
             "id": "P-4DSP",
             "public_seq": 0,
+            "title": "Synthetic smoke problem",
+            "status": "active",
             "created_at": "2026-01-01T00:00:00.000Z",
             "updated_at": "2026-01-01T00:00:00.000Z",
         }

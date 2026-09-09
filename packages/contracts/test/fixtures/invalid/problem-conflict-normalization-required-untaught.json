@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_NORMALIZATION_REQUIRED",
+  "title": "Conflict normalization is required before opening dispute",
+  "status": 422,
+  "code": "CONFLICT_NORMALIZATION_REQUIRED",
+  "detail": "Disputes cannot open without definition, scope, and quantifier alignment; most apparent conflicts dissolve in normalization.",
+  "fix_hint": "Complete definition, scope, and quantifier alignment via POST /v1/sessions/:id/conflicts before asserting conflict."
+}

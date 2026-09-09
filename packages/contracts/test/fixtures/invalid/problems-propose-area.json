@@ -1,0 +1,7 @@
+{
+  "title": "Finite path formulation",
+  "statement": "Every simple path with n edges has n + 1 vertices.",
+  "falsifier": "A simple path with a different vertex count.",
+  "motivation": "Fix the path convention before independent review.",
+  "areas": ["invented-area-without-other-prefix"]
+}

@@ -1,19 +1,84 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import Ajv2020 from "ajv/dist/2020";
 import {
   ClaimReanchorRequestSchema,
   ProblemClosingSynthesisSchema,
-  ProblemDetailSchema,
   ProblemFamousGuardrailSchema,
+  ProblemGovernanceEventSchema,
+  ProblemGovernanceKeySchema,
   ProblemLifecycleActionRequestSchema,
-  ProblemLifecycleContractsSchema,
-  ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
+  ProblemStatementReviewEventSchema,
+  ProblemStatementReviewRequestSchema,
+  ProblemStatementReviewResponseSchema,
   ProblemStatementVersionSchema,
   ProblemStatusSchema,
   ProposeProblemRequestSchema,
-  SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
 } from "../../src/problems.ts";
+
+test("statement review requests and events pin an attributed public formulation", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  for (const [name, contract, property] of [
+    ["statement-review", ProblemStatementReviewRequestSchema, "statement_review_request"],
+    ["statement-review-event", ProblemStatementReviewEventSchema, "statement_review_event"],
+  ] as const) {
+    const published = new Ajv2020({ strict: true }).compile(schema.properties[property]);
+    for (const directory of ["valid", "invalid"] as const) {
+      const fixture = JSON.parse(
+        readFileSync(new URL(`../fixtures/${directory}/${name}.json`, import.meta.url), "utf8"),
+      );
+      expect(contract.safeParse(fixture).success).toBe(directory === "valid");
+      expect(published(fixture)).toBe(directory === "valid");
+    }
+  }
+});
+
+test("public governance events preserve the sponsor actor and exact formulation transition", () => {
+  const valid = JSON.parse(
+    readFileSync(new URL("../fixtures/valid/governance-event.json", import.meta.url), "utf8"),
+  );
+  const invalid = JSON.parse(
+    readFileSync(new URL("../fixtures/invalid/governance-event.json", import.meta.url), "utf8"),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.governance_event);
+  expect(ProblemGovernanceEventSchema.safeParse(valid).success).toBe(true);
+  expect(published(valid)).toBe(true);
+  expect(ProblemGovernanceEventSchema.safeParse(invalid).success).toBe(false);
+  expect(published(invalid)).toBe(false);
+  const publishedKey = new Ajv2020({ strict: true }).compile(
+    schema.properties.governance_idempotency_key,
+  );
+  for (const key of ["publish-1", "a".repeat(160)]) {
+    expect(ProblemGovernanceKeySchema.safeParse(key).success).toBe(true);
+    expect(publishedKey(key)).toBe(true);
+  }
+  for (const key of [null, "", "a/b", "a".repeat(161)]) {
+    expect(ProblemGovernanceKeySchema.safeParse(key).success).toBe(false);
+    expect(publishedKey(key)).toBe(false);
+  }
+  for (const patch of [
+    { source_fellow_id: null },
+    { session: "invented" },
+    { acting_principal: { type: "sponsor", id: "bad" } },
+  ]) {
+    expect(ProblemGovernanceEventSchema.safeParse({ ...valid, ...patch }).success).toBe(false);
+    expect(published({ ...valid, ...patch })).toBe(false);
+  }
+  // Cross-field version comparisons are enforced by Zod; JSON Schema pins individual fields.
+  expect(
+    ProblemGovernanceEventSchema.safeParse({
+      ...valid,
+      problem: { ...valid.problem, current_statement_version: 2 },
+    }).success,
+  ).toBe(false);
+});
 
 test("W5.1 Problem lifecycle contracts validate all states and directions", () => {
   const validStatuses = [
@@ -35,6 +100,73 @@ test("W5.1 Problem lifecycle contracts validate all states and directions", () =
     expect(ProblemResolutionDirectionSchema.safeParse(dir).success).toBe(true);
   }
   expect(ProblemResolutionDirectionSchema.safeParse("proven").success).toBe(false);
+});
+
+test("result-review requests require an exact claim version in Zod and the published schema", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.lifecycle_request);
+  for (const directory of ["valid", "invalid"]) {
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${directory}/result-review-request.json`, import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(ProblemLifecycleActionRequestSchema.safeParse(fixture).success).toBe(
+      directory === "valid",
+    );
+    expect(published(fixture)).toBe(directory === "valid");
+  }
+});
+
+test("governance state changes cannot publish private drafts or reopen closed problems", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.governance_event);
+  for (const name of ["governance-result-review", "governance-retired"]) {
+    for (const directory of ["valid", "invalid"]) {
+      const fixture = JSON.parse(
+        readFileSync(new URL(`../fixtures/${directory}/${name}.json`, import.meta.url), "utf8"),
+      );
+      expect(ProblemGovernanceEventSchema.safeParse(fixture).success).toBe(directory === "valid");
+      expect(published(fixture)).toBe(directory === "valid");
+      if (directory !== "valid") continue;
+      for (const previous_status of [
+        "private-draft",
+        "sharpening",
+        "active",
+        "dormant",
+        "under-result-review",
+        "resolved",
+        "retired",
+      ]) {
+        const allowed =
+          fixture.action === "retire"
+            ? ["sharpening", "active", "dormant", "under-result-review"].includes(previous_status)
+            : ["active", "dormant"].includes(previous_status);
+        const candidate = { ...fixture, previous_status };
+        expect(ProblemGovernanceEventSchema.safeParse(candidate).success).toBe(allowed);
+        expect(published(candidate)).toBe(allowed);
+      }
+      for (const problem of [
+        { ...fixture.problem, status: "active" },
+        { ...fixture.problem, invented_session: "S-abcdefghijklmnopqrstuvwxyz" },
+        { ...fixture.problem, resolution_summary: "" },
+      ]) {
+        expect(ProblemGovernanceEventSchema.safeParse({ ...fixture, problem }).success).toBe(false);
+        expect(published({ ...fixture, problem })).toBe(false);
+      }
+      expect(
+        ProblemGovernanceEventSchema.safeParse({
+          ...fixture,
+          previous_statement_version: fixture.previous_statement_version + 1,
+        }).success,
+      ).toBe(false);
+    }
+  }
 });
 
 test("W5.1 Famous-problem guardrail enforces canonical formulation and standing banner", () => {
@@ -135,6 +267,13 @@ test("W5.1 Fellow propose problem request validates inputs", () => {
   expect(ProposeProblemRequestSchema.safeParse({ ...validProposal, areas: [] }).success).toBe(
     false,
   );
+  for (const areas of [["geometry"], ["other-"], ["other--path"], Array(33).fill("algebra")]) {
+    expect(ProposeProblemRequestSchema.safeParse({ ...validProposal, areas }).success).toBe(false);
+  }
+  expect(
+    ProposeProblemRequestSchema.safeParse({ ...validProposal, areas: ["other-path-enumeration"] })
+      .success,
+  ).toBe(true);
 });
 
 test("W5.1 Problem lifecycle action discriminated union parses valid transitions", () => {
@@ -150,8 +289,18 @@ test("W5.1 Problem lifecycle action discriminated union parses valid transitions
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "enter-result-review",
+      result_claim: { claim_id: "C-1", version: 1 },
     }).success,
   ).toBe(true);
+  for (const result_claim of [
+    undefined,
+    { claim_id: "C-1", version: 0 },
+    { claim_id: "../C-1", version: 1 },
+  ])
+    expect(
+      ProblemLifecycleActionRequestSchema.safeParse({ action: "enter-result-review", result_claim })
+        .success,
+    ).toBe(false);
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "resolve",
@@ -197,6 +346,57 @@ test("W5.1 Claim reanchor request validates claim_id and base_version", () => {
     ClaimReanchorRequestSchema.safeParse({
       claim_id: "C-1",
       base_version: 0,
+    }).success,
+  ).toBe(false);
+});
+
+test("W5.1 Problem statement review contracts validate verdict and basis", () => {
+  const validRequest = {
+    session_id: "S-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    statement_version: 1,
+    verdict: "statement-clear",
+    basis: "The formulation is rigorous, types are exact, and falsifier is sharp.",
+  };
+  expect(ProblemStatementReviewRequestSchema.safeParse(validRequest).success).toBe(true);
+
+  // statement-unclear is also valid
+  expect(
+    ProblemStatementReviewRequestSchema.safeParse({
+      ...validRequest,
+      verdict: "statement-unclear",
+    }).success,
+  ).toBe(true);
+
+  // Invalid verdict refused
+  expect(
+    ProblemStatementReviewRequestSchema.safeParse({
+      ...validRequest,
+      verdict: "clear",
+    }).success,
+  ).toBe(false);
+
+  // Empty basis refused
+  expect(
+    ProblemStatementReviewRequestSchema.safeParse({
+      ...validRequest,
+      basis: "",
+    }).success,
+  ).toBe(false);
+
+  // Valid response
+  const validResponse = {
+    reviewed: true,
+    problem_id: "P-4DSP",
+    verdict: "statement-clear",
+    status: "active",
+  };
+  expect(ProblemStatementReviewResponseSchema.safeParse(validResponse).success).toBe(true);
+
+  // Response with invalid status refused
+  expect(
+    ProblemStatementReviewResponseSchema.safeParse({
+      ...validResponse,
+      status: "non-existent-status",
     }).success,
   ).toBe(false);
 });

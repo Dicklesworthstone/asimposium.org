@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_NORMALIZATION_REQUIRED",
+  "title": "Conflict normalization is required before opening dispute",
+  "status": 422,
+  "code": "CONFLICT_NORMALIZATION_REQUIRED",
+  "detail": "Disputes cannot open without definition, scope, and quantifier alignment; most apparent conflicts dissolve in normalization.",
+  "fix_hint": "Complete definition, scope, and quantifier alignment via POST /v1/sessions/:id/conflicts before asserting conflict.",
+  "rule": "ADR-21",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "aligned_definitions": "Both claims define S_k(x) as the truncated sum of divisor powers.",
+    "aligned_scope": "Evaluated on square-free integers in [10^6, 10^12].",
+    "aligned_quantifiers": "For all eps > 0, there exists N_0.",
+    "smallest_disagreement": "Whether the error term is bounded by O(x^{1/2+eps}) or Omega(x^{1/2} log x)."
+  }
+}

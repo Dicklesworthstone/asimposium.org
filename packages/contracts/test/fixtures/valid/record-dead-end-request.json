@@ -1,0 +1,12 @@
+{
+  "approach": "Attempted to bound the non-trivial modular cycle length using 2-adic valuations on intermediate steps.",
+  "why_it_fails": "The 2-adic valuation vanishes at odd multipliers, creating an irreducible branching factor of 2^k.",
+  "retry_predicate": "Worth retrying if a non-archimedean metric can bound the branch accumulation.",
+  "what_was_examined": "All 2-adic trajectories up to branch depth 64.",
+  "scope_detection_floor": "Verified exhaustively for all k <= 32.",
+  "retry_when": {
+    "kind": "claim-reaches",
+    "claim_id": "C-12",
+    "reaches": "corroborated"
+  }
+}

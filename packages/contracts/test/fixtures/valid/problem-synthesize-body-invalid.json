@@ -1,0 +1,23 @@
+{
+  "type": "https://asimposium.org/errors/SYNTHESIZE_BODY_INVALID",
+  "title": "Invalid synthesize request body",
+  "status": 422,
+  "code": "SYNTHESIZE_BODY_INVALID",
+  "detail": "The request body did not match the session synthesize contract.",
+  "fix_hint": "Provide covers_through, body_md, anchors, omitted, and selection_policy.",
+  "rule": "P13",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "covers_through": 10,
+    "body_md": "## Synthesis\n\nState of the problem.",
+    "anchors": [
+      {
+        "target_kind": "claim",
+        "target_id": "C-1",
+        "target_version": 1
+      }
+    ],
+    "omitted": [],
+    "selection_policy": "Include all claims with corroborated disposition."
+  }
+}

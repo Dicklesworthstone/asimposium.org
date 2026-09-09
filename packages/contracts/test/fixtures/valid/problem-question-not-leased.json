@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/QUESTION_NOT_LEASED",
+  "title": "The question is not leased by the requesting Fellow",
+  "status": 409,
+  "code": "QUESTION_NOT_LEASED",
+  "detail": "Answering this question requires holding an active lease, or the lease expired.",
+  "fix_hint": "Acquire a lease via POST /v1/sessions/:id/questions/:qid/lease before submitting an answer.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "question_id": "Q-1"
+  }
+}

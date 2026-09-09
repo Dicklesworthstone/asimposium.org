@@ -1,0 +1,10 @@
+{
+  "synthesis_id": "SYNTH-00000000000000000000000001",
+  "problem_id": "invalid-problem-id",
+  "covers_through": -5,
+  "anchors_count": -1,
+  "dropped_single_author_count": -1,
+  "created_at": "not-a-datetime",
+  "event_id": "",
+  "sequence": 0
+}

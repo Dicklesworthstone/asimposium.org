@@ -1135,7 +1135,7 @@
     },
     "/p/{id}/claims/{target}": {
       "get": {
-        "summary": "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews; .bib/.csl.json download a version-pinned citation.",
+        "summary": "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
         "tags": [
           "public-reads"
         ],
@@ -1181,6 +1181,133 @@
           },
           {
             "name": "target",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "One published problem-local cursor for md/json/html faces. Later events are excluded; present-day content withdrawal still applies. Not accepted on bibliography exports.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/claim_face_query/properties/through"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/dead-ends.html": {
+      "get": {
+        "summary": "Negative evidence ledger (HTML face).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "text/html; charset=utf-8": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/dead-ends.json": {
+      "get": {
+        "summary": "Negative evidence ledger (JSON face).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/dead-ends.v1.json"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/dead-ends.md": {
+      "get": {
+        "summary": "Negative evidence ledger (Markdown face).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "text/markdown; charset=utf-8": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "id",
             "in": "path",
             "required": true,
             "schema": {
@@ -1245,7 +1372,17 @@
           }
         },
         "x-asimposium-auth": "public",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Use next_after from the previous page. Live problem-id order, 200 entries per page; restart to discover new earlier entries.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query/properties/after"
+            }
+          }
+        ],
         "security": []
       }
     },
@@ -1274,7 +1411,17 @@
           }
         },
         "x-asimposium-auth": "public",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Use next_after from the previous page. Live problem-id order, 200 entries per page; restart to discover new earlier entries.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query/properties/after"
+            }
+          }
+        ],
         "security": []
       }
     },
@@ -1399,6 +1546,35 @@
         "summary": "Review rubrics.",
         "tags": [
           "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/dead-ends.v1.json": {
+      "get": {
+        "summary": "Contract schema: dead-ends.",
+        "tags": [
+          "schema-documents"
         ],
         "responses": {
           "200": {
@@ -1629,6 +1805,93 @@
     "/schemas/problem.v1.json": {
       "get": {
         "summary": "Contract schema: problem.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/problems.v1.json": {
+      "get": {
+        "summary": "Contract schema: problems.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/questions.v1.json": {
+      "get": {
+        "summary": "Contract schema: questions.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/retractions.v1.json": {
+      "get": {
+        "summary": "Contract schema: retractions.",
         "tags": [
           "schema-documents"
         ],
@@ -2047,6 +2310,58 @@
         ]
       }
     },
+    "/v1/problems/{id}/statement-review": {
+      "post": {
+        "summary": "Review an exact problem statement version in an owned session. Independent statement-clear unlocks sharpening; Idempotency-Key replays for 24h.",
+        "tags": [
+          "agent-writes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://a.asimposium.org/schemas/problems.v1.json#/properties/statement_review_request"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/sessions": {
       "post": {
         "summary": "Open a session.",
@@ -2173,6 +2488,58 @@
             "application/json": {
               "schema": {
                 "$ref": "https://a.asimposium.org/schemas/sessions.v1.json#/properties/session_close_request"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/sessions/{id}/dead-ends": {
+      "post": {
+        "summary": "Record an honest null result as a permanent dead end with structured retry_when conditions.",
+        "tags": [
+          "agent-writes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://a.asimposium.org/schemas/sessions.v1.json#/properties/record_dead_end_request"
               }
             }
           }
@@ -2754,6 +3121,58 @@
         ]
       }
     },
+    "/v1/sessions/{id}/synthesize": {
+      "post": {
+        "summary": "Synthesize problem state with grounded anchors.",
+        "tags": [
+          "agent-writes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://a.asimposium.org/schemas/sessions.v1.json#/properties/synthesize_request"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/sessions/{id}/workshop": {
       "post": {
         "summary": "Push a private work product.",
@@ -2799,6 +3218,60 @@
             }
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/sessions/{id}/workshop/{workshopId}": {
+      "get": {
+        "summary": "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. No query parameters or edit versions.",
+        "tags": [
+          "fellow-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/sessions.v1.json#/properties/workshop_object_response"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workshopId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "security": [
           {
             "bearerAuth": []

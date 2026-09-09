@@ -6,14 +6,47 @@ import addFormats from "ajv-formats";
 import {
   ClaimCitationCslSchema,
   ClaimDependencyPinsSchema,
+  ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
+  ProblemsIndexQuerySchema,
   ProblemsIndexResponseSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
+import { ProblemDocumentSchema } from "../../src/problem.ts";
+
+test("claim snapshot cursor query has the same canonical bounded grammar in Zod and JSON Schema", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-claim-face-query.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-claim-face-query.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.claim_face_query);
+  for (const value of [good, {}, { through: "0" }, { through: "999999999999999" }]) {
+    expect(ClaimFaceQuerySchema.safeParse(value).success).toBe(true);
+    expect(published(value)).toBe(true);
+  }
+  for (const value of [
+    bad,
+    { through: ["1", "2"] },
+    { through: 42 },
+    { through: null },
+    ...["", "-1", "+1", "1.0", "1e2", " 1", "1\n", "9007199254740992"].map((through) => ({
+      through,
+    })),
+    { through: "42", workshop: true },
+  ]) {
+    expect(ClaimFaceQuerySchema.safeParse(value).success).toBe(false);
+    expect(published(value)).toBe(false);
+  }
+});
 
 test("dependency publications require bounded exact versions and public content identities", async () => {
   const good = ClaimDependencyPinsSchema.parse(
@@ -73,6 +106,52 @@ test("claim citation exports require an exact public version and real calendar d
   ]) {
     expect(ClaimCitationCslSchema.safeParse({ ...good, ...patch }).success).toBe(false);
     expect(published({ ...good, ...patch })).toBe(false);
+  }
+});
+
+test("problem formulation items agree with the published schema and retain untrusted versioned identities", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-problem-formulation.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-problem-formulation.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.problem_face_response);
+  const parsed = ProblemFaceResponseSchema.parse(good);
+  expect(published(good)).toBe(true);
+  expect(ProblemFaceResponseSchema.safeParse(bad).success).toBe(false);
+  expect(published(bad)).toBe(false);
+  const trustedReview = await fixture(
+    new URL("../fixtures/invalid/ledger-statement-review-untrusted.json", import.meta.url),
+  );
+  expect(ProblemFaceResponseSchema.safeParse(trustedReview).success).toBe(false);
+  expect(published(trustedReview)).toBe(false);
+  const review = parsed.items.find((item) => item.kind === "statement-review");
+  expect(review).toBeDefined();
+  for (const patch of [
+    { id: "SR-0" },
+    { scope: "workshop" },
+    { untrusted: false },
+    { next_actions: [] },
+  ]) {
+    const invalid = { ...parsed, items: [{ ...review, ...patch }] };
+    expect(ProblemFaceResponseSchema.safeParse(invalid).success).toBe(false);
+    expect(published(invalid)).toBe(false);
+  }
+  for (const patch of [
+    { scope: "workshop" },
+    { untrusted: false },
+    { id: "S@0-title" },
+    { id: "S@2-statement" },
+    { kind: "system" },
+    { next_actions: [] },
+  ]) {
+    const invalid = { ...parsed, items: [{ ...parsed.items[0], ...patch }] };
+    expect(ProblemFaceResponseSchema.safeParse(invalid).success).toBe(false);
+    expect(published(invalid)).toBe(false);
   }
 });
 
@@ -140,6 +219,93 @@ test("the problems index accepts the valid fixture and requires omitted[]", asyn
   // omitted[] is mandatory: an index that does not say what it left out is
   // not a valid face, even when the list itself is well-formed.
   expect(ProblemsIndexResponseSchema.safeParse(await fixture(INVALID_INDEX)).success).toBe(false);
+});
+
+test("problem-index continuation query and response agree with the served schema", async () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const query = new Ajv2020({ strict: true }).compile(schema.properties.problems_index_query);
+  const response = new Ajv2020({ strict: true }).compile(schema.properties.problems_index_response);
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-problems-index-query.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-query.json", import.meta.url),
+  );
+  for (const value of [{}, good, { after: "P-a:b.c_4" }]) {
+    expect(query(value)).toBe(true);
+    expect(ProblemsIndexQuerySchema.safeParse(value).success).toBe(true);
+  }
+  for (const value of [
+    bad,
+    { after: "" },
+    { after: ["P-A", "P-B"] },
+    { after: "../private" },
+    { after: "P--A" },
+    { after: "x".repeat(129) },
+  ]) {
+    expect(query(value)).toBe(false);
+    expect(ProblemsIndexQuerySchema.safeParse(value).success).toBe(false);
+  }
+  const invalidCursor = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-cursor.json", import.meta.url),
+  );
+  expect(response(invalidCursor)).toBe(false);
+  expect(ProblemsIndexResponseSchema.safeParse(invalidCursor).success).toBe(false);
+  expect(response(await fixture(VALID_INDEX))).toBe(true);
+  expect(
+    ProblemDocumentSchema.safeParse(
+      await fixture(new URL("../fixtures/valid/ledger-problems-index-error.json", import.meta.url)),
+    ).success,
+  ).toBe(true);
+  expect(
+    ProblemDocumentSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/ledger-problems-index-error.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
+});
+
+test("index metadata agrees with JSON Schema and refuses private or invented lifecycle states", async () => {
+  const good = ProblemsIndexResponseSchema.parse(await fixture(VALID_INDEX));
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(
+    schema.properties.problems_index_response,
+  );
+  expect(published(good)).toBe(true);
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-status.json", import.meta.url),
+  );
+  expect(published(invalid)).toBe(false);
+  expect(ProblemsIndexResponseSchema.safeParse(invalid).success).toBe(false);
+  const row = good.problems[0];
+  for (const patch of [
+    { status: "proved" },
+    { status: "private-draft" },
+    { title: "" },
+    { title: "x".repeat(121) },
+    { status: undefined },
+  ]) {
+    const candidate = { ...good, problems: [{ ...row, ...patch }] };
+    expect(published(candidate)).toBe(false);
+    expect(ProblemsIndexResponseSchema.safeParse(candidate).success).toBe(false);
+  }
+  for (const status of [
+    "sharpening",
+    "active",
+    "dormant",
+    "under-result-review",
+    "resolved",
+    "retired",
+  ]) {
+    const candidate = { ...good, problems: [{ ...row, status, title: null }] };
+    expect(published(candidate)).toBe(true);
+    expect(ProblemsIndexResponseSchema.safeParse(candidate).success).toBe(true);
+  }
 });
 
 test("the index rejects a hostile markdown-structural id (gfbc golden)", async () => {
@@ -238,13 +404,16 @@ test("the published ledger schema preserves the public face safety boundary", as
           items: {
             maxItems?: number;
             items: {
-              properties: {
-                kind: { const?: string };
-                id: { maxLength?: number; pattern?: string };
-                scope: { const?: string };
-                untrusted: { const?: boolean };
-                tokens?: unknown;
-              };
+              oneOf: {
+                properties: {
+                  kind: { const?: string };
+                  id: { maxLength?: number; pattern?: string };
+                  scope: { const?: string };
+                  untrusted: { const?: boolean };
+                  tokens?: unknown;
+                };
+                additionalProperties?: boolean;
+              }[];
             };
           };
           next_actions: {
@@ -288,12 +457,27 @@ test("the published ledger schema preserves the public face safety boundary", as
   expect(publishedProblemId.test("P-alpha")).toBe(true);
   expect(publishedProblemId.test("P-X--FORGED")).toBe(false);
 
-  const itemId = face.items.items.properties.id;
+  const variants = face.items.items.oneOf;
+  expect(variants.map((variant) => variant.properties.kind.const)).toEqual([
+    "claim",
+    "result-review",
+    "statement-review",
+    "problem-title",
+    "problem-statement",
+    "problem-falsifier",
+    "problem-motivation",
+  ]);
+  const claimItem = variants[0];
+  if (claimItem === undefined) throw new Error("Published schema has no claim item");
+  const itemId = claimItem.properties.id;
   expect(face.items.maxItems).toBe(200);
-  expect(face.items.items.properties.kind.const).toBe("claim");
-  expect(face.items.items.properties.scope.const).toBe("ledger");
-  expect(face.items.items.properties.untrusted.const).toBe(true);
-  expect("tokens" in face.items.items.properties).toBe(false);
+  expect(claimItem.properties.kind.const).toBe("claim");
+  for (const variant of variants) {
+    expect(variant.properties.scope.const).toBe("ledger");
+    expect(variant.properties.untrusted.const).toBe(true);
+    expect("tokens" in variant.properties).toBe(false);
+    expect(variant.additionalProperties).toBe(false);
+  }
   expect(itemId.maxLength).toBe(128);
   expect(typeof itemId.pattern).toBe("string");
   const publishedItemId = new RegExp(itemId.pattern as string);
@@ -412,12 +596,14 @@ test("the public ledger id grammar is renderer-safe without rewriting Krater's f
 
 test("every contract-valid entry has an unambiguous bounded markdown row", () => {
   // The markdown face renders `- \`${id}\` — seq N, opened TS, updated TS`.
-  // Hostile scalars — newlines that would forge extra listing rows, backticks
+  // Hostile identifiers and timestamps — newlines that would forge extra listing rows, backticks
   // that would escape the id code span, control text, non-canonical
   // timestamps — are contract-invalid, so the mounted reader refuses the row
   // instead of interpolating it (asimposiumorg-gfbc).
   const canonical = {
     id: "P-4DSP",
+    title: "Finite periods",
+    status: "active",
     public_seq: 1,
     created_at: "2026-08-14T00:00:00.000Z",
     updated_at: "2026-08-14T00:00:00.000Z",

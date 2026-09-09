@@ -225,6 +225,37 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     );
     expect(own.items.some((item) => item.kind === "review-candidate")).toBe(false);
     expect(own.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(true);
+    const working = PackResponseSchema.parse(
+      await (await reviewer.call(`${path}/pack?profile=working&max_tokens=8000`)).json(),
+    );
+    const recommendation = working.items.filter((item) => item.kind === "move");
+    expect(recommendation).toHaveLength(1);
+    expect(recommendation[0]?.scope).toBe("system");
+    expect(recommendation[0]?.untrusted).toBe(false);
+    expect(recommendation[0]?.body).toContain("C-1@1");
+    expect(recommendation[0]?.body).toContain("review_request");
+    expect(working.next_actions.some((item) => item.url.includes("target=C-1%401"))).toBe(true);
+    const writerOnly = await addApprovedFellow(f, {
+      suffix: "queue-writer-only",
+      scopes: ["promote"],
+    });
+    const writerSessionResponse = await writerOnly.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "writer-only-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    const writerSession = SessionOpenResponseSchema.parse(await writerSessionResponse.json());
+    const writerPack = PackResponseSchema.parse(
+      await (
+        await writerOnly.call(
+          `/v1/sessions/${writerSession.session_id}/pack?profile=working&max_tokens=8000`,
+        )
+      ).json(),
+    );
+    expect(writerPack.items.some((item) => item.kind === "move")).toBe(false);
+    expect(
+      writerPack.next_actions.some((item) => item.url.includes("profile=review&target=")),
+    ).toBe(false);
     await post(`${path}/review`, {
       target_claim_id: "C-1",
       target_version: 1,
@@ -1202,6 +1233,94 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  for (const initiallyPrivate of [true, false]) {
+    test(`private admission checks current ownership inside the session batch (initially private: ${initiallyPrivate})`, async () => {
+      let mutate: (() => Promise<void>) | undefined;
+      const f = await fixture({
+        beforeBatch: async () => {
+          const run = mutate;
+          mutate = undefined;
+          await run?.();
+        },
+      });
+      await f.db
+        .prepare(
+          "UPDATE problems SET status = ?, sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
+        )
+        .bind(
+          initiallyPrivate ? "private-draft" : "active",
+          f.binding.sponsorId,
+          f.binding.fellowId,
+        )
+        .run();
+      async function footprint() {
+        const result: Record<string, unknown> = {};
+        for (const table of [
+          "sessions",
+          "problem_memberships",
+          "session_write_replays",
+          "workshop_objects",
+          "events",
+          "public_cursor",
+        ])
+          result[table] = (await f.db.prepare(`SELECT * FROM ${table}`).all()).results;
+        return result;
+      }
+      const before = await footprint();
+      mutate = async () => {
+        await f.db
+          .prepare(
+            "UPDATE problems SET status = 'private-draft', sponsor_id = 'usr_new_owner' WHERE id = 'P-4DSP'",
+          )
+          .run();
+      };
+      const result = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "private-owner-race",
+        },
+        body: JSON.stringify({ problem_id: "P-4DSP" }),
+      });
+      expect(result.status).toBe(403);
+      expect(((await result.json()) as { code: string }).code).toBe("WRITE_REFUSED");
+      expect(await footprint()).toEqual(before);
+    });
+  }
+
+  test("a retained session-open receipt is not a grant after private ownership changes", async () => {
+    const f = await fixture();
+    await f.db
+      .prepare(
+        "UPDATE problems SET status = 'private-draft', sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
+      )
+      .bind(f.binding.sponsorId, f.binding.fellowId)
+      .run();
+    const open = () =>
+      f.call("/v1/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "private-open-receipt",
+        },
+        body: JSON.stringify({ problem_id: "P-4DSP" }),
+      });
+    expect((await open()).status).toBe(201);
+    const before = (await f.db.prepare("SELECT * FROM session_write_replays").all()).results;
+    await f.db
+      .prepare("UPDATE problems SET sponsor_id = 'usr_new_owner' WHERE id = 'P-4DSP'")
+      .run();
+    const replay = await open();
+    expect(replay.status).toBe(404);
+    expect(((await replay.json()) as { code: string }).code).toBe("PROBLEM_NOT_FOUND");
+    expect((await f.db.prepare("SELECT * FROM session_write_replays").all()).results).toEqual(
+      before,
+    );
+    expect(
+      (await f.db.prepare("SELECT count(*) AS n FROM sessions").first<{ n: number }>())?.n,
+    ).toBe(1);
+  });
+
   async function dependencyRevisionFixture(options: LocalD1Options = {}) {
     const f = await fixture(options);
     let key = 0;
@@ -9645,13 +9764,12 @@ describe("committed promotion outbox nudge", () => {
     // Title 1 (the dropped oldest) appears nowhere in the face bytes.
     const headBodies = headItems.map((item) => item.body);
     expect(headBodies[0]).toContain("J9HW Title 6");
-    expect(headBodies).toEqual([
-      "[draft] J9HW Title 6",
-      "[draft] J9HW Title 5",
-      "[draft] J9HW Title 4",
-      "[draft] J9HW Title 3",
-      "[draft] J9HW Title 2",
-    ]);
+    expect(headBodies).toEqual(
+      [6, 5, 4, 3, 2].map(
+        (number, index) =>
+          `[draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}`,
+      ),
+    );
     expect(packSixText).not.toContain("J9HW Title 1");
   });
 
@@ -10277,6 +10395,97 @@ describe("committed promotion outbox nudge", () => {
         falsifier: "A positive even n with nonzero remainder.",
       });
       await standing("open");
+    });
+  });
+
+  describe("synthesis lifecycle and P13 anchor validation (W5.8b)", () => {
+    test("valid synthesis creation, idempotent replay, and unanchored anchor rejection", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `synth-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return (await response.json()) as Record<string, unknown>;
+      };
+
+      // 1. Refuses invalid request body
+      const badBody = await post(`${f.path}/synthesize`, { covers_through: -1 }, 422);
+      expect(badBody.code).toBe("SYNTHESIZE_BODY_INVALID");
+      expect(badBody.rule).toBe("P13");
+
+      // 2. Refuses unanchored synthesis (P13): referencing nonexistent claim C-999
+      const unanchored = await post(
+        `${f.path}/synthesize`,
+        {
+          covers_through: 1,
+          body_md: "## Synthesis\n\nAsserting nonexistent claim.",
+          anchors: [{ target_kind: "claim", target_id: "C-999", target_version: 1 }],
+          omitted: [],
+          selection_policy: "All corroborated claims",
+        },
+        422,
+      );
+      expect(unanchored.code).toBe("SYNTHESIS_UNANCHORED");
+      expect(unanchored.rule).toBe("P13");
+      expect(Array.isArray(unanchored.unanchored)).toBe(true);
+      expect((unanchored.unanchored as string[]).some((s) => s.includes("C-999"))).toBe(true);
+
+      // 3. Valid synthesis creation: anchored to seeded claim C-1
+      const maxSeqRow = await f.db
+        .prepare("SELECT MAX(seq) AS max_seq FROM events WHERE problem_id = 'P-4DSP'")
+        .first<{ max_seq: number }>();
+      const currentSeq = maxSeqRow?.max_seq ?? 1;
+
+      const validSynth = (await post(`${f.path}/synthesize`, {
+        covers_through: currentSeq,
+        body_md: "## State of Problem P-4DSP\n\nClaim C-1 is established.",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+        omitted: [],
+        selection_policy: "Include claims at head version",
+      })) as Record<string, unknown>;
+
+      expect(typeof validSynth.synthesis_id).toBe("string");
+      expect((validSynth.synthesis_id as string).startsWith("SYNTH-")).toBe(true);
+      expect(validSynth.problem_id).toBe("P-4DSP");
+      expect(validSynth.covers_through).toBe(currentSeq);
+      expect(validSynth.anchors_count).toBe(1);
+      expect(validSynth.dropped_single_author_count).toBe(0);
+      expect(validSynth.sequence).toBeGreaterThan(currentSeq);
+
+      // Verify row in syntheses table
+      const synthRow = await f.db
+        .prepare("SELECT * FROM syntheses WHERE synthesis_id = ?")
+        .bind(validSynth.synthesis_id)
+        .first<{
+          synthesis_id: string;
+          covers_through: number;
+          dropped_single_author_count: number;
+        }>();
+      expect(synthRow?.synthesis_id).toBe(validSynth.synthesis_id as string);
+      expect(synthRow?.covers_through).toBe(currentSeq);
+      expect(synthRow?.dropped_single_author_count).toBe(0);
+
+      // 4. Idempotent replay with same key returns 200 with identical response
+      const replayResponse = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `synth-${key}` },
+        body: JSON.stringify({
+          covers_through: currentSeq,
+          body_md: "## State of Problem P-4DSP\n\nClaim C-1 is established.",
+          anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+          omitted: [],
+          selection_policy: "Include claims at head version",
+        }),
+      });
+      expect(replayResponse.status).toBe(200);
+      expect(replayResponse.headers.get("cache-control")).toBe("private, no-store");
+      const replayJson = (await replayResponse.json()) as Record<string, unknown>;
+      expect(replayJson.synthesis_id).toBe(validSynth.synthesis_id);
+      expect(replayJson.sequence).toBe(validSynth.sequence);
     });
   });
 });

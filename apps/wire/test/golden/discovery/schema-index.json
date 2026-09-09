@@ -3,10 +3,16 @@
   "origin": "https://a.asimposium.org",
   "schemas": [
     {
+      "id": "dead-ends",
+      "url": "https://a.asimposium.org/schemas/dead-ends.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 6128
+    },
+    {
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 17401
+      "body_bytes": 18885
     },
     {
       "id": "enrollment",
@@ -30,7 +36,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 26554
+      "body_bytes": 42471
     },
     {
       "id": "moves",
@@ -42,7 +48,25 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 38852
+      "body_bytes": 42654
+    },
+    {
+      "id": "problems",
+      "url": "https://a.asimposium.org/schemas/problems.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 47441
+    },
+    {
+      "id": "questions",
+      "url": "https://a.asimposium.org/schemas/questions.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 3934
+    },
+    {
+      "id": "retractions",
+      "url": "https://a.asimposium.org/schemas/retractions.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 2841
     },
     {
       "id": "rubrics",
@@ -60,7 +84,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 129547
+      "body_bytes": 144183
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."

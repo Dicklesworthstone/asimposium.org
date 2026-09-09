@@ -95,16 +95,34 @@ export async function claimDependencies({
   assert.equal(parentDetail.dependency_pins[0].event_id, detail1.event);
   assert.equal(parentDetail.dependency_pins[0].content_digest, detail1.content_digest);
   assert.ok(
-    original.value.next_actions.some((action) => action.url.endsWith(`/${premise.claim_id}@1.md`)),
+    original.value.next_actions.some(
+      (action) =>
+        action.url ===
+        `/p/${problem}/claims/${premise.claim_id}@1.md?through=${original.value.cursor}`,
+    ),
   );
+  const originalDependency = JSON.parse(dependency.body);
+  assert.equal(
+    originalDependency.read_url,
+    `/p/${problem}/claims/${premise.claim_id}@1.md?through=${original.value.cursor}`,
+  );
+  async function assertPremiseUnchanged() {
+    const current = (await face(target)).value;
+    assert.deepEqual(
+      JSON.parse(current.items.find((item) => item.kind === "claim-dependency").body),
+      {
+        ...originalDependency,
+        // The publication and all its provenance stay identical; navigating its
+        // scientific context now retains the cursor of the face just read.
+        read_url: `/p/${problem}/claims/${premise.claim_id}@1.md?through=${current.cursor}`,
+      },
+    );
+  }
   const premise2 = await revise(
     premise,
     "For every nonnegative integer n, the integer 2n is divisible by two.",
   );
-  assert.equal(
-    (await face(target)).value.items.find((item) => item.kind === "claim-dependency").body,
-    dependency.body,
-  );
+  await assertPremiseUnchanged();
   const beforeReplay = await count();
   const replay = await call(
     `${path}/promote`,
@@ -147,10 +165,7 @@ export async function claimDependencies({
     indexed,
     "Revision and dependency payloads must be indexed from their actual publication bytes",
   );
-  assert.equal(
-    (await face(target)).value.items.find((item) => item.kind === "claim-dependency").body,
-    dependency.body,
-  );
+  await assertPremiseUnchanged();
   for (const budget of [800, 1500, 4000, 8000]) {
     const url = `/v1/sessions/${review.session_id}/pack?profile=review&target=${target}&max_tokens=${budget}`;
     const pack = PackResponseSchema.parse(await call(url, undefined, reviewer));

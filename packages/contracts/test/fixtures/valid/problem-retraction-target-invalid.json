@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/RETRACTION_TARGET_INVALID",
+  "title": "The retraction target object does not exist",
+  "status": 422,
+  "code": "RETRACTION_TARGET_INVALID",
+  "detail": "The specified target_object does not identify a valid ledger object on this problem.",
+  "fix_hint": "Specify a valid claim, claim_version, hypothesis, evidence, or dead end on this problem.",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_object": "C-999"
+  }
+}

@@ -107,15 +107,13 @@ export const SEED_AREA_SLUGS = Object.freeze(
  */
 export const AREA_SLUG_PATTERN = /^(?:[a-z0-9]+(?:-[a-z0-9]+)*|other-[a-z0-9-]+)$/;
 
-export const AreaSlugSchema = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(AREA_SLUG_PATTERN, "invalid area slug format")
-  .refine(
-    (slug) => SEED_AREA_SLUGS.includes(slug as SeedAreaSlug) || slug.startsWith("other-"),
-    "area slug must be a canonical seed area or start with 'other-'",
-  );
+export const AreaSlugSchema = z.union([
+  z.enum(SEED_AREA_SLUGS),
+  z
+    .string()
+    .max(64)
+    .regex(/^other-[a-z0-9]+(?:-[a-z0-9]+)*$/, "use a seed area or a named other-* area"),
+]);
 
 export type AreaSlug = z.infer<typeof AreaSlugSchema>;
 

@@ -15,6 +15,8 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
+import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
@@ -107,6 +109,16 @@ const app = createApp({
 });
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  async deadEndPackAt(problemId: string, cursor: number) {
+    return JSON.stringify(await readDeadEndPack(this.env.DB, problemId, cursor, "graveyard"));
+  }
+
+  async reviewQueueAt(problemId: string, cursor: number, fellowId: string, sponsorId: string) {
+    return JSON.stringify(
+      await readReviewQueuePack(this.env.DB, problemId, cursor, { fellowId, sponsorId }),
+    );
+  }
+
   override async fetch(request: WorkerRequest): Promise<WorkerResponse> {
     // The harness compiles in Workerd; Hono's shared test declarations resolve Bun globals.
     const response = await app.fetch(request as unknown as Request, this.env, this.ctx);
@@ -160,6 +172,30 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return screenCalls;
   }
 
+  // HTTP journeys cover signed ingress. This seam isolates an authenticated
+  // writer holding an obsolete read, against real D1 without a timer race.
+  async governanceFromSnapshot(
+    snapshot: Parameters<typeof applyPublicProblemGovernance>[1],
+    sponsorId: string,
+    action: Parameters<typeof applyPublicProblemGovernance>[3],
+    key: string,
+  ) {
+    const response = await applyPublicProblemGovernance(
+      this.env.DB,
+      snapshot,
+      sponsorId,
+      action,
+      new Request(`${this.env.STOA_ORIGIN}/v1/sponsors/problems/${snapshot.id}/lifecycle`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": key,
+          "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        },
+      }),
+    );
+    return { status: response.status, body: await response.json() };
+  }
+
   redactPublicContent(eventId: string) {
     return redactEventContent(this.env.DB, eventId, "privacy", new Date().toISOString());
   }
@@ -177,8 +213,8 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
       .run();
   }
 
-  pauseScreening(): void {
-    screeningDelayMs = 2000;
+  pauseScreening(delayMs = 2000): void {
+    screeningDelayMs = delayMs;
   }
 
   resumeScreening(): void {

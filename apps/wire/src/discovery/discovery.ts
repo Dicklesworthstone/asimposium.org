@@ -100,6 +100,18 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/events.json": true,
   "GET /p/:id/*": true,
+  // W5.8d Questions & Retractions withheld until positive coverage is landed (coordinating with census).
+  "GET /p/:id/questions.json": true,
+  "GET /p/:id/questions.md": true,
+  "GET /p/:id/questions.html": true,
+  "GET /p/:id/retractions.json": true,
+  "GET /p/:id/retractions.md": true,
+  "GET /p/:id/retractions.html": true,
+  "POST /v1/sessions/:id/questions": true,
+  "POST /v1/sessions/:id/questions/:qid/lease": true,
+  "POST /v1/sessions/:id/questions/:qid/answer": true,
+  "POST /v1/sessions/:id/questions/:qid/withdraw": true,
+  "POST /v1/sessions/:id/retract": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
@@ -125,8 +137,11 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/dead-ends.md": "Negative evidence ledger (Markdown face).",
+  "GET /p/:id/dead-ends.json": "Negative evidence ledger (JSON face).",
+  "GET /p/:id/dead-ends.html": "Negative evidence ledger (HTML face).",
   "GET /p/:id/claims/:target":
-    "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews; .bib/.csl.json download a version-pinned citation.",
+    "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",
   "GET /search.md": "Public lexical search (Markdown face).",
   "GET /search.json": "Public lexical search (JSON face).",
@@ -144,6 +159,12 @@ export type DiscoveryAuth =
 
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  [
+    "POST /v1/problems/:id/statement-review",
+    "fellow-bearer",
+    "Review an exact problem statement version in an owned session. Independent statement-clear unlocks sharpening; Idempotency-Key replays for 24h.",
+    "problems:statement_review_request",
+  ],
   [
     "POST /v1/device-code",
     "device-start",
@@ -180,6 +201,11 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "Read a private budgeted session pack; profile and budget shapes are in sessions.v1.json.",
   ],
   ["POST /v1/sessions", "fellow-bearer", "Open a session.", "sessions:session_open_request"],
+  [
+    "GET /v1/sessions/:id/workshop/:workshopId",
+    "fellow-bearer",
+    "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. No query parameters or edit versions.",
+  ],
   [
     "POST /v1/sessions/:id/workshop",
     "fellow-bearer",
@@ -245,6 +271,18 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "fellow-bearer",
     "Re-anchor an authored claim to the latest problem statement version after statement drift.",
     "sessions:reanchor_request",
+  ],
+  [
+    "POST /v1/sessions/:id/synthesize",
+    "fellow-bearer",
+    "Synthesize problem state with grounded anchors.",
+    "sessions:synthesize_request",
+  ],
+  [
+    "POST /v1/sessions/:id/dead-ends",
+    "fellow-bearer",
+    "Record an honest null result as a permanent dead end with structured retry_when conditions.",
+    "sessions:record_dead_end_request",
   ],
   [
     "POST /v1/sessions/:id/close",
@@ -437,7 +475,33 @@ function responseFor(
             },
           },
         }
-      : { [media]: {} };
+      : openApiPath === "/v1/sessions/{id}/workshop/{workshopId}"
+        ? {
+            "application/json": {
+              schema: {
+                $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/workshop_object_response`,
+              },
+            },
+          }
+        : openApiPath === "/p/{id}/dead-ends.json"
+          ? {
+              "application/json": {
+                schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
+              },
+            }
+          : openApiPath === "/p/{id}/questions.json"
+            ? {
+                "application/json": {
+                  schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
+                },
+              }
+            : openApiPath === "/p/{id}/retractions.json"
+              ? {
+                  "application/json": {
+                    schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                  },
+                }
+              : { [media]: {} };
   return {
     "200": {
       description: "Success.",
@@ -462,12 +526,42 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     tags: [operation.tag],
     responses: responseFor(operation.openApiPath, origins),
     "x-asimposium-auth": operation.auth,
-    parameters: [...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
-      name: match[1],
-      in: "path",
-      required: true,
-      schema: { type: "string" },
-    })),
+    parameters: [
+      ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
+        ? [
+            {
+              name: "after",
+              in: "query",
+              required: false,
+              description:
+                "Use next_after from the previous page. Live problem-id order, 200 entries per page; restart to discover new earlier entries.",
+              schema: {
+                $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/problems_index_query/properties/after`,
+              },
+            },
+          ]
+        : []),
+      ...[...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
+        name: match[1],
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+      })),
+      ...(operation.openApiPath === "/p/{id}/claims/{target}"
+        ? [
+            {
+              name: "through",
+              in: "query",
+              required: false,
+              description:
+                "One published problem-local cursor for md/json/html faces. Later events are excluded; present-day content withdrawal still applies. Not accepted on bibliography exports.",
+              schema: {
+                $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_query/properties/through`,
+              },
+            },
+          ]
+        : []),
+    ],
     ...(schema === undefined
       ? {}
       : {

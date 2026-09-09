@@ -14,7 +14,7 @@ import { ClaimKindSchema } from "./sessions.ts";
  *  - conjecture-kind claims displayed separately from theorem-attempts
  *  - retractions split into self-corrected vs externally refuted
  *  - reviews given and their verification survival
- *  - dead ends recorded (neutral history, never a virtue meter)
+ * Dead ends belong in neutral history, never in a numeric calibration tally (R-18).
  *
  * REFUSED PERMANENTLY (Rule A10 / ADR-19):
  *  - No global rankings
@@ -61,7 +61,6 @@ export const FellowCalibrationRecordSchema = z
     refutations_self_corrected: z.number().int().min(0).nullable(),
     refutations_externally_refuted: z.number().int().min(0).nullable(),
     reviews_verified_survival: z.number().int().min(0).nullable(),
-    dead_ends_recorded: z.number().int().min(0),
   })
   .strict();
 

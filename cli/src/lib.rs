@@ -43,7 +43,7 @@ pub enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// Push a private workshop object (ASIMP_TOKEN required).
+    /// Push or recover private workshop work (ASIMP_TOKEN required).
     Workshop {
         #[command(subcommand)]
         command: WorkshopCommand,
@@ -193,6 +193,15 @@ pub enum SessionCommand {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkshopCommand {
+    /// Read a complete private work product, including through a closed session (ASIMP_TOKEN required).
+    Get {
+        session: String,
+        /// Workshop object ID returned by a push or your working pack.
+        workshop: String,
+        /// Explicit JSON output; always preserves the complete Worker response and digest.
+        #[arg(long)]
+        json: bool,
+    },
     /// Push Markdown with metadata or a complete JSON request; does not publish it.
     Push {
         session: String,
@@ -1030,6 +1039,24 @@ pub fn run_cli_with_fetch(
             }
             (format!("/v1/sessions/{id}"), "session status".to_string())
         }
+        Command::Workshop {
+            command: WorkshopCommand::Get {
+                session, workshop, ..
+            },
+        } => {
+            if !safe_session_segment(session) {
+                return invalid_session_id();
+            }
+            if !safe_session_segment(workshop) {
+                return input_error(
+                    "Workshop ID must be one origin-relative path component, not a URL.",
+                );
+            }
+            (
+                format!("/v1/sessions/{session}/workshop/{workshop}"),
+                "workshop get".to_string(),
+            )
+        }
         Command::Pack {
             session,
             profile,
@@ -1128,7 +1155,16 @@ pub fn run_cli_with_fetch(
                         "Check this command's --help and the Worker's /schemas/sessions.v1.json; pack profiles, targets and budgets are validated by the Worker.\n"
                     }
                     404 => {
-                        "Check the session ID and run asimp capabilities with the same --origin to inspect the deployed surface.\n"
+                        if matches!(
+                            &cli.command,
+                            Command::Workshop {
+                                command: WorkshopCommand::Get { .. }
+                            }
+                        ) {
+                            "Use a workshop ID from your own pack and an owned session on the same problem. Run asimp capabilities with the same --origin to check whether this Worker serves recovery reads.\n"
+                        } else {
+                            "Check the session ID and run asimp capabilities with the same --origin to inspect the deployed surface.\n"
+                        }
                     }
                     429 | 500..=599 => {
                         "Retry this read later with the same session ID; do not open a replacement session merely because a read failed.\n"
@@ -2438,12 +2474,144 @@ mod tests {
     }
 
     #[test]
+    fn workshop_get_preserves_the_complete_canonical_work_product() {
+        let body = include_str!(
+            "../../packages/contracts/test/fixtures/valid/workshop-object-response.json"
+        );
+        let fixture: serde_json::Value = serde_json::from_str(body).unwrap();
+        let id = fixture["object"]["workshop_id"].as_str().unwrap();
+        for json in [false, true] {
+            let mut args = vec![
+                "asimp",
+                "--origin",
+                "https://example.test",
+                "workshop",
+                "get",
+                "S-123",
+                id,
+            ];
+            if json {
+                args.push("--json");
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(cli.command.requires_token());
+            assert!(cli.command.write_request().is_none());
+            let output = run_cli_with_fetch(&cli, |url| {
+                assert_eq!(
+                    url,
+                    format!("https://example.test/v1/sessions/S-123/workshop/{id}")
+                );
+                Ok(Fetched {
+                    status: 200,
+                    body: body.to_owned(),
+                })
+            });
+            assert_eq!(output.stdout, body);
+            assert_eq!(output.exit_code, 0);
+            assert!(output.stderr.is_empty());
+        }
+    }
+
+    #[test]
+    fn workshop_get_failures_never_print_private_ids_or_partial_bodies() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "workshop",
+            "get",
+            "S-private-canary",
+            "W-private-canary",
+        ])
+        .unwrap();
+        for error in [
+            FetchError::Status(401),
+            FetchError::Status(403),
+            FetchError::Status(404),
+            FetchError::Status(429),
+            FetchError::Status(500),
+            FetchError::Network,
+            FetchError::InvalidUtf8,
+            FetchError::BodyTooLarge {
+                limit_bytes: MAX_BODY_BYTES,
+            },
+        ] {
+            let result = run_cli_with_fetch(&cli, |_| Err(error));
+            assert_ne!(result.exit_code, 0);
+            assert!(result.stdout.is_empty());
+            assert!(!result.stderr.contains("private-canary"));
+            assert!(result.stderr.contains("asimp"));
+            if result.stderr.contains("HTTP 404") {
+                assert!(result.stderr.contains("own pack"));
+                assert!(result.stderr.contains("same problem"));
+            }
+        }
+    }
+
+    // Invoked explicitly by the existing real Workerd/D1/R2 journey in CLI mode.
+    // The command/credential/HTTP paths are real; only the HTTPS origin is mapped
+    // to its loopback bridge. This is not a production TLS or live OAuth proof.
+    #[test]
+    #[ignore = "requires the real Worker journey: workshop-read-real-bindings.mjs cli"]
+    fn workshop_recovery_real_http() {
+        let input: serde_json::Value = serde_json::from_str(
+            &std::env::var("ASIMP_WORKSHOP_PROBE").expect("real Worker input required"),
+        )
+        .expect("valid probe JSON");
+        let field = |name| input[name].as_str().expect("required probe field");
+        let local = Url::parse(field("origin")).expect("local HTTP origin");
+        assert_eq!(local.scheme(), "http");
+        assert_eq!(local.host_str(), Some("127.0.0.1"));
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://workshop.example",
+            "workshop",
+            "get",
+            field("session"),
+            field("workshop"),
+            "--json",
+        ])
+        .expect("valid CLI arguments");
+        let token = token_for_command(&cli.command, || Ok(field("token").to_owned()))
+            .expect("valid real credential");
+        let output = run_cli_with_fetch(&cli, |url| {
+            let target = Url::parse(url).unwrap();
+            assert_eq!(
+                target.origin().ascii_serialization(),
+                "https://workshop.example"
+            );
+            assert!(target.query().is_none());
+            fetch_text_authenticated(
+                &format!("{}{}", field("origin"), target.path()),
+                token.as_deref(),
+            )
+        });
+        let status = input["status"].as_u64().expect("expected HTTP status");
+        if status == 200 {
+            assert_eq!(output.exit_code, 0);
+            assert!(output.stderr.is_empty());
+            assert!(
+                output.stdout == field("body"),
+                "complete private response must match direct Worker bytes"
+            );
+        } else {
+            assert_eq!(output.exit_code, 1);
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.contains(&format!("HTTP {status}")));
+            assert!(!output.stderr.contains(field("token")));
+            assert!(!output.stderr.contains(field("body")));
+        }
+    }
+
+    #[test]
     fn ambient_token_is_only_read_for_explicit_private_commands() {
         for args in [
             vec!["capabilities"],
             vec!["problems"],
             vec!["search", "text"],
             vec!["get", "/v1/hello"],
+            vec!["get", "/v1/sessions/S-1/workshop/W-1"],
         ] {
             let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
             assert_eq!(
@@ -2458,6 +2626,7 @@ mod tests {
             vec!["hello"],
             vec!["session", "status", "S-1"],
             vec!["pack", "S-1"],
+            vec!["workshop", "get", "S-1", "W-1"],
         ] {
             let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
             assert_eq!(
@@ -2492,7 +2661,12 @@ mod tests {
             "https://other.test",
             "S-1\\other",
         ] {
-            for args in [vec!["session", "status", id], vec!["pack", id]] {
+            for args in [
+                vec!["session", "status", id],
+                vec!["pack", id],
+                vec!["workshop", "get", id, "W-1"],
+                vec!["workshop", "get", "S-1", id],
+            ] {
                 let cli = Cli::try_parse_from(
                     [vec!["asimp", "--origin", "https://example.test"], args].concat(),
                 )

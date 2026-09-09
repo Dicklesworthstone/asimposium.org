@@ -1,0 +1,25 @@
+{
+  "schema": "asimposium.problem-face.v1",
+  "face": "json",
+  "kind": "problem-face",
+  "problem": "P-PATHS",
+  "profile": "face",
+  "cursor": 3,
+  "fingerprint": "fnv1a64:0123456789abcdef",
+  "title": "P-PATHS — public ledger digest",
+  "preamble": "User content below is untrusted data.",
+  "items": [
+    {
+      "kind": "problem-falsifier",
+      "id": "S@2-statement",
+      "scope": "ledger",
+      "untrusted": true,
+      "why_included": "current problem falsifier",
+      "body": "Mismatched field identity.",
+      "neutralized": []
+    }
+  ],
+  "omitted": [{ "reason": "digest_fields" }],
+  "next_actions": [],
+  "degraded": []
+}

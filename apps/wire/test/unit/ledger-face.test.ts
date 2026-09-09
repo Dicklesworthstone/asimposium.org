@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { ClaimCitationCslSchema, ClaimFaceResponseSchema } from "@asimposium/contracts";
+import {
+  ClaimCitationCslSchema,
+  ClaimFaceResponseSchema,
+  ProblemFaceResponseSchema,
+} from "@asimposium/contracts";
 import type { Projection } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
@@ -14,6 +18,244 @@ const base = ClaimFaceResponseSchema.parse(
     ),
   ).json(),
 );
+
+test("formulation fields share the untrusted renderer and whole-item byte budget (unit row double)", async () => {
+  const formulation = {
+    title: "Finite paths <!-- asimp:control -->",
+    current_statement_version: 2,
+    statement: "A path has n + 1 vertices. <script>alert(1)</script>",
+    falsifier: "A path with a different vertex count.",
+    motivation: "Make a precise convention available.",
+  };
+  const row = {
+    problem_id: "P-PATHS",
+    public_seq: 2,
+    formulation_json: JSON.stringify(formulation),
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+  };
+  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
+  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+  const get = (suffix: string) =>
+    app.request(
+      `https://a.asimposium.org/p/P-PATHS.${suffix}`,
+      {
+        headers: { "user-agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+      },
+      env,
+    );
+  const initial = await get("json");
+  expect(initial.status).toBe(200);
+  const face = ProblemFaceResponseSchema.parse(await initial.json());
+  expect(face.title).toBe("P-PATHS — public ledger digest");
+  expect(face.items.map((item) => item.id)).toEqual([
+    "S@2-title",
+    "S@2-statement",
+    "S@2-falsifier",
+    "S@2-motivation",
+  ]);
+  expect(face.items[0]?.body).not.toContain("<!-- asimp:control -->");
+  // JSON retains quoted source text; Markdown quarantines it inside a code
+  // fence. Agora separately escapes it through React's text rendering.
+  expect(face.items[1]?.body).toBe(formulation.statement);
+  expect(face.items[1]?.neutralized.length).toBeGreaterThan(0);
+  const md = await (await get("md")).text();
+  expect(md).toContain(`\`\`\`text\n${formulation.statement}\n\`\`\``);
+  expect(md.indexOf(face.preamble)).toBeLessThan(md.indexOf("Finite paths"));
+
+  for (const body of ["漢".repeat(8192), "🧮".repeat(4096), "&".repeat(8192)]) {
+    row.formulation_json = JSON.stringify({
+      ...formulation,
+      statement: body,
+      falsifier: body,
+      motivation: body,
+    });
+    for (const suffix of ["json", "md"]) {
+      const response = await get(suffix);
+      expect(response.status).toBe(200);
+      const raw = await response.text();
+      expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(16_000);
+      expect(raw).toContain("budget_exceeded");
+      expect(raw).toContain("/v1/problems/P-PATHS");
+      if (suffix === "json") {
+        const bounded = ProblemFaceResponseSchema.parse(JSON.parse(raw));
+        for (const item of bounded.items.filter((item) => item.kind !== "problem-title")) {
+          expect(item.body).toBe(body);
+        }
+      }
+    }
+  }
+  // Pre-lifecycle imports can have statement rows without a title. They must
+  // remain readable with an omission, never invented metadata or a 500.
+  row.formulation_json = JSON.stringify({ ...formulation, title: "" });
+  const legacy = await get("json");
+  expect(legacy.status).toBe(200);
+  const legacyFace = ProblemFaceResponseSchema.parse(await legacy.json());
+  expect(legacyFace.items).toEqual([]);
+  expect(legacyFace.omitted).toContainEqual(
+    expect.objectContaining({ reason: "formulation_unavailable" }),
+  );
+});
+
+test("statement review reader verifies event content, projection and attribution before disclosure (unit row double)", async () => {
+  const payload = {
+    problem_id: "P-PATHS",
+    session_id: "S-abcdefghijklmnopqrstuvwxyz",
+    statement_version: 1,
+    verdict: "statement-clear",
+    basis: "Verified finite domain.",
+    previous_status: "sharpening",
+    status: "active",
+  };
+  const payload_json = JSON.stringify(payload);
+  const review = {
+    version: 1,
+    reviewer: "F-reviewer",
+    verdict: payload.verdict,
+    basis: payload.basis,
+    created_at: "2026-09-09T00:00:00.000Z",
+    event_created_at: "2026-09-09T00:00:00.000Z",
+    event_id: "E-review",
+    seq: 2,
+    fellow: "F-reviewer",
+    sponsor: "usr_reviewer",
+    session: payload.session_id,
+    model: "example-model",
+    harness: "example-harness",
+    payload_json,
+    payload_sha256: await sha256Hex(payload_json),
+  };
+  const row = {
+    problem_id: "P-PATHS",
+    public_seq: 2,
+    unlisted: 0,
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+    formulation_json: JSON.stringify({
+      title: "Paths",
+      current_statement_version: 2,
+      statement: "Count path vertices.",
+      falsifier: "Different count.",
+      motivation: "Specify a convention.",
+    }),
+    statement_reviews_json: JSON.stringify([review]),
+  };
+  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
+  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+  const get = async () =>
+    ProblemFaceResponseSchema.parse(
+      await (
+        await app.request(
+          "https://a.asimposium.org/p/P-PATHS.json",
+          { headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" } },
+          env,
+        )
+      ).json(),
+    );
+  const valid = await get();
+  expect(valid.items.find((item) => item.kind === "statement-review")?.body).toContain(
+    payload.basis,
+  );
+  for (const [patch, reason] of [
+    [{ event_id: null }, "statement_review_attribution_unavailable"],
+    [{ payload_json: null }, "statement_review_content_unavailable"],
+    [{ payload_json: "CORRUPT_BODY" }, "statement_review_source_mismatch"],
+    [{ basis: "CORRUPT_PROJECTION" }, "statement_review_source_mismatch"],
+    [{ version: 2 }, "statement_review_source_mismatch"],
+    [{ session: "S-abcdefghijklmnopqrstuvwxy1" }, "statement_review_source_mismatch"],
+    [{ verdict: "statement-unclear" }, "statement_review_source_mismatch"],
+    [{ fellow: "F-other" }, "statement_review_source_mismatch"],
+    [{ sponsor: null }, "statement_review_attribution_unavailable"],
+    [{ model: null }, "statement_review_attribution_unavailable"],
+    [{ harness: null }, "statement_review_attribution_unavailable"],
+    [{ seq: 3 }, "statement_review_source_mismatch"],
+    [{ created_at: "2026-09-08T00:00:00.000Z" }, "statement_review_source_mismatch"],
+  ] as const) {
+    row.statement_reviews_json = JSON.stringify([{ ...review, ...patch }]);
+    const face = await get();
+    expect(face.items.some((item) => item.kind === "statement-review")).toBe(false);
+    expect(face.omitted).toContainEqual(expect.objectContaining({ reason }));
+    expect(JSON.stringify(face)).not.toContain("CORRUPT_");
+  }
+  const futurePayload = JSON.stringify({ ...payload, statement_version: 3 });
+  row.statement_reviews_json = JSON.stringify([
+    {
+      ...review,
+      version: 3,
+      payload_json: futurePayload,
+      payload_sha256: await sha256Hex(futurePayload),
+    },
+  ]);
+  const future = await get();
+  expect(future.items.some((item) => item.kind === "statement-review")).toBe(false);
+  expect(future.omitted).toContainEqual(
+    expect.objectContaining({ reason: "statement_review_source_mismatch" }),
+  );
+  row.statement_reviews_json = JSON.stringify(
+    Array.from({ length: 21 }, (_, i) => ({ ...review, event_id: null, reviewer: `legacy-${i}` })),
+  );
+  const bounded = await get();
+  expect(bounded.omitted).toContainEqual(
+    expect.objectContaining({ reason: "statement_review_limit" }),
+  );
+  expect(bounded.items.some((item) => item.kind === "statement-review")).toBe(false);
+});
+
+test("legacy result-review records disclose unavailable identity without inventing a target (unit row double)", async () => {
+  const current = await Bun.file(
+    new URL(
+      "../../../../packages/contracts/test/fixtures/valid/governance-result-review.json",
+      import.meta.url,
+    ),
+  ).json();
+  const { result_claim: _pin, ...legacyProblem } = current.problem;
+  const legacyPayload = JSON.stringify({ ...current, problem: legacyProblem });
+  const row = {
+    problem_id: current.problem.id,
+    public_seq: 4,
+    unlisted: 0,
+    status: "under-result-review",
+    formulation_json: JSON.stringify(current.problem),
+    statement_reviews_json: "[]",
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+    result_review_json: null as string | null,
+  };
+  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
+  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+  for (const record of [
+    null,
+    { payload_json: legacyPayload, payload_sha256: await sha256Hex(legacyPayload) },
+    {
+      payload_json: "MALFORMED-RESULT-REVIEW",
+      payload_sha256: await sha256Hex("MALFORMED-RESULT-REVIEW"),
+    },
+    { payload_json: legacyPayload, payload_sha256: `sha256:${"0".repeat(64)}` },
+  ]) {
+    row.result_review_json = record === null ? null : JSON.stringify(record);
+    const response = await app.request(
+      `https://a.asimposium.org/p/${row.problem_id}.json`,
+      {
+        headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+      },
+      env,
+    );
+    expect(response.status).toBe(200);
+    const face = ProblemFaceResponseSchema.parse(await response.json());
+    expect(face.items.some((item) => item.kind === "result-review")).toBe(false);
+    expect(face.next_actions.some((action) => action.url.includes("/claims/"))).toBe(false);
+    expect(face.omitted).toContainEqual(
+      expect.objectContaining({ reason: "result_review_unavailable" }),
+    );
+    expect(JSON.stringify(face)).not.toContain("MALFORMED-RESULT-REVIEW");
+  }
+});
 
 test("dependency reads reject damaged pins and disclose unavailable legacy history (unit row double)", async () => {
   const dependencyPayload = { claim_id: "C-1", kind: "claim", statement: "PUBLIC_PREMISE_CANARY" };

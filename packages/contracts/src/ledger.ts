@@ -10,9 +10,8 @@ import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./ses
 /**
  * Public ledger read faces (W6.1). First slice: the problems index.
  *
- * The entry mirrors the Krater `problems` projection exactly — identifiers,
- * sequence, timestamps. Titles, statements, and statuses arrive with the
- * problem lifecycle (W5.1) and extend this entry; they are never simulated.
+ * The entry mirrors the Krater `problems` projection: identifiers, sequence,
+ * timestamps, saved title and lifecycle status. Legacy missing titles are null.
  * `omitted[]` is mandatory on the response so every reader can see what the
  * face deliberately left out.
  */
@@ -56,20 +55,48 @@ export const ProblemIndexTimestampSchema = z
   .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp")
   .refine(isRealCanonicalUtcInstant, "invalid real canonical UTC instant");
 
+// Shared by lifecycle writes and public projections. Keeping this definition
+// below the common primitives avoids a ledger -> problems -> ledger cycle.
+export const PROBLEM_STATUSES = [
+  "private-draft",
+  "sharpening",
+  "active",
+  "dormant",
+  "under-result-review",
+  "resolved",
+  "retired",
+] as const;
+export const ProblemStatusSchema = z.enum(PROBLEM_STATUSES);
+export type ProblemStatus = z.infer<typeof ProblemStatusSchema>;
+
 export const ProblemIndexEntrySchema = z
   .object({
     id: PublicLedgerProblemIdSchema,
     public_seq: z.number().int().min(0),
     created_at: ProblemIndexTimestampSchema,
     updated_at: ProblemIndexTimestampSchema,
+    title: z
+      .string()
+      .min(1)
+      .max(120)
+      .nullable()
+      .describe("Untrusted Fellow-supplied title; null when a legacy title is unavailable."),
+    status: ProblemStatusSchema.exclude(["private-draft"]),
   })
   .strict();
 
 export const ProblemsIndexResponseSchema = z
   .object({
     problems: z.array(ProblemIndexEntrySchema).max(200),
+    next_after: PublicLedgerProblemIdSchema.optional().describe(
+      "When present, request the next page with ?after=<this id>; absent at the current end. Pages reflect live visibility, not a frozen snapshot.",
+    ),
     omitted: z.array(z.string().min(1).max(160)),
   })
+  .strict();
+
+export const ProblemsIndexQuerySchema = z
+  .object({ after: PublicLedgerProblemIdSchema.optional() })
   .strict();
 
 export type ProblemIndexEntry = z.infer<typeof ProblemIndexEntrySchema>;
@@ -96,6 +123,19 @@ export const PublicClaimTargetSchema = z
   .max(64)
   .regex(PUBLIC_CLAIM_TARGET_PATTERN)
   .refine((value) => !value.includes("@") || Number.isSafeInteger(Number(value.split("@")[1])));
+
+/** A public scientific snapshot through one problem-local ledger sequence.
+ * Decimal URL spelling is canonical and bounded below JS's safe-integer limit.
+ * The server also requires that this cursor has actually been published. */
+export const ClaimFaceQuerySchema = z
+  .object({
+    through: z
+      .string()
+      .regex(/^(?:0|[1-9][0-9]{0,14})$/)
+      .optional(),
+  })
+  .strict();
+export type ClaimFaceQuery = z.infer<typeof ClaimFaceQuerySchema>;
 
 /** Direct premises captured at publication, scoped by the parent problem. */
 export const ClaimDependencyPinSchema = z
@@ -144,7 +184,7 @@ export type PublicClaimState = z.infer<typeof PublicClaimStateSchema>;
 /**
  * The per-problem read face (W6.1): the JSON face of a problem-face projection
  * rendered through `@asimposium/render`. Every field emitted by the mounted
- * `/p/<id>.json` digest is pinned. Public items are ledger claims and untrusted
+ * `/p/<id>.json` digest is pinned. Public items are formulations, statement reviews or claims and untrusted
  * by construction; the shape cannot admit workshop or trusted-body leakage.
  */
 const FaceItemSchema = z
@@ -158,6 +198,34 @@ const FaceItemSchema = z
     neutralized: z.array(PackNeutralizationSchema),
   })
   .strict();
+
+const ProblemFaceItemSchema = z.discriminatedUnion("kind", [
+  FaceItemSchema,
+  FaceItemSchema.extend({
+    kind: z.literal("result-review"),
+    id: z.string().regex(/^RR-[1-9][0-9]{0,15}$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("statement-review"),
+    id: z.string().regex(/^SR-[1-9][0-9]{0,15}$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-title"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-title$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-statement"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-statement$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-falsifier"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-falsifier$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-motivation"),
+    id: z.string().regex(/^S@[1-9][0-9]{0,15}-motivation$/),
+  }),
+]);
 
 const ACTION_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 // biome-ignore lint/complexity/useRegexLiterals: RegExp constructor avoids literal ASCII control characters in regex literal
@@ -230,7 +298,7 @@ export const ProblemFaceResponseSchema = z
     fingerprint: z.string().regex(/^fnv1a64:[0-9a-f]{16}$/),
     title: z.string().min(1),
     preamble: z.string().min(1),
-    items: z.array(FaceItemSchema).max(200),
+    items: z.array(ProblemFaceItemSchema).max(200),
     omitted: z
       .array(
         z
@@ -358,8 +426,10 @@ export const LedgerContractsSchema = z
   .object({
     problem_index_entry: ProblemIndexEntrySchema,
     problems_index_response: ProblemsIndexResponseSchema,
+    problems_index_query: ProblemsIndexQuerySchema.optional(),
     problem_face_response: ProblemFaceResponseSchema,
     claim_face_response: ClaimFaceResponseSchema.optional(),
+    claim_face_query: ClaimFaceQuerySchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
     claim_dependency_pins: ClaimDependencyPinsSchema.optional(),
     search_query_request: SearchQueryRequestSchema.optional(),

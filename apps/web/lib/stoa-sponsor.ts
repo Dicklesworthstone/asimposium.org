@@ -17,6 +17,8 @@ import { isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
 
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./service-envelope";
 
+const utf8Encoder = new TextEncoder();
+
 /** The only fetch shape this sealed transport needs: a fully resolved Stoa URL. */
 export type StoaFetch = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -28,6 +30,8 @@ export const DEFAULT_STOA_TIMEOUT_MS = 10_000;
  * and not unbounded — a caller may tune it inside this range and no further.
  */
 export const MAX_STOA_TIMEOUT_MS = 60_000;
+/** Maximum raw request body bytes for a service-envelope dispatch (64 KiB). */
+export const MAX_SERVICE_ENVELOPE_BODY_BYTES = 64 * 1024;
 /** One console render may fetch at most two private workshop previews. */
 export const MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS = 2;
 /** One absolute budget covers every preview dispatch and response read in that render. */
@@ -305,6 +309,21 @@ export async function dispatchSignedSponsorRequest(
   // whatever collects them — which is the leak this check exists to prevent.
   if (!SponsorIdSchema.safeParse(options.sponsorId).success) {
     throw new TypeError("Stoa sponsor id must be a canonical opaque Worker principal");
+  }
+  // The raw body is bounded at the transport edge before signing and dispatch.
+  // Worker ingress enforces MAX_SERVICE_ENVELOPE_BODY_BYTES (64 KiB); enforcing
+  // it here prevents generating a signed envelope and dispatching an over-limit
+  // request to Stoa only to receive a 413, and avoids copying oversized caller buffers.
+  const incomingByteLength =
+    typeof options.rawBody === "string"
+      ? options.rawBody.length > MAX_SERVICE_ENVELOPE_BODY_BYTES
+        ? options.rawBody.length
+        : utf8Encoder.encode(options.rawBody).byteLength
+      : options.rawBody.byteLength;
+  if (incomingByteLength > MAX_SERVICE_ENVELOPE_BODY_BYTES) {
+    throw new TypeError(
+      `Stoa request raw body exceeds maximum ${MAX_SERVICE_ENVELOPE_BODY_BYTES} bytes`,
+    );
   }
   const rawBody =
     typeof options.rawBody === "string" ? options.rawBody : copyBodyBytes(options.rawBody);

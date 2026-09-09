@@ -31,7 +31,53 @@ import {
   validateFtsReadInput,
   validateKraterIngressTimestamp,
   writeClaim,
+  writeLedgerEvent,
 } from "./krater";
+
+test("sponsor ledger attribution cannot mint scientific authorship or Fellow events", async () => {
+  const untouchedDb = {
+    prepare: () => {
+      throw new Error("DATABASE_TOUCHED");
+    },
+  } as unknown as Parameters<typeof writeLedgerEvent>[0];
+  const input: Parameters<typeof writeLedgerEvent>[1] = {
+    problemId: "P-governance",
+    objectId: "P-governance",
+    objectKind: "problem",
+    eventId: "E-governance",
+    eventType: "problem.admitted",
+    objectVersion: 1,
+    idempotencyKey: "gov-key",
+    requestDigest: "a".repeat(64),
+    payloadJson: "{}",
+    createdAt: new Date().toISOString(),
+    attribution: {
+      principalType: "sponsor",
+      sponsorId: "usr_governance",
+      fellowId: null,
+      sessionId: null,
+      modelSelfDeclared: null,
+      harness: null,
+    },
+  };
+  for (const patch of [
+    { eventType: "claim.created" },
+    { objectKind: "claim" },
+    { objectId: "P-another" },
+    { attribution: { ...input.attribution, fellowId: "invented" } },
+    { attribution: { ...input.attribution, sessionId: "invented" } },
+    { attribution: { ...input.attribution, modelSelfDeclared: "invented" } },
+    { attribution: { ...input.attribution, harness: "invented" } },
+    { attribution: { ...input.attribution, credentialId: "invented" } },
+    { attribution: { sponsorId: "usr_governance", fellowId: null, sessionId: null } },
+  ]) {
+    await expect(
+      writeLedgerEvent(untouchedDb, { ...input, ...patch } as typeof input, {
+        statementsAfterEvent: () => [],
+      }),
+    ).rejects.toThrow(KraterValidationError);
+  }
+});
 
 function event(
   problemId: string,
@@ -117,8 +163,8 @@ const OUTBOX_READ_SQL = normalizeSql(`SELECT event_id, problem_id, kind, dedupe_
   payload_sha256, state FROM outbox
   WHERE event_id = ? AND problem_id = ? AND kind = 'search.index'`);
 const CLAIM_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO claims
-  (id, problem_id, statement, payload_sha256, norm_hash, source_seq, created_at)
-  SELECT ?, p.id, ?, ?, ?, p.public_seq, ? FROM problems p
+  (id, problem_id, statement, payload_sha256, norm_hash, source_seq, statement_version, statement_drift, created_at)
+  SELECT ?, p.id, ?, ?, ?, p.public_seq, p.current_statement_version, 0, ? FROM problems p
   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
   WHERE p.id = ? AND i.event_id IS NULL`);
 const EVENT_INSERT_SELECT_SQL = normalizeSql(`INSERT INTO events
@@ -480,7 +526,7 @@ function retryingWriteHarness(
       const scratch = new Database(":memory:");
       try {
         scratch.run(`
-          CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL);
+          CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL, current_statement_version INTEGER NOT NULL DEFAULT 1);
           CREATE TABLE idempotency (
             problem_id TEXT NOT NULL,
             idempotency_key TEXT NOT NULL,
@@ -499,7 +545,9 @@ function retryingWriteHarness(
             payload_sha256 TEXT NOT NULL,
             norm_hash TEXT,
             source_seq INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            statement_version INTEGER NOT NULL,
+            statement_drift INTEGER NOT NULL
           );
           CREATE TABLE events (
             id TEXT PRIMARY KEY,

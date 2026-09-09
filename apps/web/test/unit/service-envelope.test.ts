@@ -24,6 +24,7 @@ import {
   boundedWorkshopPreviewPlan,
   dispatchSignedSponsorRequest,
   loadBoundedWorkshopPreviewPrefix,
+  MAX_SERVICE_ENVELOPE_BODY_BYTES,
   MAX_SPONSOR_WORKSHOP_PREVIEW_REQUESTS,
   newestWorkshopPreview,
   newestWorkshopPreviewIfValid,
@@ -775,6 +776,82 @@ describe("configured Stoa origin binding", () => {
 
     expect(response.status).toBe(200);
     expect(signedPrincipal).toBe(longest);
+  });
+
+  // ggv.4: Worker ingress enforces MAX_SERVICE_ENVELOPE_BODY_BYTES (64 KiB).
+  // Agora dispatch must refuse an oversized raw body before minting an envelope
+  // or contacting the transport, containing apex signing/dispatch costs.
+  test("PLANTED: an oversized raw body (>64 KiB) is refused before signer and transport", async () => {
+    const keypair = await makeKeypair();
+    const unreachable = (stage: string) => () => {
+      throw new Error(`PLANTED_OVERSIZED_BODY_REACHED_${stage}`);
+    };
+
+    for (const [label, rawBody] of [
+      ["string >64 KiB", "x".repeat(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1)],
+      ["Uint8Array >64 KiB", new Uint8Array(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1)],
+      ["multibyte UTF-8 string exceeding 64 KiB", "€".repeat(22_000)],
+    ] as const) {
+      const rejected = dispatchSignedSponsorRequest({
+        stoaOrigin: staging,
+        path: "/v1/sponsor-probe",
+        method: "POST",
+        route: "/v1/sponsor-probe",
+        action: "sponsor.probe",
+        sponsorId: "usr_1",
+        rawBody,
+        privateKey: keypair.privateKey,
+        kid: "oversized-body-test",
+        now: NOW,
+        mintEnvelopeImpl: unreachable("MINT"),
+        fetchImpl: unreachable("FETCH"),
+      });
+
+      await expect(rejected, label).rejects.toMatchObject({
+        name: "TypeError",
+        message: `Stoa request raw body exceeds maximum ${MAX_SERVICE_ENVELOPE_BODY_BYTES} bytes`,
+      });
+    }
+  });
+
+  test("PLANTED: the exact 64 KiB boundary admits the largest lawful raw body", async () => {
+    const keypair = await makeKeypair();
+    let signedBody: string | Uint8Array | undefined;
+    let dispatchedBody: unknown;
+    const envelope = await mintSponsorProbeEnvelope(keypair.privateKey, "body-boundary-test");
+    const exactBody = new Uint8Array(MAX_SERVICE_ENVELOPE_BODY_BYTES);
+    exactBody.fill(0x42);
+
+    const response = await dispatchSignedSponsorRequest({
+      stoaOrigin: staging,
+      path: "/v1/sponsor-probe",
+      method: "POST",
+      route: "/v1/sponsor-probe",
+      action: "sponsor.probe",
+      sponsorId: "usr_1",
+      rawBody: exactBody,
+      privateKey: keypair.privateKey,
+      kid: "body-boundary-test",
+      now: NOW,
+      mintEnvelopeImpl: async (options) => {
+        signedBody = options.body;
+        return envelope;
+      },
+      fetchImpl: async (_input, init) => {
+        dispatchedBody = init?.body;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(signedBody).toBeDefined();
+    expect(signedBody instanceof Uint8Array ? signedBody.byteLength : 0).toBe(
+      MAX_SERVICE_ENVELOPE_BODY_BYTES,
+    );
+    expect(dispatchedBody).toBeDefined();
+    expect(dispatchedBody instanceof Uint8Array ? dispatchedBody.byteLength : 0).toBe(
+      MAX_SERVICE_ENVELOPE_BODY_BYTES,
+    );
   });
 
   test("PLANTED: a transport rejection after the deadline remains observed", async () => {

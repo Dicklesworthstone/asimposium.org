@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_BODY_INVALID",
+  "title": "Conflict normalization payload is invalid",
+  "status": 422,
+  "code": "CONFLICT_BODY_INVALID",
+  "detail": "A conflict normalization request must specify exactly two distinct claims and substantively state aligned definitions, scope, quantifiers, smallest disagreement, agreed facts, and discriminating tests.",
+  "fix_hint": "Submit a complete conflict normalization payload with all required alignment fields."
+}

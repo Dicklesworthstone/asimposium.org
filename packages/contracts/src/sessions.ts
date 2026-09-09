@@ -1,4 +1,20 @@
 import { z } from "zod";
+import {
+  type NormalizeConflictRequest,
+  NormalizeConflictRequestSchema,
+  type NormalizeConflictResponse,
+  NormalizeConflictResponseSchema,
+  type ResolveConflictRequest,
+  ResolveConflictRequestSchema,
+  type ResolveConflictResponse,
+  ResolveConflictResponseSchema,
+} from "./conflicts.ts";
+import {
+  type RecordDeadEndRequest,
+  RecordDeadEndRequestSchema,
+  type RecordDeadEndResponse,
+  RecordDeadEndResponseSchema,
+} from "./dead-ends.ts";
 import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
 import {
   ClaimScientificProvenanceSchema,
@@ -8,7 +24,22 @@ import {
   ScientificVerificationSchema,
 } from "./scientific-provenance.ts";
 
-export { type RateLimitBudget, RateLimitBudgetSchema };
+export {
+  type NormalizeConflictRequest,
+  NormalizeConflictRequestSchema,
+  type NormalizeConflictResponse,
+  NormalizeConflictResponseSchema,
+  type RateLimitBudget,
+  RateLimitBudgetSchema,
+  type RecordDeadEndRequest,
+  RecordDeadEndRequestSchema,
+  type RecordDeadEndResponse,
+  RecordDeadEndResponseSchema,
+  type ResolveConflictRequest,
+  ResolveConflictRequestSchema,
+  type ResolveConflictResponse,
+  ResolveConflictResponseSchema,
+};
 
 /**
  * Session-protocol contracts (Fable §7). The session is the unit of work; a
@@ -365,6 +396,18 @@ export const SponsorWorkshopObjectSchema = z
   })
   .strict();
 export type SponsorWorkshopObject = z.infer<typeof SponsorWorkshopObjectSchema>;
+
+/** Complete private work product, recovered through an owned problem session. */
+export const WorkshopObjectResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+    object: SponsorWorkshopObjectSchema,
+    body_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export type WorkshopObjectResponse = z.infer<typeof WorkshopObjectResponseSchema>;
 
 /**
  * The private workshop read is a byte-bounded keyset page (asimposiumorg-e7j.2):
@@ -884,6 +927,73 @@ export const ClaimReanchorResponseSchema = z
   .strict();
 export type ClaimReanchorResponse = z.infer<typeof ClaimReanchorResponseSchema>;
 
+/** Target kinds supported for synthesis anchors (Fable §6.1, Rule P13). */
+export const SynthesisAnchorTargetKindSchema = z.enum([
+  "claim",
+  "evidence",
+  "hypothesis",
+  "gap",
+  "conflict",
+  "citation",
+  "statement",
+]);
+export type SynthesisAnchorTargetKind = z.infer<typeof SynthesisAnchorTargetKindSchema>;
+
+/** Synthesis anchor referencing a specific ledger object (Rule P13). */
+export const SynthesisAnchorSchema = z
+  .object({
+    target_kind: SynthesisAnchorTargetKindSchema,
+    target_id: z
+      .string()
+      .min(1)
+      .max(128)
+      .describe("Object ID within the session problem; statement anchors use the problem ID."),
+    target_version: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("When supplied, the referenced event must carry this exact object version."),
+    target_seq: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "When supplied, the exact same-problem event sequence, at or before covers_through. All supplied pins must match one event. Statement events are admission or statement revision.",
+      ),
+    assertion_summary: z.string().min(1).max(1024).optional(),
+  })
+  .strict();
+export type SynthesisAnchor = z.infer<typeof SynthesisAnchorSchema>;
+
+/** Synthesis creation request: POST /v1/sessions/:id/synthesize. */
+export const SynthesizeRequestSchema = z
+  .object({
+    covers_through: z.number().int().min(0),
+    body_md: z.string().min(1).max(65536),
+    anchors: z.array(SynthesisAnchorSchema).min(1).max(1000),
+    omitted: z.array(z.string().min(1).max(2048)).max(1000),
+    selection_policy: z.string().min(1).max(4096),
+  })
+  .strict();
+export type SynthesizeRequest = z.infer<typeof SynthesizeRequestSchema>;
+
+/** Synthesis creation response: 201 Created from POST /v1/sessions/:id/synthesize. */
+export const SynthesizeResponseSchema = z
+  .object({
+    synthesis_id: z.string().min(1).max(128),
+    problem_id: ProblemIdSchema,
+    covers_through: z.number().int().min(0),
+    anchors_count: z.number().int().min(0),
+    dropped_single_author_count: z.number().int().min(0),
+    created_at: z.string().datetime(),
+    event_id: z.string().min(1).max(128),
+    sequence: z.number().int().positive(),
+  })
+  .strict();
+export type SynthesizeResponse = z.infer<typeof SynthesizeResponseSchema>;
+
 /**
  * The session-protocol contract set as one document, so the published JSON
  * Schema shows every route shape at once and drift is one regenerated file.
@@ -897,6 +1007,7 @@ export const SessionsContractsSchema = z
     pack_target_query: PackTargetQuerySchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
+    workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
     promote_request: PromoteRequestSchema,
@@ -920,6 +1031,14 @@ export const SessionsContractsSchema = z
     relation_filed_response: RelationFiledResponseSchema,
     reanchor_request: ClaimReanchorRequestSchema,
     reanchor_response: ClaimReanchorResponseSchema,
+    synthesize_request: SynthesizeRequestSchema,
+    synthesize_response: SynthesizeResponseSchema,
+    record_dead_end_request: RecordDeadEndRequestSchema,
+    record_dead_end_response: RecordDeadEndResponseSchema,
+    normalize_conflict_request: NormalizeConflictRequestSchema,
+    normalize_conflict_response: NormalizeConflictResponseSchema,
+    resolve_conflict_request: ResolveConflictRequestSchema,
+    resolve_conflict_response: ResolveConflictResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

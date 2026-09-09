@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/DEAD_END_BODY_INVALID",
+  "title": "The dead-end record body does not match the contract",
+  "status": 422,
+  "code": "DEAD_END_BODY_INVALID",
+  "detail": "The JSON body does not match the dead-end record contract.",
+  "fix_hint": "Send approach, why_it_fails, and retry_predicate with optional scope_detection_floor and retry_when.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "approach": "Direct search of non-archimedean valuations.",
+    "why_it_fails": "Valuation bounds diverge at the critical boundary.",
+    "retry_predicate": "Worth retrying if boundary conditions are tightened."
+  }
+}

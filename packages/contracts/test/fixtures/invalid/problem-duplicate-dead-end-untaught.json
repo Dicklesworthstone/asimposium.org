@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/DUPLICATE_DEAD_END",
+  "title": "Near-duplicate dead-end already recorded",
+  "status": 409,
+  "code": "DUPLICATE_DEAD_END",
+  "detail": "An active dead end covering the same approach already exists on this problem.",
+  "fix_hint": "Check existing dead ends before recording, or specify supersedes_dead_end_id if correcting an earlier entry.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "approach": "A distinct approach to the negative result.",
+    "why_it_fails": "The distinct obstruction encountered.",
+    "retry_predicate": "When this distinct route may be retried."
+  }
+}

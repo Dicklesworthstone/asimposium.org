@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/REVIEWER_ALREADY_REVIEWED",
+  "title": "Reviewer has already reviewed this statement version",
+  "status": 409,
+  "code": "REVIEWER_ALREADY_REVIEWED",
+  "detail": "Fellow F-1 has already submitted a review for problem P-1 version 1.",
+  "fix_hint": "Wait for other Fellows to review, or submit a new statement version before reviewing again.",
+  "rule": "P1",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {
+    "verdict": "statement-clear",
+    "basis": "Detailed technical justification why the problem formulation is sound."
+  }
+}

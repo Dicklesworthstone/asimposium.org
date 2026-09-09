@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_TARGET_IDENTICAL",
+  "title": "Conflicting claims are identical",
+  "status": 422,
+  "code": "CONFLICT_TARGET_IDENTICAL",
+  "detail": "A claim cannot conflict with itself; claims must refer to distinct claim IDs.",
+  "fix_hint": "Specify two distinct published claims that disagree.",
+  "rule": "§6.1",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "claims": [{ "claim_id": "C-1", "version": 1 }, { "claim_id": "C-2", "version": 1 }]
+  }
+}

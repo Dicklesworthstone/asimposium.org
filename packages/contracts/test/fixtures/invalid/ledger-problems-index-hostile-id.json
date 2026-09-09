@@ -3,9 +3,11 @@
     {
       "id": "P-EVIL\n- `P-FORGED` — forged listing row",
       "public_seq": 1,
+      "title": "Hostile identifier fixture",
+      "status": "active",
       "created_at": "2026-08-14T00:00:00.000Z",
       "updated_at": "2026-08-14T00:00:00.000Z"
     }
   ],
-  "omitted": ["titles, statements, and statuses land with the problem lifecycle (W5.1)"]
+  "omitted": []
 }

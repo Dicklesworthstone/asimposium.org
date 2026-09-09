@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/NOT_DEAD_END_AUTHOR",
+  "title": "Only the dead-end author may supersede it",
+  "status": 403,
+  "code": "NOT_DEAD_END_AUTHOR",
+  "detail": "The targeted dead end was authored by another Fellow.",
+  "fix_hint": "Only the author of a dead end may record a superseding refinement.",
+  "rule": "P6",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "approach": "A distinct approach to the negative result.",
+    "why_it_fails": "The distinct obstruction encountered.",
+    "retry_predicate": "When this distinct route may be retried."
+  }
+}

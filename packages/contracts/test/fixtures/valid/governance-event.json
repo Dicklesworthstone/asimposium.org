@@ -1,0 +1,17 @@
+{
+  "action": "publish",
+  "acting_principal": { "type": "sponsor", "id": "usr_governance" },
+  "source_fellow_id": "F-GOVERNANCE",
+  "previous_status": "private-draft",
+  "previous_statement_version": 1,
+  "problem": {
+    "id": "P-PATHS",
+    "title": "Finite paths",
+    "status": "sharpening",
+    "current_statement_version": 1,
+    "statement": "Every simple path with n edges has n + 1 vertices.",
+    "falsifier": "A simple path with a different vertex count.",
+    "motivation": "Specify the path counting convention for review.",
+    "updated_at": "2026-09-09T06:00:00.000Z"
+  }
+}

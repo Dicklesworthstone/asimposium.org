@@ -52,6 +52,7 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   },
   "collapse-duplicate": { source_claim_id: "C-1", source_version: 1, target: "C-2@1" },
   "re-anchor": { claim_id: "C-1", base_version: 1 },
+  "record-dead-end": {},
   formalize: {
     bears_on_id: "C-1",
     bears_on_version: 1,
@@ -70,6 +71,7 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   "add-refuter-from-friction": evidence,
   "close-gap": { gap_id: "G-1", closed_by: "C-2@1" },
   "idle-close": { handback: "C-1 needs an independent check of its boundary case." },
+  synthesize: {},
 };
 
 test("available move guidance agrees with mounted POSTs, published schemas and actual validators", () => {
@@ -119,7 +121,7 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
         expect(template.required_fields, template.move).toContain(field);
     }
   }
-  expect(count).toBe(11);
+  expect(count).toBe(13);
   expect(Object.keys(bodies)).toHaveLength(count);
 });
 

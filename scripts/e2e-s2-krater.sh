@@ -161,6 +161,12 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0046_workshop_revision.sql
   db/migrations/0047_problem_lifecycle.sql
   db/migrations/0048_reanchor_replay_scope.sql
+  db/migrations/0049_problem_statement_reviews.sql
+  db/migrations/0050_problem_areas.sql
+  db/migrations/0051_synthesize_replay_scope.sql
+  db/migrations/0052_dead_ends_and_replay_scope.sql
+  db/migrations/0053_questions_and_retractions_replay_scope.sql
+  db/migrations/0054_conflicts_fable_shape_and_replay_scope.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -193,6 +199,10 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/search.ts
   packages/contracts/src/rubrics.ts
   packages/contracts/src/moves.ts
+  packages/contracts/src/dead-ends.ts
+  packages/contracts/src/questions.ts
+  packages/contracts/src/retractions.ts
+  packages/contracts/src/conflicts.ts
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
@@ -243,6 +253,10 @@ readonly -a S2_SOURCE_PATHS=(
   # Reached through `sessions/router.ts` since the claim-relations slice; the
   # mechanical walk flagged it on first run, which is this attestation working.
   apps/wire/src/ledger/relations.ts
+  apps/wire/src/ledger/synthesis.ts
+  apps/wire/src/ledger/dead-ends.ts
+  apps/wire/src/ledger/questions.ts
+  apps/wire/src/ledger/retractions.ts
   apps/wire/src/krater/claim-version.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
   # (mintClaimVersion on the promote path); the mechanical walk flagged it the
@@ -265,8 +279,14 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/markdown.ts
   apps/wire/src/search/service.ts
   apps/wire/src/problems/router.ts
+  apps/wire/src/problems/lifecycle-ledger.ts
   packages/contracts/src/public-schemas.ts
+  packages/contracts/generated/dead-ends.schema.json
   packages/contracts/generated/discovery.schema.json
+  packages/contracts/generated/problems.schema.json
+  packages/contracts/generated/questions.schema.json
+  packages/contracts/generated/retractions.schema.json
+  packages/contracts/generated/conflicts.schema.json
   packages/contracts/generated/enrollment.schema.json
   packages/contracts/generated/enrollment-capsule.schema.json
   packages/contracts/generated/ledger.schema.json
@@ -362,6 +382,12 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0046_workshop_revision.sql
   0047_problem_lifecycle.sql
   0048_reanchor_replay_scope.sql
+  0049_problem_statement_reviews.sql
+  0050_problem_areas.sql
+  0051_synthesize_replay_scope.sql
+  0052_dead_ends_and_replay_scope.sql
+  0053_questions_and_retractions_replay_scope.sql
+  0054_conflicts_fable_shape_and_replay_scope.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

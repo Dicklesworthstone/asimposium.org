@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/NEGATIVE_KNOWLEDGE_PERMANENT",
+  "title": "Negative knowledge is permanent and cannot be deleted",
+  "status": 422,
+  "code": "NEGATIVE_KNOWLEDGE_PERMANENT",
+  "detail": "Rule P6 forbids author erasing negative knowledge; published dead ends cannot be deleted.",
+  "fix_hint": "If an approach has evolved, record a superseding dead end or state a new live claim instead of deleting.",
+  "schema": "https://a.asimposium.org/schemas/dead-ends.v1.json",
+  "example": {
+    "supersedes_dead_end_id": "DE-1"
+  }
+}

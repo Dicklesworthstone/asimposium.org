@@ -334,7 +334,7 @@ smoke_agent_run_fixture_self_test() {
     return 1
   fi
 
-  local valid_problem_index='{"problems":[{"id":"P-private-workshop","public_seq":0,"created_at":"2024-02-29T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":["bodies"]}'
+  local valid_problem_index='{"problems":[{"id":"P-private-workshop","public_seq":0,"created_at":"2024-02-29T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":"Public workshop terminology","status":"active"}],"omitted":["bodies"]}'
   if ! printf '%s' "$valid_problem_index" | smoke_agent_check_problem_index_shape; then
     return 1
   fi
@@ -342,16 +342,24 @@ smoke_agent_run_fixture_self_test() {
   if ! printf '%s' "$boundary_problem_index" | smoke_agent_check_problem_index_shape; then
     return 1
   fi
+  local legacy_problem_index="${valid_problem_index/\"title\":\"Public workshop terminology\"/\"title\":null}"
+  if ! printf '%s' "$legacy_problem_index" | smoke_agent_check_problem_index_shape; then
+    return 1
+  fi
   for refusal in \
     '{}' \
     '[]' \
     '{"problems":[],"omitted":[],"extra":true}' \
-    '{"problems":[{"id":"P--BAD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}' \
-    '{"problems":[{"id":"P-GOOD","public_seq":true,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}' \
-    '{"problems":[{"id":"P-GOOD","public_seq":9007199254740992,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}' \
-    '{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-02-30T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}' \
-    '{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-02-30T00:00:00.000Z"}],"omitted":[]}' \
-    '{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","extra":true}],"omitted":[]}' \
+    "${valid_problem_index/P-private-workshop/P--BAD}" \
+    "${valid_problem_index/\"public_seq\":0/\"public_seq\":true}" \
+    "${valid_problem_index/\"public_seq\":0/\"public_seq\":9007199254740992}" \
+    "${valid_problem_index/2024-02-29/2026-02-30}" \
+    "${valid_problem_index/2026-01-01/2026-02-30}" \
+    "${valid_problem_index/\"status\":\"active\"/\"status\":\"active\",\"extra\":true}" \
+    "${valid_problem_index/\"title\":\"Public workshop terminology\"/\"title\":\"\"}" \
+    "${valid_problem_index/,\"title\":\"Public workshop terminology\"/}" \
+    "${valid_problem_index/\"status\":\"active\"/\"status\":\"private-draft\"}" \
+    "${valid_problem_index/,\"status\":\"active\"/}" \
     '{"problems":[],"omitted":[""]}' \
     '{"problems":[],"omitted":["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]}'; do
     if printf '%s' "$refusal" | smoke_agent_check_problem_index_shape; then
@@ -367,6 +375,8 @@ entry = {
     "public_seq": 0,
     "created_at": "2026-01-01T00:00:00.000Z",
     "updated_at": "2026-01-01T00:00:00.000Z",
+    "title": None,
+    "status": "active",
 }
 print(json.dumps({"problems": [entry] * 201, "omitted": []}, separators=(",", ":")))
 ')" || return 1

@@ -5,11 +5,13 @@ import {
   AreaDetailResponseSchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
+  ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   isTrustedStoaOrigin,
+  LedgerContractsSchema,
   type NowStripResponse,
   NowStripResponseSchema,
   type ProblemFaceResponse,
@@ -28,7 +30,7 @@ export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
 const PUBLIC_READ_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 
 export type PublicRead<T> =
-  | { readonly state: "ok"; readonly data: T; readonly origin: string }
+  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true }
   | { readonly state: "not_found"; readonly origin: string }
   | {
       readonly state: "unavailable";
@@ -123,7 +125,16 @@ async function readPublic<T>(
     }
     const parsed = schema.safeParse(value);
     return parsed.success
-      ? { state: "ok", data: parsed.data, origin }
+      ? {
+          state: "ok",
+          data: parsed.data,
+          origin,
+          ...(/(?:^|[,\s])(?:noindex|none)(?:$|[,\s])/i.test(
+            response.headers.get("x-robots-tag") ?? "",
+          )
+            ? { noindex: true as const }
+            : {}),
+        }
       : { state: "unavailable", reason: "invalid_response" };
   } catch {
     return { state: "unavailable", reason: expired ? "timeout" : "network" };
@@ -145,7 +156,7 @@ export async function stoaFetchProblemFace(
     `/p/${encodeURIComponent(problemId)}.json`,
     stoaOrigin,
     ProblemFaceResponseSchema,
-    10,
+    0,
     "PROBLEM_NOT_FOUND",
   );
 }
@@ -155,15 +166,18 @@ export async function stoaFetchClaimFace(
   problemId: string,
   target: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: { through?: string | string[] } = {},
 ): Promise<PublicRead<ClaimFaceResponse>> {
+  const parsedQuery = ClaimFaceQuerySchema.safeParse(query);
   if (
+    !parsedQuery.success ||
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(target).success
   ) {
     return { state: "unavailable", reason: "invalid_response" };
   }
   const result = await readPublic(
-    `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.json`,
+    `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.json${parsedQuery.data.through === undefined ? "" : `?through=${parsedQuery.data.through}`}`,
     stoaOrigin,
     ClaimFaceResponseSchema,
     0,
@@ -174,6 +188,8 @@ export async function stoaFetchClaimFace(
   if (
     result.data.problem !== problemId ||
     result.data.claim_state.claim_id !== claimId ||
+    (parsedQuery.data.through !== undefined &&
+      result.data.cursor !== Number(parsedQuery.data.through)) ||
     (version !== undefined && result.data.claim_state.version !== Number(version))
   ) {
     return { state: "unavailable", reason: "invalid_response" };
@@ -187,8 +203,26 @@ export async function stoaFetchClaimFace(
  */
 export async function stoaFetchProblemsIndex(
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<ProblemsIndexResponse>> {
-  return readPublic("/problems.json", stoaOrigin, ProblemsIndexResponseSchema, 10);
+  const parsed = LedgerContractsSchema.shape.problems_index_query.unwrap().safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const after = parsed.data.after;
+  const result = await readPublic(
+    `/problems.json${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`,
+    stoaOrigin,
+    ProblemsIndexResponseSchema,
+    10,
+  );
+  if (result.state !== "ok") return result;
+  const { problems, next_after } = result.data;
+  if (
+    problems.some((entry, i) => entry.id <= (problems[i - 1]?.id ?? after ?? "")) ||
+    (next_after !== undefined && next_after !== problems.at(-1)?.id)
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return result;
 }
 
 /**

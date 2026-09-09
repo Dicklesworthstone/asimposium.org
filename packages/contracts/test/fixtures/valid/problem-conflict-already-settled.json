@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_ALREADY_SETTLED",
+  "title": "Conflict is already settled",
+  "status": 409,
+  "code": "CONFLICT_ALREADY_SETTLED",
+  "detail": "Conflict CF-1 is already resolved or in persistent uncertainty; only open conflicts can be resolved.",
+  "fix_hint": "Inspect the conflict status in your pack or GET /p/:id/conflicts.json.",
+  "rule": "§6.1",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "status": "resolved",
+    "resolution": "Resolved by evidence E-10 disproving the narrower claim."
+  }
+}

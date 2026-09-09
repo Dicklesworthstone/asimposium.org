@@ -17,11 +17,13 @@ import {
   HypothesisRequestSchema,
   PackResponseSchema,
   PromoteRequestSchema,
+  RecordDeadEndRequestSchema,
   RelationFileRequestSchema,
   ReviewRequestSchema,
   ReviseRequestSchema,
   SessionOpenRequestSchema,
   SessionStatusResponseSchema,
+  SynthesizeRequestSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
 import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
@@ -626,6 +628,9 @@ async function runDiscovery() {
     author,
     201,
   );
+  const synthesisCut = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+    .bind("P-DISC-POL")
+    .first();
   const candidates = [
     [
       "promote",
@@ -724,6 +729,32 @@ async function runDiscovery() {
       author,
       { kind: "addresses-gap", source_claim_id: "C-1", source_version: 1, target: gap.gap_id },
     ],
+    [
+      "dead-ends",
+      "dead-end",
+      author,
+      {
+        approach: "Exhaustively enumerate finite paths before applying the parity bound.",
+        why_it_fails: "The branching count grows beyond the finite enumeration budget.",
+        retry_predicate: "Retry when a symbolic branch bound becomes available.",
+        retry_when: { kind: "statement-revised" },
+      },
+    ],
+    [
+      "synthesize",
+      "synthesis",
+      author,
+      {
+        covers_through: synthesisCut.public_seq,
+        body_md: "The recorded conjecture proposes parity; its covering gap remains open.",
+        anchors: [
+          { target_kind: "claim", target_id: "C-1", target_version: 1 },
+          { target_kind: "gap", target_id: gap.gap_id },
+        ],
+        omitted: ["Other recorded work is outside this focused digest."],
+        selection_policy: "The parity conjecture and its explicit covering obligation.",
+      },
+    ],
   ];
   // The private graveyard must identify its bounded extract and row limit.
   // These are real workshop pushes, including an actual private R2 spill.
@@ -783,6 +814,8 @@ async function runDiscovery() {
       (SELECT count(*) FROM evidence) AS evidence,
       (SELECT count(*) FROM proof_gaps) AS gaps,
       (SELECT count(*) FROM claim_relations) AS relations,
+      (SELECT count(*) FROM dead_ends) AS dead_ends,
+      (SELECT count(*) FROM syntheses) AS syntheses,
       (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor`).first();
   }
   // Catalog-directed writes have their own problem and sponsor. Complete them
@@ -896,6 +929,8 @@ async function runDiscovery() {
     gaps: GapFileRequestSchema,
     "gap-close": GapTransitionRequestSchema,
     relation: RelationFileRequestSchema,
+    "dead-end": RecordDeadEndRequestSchema,
+    synthesis: SynthesizeRequestSchema,
   };
   // Each mode gets a fresh real database through the parent test. Together the
   // five runs retain every screening case without bypassing the hourly quota.
@@ -999,7 +1034,13 @@ async function runDiscovery() {
   } else {
     await fixtures.setScreenMode("pass");
     // Keep version and target preconditions valid while exercising each positive path.
-    for (const index of [0, 2, 3, 5, 6, 8, 7, 4, 1]) {
+    const positiveOrder = [0, 2, 3, 5, 6, 8, 9, 10, 7, 4, 1];
+    assert.deepEqual(
+      [...positiveOrder].sort((a, b) => a - b),
+      candidates.map((_, index) => index),
+      "The positive journey must publish every candidate exactly once",
+    );
+    for (const index of positiveOrder) {
       const [suffix, kind, token, body] = candidates[index];
       const path =
         kind === "review"
@@ -1018,6 +1059,20 @@ async function runDiscovery() {
         `positive-${kind}`,
       );
       assert.equal((await publicState()).events, before.events + 1, `${kind}: one accepted event`);
+      if (kind === "dead-end") {
+        assert.equal((await publicState()).dead_ends, before.dead_ends + 1);
+        const face = await call("/p/P-DISC-POL/dead-ends.json");
+        const recorded = face.dead_ends.find((item) => item.dead_end_id === response.dead_end_id);
+        assert.ok(recorded);
+        assert.equal(recorded.approach, body.approach);
+        assert.equal(recorded.author_fellow_id, authorCard.fellow_id);
+        assert.deepEqual(recorded.retry_when, body.retry_when);
+      }
+      if (kind === "synthesis") {
+        assert.equal((await publicState()).syntheses, before.syntheses + 1);
+        assert.equal(response.covers_through, body.covers_through);
+        assert.equal(response.anchors_count, body.anchors.length);
+      }
       assert.equal(
         (await publicState()).screening_publications,
         before.screening_publications + 1,

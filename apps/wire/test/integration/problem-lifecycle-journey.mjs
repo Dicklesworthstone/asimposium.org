@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import {
+  EnrollmentProblemBindingSchema,
+  ProblemIdSchema,
+  PublicLedgerProblemIdSchema,
+} from "@asimposium/contracts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 
 /**
@@ -27,6 +32,7 @@ export async function problemLifecycleJourney({
   origin,
   userAgent,
   sponsorCall,
+  fixtures,
 }) {
   const sponsorA = "usr_problem_sponsor_a";
   const sponsorB = "usr_problem_sponsor_b";
@@ -161,7 +167,13 @@ export async function problemLifecycleJourney({
   // Authorized Fellow A1 adopts the brief and proposes the problem
   const proposed = await call("/v1/problems", proposalPayload, fellowA1Token, 201);
   const problemId = proposed.problem.id;
-  assert.ok(problemId.startsWith("P-COLLATZ"));
+  for (const schema of [
+    EnrollmentProblemBindingSchema,
+    ProblemIdSchema,
+    PublicLedgerProblemIdSchema,
+  ])
+    assert.equal(schema.parse(problemId), problemId);
+  assert.equal(proposed.problem.title, proposalPayload.title);
   assert.equal(proposed.problem.status, "private-draft");
   assert.equal(proposed.problem.current_statement_version, 1);
   await refuseBriefEdit(sponsorA, savedBrief.brief.id, "Edit after adoption");
@@ -211,6 +223,191 @@ export async function problemLifecycleJourney({
   assert.equal(visibleDraft.problem.id, problemId);
   assert.equal(visibleDraft.problem.status, "private-draft");
 
+  const peerToken = await enroll("fellow-a-private-peer", sponsorA);
+  async function privateState() {
+    const result = {};
+    for (const [name, sql] of Object.entries({
+      problems: "SELECT * FROM problems WHERE id = ?",
+      sessions: "SELECT * FROM sessions WHERE problem_id = ? ORDER BY session_id",
+      members: "SELECT * FROM problem_memberships WHERE problem_id = ? ORDER BY fellow_id",
+      workshop: "SELECT * FROM workshop_objects WHERE problem_id = ? ORDER BY workshop_id",
+      events: "SELECT * FROM events WHERE problem_id = ? ORDER BY seq",
+    }))
+      result[name] = (await env.DB.prepare(sql).bind(problemId).all()).results;
+    result.replays = (
+      await env.DB.prepare(
+        "SELECT * FROM session_write_replays ORDER BY scope, principal_scope, idempotency_key",
+      ).all()
+    ).results;
+    result.cursor = await call("/cursor");
+    return result;
+  }
+  const beforePrivateRefusals = await privateState();
+  for (const token of [peerToken, fellowB1Token]) {
+    assert.equal(
+      (await call(`/v1/problems/${problemId}`, undefined, token, 404)).code,
+      "PROBLEM_NOT_FOUND",
+    );
+    assert.equal(
+      (await call("/v1/sessions", { problem_id: problemId }, token, 404)).code,
+      "PROBLEM_NOT_FOUND",
+    );
+    assert.deepEqual(await privateState(), beforePrivateRefusals);
+  }
+  async function boundFellow(name, actor, binding) {
+    const minted = await sponsorCall(
+      actor,
+      "POST",
+      "/v1/enrollments",
+      "enrollment.mint",
+      {
+        requested_scopes: ["review"],
+        problem_binding: binding,
+      },
+      201,
+    );
+    const claimed = await call(
+      "/v1/fellows",
+      {
+        enrollment_id: minted.enrollment_id,
+        secret: minted.secret,
+        name,
+        model: "synthetic-problem-model",
+        harness: "local-problem-lifecycle-proof",
+      },
+      undefined,
+      202,
+    );
+    await sponsorCall(
+      actor,
+      "POST",
+      `/v1/enrollments/${minted.enrollment_id}/decision`,
+      "enrollment.decide",
+      {
+        enrollment_id: minted.enrollment_id,
+        decision: "approve",
+        step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      },
+      200,
+      "/v1/enrollments/:enrollmentId/decision",
+    );
+    return (await call("/v1/fellows/flow", { flow_handle: claimed.flow_handle })).token;
+  }
+  const boundPeer = await boundFellow("fellow-a-bound-peer", sponsorA, problemId);
+  const foreignBound = await boundFellow("fellow-b-bound-peer", sponsorB, problemId);
+  const wrongTarget = await boundFellow("fellow-a-other-binding", sponsorA, "P-OTHER");
+  const beforeBoundRefusals = await privateState();
+  for (const [token, status, code] of [
+    [foreignBound, 404, "PROBLEM_NOT_FOUND"],
+    [wrongTarget, 403, "WRITE_REFUSED"],
+  ]) {
+    await call(`/v1/problems/${problemId}`, undefined, token, 404);
+    assert.equal((await call("/v1/sessions", { problem_id: problemId }, token, status)).code, code);
+    assert.deepEqual(await privateState(), beforeBoundRefusals);
+  }
+  for (const [label, token] of [
+    ["creator", fellowA1Token],
+    ["explicit-owner-grant", boundPeer],
+  ]) {
+    assert.equal(
+      (await call(`/v1/problems/${problemId}`, undefined, token)).problem.statement,
+      proposalPayload.statement,
+    );
+    const key = `private-authority-${label}`;
+    const session = await call("/v1/sessions", { problem_id: problemId }, token, 201, key);
+    const afterOpen = await privateState();
+    assert.deepEqual(
+      await call("/v1/sessions", { problem_id: problemId }, token, 200, key),
+      session,
+    );
+    assert.deepEqual(await privateState(), afterOpen);
+    const canary = `PRIVATE_WORKSPACE_${label}_CANARY`;
+    const pushed = await call(
+      `/v1/sessions/${session.session_id}/workshop`,
+      {
+        type: "draft",
+        title: "Private work",
+        body_md: canary,
+        relates_to: [],
+      },
+      token,
+      201,
+    );
+    const pack = await call(
+      `/v1/sessions/${session.session_id}/pack?profile=working`,
+      undefined,
+      token,
+    );
+    assert.ok(
+      pack.items.some((item) => item.kind === "workshop-head" && item.id === pushed.workshop_id),
+    );
+    const stored = await env.DB.prepare(
+      "SELECT fellow_id, body_md FROM workshop_objects WHERE workshop_id = ?",
+    )
+      .bind(pushed.workshop_id)
+      .first();
+    assert.equal(stored.body_md, canary);
+    const sponsorView = await sponsorCall(
+      sponsorA,
+      "POST",
+      "/v1/sponsors/workshop",
+      "workshop.read",
+      {
+        problem_id: problemId,
+        fellow_id: stored.fellow_id,
+      },
+    );
+    assert.equal(
+      sponsorView.objects.find((object) => object.workshop_id === pushed.workshop_id).body_md,
+      canary,
+    );
+    await call(
+      `/v1/sessions/${session.session_id}/close`,
+      { handback: "Private work retained for later publication." },
+      token,
+      201,
+    );
+    await call(`/p/${problemId}.json`, undefined, undefined, 404);
+  }
+  const nonLatinTitle = "有限経路の研究".repeat(15);
+  const nonLatin = await call(
+    "/v1/problems",
+    {
+      title: nonLatinTitle,
+      statement: "Every finite path over this alphabet has finitely many vertices.",
+      falsifier: "A finite path in this domain with infinitely many vertices.",
+      motivation: "Display text must not control whether enrollment can bind the problem.",
+      areas: ["combinatorics"],
+    },
+    fellowA1Token,
+    201,
+  );
+  for (const schema of [
+    EnrollmentProblemBindingSchema,
+    ProblemIdSchema,
+    PublicLedgerProblemIdSchema,
+  ])
+    assert.equal(schema.parse(nonLatin.problem.id), nonLatin.problem.id);
+  assert.notEqual(nonLatin.problem.id, problemId);
+  assert.equal(
+    (await call(`/v1/problems/${nonLatin.problem.id}`, undefined, fellowA1Token)).problem.title,
+    nonLatinTitle,
+  );
+  // An explicit legacy read fixture proves this repair does not narrow retained IDs.
+  await fixtures.seedProblem("P-LEGACY-TITLE-12345678", sponsorA);
+  assert.equal((await call("/p/P-LEGACY-TITLE-12345678.json")).problem, "P-LEGACY-TITLE-12345678");
+  console.log(
+    JSON.stringify({
+      stage: "private-problem-authority",
+      status: "pass",
+      enrollment_binding: "real signed mint and explicit approval",
+      owner_and_granted_workshop: "readable",
+      ungranted_and_foreign_admission: "refused",
+      retained_ids: "readable",
+      boundary: "real local D1 and signed ingress; no OAuth or deployment claim",
+    }),
+  );
+
   // --- Step 3: Sponsor Publishes to Sharpening ---
   const publishRes = await sponsorCall(
     sponsorA,
@@ -255,10 +452,21 @@ export async function problemLifecycleJourney({
   assert.equal(lockedRefusal.rule, "P3");
 
   // --- Step 5: Statement Review & Sharpening Unlock ---
+  const sessionB1 = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "review" },
+    fellowB1Token,
+    201,
+  );
   // Author fellow attempts review -> 422 REVIEWER_IS_AUTHOR (rule P1)
   const selfReview = await call(
     `/v1/problems/${problemId}/statement-review`,
-    { verdict: "statement-clear", basis: "I assert my own statement is clear." },
+    {
+      session_id: sessionA1.session_id,
+      statement_version: 1,
+      verdict: "statement-clear",
+      basis: "I assert my own statement is clear.",
+    },
     fellowA1Token,
     422,
   );
@@ -271,12 +479,65 @@ export async function problemLifecycleJourney({
     {
       verdict: "statement-clear",
       basis: "The formulation is rigorous, types are exact, and falsifier is sharp.",
+      session_id: sessionB1.session_id,
+      statement_version: 1,
     },
     fellowB1Token,
     200,
   );
   assert.equal(independentReview.verdict, "statement-clear");
   assert.equal(independentReview.status, "active");
+
+  // Verify review record was persisted in problem_statement_reviews in D1
+  const persistedReview = await env.DB.prepare(
+    "SELECT * FROM problem_statement_reviews WHERE problem_id = ? AND version = 1",
+  )
+    .bind(problemId)
+    .first();
+  assert.ok(persistedReview, "Statement review must be persisted in D1");
+  assert.equal(persistedReview.verdict, "statement-clear");
+  const statementEvent = await env.DB.prepare(
+    "SELECT * FROM events WHERE problem_id = ? AND type = 'problem.statement-reviewed'",
+  )
+    .bind(problemId)
+    .first();
+  assert.ok(statementEvent, "Statement review and activation must append a ledger event");
+  assert.equal(statementEvent.actor_fellow_id, persistedReview.reviewer_fellow_id);
+  assert.equal(statementEvent.actor_sponsor_id, sponsorB);
+  assert.ok(statementEvent.actor_session_id, "Statement review must retain its actual session");
+  assert.equal(
+    persistedReview.basis,
+    "The formulation is rigorous, types are exact, and falsifier is sharp.",
+  );
+
+  // Duplicate review on the same version is refused 409 REVIEWER_ALREADY_REVIEWED
+  const duplicateReview = await call(
+    `/v1/problems/${problemId}/statement-review`,
+    {
+      verdict: "statement-clear",
+      basis: "A duplicate review attempt.",
+      session_id: sessionB1.session_id,
+      statement_version: 1,
+    },
+    fellowB1Token,
+    409,
+  );
+  assert.equal(duplicateReview.code, "REVIEWER_ALREADY_REVIEWED");
+  assert.equal(duplicateReview.rule, "P1");
+
+  // Invalid review body (empty basis) is refused 422 REVIEW_BODY_INVALID
+  const invalidReview = await call(
+    `/v1/problems/${problemId}/statement-review`,
+    {
+      verdict: "statement-clear",
+      basis: "",
+      session_id: sessionB1.session_id,
+      statement_version: 1,
+    },
+    fellowB1Token,
+    422,
+  );
+  assert.equal(invalidReview.code, "REVIEW_BODY_INVALID");
 
   // Verify status is now active in D1
   const activeProblem = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
@@ -322,12 +583,6 @@ export async function problemLifecycleJourney({
   assert.equal(driftedClaimRow.statement_drift, 1);
 
   // Review on drifted claim is refused (P9)
-  const sessionB1 = await call(
-    "/v1/sessions",
-    { problem_id: problemId, intent: "review" },
-    fellowB1Token,
-    201,
-  );
   const driftedReview = await call(
     `/v1/sessions/${sessionB1.session_id}/review`,
     {
@@ -455,12 +710,27 @@ export async function problemLifecycleJourney({
     "POST",
     `/v1/sponsors/problems/${problemId}/lifecycle`,
     "problem-lifecycle",
-    { action: "enter-result-review" },
+    {
+      action: "enter-result-review",
+      result_claim: { claim_id: promotedClaim.claim_id, version: 1 },
+    },
     200,
   );
   assert.equal(reviewStage.problem.status, "under-result-review");
+  assert.equal(reviewStage.problem.result_claim.claim_id, promotedClaim.claim_id);
+  const reviewFace = await call(`/p/${problemId}.json`);
+  assert.ok(
+    reviewFace.items.some(
+      (item) => item.kind === "result-review" && item.body.includes(`${promotedClaim.claim_id}@1`),
+    ),
+  );
+  const reviewLink = reviewFace.next_actions.find(
+    (action) => action.url === `/p/${problemId}/claims/${promotedClaim.claim_id}@1.json`,
+  );
+  assert.ok(reviewLink);
+  await call(reviewLink.url);
 
-  // Famous problem guardrail: requires external_expert_review_proof
+  // Missing external proof is insufficient; free-text proof below is insufficient too.
   const missingProofRefusal = await sponsorCall(
     sponsorA,
     "POST",
@@ -483,30 +753,132 @@ export async function problemLifecycleJourney({
   );
   assert.equal(missingProofRefusal.code, "PREMATURE_RESOLUTION");
 
-  // Resolution with valid external proof
-  const resolvedProblem = await sponsorCall(
-    sponsorA,
-    "POST",
-    `/v1/sponsors/problems/${problemId}/lifecycle`,
-    "problem-lifecycle",
-    {
-      action: "resolve",
-      direction: "affirmed",
-      closing_synthesis: {
-        summary: "The modular cycle length bound is settled.",
-        no_claim_boundary: {
-          verified: ["Modular cycle bounds"],
-          mechanisms: ["2-adic valuation"],
-          independence_tiers: ["T2"],
-          remaining_external_validation: ["Full integer Collatz map"],
+  // Plausible prose is not an external verification record or an anchored synthesis.
+  const beforeUnsupportedResolution = await privateState();
+  for (const direction of ["affirmed", "refuted-as-stated", "closed-with-negative-result"]) {
+    const unsupportedResolution = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problemId}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "resolve",
+        direction,
+        closing_synthesis: {
+          summary: "The modular cycle length bound is settled.",
+          no_claim_boundary: {
+            verified: ["Modular cycle bounds"],
+            mechanisms: ["2-adic valuation"],
+            independence_tiers: ["T2"],
+            remaining_external_validation: ["Full integer Collatz map"],
+          },
         },
+        external_expert_review_proof:
+          "Lean 4 formalized proof independently verified by 2 external experts.",
       },
-      external_expert_review_proof:
-        "Lean 4 formalized proof independently verified by 2 external experts.",
-    },
-    200,
+      422,
+    );
+    assert.equal(unsupportedResolution.code, "PREMATURE_RESOLUTION");
+    assert.deepEqual(await privateState(), beforeUnsupportedResolution);
+  }
+  console.log(
+    JSON.stringify({
+      stage: "anchored-result-review",
+      status: "pass",
+      result_target: "exact public claim version and evidence/review links",
+      unsupported_resolution_directions: 3,
+      refused_mutations: 0,
+      terminal_fixture_boundary:
+        "following resolved-row checks use an explicit retained-data fixture, not resolution admission",
+    }),
   );
-  assert.equal(resolvedProblem.problem.status, "resolved");
+
+  // Retained resolved-row fixture ONLY: preserve read/refusal coverage for historical
+  // data without presenting a seeded terminal state as successful resolution admission.
+  await env.DB.prepare(`UPDATE problems SET status = 'resolved', resolution_direction = 'affirmed',
+    resolution_summary = 'Historical resolution record', resolution_no_claim_boundary = ? WHERE id = ?`)
+    .bind(
+      JSON.stringify({
+        verified: ["Modular cycle bounds"],
+        mechanisms: ["2-adic valuation"],
+        independence_tiers: ["T2"],
+        remaining_external_validation: ["Full integer Collatz map"],
+      }),
+      problemId,
+    )
+    .run();
+  const resolvedBefore = await env.DB.prepare("SELECT * FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first();
+  const resolvedEventsBefore = await env.DB.prepare(
+    "SELECT * FROM events WHERE problem_id = ? ORDER BY seq",
+  )
+    .bind(problemId)
+    .all();
+  const resolvedCursorBefore = await call("/cursor");
+  for (const action of [
+    {
+      action: "enter-result-review",
+      result_claim: { claim_id: promotedClaim.claim_id, version: 1 },
+    },
+    { action: "retire", reason: "Cannot replace an existing resolution." },
+  ]) {
+    const refusal = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problemId}/lifecycle`,
+      "problem-lifecycle",
+      action,
+      409,
+    );
+    assert.equal(refusal.code, "OBJECT_VERSION_CONFLICT");
+  }
+  assert.deepEqual(
+    await env.DB.prepare("SELECT * FROM problems WHERE id = ?").bind(problemId).first(),
+    resolvedBefore,
+  );
+  assert.deepEqual(
+    (
+      await env.DB.prepare("SELECT * FROM events WHERE problem_id = ? ORDER BY seq")
+        .bind(problemId)
+        .all()
+    ).results,
+    resolvedEventsBefore.results,
+  );
+  assert.equal(await call("/cursor"), resolvedCursorBefore);
+
+  // Verify problem detail resolution reflects actual saved data and no fabricated fallbacks
+  const resolvedDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
+  assert.equal(resolvedDetail.problem.status, "resolved");
+  assert.ok(resolvedDetail.problem.resolution, "Problem must have resolution object");
+  assert.equal(resolvedDetail.problem.resolution.direction, "affirmed");
+  assert.deepEqual(resolvedDetail.problem.resolution.no_claim_boundary.verified, [
+    "Modular cycle bounds",
+  ]);
+
+  // Verify that a problem without resolution_no_claim_boundary does NOT fabricate resolution literals
+  await env.DB.prepare("UPDATE problems SET resolution_no_claim_boundary = NULL WHERE id = ?")
+    .bind(problemId)
+    .run();
+  const unboundaryDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
+  assert.equal(unboundaryDetail.problem.status, "resolved");
+  assert.equal(
+    unboundaryDetail.problem.resolution,
+    undefined,
+    "A resolved problem with missing no-claim boundary must not synthesize fake literals",
+  );
+  // Restore the boundary
+  await env.DB.prepare("UPDATE problems SET resolution_no_claim_boundary = ? WHERE id = ?")
+    .bind(
+      JSON.stringify({
+        verified: ["Modular cycle bounds"],
+        mechanisms: ["2-adic valuation"],
+        independence_tiers: ["T2"],
+        remaining_external_validation: ["Full integer Collatz map"],
+      }),
+      problemId,
+    )
+    .run();
 
   // Further promotion on resolved problem refused
   const postResolveDraft = await call(
@@ -566,12 +938,31 @@ export async function problemLifecycleJourney({
       statement: "A problem statement that will be retired early.",
       falsifier: "A falsifier for retired problem.",
       motivation: "Retirement flow verification.",
-      areas: ["geometry"],
+      areas: ["topology-and-geometry"],
     },
     fellowA1Token,
     201,
   );
   const retiredProblemId = retiredProblemProp.problem.id;
+
+  const privateRetirement = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${retiredProblemId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "retire", reason: "Must remain private before publication." },
+    409,
+  );
+  assert.equal(privateRetirement.code, "OBJECT_VERSION_CONFLICT");
+  await call(`/p/${retiredProblemId}.json`, undefined, undefined, 404);
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${retiredProblemId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    200,
+  );
 
   const retireRes = await sponsorCall(
     sponsorA,
@@ -592,7 +983,7 @@ export async function problemLifecycleJourney({
     statement: "Every edge in a finite matching has two distinct endpoints.",
     falsifier: "An edge in the matching with fewer than two distinct endpoints.",
     motivation: "Exercise problem ingress without oversized stored fields.",
-    areas: ["graph-theory"],
+    areas: ["combinatorics"],
   };
   const boundaryBrief = await sponsorCall(
     sponsorA,
@@ -622,6 +1013,12 @@ export async function problemLifecycleJourney({
     200,
   );
 
+  const boundarySession = await call(
+    "/v1/sessions",
+    { problem_id: boundaryReviewId, intent: "review" },
+    fellowB1Token,
+    201,
+  );
   async function problemWriteDigest() {
     const rows = await env.DB.batch([
       env.DB.prepare("SELECT * FROM problems ORDER BY id"),
@@ -629,6 +1026,9 @@ export async function problemLifecycleJourney({
       env.DB.prepare("SELECT * FROM sponsor_problem_briefs ORDER BY id"),
       env.DB.prepare("SELECT * FROM krater_integrity_backfill ORDER BY problem_id"),
       env.DB.prepare("SELECT * FROM events ORDER BY problem_id, seq"),
+      env.DB.prepare(
+        "SELECT * FROM problem_statement_reviews ORDER BY problem_id, version, reviewer_fellow_id",
+      ),
     ]);
     return createHash("sha256")
       .update(JSON.stringify(rows.map((row) => row.results)))
@@ -648,7 +1048,12 @@ export async function problemLifecycleJourney({
       name: "statement-review",
       path: `/v1/problems/${boundaryReviewId}/statement-review`,
       token: fellowB1Token,
-      payload: { verdict: "statement-clear", basis: "BYTE_SENTINEL · independently checked." },
+      payload: {
+        session_id: boundarySession.session_id,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "BYTE_SENTINEL · independently checked.",
+      },
       malformedCode: "REVIEW_BODY_INVALID",
       acceptedStatus: 200,
     },

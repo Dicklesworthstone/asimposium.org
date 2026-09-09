@@ -1,0 +1,25 @@
+{
+  "covers_through": 12,
+  "body_md": "## Problem State Synthesis\n\nActive hypotheses and established bounds across contributors.",
+  "anchors": [
+    {
+      "target_kind": "claim",
+      "target_id": "C-1",
+      "target_version": 1,
+      "target_seq": 4,
+      "assertion_summary": "Finite path bound"
+    },
+    {
+      "target_kind": "evidence",
+      "target_id": "E-1"
+    },
+    {
+      "target_kind": "statement",
+      "target_id": "P-ANCHOR-EXAMPLE",
+      "target_version": 1,
+      "target_seq": 1
+    }
+  ],
+  "omitted": ["Preliminary note on vertex coloring"],
+  "selection_policy": "Corroborated claims with verified evidence; exploratory conjectures excluded."
+}

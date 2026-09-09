@@ -1,12 +1,25 @@
 import {
+  ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
+  DEAD_ENDS_SCHEMA_ID,
+  DeadEndsListResponseSchema,
+  EnrollmentDeclaredRuntimeSchema,
+  LedgerContractsSchema,
+  ProblemDetailSchema,
   ProblemFaceResponseSchema,
+  ProblemGovernanceEventSchema,
   type ProblemIndexEntry,
+  ProblemIndexTimestampSchema,
+  ProblemStatementReviewEventSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
   PublicClaimStateSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
+  QUESTIONS_SCHEMA_ID,
+  QuestionsListResponseSchema,
+  RETRACTIONS_SCHEMA_ID,
+  RetractionsListResponseSchema,
 } from "@asimposium/contracts";
 import {
   type ComposedPack,
@@ -15,15 +28,32 @@ import {
   type RenderedFace,
   renderAllFaces,
   renderProjection,
+  safeCodeSpan,
 } from "@asimposium/render";
 import { Hono } from "hono";
 
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
-import { readEvents } from "./krater/krater";
+import { readEvents, sha256Hex } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
+import {
+  loadProblemDeadEnds,
+  MAX_DEAD_ENDS_PER_PAGE,
+  renderDeadEndsHtmlFragment,
+  renderDeadEndsMarkdown,
+} from "./ledger/dead-ends";
 import { displayClaimDisposition } from "./ledger/dispositions";
+import {
+  loadProblemQuestions,
+  renderQuestionsHtmlFragment,
+  renderQuestionsMarkdown,
+} from "./ledger/questions";
+import {
+  loadProblemRetractions,
+  renderRetractionsHtmlFragment,
+  renderRetractionsMarkdown,
+} from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
@@ -32,7 +62,12 @@ import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
  * Rows come from Krater's public projections directly, so an empty ledger
  * answers honestly and every bounded digest declares what it omitted.
  */
-const OMITTED = ["titles, statements, and statuses land with the problem lifecycle (W5.1)"];
+const OMITTED = [
+  "problem statements and scientific details are available through each problem digest",
+  "private and unlisted problems are excluded",
+];
+const INDEX_PREAMBLE =
+  "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.";
 
 type ProblemIndexMarkdownFieldDescriptor<K extends keyof ProblemIndexEntry> = Readonly<{
   key: K;
@@ -56,6 +91,10 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
   defineProblemIndexMarkdownField("public_seq", (value) => ` — seq ${value}`),
   defineProblemIndexMarkdownField("created_at", (value) => `, opened ${value}`),
   defineProblemIndexMarkdownField("updated_at", (value) => `, updated ${value}`),
+  defineProblemIndexMarkdownField("title", (value) =>
+    value === null ? "; title unavailable" : `; title (untrusted) ${safeCodeSpan(value)}`,
+  ),
+  defineProblemIndexMarkdownField("status", (value) => `; status ${value}`),
 ] as const;
 
 const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
@@ -71,25 +110,97 @@ function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
 }
 
 const PUBLIC_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
+const UNLISTED_NOTICE =
+  "Unlisted: this URL is guessable and public, not private. It is excluded from discovery.";
+
+function indexingHeaders(unlisted: boolean): Record<string, string> {
+  return unlisted ? { "x-robots-tag": "noindex, nofollow" } : {};
+}
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
+const STATEMENT_REVIEW_LIMIT = 20;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
   p.public_seq AS public_seq,
+  p.unlisted AS unlisted,
+  p.status AS status,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1
+    AND v.version IS NOT NULL THEN json_object(
+      'title', p.title, 'current_statement_version', v.version,
+      'statement', v.statement, 'falsifier', v.falsifier, 'motivation', v.motivation
+    ) END AS formulation_json,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
+    SELECT json_group_array(json(review_json)) FROM (
+      SELECT json_object(
+        'version', r.version, 'reviewer', r.reviewer_fellow_id, 'verdict', r.verdict,
+        'basis', CASE WHEN length(CAST(r.basis AS BLOB)) <= 32768 THEN r.basis END,
+        'created_at', r.created_at, 'event_id', e.id, 'seq', e.seq,
+        'fellow', e.actor_fellow_id, 'sponsor', e.actor_sponsor_id,
+        'session', e.actor_session_id, 'model', e.model_string_self_declared,
+        'harness', e.harness, 'event_created_at', e.created_at,
+        'payload_sha256', e.payload_sha256,
+        'payload_json', CASE WHEN c.redacted_at IS NULL
+          AND c.payload_sha256 = e.payload_sha256
+          AND length(CAST(c.payload_json AS BLOB)) <= 65536 THEN c.payload_json END
+      ) AS review_json
+      FROM problem_statement_reviews r
+      LEFT JOIN events e ON e.id = (
+        SELECT source.id FROM events source
+        WHERE source.problem_id = p.id AND source.object_id = p.id
+          AND source.object_kind = 'problem' AND source.type = 'problem.statement-reviewed'
+          AND source.object_version = r.version AND source.actor_fellow_id = r.reviewer_fellow_id
+          AND source.seq <= p.public_seq
+        ORDER BY source.seq ASC LIMIT 1
+      )
+      LEFT JOIN event_content c ON c.event_id = e.id
+      WHERE r.problem_id = p.id
+      ORDER BY e.seq IS NULL, e.seq ASC, r.version ASC, r.reviewer_fellow_id ASC
+      LIMIT ${STATEMENT_REVIEW_LIMIT + 1}
+    )
+  ) END AS statement_reviews_json,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
+    SELECT json_object('seq', re.seq, 'sponsor', re.actor_sponsor_id,
+      'version', re.object_version, 'created_at', re.created_at,
+      'payload_sha256', re.payload_sha256,
+      'payload_json', CASE WHEN rc.redacted_at IS NULL
+        AND rc.payload_sha256 = re.payload_sha256
+        AND length(CAST(rc.payload_json AS BLOB)) <= 65536 THEN rc.payload_json END,
+      'target_json', CASE WHEN tc.redacted_at IS NULL AND tc.payload_sha256 = te.payload_sha256
+        AND length(CAST(tc.payload_json AS BLOB)) <= 65536 THEN tc.payload_json END,
+      'target_id', te.object_id, 'target_version', te.object_version,
+      'target_digest', te.payload_sha256, 'target_content_digest', tv.content_digest)
+    FROM events re LEFT JOIN event_content rc ON rc.event_id = re.id
+    LEFT JOIN events te ON te.id = json_extract(rc.payload_json, '$.problem.result_claim.event_id')
+      AND te.problem_id = re.problem_id AND te.object_kind = 'claim'
+      AND te.type IN ('claim.created', 'claim.revised') AND te.seq < re.seq
+    LEFT JOIN event_content tc ON tc.event_id = te.id
+    LEFT JOIN claim_versions tv ON tv.problem_id = te.problem_id AND tv.claim_id = te.object_id
+      AND tv.version = te.object_version
+    WHERE re.problem_id = p.id AND re.object_id = p.id AND re.object_kind = 'problem'
+      AND re.type = 'problem.result-review-started' AND re.seq <= p.public_seq
+    ORDER BY re.seq DESC LIMIT 1
+  ) END AS result_review_json,
   claims.id AS claim_id,
   CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN claims.statement END AS statement,
   claims.source_seq AS source_seq
 FROM problems p
+LEFT JOIN problem_statement_versions v
+  ON v.problem_id = p.id AND v.version = p.current_statement_version
 LEFT JOIN claims
   ON claims.problem_id = p.id
  AND claims.source_seq <= p.public_seq
-WHERE p.id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+WHERE p.id = ? AND p.status != 'private-draft'
 ORDER BY claims.source_seq ASC, claims.id ASC
 LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 
 interface ProblemDigestRow {
   readonly problem_id: string;
   readonly public_seq: number;
+  readonly unlisted: number;
+  readonly status: string;
+  readonly formulation_json: string | null;
+  readonly statement_reviews_json: string | null;
+  readonly result_review_json: string | null;
   readonly claim_id: string | null;
   readonly statement: string | null;
   readonly source_seq: number | null;
@@ -98,6 +209,212 @@ interface ProblemDigestRow {
 interface ProblemFaceFaces {
   readonly json: RenderedFace;
   readonly markdown: RenderedFace;
+}
+
+const FormulationSchema = ProblemDetailSchema.pick({
+  title: true,
+  current_statement_version: true,
+  statement: true,
+  falsifier: true,
+  motivation: true,
+});
+
+interface StatementReviewRow {
+  version: number;
+  reviewer: string;
+  verdict: string;
+  basis: string | null;
+  created_at: string;
+  event_id: string | null;
+  seq: number;
+  fellow: string;
+  sponsor: string;
+  session: string;
+  model: string;
+  harness: string;
+  event_created_at: string;
+  payload_sha256: string;
+  payload_json: string | null;
+}
+
+/** No current identity lookup: attribution belongs to the publication. Legacy
+ * projection rows cannot acquire a made-up session or today's sponsor. */
+async function statementReviewCandidates(first: ProblemDigestRow, currentVersion: number | null) {
+  const rows: StatementReviewRow[] = JSON.parse(first.statement_reviews_json ?? "[]");
+  const candidates = [];
+  const reasons = new Set<string>();
+  if (rows.length > STATEMENT_REVIEW_LIMIT) reasons.add("statement_review_limit");
+  for (const row of rows.slice(0, STATEMENT_REVIEW_LIMIT)) {
+    if (row.event_id === null) {
+      reasons.add("statement_review_attribution_unavailable");
+      continue;
+    }
+    if (row.payload_json === null) {
+      reasons.add("statement_review_content_unavailable");
+      continue;
+    }
+    try {
+      const payload = ProblemStatementReviewEventSchema.safeParse(
+        await checkedScientificPayload({ ...row, payload_json: row.payload_json }),
+      );
+      if (
+        !payload.success ||
+        payload.data.problem_id !== first.problem_id ||
+        payload.data.statement_version !== row.version ||
+        (currentVersion !== null && row.version > currentVersion) ||
+        payload.data.session_id !== row.session ||
+        payload.data.verdict !== row.verdict ||
+        payload.data.basis !== row.basis ||
+        row.fellow !== row.reviewer ||
+        row.event_created_at !== row.created_at ||
+        !ProblemIndexTimestampSchema.safeParse(row.created_at).success ||
+        !Number.isSafeInteger(row.seq) ||
+        row.seq < 1 ||
+        row.seq > first.public_seq
+      ) {
+        reasons.add("statement_review_source_mismatch");
+        continue;
+      }
+      if (
+        ![row.fellow, row.sponsor, row.event_id].every(
+          (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value),
+        ) ||
+        !EnrollmentDeclaredRuntimeSchema.safeParse(row.model).success ||
+        !EnrollmentDeclaredRuntimeSchema.safeParse(row.harness).success
+      ) {
+        reasons.add("statement_review_attribution_unavailable");
+        continue;
+      }
+      candidates.push({
+        kind: "statement-review",
+        id: `SR-${row.seq}`,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        body: JSON.stringify(
+          {
+            problem: first.problem_id,
+            statement_version: payload.data.statement_version,
+            verdict: payload.data.verdict,
+            basis: payload.data.basis,
+            previous_status: payload.data.previous_status,
+            status: payload.data.status,
+            event: row.event_id,
+            seq: row.seq,
+            created_at: row.event_created_at,
+            fellow: row.fellow,
+            sponsor: row.sponsor,
+            session: row.session,
+            model_self_declared: row.model,
+            harness_self_declared: row.harness,
+          },
+          null,
+          2,
+        ),
+        why_included:
+          currentVersion === null
+            ? `review of statement S@${row.version}; current formulation unavailable`
+            : row.version === currentVersion
+              ? `review of current statement S@${row.version}`
+              : `review of earlier statement S@${row.version}; current formulation is S@${currentVersion}`,
+        stable_prefix: 4 + candidates.length,
+      });
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      reasons.add("statement_review_source_mismatch");
+    }
+  }
+  const detail: Record<string, string> = {
+    statement_review_limit: `Only the first ${STATEMENT_REVIEW_LIMIT} statement reviews are considered, in ledger sequence order; legacy rows follow attributed events.`,
+    statement_review_attribution_unavailable:
+      "Statement reviews without a complete matching publication attribution are omitted, including legacy projection-only rows.",
+    statement_review_content_unavailable:
+      "Statement review content is withdrawn, missing, oversized or detached from its immutable event digest.",
+    statement_review_source_mismatch:
+      "Statement review content fails its event digest, version, session or projection consistency check.",
+  };
+  return {
+    candidates,
+    omitted: [...reasons].sort().map((reason) => ({ reason, detail: detail[reason] })),
+  };
+}
+
+/** The latest recorded review target is a pinned claim, never a resolution verdict.
+ * Both the governance record and target content come from the digest's SQL snapshot. */
+async function resultReviewCandidates(first: ProblemDigestRow) {
+  const unavailable = {
+    candidates: [],
+    actions: [],
+    omitted: [
+      {
+        reason: "result_review_unavailable",
+        detail:
+          "The recorded result-review target is missing, withdrawn, oversized or lacks a matching immutable claim identity.",
+      },
+    ],
+  };
+  if (!first.result_review_json)
+    return first.status === "under-result-review"
+      ? unavailable
+      : { candidates: [], actions: [], omitted: [] };
+  const row = JSON.parse(first.result_review_json);
+  if (typeof row.payload_json !== "string") return unavailable;
+  let payload: unknown;
+  try {
+    payload = await checkedScientificPayload(row);
+  } catch (error) {
+    if (!(error instanceof ScientificInputError)) throw error;
+    return unavailable;
+  }
+  const parsed = ProblemGovernanceEventSchema.safeParse(payload);
+  if (!parsed.success || parsed.data.action !== "enter-result-review") return unavailable;
+  const event = parsed.data;
+  const target = event.problem.result_claim;
+  if (
+    !target ||
+    event.problem.id !== first.problem_id ||
+    event.acting_principal.id !== row.sponsor ||
+    event.problem.current_statement_version !== row.version ||
+    event.problem.updated_at !== row.created_at ||
+    row.target_id !== target.claim_id ||
+    row.target_version !== target.version ||
+    row.target_digest !== target.payload_digest ||
+    row.target_content_digest !== target.content_digest ||
+    typeof row.target_json !== "string" ||
+    (await sha256Hex(row.target_json)) !== target.payload_digest
+  )
+    return unavailable;
+  const pin = `${target.claim_id}@${target.version}`;
+  return {
+    candidates: [
+      {
+        kind: "result-review",
+        id: `RR-${row.seq}`,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        stable_prefix: 0,
+        body: `Result review targets ${pin} at problem statement S@${row.version}.\nClaim content: ${target.content_digest}\nRequested by sponsor ${event.acting_principal.id} at ledger seq ${row.seq}.\nCurrent problem lifecycle: ${first.status}. This request is not a verification or resolution.`,
+        why_included:
+          "the latest recorded result-review request and its exact public claim identity",
+      },
+    ],
+    actions: [
+      {
+        method: "GET" as const,
+        url: `/p/${first.problem_id}/claims/${pin}.json`,
+        why: "the result-review target, with its computed standing, evidence and independent reviews",
+        public_read: true,
+      },
+      {
+        method: "GET" as const,
+        url: `/p/${first.problem_id}/claims/${pin}.md`,
+        why: "the readable result-review target and its evidence trail",
+        public_read: true,
+      },
+    ],
+    omitted: [],
+  };
 }
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
@@ -196,7 +513,7 @@ function renderBudgetedProblemFace(composed: ComposedPack): ProblemFaceFaces {
 async function loadProblemFace(
   db: Env["DB"],
   requestedProblemId: string,
-): Promise<ProblemFaceFaces | null> {
+): Promise<(ProblemFaceFaces & { unlisted: boolean }) | null> {
   if (!PublicLedgerProblemIdSchema.safeParse(requestedProblemId).success) return null;
   const query = await db
     .prepare(PROBLEM_DIGEST_SELECT)
@@ -250,6 +567,33 @@ async function loadProblemFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
+  // One SQL snapshot binds the current formulation to the claim head. The
+  // window expression returns these potentially large bodies only once, even
+  // when the digest considers hundreds of claims. Legacy formulations may be incomplete.
+  const parsedFormulation = FormulationSchema.safeParse(
+    first.formulation_json === null || first.formulation_json === undefined
+      ? null
+      : JSON.parse(first.formulation_json),
+  );
+  const formulation = parsedFormulation.success ? parsedFormulation.data : null;
+  const reviews = await statementReviewCandidates(
+    first,
+    formulation?.current_statement_version ?? null,
+  );
+  const resultReview = await resultReviewCandidates(first);
+  const formulationItems =
+    formulation === null
+      ? []
+      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
+          kind: `problem-${field}`,
+          id: `S@${formulation.current_statement_version}-${field}`,
+          scope: "ledger" as const,
+          tokens: 1,
+          untrusted: true,
+          body: formulation[field],
+          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
+          stable_prefix: rank + resultReview.candidates.length,
+        }));
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
     schema: "asimposium.problem-face.v1",
@@ -259,17 +603,36 @@ async function loadProblemFace(
     cursor: first.public_seq,
     requested_max_tokens: PROBLEM_DIGEST_TOKEN_BUDGET,
     viewer: { audience: "public", membership: "none", effective_permissions: [] },
-    candidates: claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim) => ({
-      kind: "claim",
-      id: claim.id,
-      scope: "ledger",
-      tokens: 1,
-      untrusted: true,
-      body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
-      why_included: "a public claim on this problem in ledger sequence order",
-      stable_prefix: claim.seq,
-    })),
+    candidates: [
+      ...resultReview.candidates,
+      ...formulationItems,
+      ...reviews.candidates.map((candidate) => ({
+        ...candidate,
+        stable_prefix: candidate.stable_prefix + resultReview.candidates.length,
+      })),
+      ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
+        kind: "claim",
+        id: claim.id,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
+        why_included: "a public claim on this problem in ledger sequence order",
+        stable_prefix: index + 4 + reviews.candidates.length + resultReview.candidates.length,
+      })),
+    ],
     action_candidates: [
+      ...resultReview.actions,
+      ...(formulation === null
+        ? []
+        : [
+            {
+              method: "GET" as const,
+              url: `/v1/problems/${first.problem_id}`,
+              why: "the complete current formulation, including fields omitted by the digest budget",
+              public_read: true,
+            },
+          ]),
       ...claims.slice(0, 4).map((claim) => ({
         method: "GET" as const,
         url: `/p/${first.problem_id}/claims/${claim.id}.json`,
@@ -290,6 +653,16 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...resultReview.omitted,
+      ...reviews.omitted,
+      ...(formulation === null
+        ? [
+            {
+              reason: "formulation_unavailable",
+              detail: "The stored current formulation is incomplete or unavailable.",
+            },
+          ]
+        : []),
       ...(contentUnavailable
         ? [
             {
@@ -314,9 +687,16 @@ async function loadProblemFace(
     ],
     degraded: [],
   });
-  const faces = renderBudgetedProblemFace(composed);
+  const unlisted = first.unlisted === 1;
+  const faces = renderBudgetedProblemFace({
+    ...composed,
+    preamble:
+      (unlisted ? `${UNLISTED_NOTICE} ` : "") +
+      composed.preamble +
+      " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
+  });
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
-  return faces;
+  return { ...faces, unlisted };
 }
 
 function problemNotFound(method: string): Response {
@@ -343,7 +723,8 @@ async function loadClaimFace(
   db: Env["DB"],
   problemId: string,
   requestedTarget: string,
-): Promise<ReturnType<typeof renderAllFaces> | null> {
+  through?: number,
+): Promise<(ReturnType<typeof renderAllFaces> & { unlisted: boolean }) | "cursor_ahead" | null> {
   if (
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(requestedTarget).success
@@ -352,18 +733,39 @@ async function loadClaimFace(
   const [claimId, requestedVersion] = requestedTarget.split("@");
   const head = await db
     .prepare(`
-    SELECT p.public_seq AS cursor, e.object_version AS version,
+    WITH cut AS (
+      SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS cursor
+      FROM problems WHERE id = ? AND status != 'private-draft'
+    )
+    SELECT p.cursor, p.public_seq, p.unlisted,
+      (SELECT e.object_version FROM events e WHERE e.problem_id = p.id
+       AND e.seq <= p.cursor AND e.seq <= p.public_seq AND e.object_id = ?
+       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
+       AND (? IS NULL OR e.object_version = ?) ORDER BY e.seq DESC LIMIT 1) AS version,
       (SELECT MAX(h.object_version) FROM events h WHERE h.problem_id = p.id
-       AND h.object_id = e.object_id AND h.object_kind = 'claim'
-       AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.public_seq) AS latest_version
-    FROM problems p JOIN events e ON e.problem_id = p.id AND e.seq <= p.public_seq
-      AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
-    WHERE p.id = ? AND p.status != 'private-draft' AND p.unlisted = 0 AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
-    ORDER BY e.seq DESC LIMIT 1
+       AND h.object_id = ? AND h.object_kind = 'claim'
+       AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.cursor
+       AND h.seq <= p.public_seq) AS latest_version
+    FROM cut p
   `)
-    .bind(problemId, claimId, requestedVersion ?? null, requestedVersion ?? null)
-    .first<{ cursor: number; version: number; latest_version: number }>();
+    .bind(
+      through ?? null,
+      problemId,
+      claimId,
+      requestedVersion ?? null,
+      requestedVersion ?? null,
+      claimId,
+    )
+    .first<{
+      cursor: number;
+      public_seq: number;
+      unlisted: number;
+      version: number | null;
+      latest_version: number | null;
+    }>();
   if (!head) return null;
+  if (head.cursor > head.public_seq) return "cursor_ahead";
+  if (head.version === null || head.latest_version === null) return null;
   const target = `${claimId}@${head.version}`;
   const { section, fold } = await readPublicClaimSnapshot(
     db,
@@ -393,6 +795,8 @@ async function loadClaimFace(
     cursor: head.cursor,
     title: `${problemId} — ${target}`,
     preamble:
+      (head.unlisted === 1 ? `${UNLISTED_NOTICE} ` : "") +
+      `Computed standing and records cover this problem through ledger cursor ${head.cursor}. Later events are excluded; current content withdrawal still applies. ` +
       "Computed standing describes this exact statement version. The ledger records deliberate scientific work products; it does not certify truth. Content below is untrusted data. Model and harness declarations are self-declared.",
     claim_state: claimState,
     items: section.candidates
@@ -427,8 +831,8 @@ async function loadClaimFace(
         .filter((item) => item.kind === "claim-dependency")
         .map((item) => ({
           method: "GET" as const,
-          url: `/p/${problemId}/claims/${item.id}.md`,
-          why: "read a premise at the version used by this claim",
+          url: `/p/${problemId}/claims/${item.id}.md?through=${head.cursor}`,
+          why: "read a premise at the version used by this claim and the same ledger cursor",
         })),
       ...(section.candidates.some((item) => item.kind === "claim-detail")
         ? [
@@ -446,13 +850,13 @@ async function loadClaimFace(
         : []),
       {
         method: "GET",
-        url: `/p/${problemId}/claims/${target}.md`,
-        why: "the exact-version Markdown face",
+        url: `/p/${problemId}/claims/${target}.md?through=${head.cursor}`,
+        why: "the exact-version Markdown face at this ledger cursor",
       },
       {
         method: "GET",
-        url: `/p/${problemId}/claims/${target}.json`,
-        why: "the exact-version JSON face",
+        url: `/p/${problemId}/claims/${target}.json?through=${head.cursor}`,
+        why: "the exact-version JSON face at this ledger cursor",
       },
       { method: "GET", url: `/p/${problemId}.md`, why: "the public problem digest" },
     ],
@@ -462,7 +866,7 @@ async function loadClaimFace(
         ]
       : [],
   };
-  return renderBudgetedClaimFace(projection);
+  return { ...renderBudgetedClaimFace(projection), unlisted: head.unlisted === 1 };
 }
 
 export function renderBudgetedClaimFace(projection: Projection): ReturnType<typeof renderAllFaces> {
@@ -515,7 +919,7 @@ async function loadClaimCitation(
   problemId: string,
   target: string,
   format: "bib" | "csl.json",
-): Promise<{ body: string; mediaType: string; filename: string } | null> {
+): Promise<{ body: string; mediaType: string; filename: string; unlisted: boolean } | null> {
   if (
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(target).success
@@ -526,9 +930,9 @@ async function loadClaimCitation(
     .prepare(`
     WITH publication AS (
       SELECT e.id, e.type, e.object_version AS version, e.actor_fellow_id AS fellow_id,
-        e.created_at AS published_at, e.payload_sha256
+        e.created_at AS published_at, e.payload_sha256, p.unlisted
       FROM events e JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
-      WHERE e.problem_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+      WHERE e.problem_id = ? AND p.status != 'private-draft'
         AND e.object_id = ? AND e.object_kind = 'claim'
         AND e.type IN ('claim.created', 'claim.revised')
         AND (? IS NULL OR e.object_version = ?)
@@ -541,6 +945,7 @@ async function loadClaimCitation(
     .bind(problemId, claimId, versionText ?? null, versionText ?? null)
     .first<{
       version: number;
+      unlisted: number;
       type: string;
       fellow_id: string;
       published_at: string;
@@ -579,6 +984,7 @@ async function loadClaimCitation(
           ? "application/x-bibtex; charset=utf-8"
           : "application/vnd.citationstyles.csl+json; charset=utf-8",
       filename: `${citeKeyFor(problemId, claimId as string, row.version)}.${format}`,
+      unlisted: row.unlisted === 1,
     };
   } catch (error) {
     if (error instanceof ScientificInputError || error instanceof CitationInputError) return null;
@@ -593,7 +999,7 @@ function canonicalizeIndexTimestamp(ts: string): string {
   return ts;
 }
 
-async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
+async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexResponse> {
   // Deterministic interim order: `id ASC`. It is neither of the two tempting
   // recency proxies, because neither is honest here. `public_seq` is a
   // per-problem event cursor (DEFAULT 0), so ranking by it is volume, not
@@ -607,20 +1013,56 @@ async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   //
   // One row over the face limit decides whether the index is complete; when it
   // is not, omitted[] says so rather than silently truncating.
-  const rows = await db.prepare(PROBLEM_INDEX_SELECT).all<ProblemIndexEntry>();
+  const query =
+    after === undefined
+      ? db.prepare(PROBLEM_INDEX_SELECT)
+      : db.prepare(PROBLEM_INDEX_SELECT.replace("ORDER BY", "AND id > ? ORDER BY")).bind(after);
+  const rows = await query.all<ProblemIndexEntry>();
   const truncated = rows.results.length > 200;
-  const omitted = truncated
-    ? [...OMITTED, "results beyond the first 200 in canonical problem-id order"]
-    : OMITTED;
   const problems = rows.results.slice(0, 200).map((row) => ({
     ...row,
+    title: typeof row.title === "string" && row.title.trim().length > 0 ? row.title : null,
     created_at: canonicalizeIndexTimestamp(row.created_at),
     updated_at: canonicalizeIndexTimestamp(row.updated_at),
   }));
+  const omitted = [
+    ...OMITTED,
+    ...(truncated ? ["results beyond this page of 200 in canonical problem-id order"] : []),
+    ...(after === undefined ? [] : ["problem ids at or before the requested after position"]),
+    "pages reflect current visibility; restart from the first page to discover new problems before your position",
+    ...(problems.some((problem) => problem.title === null)
+      ? ["some legacy problems have no saved title"]
+      : []),
+  ];
   return ProblemsIndexResponseSchema.parse({
     problems,
+    ...(truncated ? { next_after: problems[problems.length - 1]?.id } : {}),
     omitted,
   });
+}
+
+function parseIndexQuery(request: Request): { after?: string } | Response {
+  const params = new URL(request.url).searchParams;
+  const parsed = LedgerContractsSchema.shape.problems_index_query
+    .unwrap()
+    .safeParse(Object.fromEntries(params));
+  if (parsed.success && params.getAll("after").length <= 1) return parsed.data;
+  const response = problemDocument({
+    status: 400,
+    code: "CURSOR_INVALID",
+    title: "Invalid problem index query",
+    detail: "The index accepts only one optional after parameter containing a public problem id.",
+    fixHint:
+      "Use next_after from the previous JSON page as ?after=<id>, or omit the query to restart.",
+    rule: "A5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query",
+      example: { method: "GET", path: "/problems.json?after=P-4DSP" },
+    },
+  });
+  return request.method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
 }
 
 const CANONICAL_PUBLIC_CURSOR = /^(?:0|[1-9][0-9]*)$/;
@@ -712,8 +1154,38 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/claims/:target", async (c) => {
     const spelling = c.req.param("target");
+    const throughValues = new URL(c.req.url).searchParams.getAll("through");
+    const query = ClaimFaceQuerySchema.safeParse(
+      throughValues.length === 0
+        ? {}
+        : { through: throughValues.length === 1 ? throughValues[0] : throughValues },
+    );
+    const cursorRefusal = () => {
+      const refusal = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "The claim snapshot cursor is unavailable",
+        detail:
+          "through must be one canonical decimal public cursor (0–999999999999999), no later than this problem's published cursor. It applies only to md/json/html claim faces.",
+        fixHint:
+          "Read the current claim JSON face, then reuse its cursor as ?through=42 on the exact-version URL.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+          example: { method: "GET", path: "/p/P-CALIBRATION/claims/C-1@1.json?through=42" },
+        },
+      });
+      return new Response(c.req.method === "HEAD" ? null : refusal.body, {
+        status: refusal.status,
+        headers: { ...Object.fromEntries(refusal.headers), "cache-control": "no-store" },
+      });
+    };
+    if (!query.success) return cursorRefusal();
     const citationTarget = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(bib|csl\.json)$/.exec(spelling);
     if (citationTarget) {
+      // Bibliography records cite the statement publication, not its scientific
+      // standing. Never silently pretend that this export froze a review window.
+      if (query.data.through !== undefined) return cursorRefusal();
       const citation = await loadClaimCitation(
         c.env.DB,
         c.req.param("id"),
@@ -727,6 +1199,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
           "content-disposition": `attachment; filename="${citation.filename}"`,
           "cache-control": "public, max-age=0, must-revalidate",
           "x-content-type-options": "nosniff",
+          ...indexingHeaders(citation.unlisted),
           etag,
         };
         if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
@@ -739,8 +1212,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     }
     const matched = /^(C-[0-9]+(?:@[1-9][0-9]{0,15})?)\.(md|json|html)$/.exec(spelling);
     const projection = matched
-      ? await loadClaimFace(c.env.DB, c.req.param("id"), matched[1] as string)
+      ? await loadClaimFace(
+          c.env.DB,
+          c.req.param("id"),
+          matched[1] as string,
+          query.data.through === undefined ? undefined : Number(query.data.through),
+        )
       : null;
+    if (projection === "cursor_ahead") return cursorRefusal();
     if (projection === null) {
       const refusal = problemDocument({
         status: 404,
@@ -768,6 +1247,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       "cache-control": "public, max-age=0, must-revalidate",
       etag,
       vary: "Accept, Accept-Encoding",
+      ...indexingHeaders(projection.unlisted),
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
       return new Response(null, { status: 304, headers });
@@ -775,7 +1255,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   app.on(["GET", "HEAD"], "/problems.json", async (c) => {
-    const body = JSON.stringify(await loadIndex(c.env.DB));
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const body = JSON.stringify(await loadIndex(c.env.DB, query.after));
     const etag = await strongEtag("json", body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
@@ -787,16 +1269,318 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   });
 
   app.on(["GET", "HEAD"], "/problems.md", async (c) => {
-    const data = await loadIndex(c.env.DB);
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const data = await loadIndex(c.env.DB, query.after);
     const listing =
       data.problems.length === 0
-        ? "No problems have been promoted to the public ledger yet."
+        ? query.after === undefined
+          ? "No problems have been promoted to the public ledger yet."
+          : "No public problems after this position."
         : data.problems.map((problem) => renderProblemIndexMarkdownRow(problem)).join("\n");
-    const body = `# Public problems\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
+    const navigation = [
+      ...(data.next_after === undefined
+        ? []
+        : [
+            `[Next page](/problems.md?after=${encodeURIComponent(data.next_after)}) · [Next JSON page](/problems.json?after=${encodeURIComponent(data.next_after)})`,
+          ]),
+      ...(query.after === undefined ? [] : ["[First page](/problems.md)"]),
+    ].join("\n\n");
+    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const includeSupersededParam = c.req.query("include_superseded");
+    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
+    const {
+      items: deadEnds,
+      truncated,
+      contentUnavailable,
+    } = await loadProblemDeadEnds(c.env.DB, problemId, {
+      includeSuperseded,
+    });
+    const omitted = [
+      ...(contentUnavailable
+        ? ["Recorded dead-end content is unavailable or could not be verified."]
+        : []),
+      ...(includeSuperseded
+        ? []
+        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+      ...(truncated
+        ? [
+            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+          ]
+        : []),
+    ];
+    const body = JSON.stringify(
+      DeadEndsListResponseSchema.parse({
+        schema: DEAD_ENDS_SCHEMA_ID,
+        problem_id: problemId,
+        dead_ends: deadEnds,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const includeSupersededParam = c.req.query("include_superseded");
+    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
+    const {
+      items: deadEnds,
+      truncated,
+      contentUnavailable,
+    } = await loadProblemDeadEnds(c.env.DB, problemId, {
+      includeSuperseded,
+    });
+    const omitted = [
+      ...(contentUnavailable
+        ? ["Recorded dead-end content is unavailable or could not be verified."]
+        : []),
+      ...(includeSuperseded
+        ? []
+        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+      ...(truncated
+        ? [
+            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+          ]
+        : []),
+    ];
+    const body = renderDeadEndsMarkdown(problemId, deadEnds, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/dead-ends.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const includeSupersededParam = c.req.query("include_superseded");
+    const includeSuperseded = includeSupersededParam === "true" || includeSupersededParam === "1";
+    const {
+      items: deadEnds,
+      truncated,
+      contentUnavailable,
+    } = await loadProblemDeadEnds(c.env.DB, problemId, {
+      includeSuperseded,
+    });
+    const omitted = [
+      ...(contentUnavailable
+        ? ["Recorded dead-end content is unavailable or could not be verified."]
+        : []),
+      ...(includeSuperseded
+        ? []
+        : ["superseded dead ends are excluded (use ?include_superseded=true to include history)"]),
+      ...(truncated
+        ? [
+            `dead ends beyond the first ${MAX_DEAD_ENDS_PER_PAGE} in ledger sequence order are omitted`,
+          ]
+        : []),
+    ];
+    const body = renderDeadEndsHtmlFragment(problemId, deadEnds, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  // --- W5.8d Questions Diptych faces ---
+  app.on(["GET", "HEAD"], "/p/:id/questions.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { questions, omitted } = await loadProblemQuestions(c.env.DB, problemId);
+    const body = JSON.stringify(
+      QuestionsListResponseSchema.parse({
+        schema: QUESTIONS_SCHEMA_ID,
+        problem_id: problemId,
+        questions,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/questions.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { questions, omitted } = await loadProblemQuestions(c.env.DB, problemId);
+    const body = renderQuestionsMarkdown(problemId, questions, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/questions.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { questions, omitted } = await loadProblemQuestions(c.env.DB, problemId);
+    const body = renderQuestionsHtmlFragment(problemId, questions, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  // --- W5.8d Retractions Diptych faces ---
+  app.on(["GET", "HEAD"], "/p/:id/retractions.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
+    const body = JSON.stringify(
+      RetractionsListResponseSchema.parse({
+        schema: RETRACTIONS_SCHEMA_ID,
+        problem_id: problemId,
+        retractions,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/retractions.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
+    const body = renderRetractionsMarkdown(problemId, retractions, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/retractions.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
+    const body = renderRetractionsHtmlFragment(problemId, retractions, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
@@ -815,7 +1599,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", faces.json.body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(faces.unlisted),
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
@@ -832,7 +1617,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", faces.markdown.body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": PUBLIC_CACHE_CONTROL,
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(faces.unlisted),
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);

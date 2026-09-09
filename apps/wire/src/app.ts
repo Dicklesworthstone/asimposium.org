@@ -856,6 +856,22 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     }
     if (
       !encodedSeparator &&
+      segments.length === 4 &&
+      (segments[3] === "dead-ends.json" ||
+        segments[3] === "dead-ends.md" ||
+        segments[3] === "dead-ends.html" ||
+        segments[3] === "questions.json" ||
+        segments[3] === "questions.md" ||
+        segments[3] === "questions.html" ||
+        segments[3] === "retractions.json" ||
+        segments[3] === "retractions.md" ||
+        segments[3] === "retractions.html")
+    ) {
+      await next();
+      return;
+    }
+    if (
+      !encodedSeparator &&
       segments.length === 5 &&
       segments[3] === "claims" &&
       /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html|bib|csl\.json)$/.test(
@@ -887,6 +903,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (
       pathname !== "/cursor" &&
       !pathname.startsWith("/v1/sessions") &&
+      !/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname) &&
       pathname !== "/v1/sponsors/workshop"
     ) {
       await next();

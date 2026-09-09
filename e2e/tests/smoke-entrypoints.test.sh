@@ -516,24 +516,24 @@ printf '%s\n' \
   '      contract-empty) printf "%s" '\''{}'\'' ;;' \
   '      contract-array) printf "%s" '\''[]'\'' ;;' \
   '      contract-extra) printf "%s" '\''{"problems":[],"omitted":[],"extra":true}'\'' ;;' \
-  '      contract-id) printf "%s" '\''{"problems":[{"id":"P--BAD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      contract-seq-bool) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":true,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      contract-seq-unsafe) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":9007199254740992,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      contract-created) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-02-30T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      contract-updated) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-02-30T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      contract-entry-extra) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","extra":true}],"omitted":[]}'\'' ;;' \
+  '      contract-id) printf "%s" '\''{"problems":[{"id":"P--BAD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      contract-seq-bool) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":true,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      contract-seq-unsafe) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":9007199254740992,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      contract-created) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-02-30T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      contract-updated) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-02-30T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      contract-entry-extra) printf "%s" '\''{"problems":[{"id":"P-GOOD","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active","extra":true}],"omitted":[]}'\'' ;;' \
   '      contract-omitted-empty) printf "%s" '\''{"problems":[],"omitted":[""]}'\'' ;;' \
   '      contract-omitted-long) printf "%s" '\''{"problems":[],"omitted":["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]}'\'' ;;' \
-  '      benign) printf "%s" '\''{"problems":[{"id":"P-private-workshop","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
+  '      benign) printf "%s" '\''{"problems":[{"id":"P-private-workshop","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":"Public workshop terminology","status":"active"}],"omitted":[]}'\'' ;;' \
   '      http) printf "%s" '\''{"problems":[],"omitted":[]}'\''; problem_status="503" ;;' \
   '      wrong-media) printf "%s" '\''{"problems":[],"omitted":[]}'\''; problem_content_type="text/html; charset=utf-8" ;;' \
   '      cursor-http | cursor-transport) printf "%s" '\''{"problems":[],"omitted":[]}'\'' ;;' \
-  '      reachable) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      parser) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
-  '      shape) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
+  '      reachable) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      parser) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
+  '      shape) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
   '      unproven) printf "%s" '\''{"problems":[],"omitted":[]}'\'' ;;' \
   '      auth-wrong-code | auth-forbidden | auth-malformed | auth-wrong-title | auth-wrong-detail | auth-wrong-fix | auth-wrong-media) printf "%s" '\''{"problems":[],"omitted":[]}'\'' ;;' \
-  '      workshop) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}],"omitted":[]}'\'' ;;' \
+  '      workshop) printf "%s" '\''{"problems":[{"id":"P-4DSP","public_seq":0,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","title":null,"status":"active"}],"omitted":[]}'\'' ;;' \
   '      *) exit 7 ;;' \
   '    esac' \
   '    if [[ "$write_out" == *"content_type"* ]]; then printf "\n%s\t%s" "$problem_status" "$problem_content_type"; elif [[ "$write_out" == *"http_code"* ]]; then printf "\n%s" "$problem_status"; fi' \

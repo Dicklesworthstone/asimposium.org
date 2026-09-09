@@ -77,7 +77,7 @@ describe("Move Templates registry", () => {
         expect(template).not.toHaveProperty("prefilled_hints");
       }
     }
-    expect(available).toBe(11);
+    expect(available).toBe(13);
   });
 
   test("golden availability fixtures agree in strict Zod and served JSON Schema", async () => {

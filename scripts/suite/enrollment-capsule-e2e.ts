@@ -1,5 +1,7 @@
 /**
- * W3.3 Enrollment Mint, Fragment Join URL, and Onboarding Capsule E2E Gate (bead asimposiumorg-nvo).
+ * W3.3 SQLite/service checks for the enrollment capsule (bead asimposiumorg-nvo).
+ * This runner does not exercise Workerd/D1, Google login, browser history,
+ * browser referrers, analytics, screenshots or actual sponsor UI onboarding.
  *
  * Acceptance Criteria:
  * 1. Unit/property tests cover enrollment ID/secret generation, fragment-only capsule assembly,
@@ -153,6 +155,13 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
 }> {
   const startedAt = Date.now();
   const opsRecords: DiagnosticRecord[] = [];
+  console.log(
+    JSON.stringify({
+      suite: "enrollment-capsule",
+      proof: "sqlite-service-fixture",
+      product_e2e: "unproven",
+    }),
+  );
 
   // 1. Initialize DB and apply migrations
   const sqlite = new Database(":memory:", { strict: true });
@@ -188,7 +197,9 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
 
   // Helper for requests
   async function request(input: string | URL, init?: RequestInit): Promise<Response> {
-    return await router.fetch(new Request(input.toString(), init));
+    const headers = new Headers(init?.headers);
+    headers.set("User-Agent", "OpenAI File Downloader, XaiImageApiFetch/1.0");
+    return await router.fetch(new Request(input.toString(), { ...init, headers }));
   }
 
   async function jsonOf<T = ResponseDetails>(response: Response): Promise<T> {
@@ -201,6 +212,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
   ): Promise<Response> {
     seq += 1;
     const reqHeaders: Record<string, string> = {
+      "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
       "content-type": "application/json",
       "idempotency-key": `e2e-capsule-fellow-${seq}-${Date.now()}`,
       ...headers,
@@ -222,6 +234,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
   async function postFlow(flowHandle: string, headers?: Record<string, string>): Promise<Response> {
     seq += 1;
     const reqHeaders: Record<string, string> = {
+      "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
       "content-type": "application/json",
       "idempotency-key": `e2e-capsule-flow-${seq}-${Date.now()}`,
       ...headers,
@@ -331,7 +344,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     }
     const mdContentType = mdRes.headers.get("content-type") ?? "";
     if (!mdContentType.includes("text/markdown")) {
-      throw new Error(`Stage 2 (markdown): unexpected content-type ${mdContentType}`);
+      throw new Error("Stage 2 (markdown): unexpected content-type");
     }
     const mdBody = await mdRes.text();
 
@@ -388,9 +401,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     const projection = JSON.parse(jsonBody);
     const parsedProjection = EnrollmentCapsuleProjectionSchema.safeParse(projection);
     if (!parsedProjection.success) {
-      throw new Error(
-        `Stage 2 (json): projection failed schema validation: ${parsedProjection.error.message}`,
-      );
+      throw new Error("Stage 2 (json): projection failed schema validation");
     }
 
     // 2.3 HTML Face (text/html)
@@ -414,7 +425,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     }
     const cacheControl = mdRes.headers.get("cache-control") ?? "";
     if (!cacheControl.includes("no-cache")) {
-      throw new Error(`Stage 2: expected no-cache in cache-control, got ${cacheControl}`);
+      throw new Error("Stage 2: expected no-cache in cache-control");
     }
     const revalRes = await request(`https://a.asimposium.org${capsulePath}`, {
       headers: { "if-none-match": etag },
@@ -481,12 +492,12 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
       stage: "secret_absence_audit",
       enrollment_id: mint1.enrollmentId,
       route_template: "GET /join/:enrollmentId",
-      state_or_code: "SAFE_REDACTION_VERIFIED",
+      state_or_code: "CAPSULE_RESPONSE_CHECKS_PASSED",
       request_id: "req_safe_audit",
       duration_ms: Date.now() - stageStart,
     });
     console.log(
-      "✓ Stage 3: Secret absence from logs, Referer, query params, and unknown IDs verified.",
+      "✓ Stage 3: Service responses refuse query credentials and omit the planted Referer value; browser/log/analytics proof remains absent.",
     );
   }
 
@@ -507,8 +518,10 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     });
 
     if (claimRes.status !== 202) {
-      const err = await claimRes.text();
-      throw new Error(`Stage 4: claim expected 202, got ${claimRes.status}: ${err}`);
+      const digest = sha256Hex(await claimRes.text());
+      throw new Error(
+        `Stage 4: claim expected 202, got ${claimRes.status}; response_sha256=${digest}`,
+      );
     }
 
     const claimData = await jsonOf(claimRes);
@@ -565,7 +578,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     }
     const pollPendingData = await jsonOf(pollPendingRes);
     if (pollPendingData.status !== "authorization_pending") {
-      throw new Error(`Stage 5: expected authorization_pending, got ${pollPendingData.status}`);
+      throw new Error("Stage 5: expected authorization_pending");
     }
     if (typeof pollPendingData.retry_after_seconds !== "number") {
       throw new Error("Stage 5: poll missing RFC-8628 retry_after_seconds field");
@@ -631,14 +644,14 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
       "Idempotency-Key": "idemp-capsule-approval-1",
     });
     if (pollApprovedRes.status !== 200) {
-      const err = await pollApprovedRes.text();
-      throw new Error(`Stage 6.1: expected 200 approved, got ${pollApprovedRes.status}: ${err}`);
+      const digest = sha256Hex(await pollApprovedRes.text());
+      throw new Error(
+        `Stage 6.1: expected 200 approved, got ${pollApprovedRes.status}; response_sha256=${digest}`,
+      );
     }
     const approvedData = await jsonOf(pollApprovedRes);
     if (approvedData.status !== "approved" || !approvedData.token?.startsWith("asimp_ag_")) {
-      throw new Error(
-        `Stage 6.1: approval missing token (status: ${String(approvedData.status)}, has_token: ${Boolean(approvedData.token)})`,
-      );
+      throw new Error("Stage 6.1: approval missing valid status or token");
     }
 
     // Same-key replay returns exact token within 24h
@@ -678,9 +691,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     const pollReducedRes = await postFlow(claim2Data.flow_handle);
     const reducedData = await jsonOf(pollReducedRes);
     if (reducedData.status !== "approved") {
-      throw new Error(
-        `Stage 6.2: expected approved status on reduction, got ${reducedData.status}`,
-      );
+      throw new Error("Stage 6.2: expected approved status on reduction");
     }
     // Verify in D1 that the granted scopes were reduced to only ["review"]
     const grantRow = sqlite
@@ -691,7 +702,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     if (!grantRow) throw new Error("Stage 6.2: grant row missing in D1");
     const grantedScopes = JSON.parse(grantRow.granted_scopes_json);
     if (!grantedScopes.includes("review") || grantedScopes.includes("promote")) {
-      throw new Error(`Stage 6.2: expected scopes ['review'], got ${grantRow.granted_scopes_json}`);
+      throw new Error("Stage 6.2: expected reduced review scope");
     }
 
     // 6.3 DENY: Mint third enrollment, sponsor denies
@@ -716,7 +727,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     const pollDeniedRes = await postFlow(claim3Data.flow_handle);
     const deniedData = await jsonOf(pollDeniedRes);
     if (deniedData.status !== "access_denied") {
-      throw new Error(`Stage 6.3: expected status access_denied, got ${deniedData.status}`);
+      throw new Error("Stage 6.3: expected status access_denied");
     }
     // Denial must NOT disclose sponsor identity
     if ("sponsor" in deniedData || "sponsor_id" in deniedData) {
@@ -785,9 +796,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
     const pollExpiredProp = await postFlow(claim7bData.flow_handle);
     const expiredPropData = await jsonOf(pollExpiredProp);
     if (expiredPropData.status !== "expired_token") {
-      throw new Error(
-        `Stage 7: expected expired_token status for proposal, got ${expiredPropData.status}`,
-      );
+      throw new Error("Stage 7: expected expired_token status for proposal");
     }
 
     opsRecords.push({
@@ -875,13 +884,8 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
   }
 
   // =========================================================================
-  // STAGE 9: OPS.2a Structured Diagnostic Logging & Strict Zero-Leakage Audit
+  // STAGE 9: Check the selected fixture records before emitting them.
   // =========================================================================
-  console.log("\n--- OPS.2a Structured Diagnostic Log ---");
-  for (const record of opsRecords) {
-    console.log(JSON.stringify(record));
-  }
-
   const fullLog = JSON.stringify(opsRecords);
   const forbiddenCanaries = [
     mint1.secret,
@@ -894,15 +898,21 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
 
   for (const canary of forbiddenCanaries) {
     if (fullLog.includes(canary)) {
-      throw new Error(`CRITICAL: OPS.2a diagnostic log leaked sensitive data: '${canary}'`);
+      throw new Error("OPS.2a selected-record check detected a private value");
     }
   }
+  console.log("\n--- OPS.2a Structured Diagnostic Log ---");
+  for (const record of opsRecords) {
+    console.log(JSON.stringify(record));
+  }
   console.log(
-    "✓ Stage 9: OPS.2a zero-leakage security audit passed (redaction verified clean across all diagnostic records).",
+    "✓ Stage 9: Selected SQLite fixture records omit the tested private values; this does not certify server or browser logs.",
   );
 
   const totalDuration = Date.now() - startedAt;
-  console.log(`\nAll 9 stages completed successfully in ${totalDuration}ms.`);
+  console.log(
+    `\nAll 9 SQLite/service stages completed in ${totalDuration}ms; product E2E remains unproven.`,
+  );
   return { passed: true, records: opsRecords };
 }
 
@@ -910,7 +920,14 @@ if (import.meta.main) {
   runEnrollmentCapsuleE2e()
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error("\nE2E EXECUTION FAILED:", err);
+      console.error(
+        JSON.stringify({
+          suite: "enrollment-capsule",
+          proof: "sqlite-service-fixture",
+          status: "fail",
+          error_sha256: sha256Hex(err instanceof Error ? err.message : typeof err),
+        }),
+      );
       process.exit(1);
     });
 }

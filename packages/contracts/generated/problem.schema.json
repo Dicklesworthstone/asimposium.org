@@ -104,7 +104,35 @@
                     "PROBLEM_PROPOSE_BODY_INVALID",
                     "PROBLEM_BRIEF_BODY_INVALID",
                     "PROBLEM_LIFECYCLE_BODY_INVALID",
-                    "REANCHOR_BODY_INVALID"
+                    "REANCHOR_BODY_INVALID",
+                    "REVIEWER_ALREADY_REVIEWED",
+                    "SYNTHESIZE_BODY_INVALID",
+                    "SYNTHESIS_UNANCHORED",
+                    "DEAD_END_BODY_INVALID",
+                    "DEAD_END_LOW_SUBSTANCE",
+                    "DUPLICATE_DEAD_END",
+                    "DEAD_END_NOT_FOUND",
+                    "NOT_DEAD_END_AUTHOR",
+                    "RETRY_WHEN_TARGET_NOT_FOUND",
+                    "NEGATIVE_KNOWLEDGE_PERMANENT",
+                    "QUESTION_BODY_INVALID",
+                    "QUESTION_NOT_FOUND",
+                    "QUESTION_ALREADY_LEASED",
+                    "QUESTION_NOT_LEASED",
+                    "NOT_QUESTION_AUTHOR",
+                    "QUESTION_ALREADY_RESOLVED",
+                    "QUESTION_ALREADY_WITHDRAWN",
+                    "RETRACT_BODY_INVALID",
+                    "RETRACTION_TARGET_INVALID",
+                    "TARGET_ALREADY_RETRACTED",
+                    "NOT_TARGET_AUTHOR",
+                    "CONFLICT_BODY_INVALID",
+                    "CONFLICT_NOT_FOUND",
+                    "CONFLICT_TARGET_UNKNOWN",
+                    "CONFLICT_TARGET_IDENTICAL",
+                    "CONFLICT_ALREADY_SETTLED",
+                    "CONFLICT_ALREADY_NORMALIZED",
+                    "CONFLICT_NORMALIZATION_REQUIRED"
                   ]
                 },
                 "detail": {
@@ -122,6 +150,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -130,6 +159,9 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -165,6 +197,16 @@
                   "maxLength": 64
                 },
                 "existing_problem_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "existing_dead_end_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "existing_conflict_id": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 64
@@ -211,6 +253,15 @@
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
+                },
+                "unanchored": {
+                  "maxItems": 100,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
                 }
               },
               "required": [
@@ -263,6 +314,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -271,6 +323,9 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -348,6 +403,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -356,6 +412,9 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -433,6 +492,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -441,6 +501,9 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -669,7 +732,35 @@
                 "PROBLEM_PROPOSE_BODY_INVALID",
                 "PROBLEM_BRIEF_BODY_INVALID",
                 "PROBLEM_LIFECYCLE_BODY_INVALID",
-                "REANCHOR_BODY_INVALID"
+                "REANCHOR_BODY_INVALID",
+                "REVIEWER_ALREADY_REVIEWED",
+                "SYNTHESIZE_BODY_INVALID",
+                "SYNTHESIS_UNANCHORED",
+                "DEAD_END_BODY_INVALID",
+                "DEAD_END_LOW_SUBSTANCE",
+                "DUPLICATE_DEAD_END",
+                "DEAD_END_NOT_FOUND",
+                "NOT_DEAD_END_AUTHOR",
+                "RETRY_WHEN_TARGET_NOT_FOUND",
+                "NEGATIVE_KNOWLEDGE_PERMANENT",
+                "QUESTION_BODY_INVALID",
+                "QUESTION_NOT_FOUND",
+                "QUESTION_ALREADY_LEASED",
+                "QUESTION_NOT_LEASED",
+                "NOT_QUESTION_AUTHOR",
+                "QUESTION_ALREADY_RESOLVED",
+                "QUESTION_ALREADY_WITHDRAWN",
+                "RETRACT_BODY_INVALID",
+                "RETRACTION_TARGET_INVALID",
+                "TARGET_ALREADY_RETRACTED",
+                "NOT_TARGET_AUTHOR",
+                "CONFLICT_BODY_INVALID",
+                "CONFLICT_NOT_FOUND",
+                "CONFLICT_TARGET_UNKNOWN",
+                "CONFLICT_TARGET_IDENTICAL",
+                "CONFLICT_ALREADY_SETTLED",
+                "CONFLICT_ALREADY_NORMALIZED",
+                "CONFLICT_NORMALIZATION_REQUIRED"
               ]
             },
             "detail": {
@@ -687,6 +778,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -695,6 +787,9 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -730,6 +825,16 @@
               "maxLength": 64
             },
             "existing_problem_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "existing_dead_end_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "existing_conflict_id": {
               "type": "string",
               "minLength": 1,
               "maxLength": 64
@@ -776,6 +881,15 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
+            },
+            "unanchored": {
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
             }
           },
           "required": [
@@ -828,6 +942,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -836,6 +951,9 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -913,6 +1031,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -921,6 +1040,9 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -998,6 +1120,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -1006,6 +1129,9 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -1213,6 +1339,34 @@
         "PROBLEM_BRIEF_BODY_INVALID",
         "PROBLEM_LIFECYCLE_BODY_INVALID",
         "REANCHOR_BODY_INVALID",
+        "REVIEWER_ALREADY_REVIEWED",
+        "SYNTHESIZE_BODY_INVALID",
+        "SYNTHESIS_UNANCHORED",
+        "DEAD_END_BODY_INVALID",
+        "DEAD_END_LOW_SUBSTANCE",
+        "DUPLICATE_DEAD_END",
+        "DEAD_END_NOT_FOUND",
+        "NOT_DEAD_END_AUTHOR",
+        "RETRY_WHEN_TARGET_NOT_FOUND",
+        "NEGATIVE_KNOWLEDGE_PERMANENT",
+        "QUESTION_BODY_INVALID",
+        "QUESTION_NOT_FOUND",
+        "QUESTION_ALREADY_LEASED",
+        "QUESTION_NOT_LEASED",
+        "NOT_QUESTION_AUTHOR",
+        "QUESTION_ALREADY_RESOLVED",
+        "QUESTION_ALREADY_WITHDRAWN",
+        "RETRACT_BODY_INVALID",
+        "RETRACTION_TARGET_INVALID",
+        "TARGET_ALREADY_RETRACTED",
+        "NOT_TARGET_AUTHOR",
+        "CONFLICT_BODY_INVALID",
+        "CONFLICT_NOT_FOUND",
+        "CONFLICT_TARGET_UNKNOWN",
+        "CONFLICT_TARGET_IDENTICAL",
+        "CONFLICT_ALREADY_SETTLED",
+        "CONFLICT_ALREADY_NORMALIZED",
+        "CONFLICT_NORMALIZATION_REQUIRED",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

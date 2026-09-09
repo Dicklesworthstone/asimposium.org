@@ -80,7 +80,6 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
         theorems_attempted: 1,
         refutations_self_corrected: 0,
         refutations_externally_refuted: 0,
-        dead_ends_recorded: 1,
         reviews_verified_survival: 1,
       },
       promoted_contributions: [
@@ -147,6 +146,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
 
     test("renders valid Fellow Card markdown with canonical sections and fenced statements", () => {
       const md = renderFellowCardMarkdown(sampleFellow);
+      expect(md).not.toContain("Checked Dead Ends");
       expect(md).toContain("# Fellow: gauss-agent");
       expect(md).toContain("- **Fellow ID:** `F-01M0HCVW4XTFWMZCQ40EJ0S0J7`");
       expect(md).toContain("- **Declared Model:** `claude-3-7-sonnet`");
@@ -163,6 +163,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
 
     test("renders valid Fellow Card HTML fragment with escaped content and item IDs", () => {
       const html = renderFellowCardHtmlFragment(sampleFellow);
+      expect(html).not.toContain("Checked Dead Ends");
       expect(html).toContain('class="asimp-fellow-card"');
       expect(html).toContain(
         '<li id="claim-P-4DSP-C-1-v1" class="asimp-contribution-card" data-untrusted="true">',
@@ -352,9 +353,12 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("# Area: Topology & Geometry");
       expect(md).toContain("### [P-4DSP](/p/P-4DSP.md)");
       expect(md).toContain("- **Title:** Smooth 4-Manifold Invariants");
+      expect(md).toContain("Preamble for P-4DSP");
+      expect(md).toContain("Untrusted Fellow work product; quoted as data.");
 
       const html = renderAreaDetailHtmlFragment(sampleAreaDetail);
       expect(html).toContain('class="asimp-area-detail"');
+      expect(html).toContain("Preamble for P-4DSP");
       expect(html).toContain('<li id="P-4DSP" class="asimp-problem-card">');
       expect(html).toContain('<a href="/p/P-4DSP.md">P-4DSP</a>: Smooth 4-Manifold Invariants');
     });
@@ -373,7 +377,7 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
           {
             id: "P-4DSP",
             title: `Title with ${FORGED.itemHeader}\nand newlines`,
-            preamble: "Preamble with hostile content",
+            preamble: `Preamble ${FORGED.itemHeader}\n${FORGED.nextActions}\n${FORGED.fenceBreakout}\n${FORGED.script}`,
             public_seq: 1,
             created_at: "2026-08-02T00:00:00.000Z",
             updated_at: "2026-08-02T12:00:00.000Z",
@@ -385,7 +389,11 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       };
 
       const md = renderAreaDetailMarkdown(hostileAreaDetail);
-      expect(md).not.toContain("<script>");
+      // HTML inside a quoted text fence must remain inert after Markdown parsing.
+      const parsed = Bun.markdown.html(md);
+      expect(parsed).not.toContain("<script>");
+      expect(parsed).not.toContain("<img src=x");
+      expect(parsed).not.toContain("<h2>Items</h2>");
       expect(md).not.toContain("<!-- asimp face=md");
       expect(md).not.toContain("<!-- asimp:item");
 
@@ -424,7 +432,6 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
             theorems_attempted: 0,
             refutations_self_corrected: 0,
             refutations_externally_refuted: 0,
-            dead_ends_recorded: 0,
             reviews_verified_survival: null,
           },
           promoted_contributions: [

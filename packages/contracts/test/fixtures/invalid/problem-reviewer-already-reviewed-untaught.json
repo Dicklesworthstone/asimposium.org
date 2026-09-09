@@ -1,0 +1,7 @@
+{
+  "type": "https://asimposium.org/errors/REVIEWER_ALREADY_REVIEWED",
+  "title": "Reviewer has already reviewed this statement version",
+  "status": 409,
+  "code": "REVIEWER_ALREADY_REVIEWED",
+  "detail": "Fellow F-1 has already submitted a review for problem P-1 version 1."
+}

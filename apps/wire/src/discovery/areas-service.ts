@@ -1,8 +1,8 @@
 import {
   type AreaDetailResponse,
   AreaDetailResponseSchema,
-  type AreaProblemEntry,
   type AreaSlug,
+  AreaSlugSchema,
   type AreaSummary,
   AreaSummarySchema,
   type AreasIndexResponse,
@@ -10,99 +10,40 @@ import {
   type ScientificNeedType,
   SEED_AREA_SLUGS,
   SEED_AREAS,
-  type SeedAreaSlug,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
-interface ProblemRow {
-  id: string;
-  public_seq: number;
-  created_at: string;
-  updated_at: string;
+const AREA_LIMIT = 64;
+const PROBLEM_LIMIT = 50;
+// All counts and memberships use the same visibility predicate. Unlisted
+// problems remain accessible by their direct URL, never through discovery.
+const VISIBLE = "p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')";
+const SEEDS_SQL = SEED_AREA_SLUGS.map((slug) => `'${slug}'`).join(", ");
+const OMITTED = [
+  "private, unlisted and dormant problems are excluded from area discovery",
+  "scientific needs and review eligibility are unavailable; assignments do not establish readiness",
+];
+
+interface VisibleCounts {
+  total: number;
+  unassigned: number;
 }
 
-/**
- * Determine the primary area for a problem based on ID and keywords,
- * with canonical fallback to 'other-exact-sciences' (Fable Appendix C).
- */
-export function determineProblemArea(problemId: string): AreaSlug {
-  const upper = problemId.toUpperCase();
-  if (upper.includes("4DSP") || upper.includes("TOPOLOGY") || upper.includes("MANIFOLD")) {
-    return "topology-and-geometry";
-  }
-  if (
-    upper.includes("RIEMANN") ||
-    upper.includes("NUMBER") ||
-    upper.includes("PRIME") ||
-    upper.includes("ERDOS") ||
-    upper.includes("CUBE")
-  ) {
-    return "number-theory";
-  }
-  if (upper.includes("KAPLANSKY") || upper.includes("ALGEBRA") || upper.includes("GROUP")) {
-    return "algebra";
-  }
-  if (
-    upper.includes("NAVIER") ||
-    upper.includes("STOKES") ||
-    upper.includes("ANALYSIS") ||
-    upper.includes("PDE")
-  ) {
-    return "analysis";
-  }
-  if (
-    upper.includes("LOGIC") ||
-    upper.includes("FOUNDATION") ||
-    upper.includes("GÖDEL") ||
-    upper.includes("SET")
-  ) {
-    return "logic-and-foundations";
-  }
-  if (upper.includes("COMBINATORIC") || upper.includes("GRAPH") || upper.includes("RAMSEY")) {
-    return "combinatorics";
-  }
-  if (upper.includes("PROBABILITY") || upper.includes("RANDOM") || upper.includes("STOCHASTIC")) {
-    return "probability";
-  }
-  if (upper.includes("QUANTUM") || upper.includes("CHANNEL") || upper.includes("BELL")) {
-    return "quantum-foundations";
-  }
-  if (upper.includes("PHYSICS") || upper.includes("INTEGRABLE") || upper.includes("STATMECH")) {
-    return "mathematical-physics";
-  }
-  if (upper.includes("STRING") || upper.includes("HIGH-ENERGY") || upper.includes("PARTICLE")) {
-    return "high-energy-theory";
-  }
-  if (
-    upper.includes("CONDENSED") ||
-    upper.includes("SUPERCONDUCT") ||
-    upper.includes("TOPOLOGICAL-INSULATOR")
-  ) {
-    return "condensed-matter-theory";
-  }
-  if (upper.includes("GRAVIT") || upper.includes("COSMOLOGY") || upper.includes("BLACK-HOLE")) {
-    return "gravitation-and-cosmology";
-  }
-  if (upper.includes("CHAOS") || upper.includes("DYNAMIC") || upper.includes("BIFURCATION")) {
-    return "dynamical-systems";
-  }
-  if (
-    upper.includes("COMPLEXITY") ||
-    upper.includes("CS") ||
-    upper.includes("ALGO") ||
-    upper.includes("BB")
-  ) {
-    return "cs-theory";
-  }
-  if (
-    upper.includes("LEAN") ||
-    upper.includes("FORMAL") ||
-    upper.includes("ISABELLE") ||
-    upper.includes("COQ")
-  ) {
-    return "formal-verification";
-  }
-  return "other-exact-sciences";
+function visibleCounts(db: D1Database) {
+  return db.prepare(`SELECT COUNT(*) AS total,
+    COALESCE(SUM(json_array_length(p.areas) = 0), 0) AS unassigned
+    FROM problems p WHERE ${VISIBLE}`);
+}
+
+function omissions(counts: VisibleCounts): string[] {
+  return [
+    ...OMITTED,
+    ...(counts.unassigned > 0
+      ? [
+          `${counts.unassigned} visible problems have no recorded area assignments; area counts cover recorded assignments only`,
+        ]
+      : []),
+  ];
 }
 
 /**
@@ -110,7 +51,7 @@ export function determineProblemArea(problemId: string): AreaSlug {
  */
 export function getAreaInfo(
   slug: AreaSlug,
-  problemCount: number,
+  problemCount: number | null,
   activeNeeds: ScientificNeedType[],
 ): AreaSummary {
   const seed = SEED_AREAS.find((a) => a.slug === slug);
@@ -146,45 +87,46 @@ export function getAreaInfo(
  * Fetch all areas with active problem counts and scientific need chips.
  */
 export async function loadAreasIndex(db: D1Database): Promise<AreasIndexResponse> {
-  const problemRows = await db
-    .prepare("SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY id ASC")
-    .all<ProblemRow>();
-
-  const problems = problemRows.results ?? [];
-
-  // Group problems by area
-  const areaProblemMap = new Map<string, ProblemRow[]>();
-  for (const slug of SEED_AREA_SLUGS) {
-    areaProblemMap.set(slug, []);
-  }
-
-  for (const prob of problems) {
-    const area = determineProblemArea(prob.id);
-    const existing = areaProblemMap.get(area) ?? [];
-    existing.push(prob);
-    areaProblemMap.set(area, existing);
-  }
-
-  const summaries: AreaSummary[] = [];
-  for (const [slug, assignedProblems] of areaProblemMap.entries()) {
-    const count = assignedProblems.length;
-    // Derive active needs: if problem count > 0, provide default need chips
-    const activeNeeds: ScientificNeedType[] =
-      count > 0 ? ["review-ready", "formalization-wanted"] : [];
-    summaries.push(getAreaInfo(slug as AreaSlug, count, activeNeeds));
-  }
-
-  // Sort: areas with problems first, then alphabetical by label
-  summaries.sort((a, b) => {
-    if (a.problem_count !== b.problem_count) return b.problem_count - a.problem_count;
-    return a.label.localeCompare(b.label);
-  });
+  // Seed rows sort first so a custom-area cap cannot erase a seed's real count.
+  // Window totals retain the exact taxonomy size even when the list is bounded.
+  const [countResult, areaResult] = await db.batch([
+    visibleCounts(db),
+    db.prepare(`SELECT a.value AS slug, COUNT(DISTINCT p.id) AS count,
+      SUM(CASE WHEN a.value IN (${SEEDS_SQL}) THEN 0 ELSE 1 END) OVER () AS custom_total
+      FROM problems p, json_each(p.areas) a
+      WHERE ${VISIBLE}
+      GROUP BY a.value
+      ORDER BY CASE WHEN a.value IN (${SEEDS_SQL}) THEN 0 ELSE 1 END, a.value
+      LIMIT ${SEED_AREA_SLUGS.length + AREA_LIMIT}`),
+  ]);
+  const counts = countResult?.results[0] as unknown as VisibleCounts | undefined;
+  if (!counts) throw new Error("Problem count unavailable");
+  const rows = areaResult?.results as unknown as {
+    slug: string;
+    count: number;
+    custom_total: number;
+  }[];
+  const recorded = rows.map((row) => ({ ...row, slug: AreaSlugSchema.parse(row.slug) }));
+  const summaries = SEED_AREA_SLUGS.map((slug) =>
+    getAreaInfo(slug, recorded.find((row) => row.slug === slug)?.count ?? 0, []),
+  );
+  const custom = recorded.filter((row) => !SEED_AREA_SLUGS.some((seed) => seed === row.slug));
+  summaries.push(...custom.slice(0, AREA_LIMIT).map((row) => getAreaInfo(row.slug, row.count, [])));
+  summaries.sort((a, b) => a.label.localeCompare(b.label));
+  const customTotal = recorded[0]?.custom_total ?? 0;
 
   return AreasIndexResponseSchema.parse({
     areas: summaries,
-    total_areas: summaries.length,
-    total_problems: problems.length,
-    omitted: ["dormant problems omitted from active taxonomy count"],
+    total_areas: SEED_AREA_SLUGS.length + customTotal,
+    total_problems: counts.total,
+    omitted: [
+      ...omissions(counts),
+      ...(customTotal > AREA_LIMIT
+        ? [
+            `${customTotal - AREA_LIMIT} custom areas omitted after the first ${AREA_LIMIT} by slug; known area URLs remain readable`,
+          ]
+        : []),
+    ],
   });
 }
 
@@ -195,42 +137,75 @@ export async function loadAreaDetail(
   db: D1Database,
   slug: AreaSlug,
 ): Promise<AreaDetailResponse | null> {
-  const isSeed = SEED_AREA_SLUGS.includes(slug as SeedAreaSlug);
-  const isOther = slug.startsWith("other-");
-  if (!isSeed && !isOther) return null;
-
-  const problemRows = await db
-    .prepare("SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY id ASC")
-    .all<ProblemRow>();
-
-  const matchingProblems: AreaProblemEntry[] = [];
-  const activeNeedsSet = new Set<ScientificNeedType>();
-
-  for (const prob of problemRows.results ?? []) {
-    if (determineProblemArea(prob.id) === slug) {
-      // Check claim counts and falsifiers
-      const falsifierPresent = true; // Every problem requires a falsifier per rule
-      const needs: ScientificNeedType[] = ["review-ready", "formalization-wanted"];
-      for (const n of needs) activeNeedsSet.add(n);
-
-      matchingProblems.push({
-        id: prob.id,
-        title: `${prob.id} — Scientific Problem`,
-        preamble: `Scientific problem ${prob.id} registered under ${slug}.`,
-        public_seq: prob.public_seq,
-        created_at: prob.created_at,
-        updated_at: prob.updated_at,
-        needs,
-        falsifier_present: falsifierPresent,
-      });
-    }
-  }
-
-  const summary = getAreaInfo(slug, matchingProblems.length, Array.from(activeNeedsSet));
+  const membership = `${VISIBLE} AND EXISTS (SELECT 1 FROM json_each(p.areas) a WHERE a.value = ?)`;
+  const metadata = "length(trim(p.title)) > 0 AND v.problem_id IS NOT NULL";
+  // One D1 read transaction pins metadata, membership, counts and truncation.
+  const [visibleResult, countResult, problemResult] = await db.batch([
+    visibleCounts(db),
+    db
+      .prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN ${metadata} THEN 0 ELSE 1 END), 0) AS missing
+      FROM problems p LEFT JOIN problem_statement_versions v
+        ON v.problem_id = p.id AND v.version = p.current_statement_version
+      WHERE ${membership}`)
+      .bind(slug),
+    db
+      .prepare(`SELECT p.id, p.title, p.public_seq, p.created_at, p.updated_at,
+      substr(v.statement, 1, 2048) AS preamble, length(v.statement) AS statement_length,
+      v.falsifier
+      FROM problems p JOIN problem_statement_versions v
+        ON v.problem_id = p.id AND v.version = p.current_statement_version
+      WHERE ${membership} AND ${metadata}
+      ORDER BY p.id LIMIT ${PROBLEM_LIMIT}`)
+      .bind(slug),
+  ]);
+  const visible = visibleResult?.results[0] as unknown as VisibleCounts | undefined;
+  const count = countResult?.results[0] as unknown as
+    | { total: number; missing: number }
+    | undefined;
+  if (!visible || !count) throw new Error("Area count unavailable");
+  // A private-only or arbitrary other-* URL must not reveal a taxonomy entry.
+  if (count.total === 0 && !SEED_AREA_SLUGS.some((known) => known === slug)) return null;
+  const rows = problemResult?.results as unknown as {
+    id: string;
+    title: string;
+    public_seq: number;
+    created_at: string;
+    updated_at: string;
+    preamble: string;
+    statement_length: number;
+    falsifier: string;
+  }[];
+  const truncated = rows.some((row) => row.statement_length > 2048 || row.preamble.length > 2048);
+  const problems = rows.map(({ statement_length: _length, falsifier, ...row }) => ({
+    ...row,
+    // Zod string budgets count UTF-16 code units. Do not split surrogate pairs.
+    preamble: row.preamble.slice(0, 2048).replace(/[\uD800-\uDBFF]$/, ""),
+    falsifier_present: falsifier.trim().length > 0,
+    needs: [],
+  }));
+  const remaining = count.total - count.missing - problems.length;
 
   return AreaDetailResponseSchema.parse({
-    area: summary,
-    problems: matchingProblems,
-    omitted: matchingProblems.length === 0 ? ["no problems currently promoted in this area"] : [],
+    area: getAreaInfo(slug, count.total, []),
+    problems,
+    omitted: [
+      ...omissions(visible),
+      ...(count.missing > 0
+        ? [
+            `${count.missing} assigned problems lack a published title or current statement and cannot be listed`,
+          ]
+        : []),
+      ...(remaining > 0
+        ? [
+            `${remaining} problems omitted after the first ${PROBLEM_LIMIT} by ID; use /problems.json or known problem URLs for further reads`,
+          ]
+        : []),
+      ...(truncated
+        ? [
+            "statement excerpts are limited to 2048 characters; read the full formulation at /v1/problems/:id",
+          ]
+        : []),
+    ],
   });
 }

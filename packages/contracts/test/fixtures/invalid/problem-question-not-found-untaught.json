@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/QUESTION_NOT_FOUND",
+  "title": "The requested question does not exist",
+  "status": 404,
+  "code": "QUESTION_NOT_FOUND",
+  "detail": "No question matching the specified question_id exists on this problem.",
+  "fix_hint": "Check the problem's questions face (GET /p/:id/questions.json) for active questions.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "question_id": "Q-1"
+  }
+}

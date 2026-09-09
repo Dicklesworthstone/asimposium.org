@@ -140,6 +140,38 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "PROBLEM_BRIEF_BODY_INVALID",
   "PROBLEM_LIFECYCLE_BODY_INVALID",
   "REANCHOR_BODY_INVALID",
+  "REVIEWER_ALREADY_REVIEWED",
+  // W5.8b: Synthesis lifecycle teaching refusals (Fable §6.1, §6.3, Rule P13).
+  "SYNTHESIZE_BODY_INVALID",
+  "SYNTHESIS_UNANCHORED",
+  // W5.8a: Dead-end lifecycle teaching refusals (Fable §6.1, §6.3, Rule P6, P10, P11).
+  "DEAD_END_BODY_INVALID",
+  "DEAD_END_LOW_SUBSTANCE",
+  "DUPLICATE_DEAD_END",
+  "DEAD_END_NOT_FOUND",
+  "NOT_DEAD_END_AUTHOR",
+  "RETRY_WHEN_TARGET_NOT_FOUND",
+  "NEGATIVE_KNOWLEDGE_PERMANENT",
+  // W5.8d: Questions & retractions lifecycle teaching refusals (Fable §6.1, §7.5, Rule P6, P9, P10).
+  "QUESTION_BODY_INVALID",
+  "QUESTION_NOT_FOUND",
+  "QUESTION_ALREADY_LEASED",
+  "QUESTION_NOT_LEASED",
+  "NOT_QUESTION_AUTHOR",
+  "QUESTION_ALREADY_RESOLVED",
+  "QUESTION_ALREADY_WITHDRAWN",
+  "RETRACT_BODY_INVALID",
+  "RETRACTION_TARGET_INVALID",
+  "TARGET_ALREADY_RETRACTED",
+  "NOT_TARGET_AUTHOR",
+  // W5.5: Normalized conflicts (CF-n) join the teaching family (Fable §6.1).
+  "CONFLICT_BODY_INVALID",
+  "CONFLICT_NOT_FOUND",
+  "CONFLICT_TARGET_UNKNOWN",
+  "CONFLICT_TARGET_IDENTICAL",
+  "CONFLICT_ALREADY_SETTLED",
+  "CONFLICT_ALREADY_NORMALIZED",
+  "CONFLICT_NORMALIZATION_REQUIRED",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -197,6 +229,7 @@ export const ProblemCodeSchema = z.enum([...CONTRACT_PROBLEM_CODES, ...OPAQUE_PR
 export const ProblemRuleSchema = z.enum([
   "A5",
   "ADR-20",
+  "ADR-21",
   "P-EN-NAME",
   // Validator P-rules cited by mounted ledger/session surfaces (A9): P1
   // identity, P2/P4 self-certification split, P3 falsifier, P6 preserved
@@ -209,6 +242,9 @@ export const ProblemRuleSchema = z.enum([
   "P9",
   "P10",
   "P11",
+  "P13",
+  "§6.1",
+  "§7.5",
   "§7.6",
 ]);
 
@@ -252,6 +288,8 @@ const generalContractProblem = z
     existing_session_id: z.string().min(1).max(64).optional(),
     existing_claim_id: z.string().min(1).max(64).optional(),
     existing_problem_id: z.string().min(1).max(64).optional(),
+    existing_dead_end_id: z.string().min(1).max(64).optional(),
+    existing_conflict_id: z.string().min(1).max(64).optional(),
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
     /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
     head_version: z.number().int().min(1).optional(),
@@ -265,6 +303,8 @@ const generalContractProblem = z
     remaining: z.number().int().min(0).optional(),
     /** Window duration in seconds, present only on rate-limited refusals. */
     window_seconds: z.number().int().positive().optional(),
+    /** Unanchored ledger object references, present only on SYNTHESIS_UNANCHORED. */
+    unanchored: z.array(z.string().min(1).max(256)).max(100).optional(),
   })
   .strict();
 

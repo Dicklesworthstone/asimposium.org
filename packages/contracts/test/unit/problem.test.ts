@@ -146,6 +146,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-promote-body-invalid.json", "PROMOTE_BODY_INVALID", 422, "contract"],
   ["problem-session-close-body-invalid.json", "SESSION_CLOSE_BODY_INVALID", 422, "contract"],
   ["problem-promotion-rate-limited.json", "PROMOTION_RATE_LIMITED", 429, "contract"],
+  ["problem-reviewer-already-reviewed.json", "REVIEWER_ALREADY_REVIEWED", 409, "contract"],
 ] as const;
 
 async function fixture(url: URL): Promise<unknown> {

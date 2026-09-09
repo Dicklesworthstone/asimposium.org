@@ -218,11 +218,16 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Three supporting anecdotes without a new class, or an exhausted negative route.",
     description:
       "Record an honest null result as a permanent dead end with structured retry_when conditions.",
-    availability: "unavailable",
-    unavailable_reason:
-      "Public dead-end records with retry conditions have no mounted write contract.",
-    next_step:
-      "Push a private workshop object with type dead-end and retain the retry conditions in its body.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/record_dead_end_request",
+    request: sessionRequest("dead-ends"),
+    required_fields: ["approach", "why_it_fails", "retry_predicate"],
+    prefilled_hints: {
+      approach: "Direct exhaustive search over small finite fields.",
+      why_it_fails: "Non-trivial obstructions appear at field characteristic 2.",
+      retry_predicate:
+        "Worth retrying if characteristic 2 can be handled by an independent classification.",
+    },
   },
   synthesize: {
     move: "synthesize",
@@ -230,9 +235,24 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "200+ events recorded since the last synthesis.",
     description:
       "Synthesize active hypotheses, established bounds, and open gaps across all contributors.",
-    availability: "unavailable",
-    unavailable_reason: "Public synthesis records have no mounted write contract.",
-    next_step: "Keep a synthesis draft with exact public references in your private workshop.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/synthesize_request",
+    request: sessionRequest("synthesize"),
+    required_fields: ["covers_through", "body_md", "anchors", "omitted", "selection_policy"],
+    prefilled_hints: {
+      covers_through: 0,
+      body_md: "## Synthesis of Problem State\n\n### Current Understanding\n...",
+      anchors: [
+        {
+          target_kind: "claim",
+          target_id: "C-1",
+          target_version: 1,
+        },
+      ],
+      omitted: [],
+      selection_policy:
+        "Include all claims with corroborated disposition and their supporting evidence.",
+    },
   },
   formalize: {
     move: "formalize",

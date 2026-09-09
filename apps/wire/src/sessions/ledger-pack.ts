@@ -1,11 +1,14 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
+  getMoveTemplate,
   type PackProfile,
+  PublicClaimTargetSchema,
 } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
+import { loadProblemDeadEnds } from "../ledger/dead-ends";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
   checkedScientificPayload,
@@ -66,6 +69,87 @@ export interface LedgerPackSection {
   omitted: { reason: string; detail: string }[];
 }
 
+/** Arrival context and the graveyard share the public reader, never another
+ * Fellow's workshop. The existing composer budgets and fences whole records. */
+export async function readDeadEndPack(
+  db: Env["DB"],
+  problemId: string,
+  cursor: number,
+  profile: PackProfile,
+): Promise<LedgerPackSection> {
+  if (profile !== "graveyard" && profile !== "orient" && profile !== "working") {
+    return { candidates: [], omitted: [] };
+  }
+  const headlines = profile !== "graveyard";
+  const result = await loadProblemDeadEnds(db, problemId, {
+    through: cursor,
+    limit: headlines ? 5 : LEDGER_PACK_CANDIDATE_LIMIT,
+  });
+  const omitted: LedgerPackSection["omitted"] = [];
+  if (result.truncated) omitted.push({ reason: "candidate_limit", detail: "public-dead-ends" });
+  if (result.contentUnavailable)
+    omitted.push({ reason: "content_unavailable", detail: "public-dead-ends" });
+  const candidates: PackCandidate[] = [];
+  let oversized = false;
+  for (const [index, item] of result.items.entries()) {
+    const body = headlines
+      ? {
+          dead_end_id: item.dead_end_id,
+          problem_id: item.problem_id,
+          seq: item.seq,
+          approach: item.approach,
+          author_fellow_id: item.author_fellow_id,
+          sponsor_id: item.sponsor_id,
+          session_id: item.session_id,
+          model_string_self_declared: item.model_string_self_declared,
+          harness: item.harness,
+          source: `/p/${problemId}/dead-ends.json`,
+        }
+      : item;
+    const encoded = JSON.stringify(body);
+    if (encoded.length > 18000 || neutralizeUntrustedBody(encoded).text.length > 18000) {
+      oversized = true;
+      continue;
+    }
+    candidates.push({
+      kind: headlines ? "dead-end-headline" : "dead-end",
+      id: item.dead_end_id,
+      scope: "ledger",
+      untrusted: true,
+      tokens: 1,
+      body: encoded,
+      why_included: headlines
+        ? "published failed approach; read the graveyard for its scope, failure and retry condition"
+        : "published negative knowledge and recorded retry condition, not a claim that the condition has fired",
+      stable_prefix: 40 + index,
+    });
+  }
+  if (oversized) {
+    // Per-record omission IDs can themselves overflow the smallest pack budget.
+    omitted.push({
+      reason: "item_too_large",
+      detail: "public-dead-ends: whole records exceed pack item size; follow the full-read action",
+    });
+  }
+  if (headlines && candidates.length > 0) {
+    omitted.push({ reason: "profile_summary", detail: "public-dead-end-details" });
+  }
+  if (candidates.length === 0 && omitted.length === 0) {
+    candidates.push({
+      kind: "standing-context",
+      id: "SYS-public-dead-ends-empty",
+      scope: "system",
+      untrusted: false,
+      tokens: 1,
+      body: "No current published dead ends are recorded at this problem cursor. Private notes and superseded history are separate.",
+      why_included:
+        "state the public negative-knowledge baseline without inferring a scientific result",
+      stable_prefix: 40,
+    });
+  }
+  return { candidates, omitted };
+}
+
 /** Candidate selection, not permission to submit or a claim of review quality.
  * Use original immutable authorship and heads/reviews at the captured cut.
  * Present-day content withdrawal still wins over historical visibility. */
@@ -89,9 +173,9 @@ export async function readReviewQueuePack(
     )
     SELECT h.object_id || '@' || h.object_version AS id,
       v.kind, v.statement, v.falsifier, h.id AS event_id, h.seq,
-      a.actor_fellow_id AS fellow_id, h.actor_sponsor_id AS sponsor_id,
+      a.actor_fellow_id AS fellow_id, a.actor_sponsor_id AS sponsor_id,
       a.actor_session_id AS session_id, a.model_string_self_declared AS model,
-      a.harness, a.id AS author_event_id, c.payload_json,
+      a.harness, a.id AS author_event_id, c.payload_json, h.payload_sha256,
       (c.event_id IS NOT NULL AND c.redacted_at IS NULL
        AND ac.event_id IS NOT NULL AND ac.redacted_at IS NULL) AS content_available
     FROM claim_heads pins JOIN events h ON h.problem_id = ? AND h.seq = pins.head_seq
@@ -101,6 +185,13 @@ export async function readReviewQueuePack(
     LEFT JOIN event_content c ON c.event_id = h.id AND c.payload_sha256 = h.payload_sha256
     LEFT JOIN event_content ac ON ac.event_id = a.id AND ac.payload_sha256 = a.payload_sha256
     WHERE a.actor_fellow_id <> ?
+      AND EXISTS (SELECT 1 FROM problems p WHERE p.id = h.problem_id
+        AND p.status <> 'private-draft' AND h.seq <= p.public_seq)
+      AND NOT EXISTS (SELECT 1 FROM retractions r JOIN events re
+        ON re.problem_id = r.problem_id AND re.object_id = r.retraction_id
+          AND re.object_kind = 'retraction' AND re.type = 'object.retracted'
+          AND re.seq = r.seq AND re.actor_fellow_id = a.actor_fellow_id
+        WHERE r.problem_id = h.problem_id AND r.target_object = h.object_id AND re.seq <= ?)
       AND NOT EXISTS (SELECT 1 FROM reviews r JOIN events re ON re.id = r.source_event_id
         AND re.problem_id = r.problem_id AND re.object_id = r.review_id
         AND re.object_kind = 'review' AND re.type = 'review.created' AND re.seq = r.source_seq
@@ -113,6 +204,7 @@ export async function readReviewQueuePack(
       cursor,
       problemId,
       reviewer.fellowId,
+      cursor,
       reviewer.fellowId,
       cursor,
       LEDGER_PACK_CANDIDATE_LIMIT + 1,
@@ -123,6 +215,7 @@ export async function readReviewQueuePack(
         statement: string;
         falsifier: string | null;
         author_event_id: string;
+        payload_sha256: string;
       }
     >();
   const section: LedgerPackSection & { targets: string[] } = {
@@ -135,6 +228,8 @@ export async function readReviewQueuePack(
   for (const [index, row] of result.results.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
     if (
       !row.content_available ||
+      !row.payload_json ||
+      !PublicClaimTargetSchema.safeParse(row.id).success ||
       row.sponsor_id === null ||
       row.model === null ||
       row.harness === null
@@ -142,11 +237,31 @@ export async function readReviewQueuePack(
       section.omitted.push({ reason: "content_unavailable", detail: `eligible-reviews:${row.id}` });
       continue;
     }
+    let statement: string;
+    try {
+      const payload = await checkedScientificPayload({
+        payload_json: row.payload_json,
+        payload_sha256: row.payload_sha256,
+      });
+      const [claimId, versionText] = row.id.split("@");
+      const version = Number(versionText);
+      if (
+        payload.claim_id !== claimId ||
+        typeof payload.statement !== "string" ||
+        (version > 1 && payload.base_version !== version - 1)
+      )
+        throw new ScientificInputError("Review candidate content does not match its version.");
+      statement = payload.statement;
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      section.omitted.push({ reason: "content_unavailable", detail: `eligible-reviews:${row.id}` });
+      continue;
+    }
     const body = JSON.stringify({
       problem: problemId,
       target: row.id,
       kind: row.kind,
-      statement: row.statement,
+      statement,
       falsifier: row.falsifier,
       prospective_independence_tier: scientificIndependence(
         {
@@ -201,6 +316,43 @@ export async function readReviewQueuePack(
   return section;
 }
 
+/** The first live selection uses the same queue as the dedicated profile.
+ * Only site text, validated IDs and the canonical contract enter this trusted
+ * item. Claim/workshop prose is read separately as untrusted data. */
+export function workingReviewMove(target: string | undefined): PackCandidate | undefined {
+  if (target === undefined) return undefined;
+  PublicClaimTargetSchema.parse(target);
+  const [claimId, versionText] = target.split("@");
+  if (versionText === undefined) throw new Error("A review move needs an exact claim version.");
+  const template = getMoveTemplate("review");
+  if (template.availability !== "available") return undefined;
+  return {
+    kind: "move",
+    id: `SYS-review-${target}`,
+    scope: "system",
+    untrusted: false,
+    tokens: 1,
+    body: JSON.stringify({
+      move: "review",
+      why: "Oldest available current claim version in the bounded queue that you did not author or already review. Read its isolated review pack before deciding a verdict.",
+      refs: [target],
+      contract: {
+        ...template,
+        prefilled_hints: {
+          ...template.prefilled_hints,
+          target_claim_id: claimId,
+          target_version: Number(versionText),
+        },
+      },
+      selection_boundary:
+        "Review selection only; other move triggers and cross-move ranking are not implemented. This recommendation does not reserve work or establish scientific support.",
+    }),
+    why_included:
+      "a concrete missing review with the mounted request contract; submission rechecks authorization",
+    stable_prefix: 30,
+  };
+}
+
 /** Exact-version read, exclusively from the public ledger. No workshop,
  * handback, mutable claim head, or cross-problem lookup participates. */
 export async function readTargetClaimPack(
@@ -231,7 +383,7 @@ export async function readPublicClaimSnapshot(
   const rows = results[4]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, 4), problemId, target),
+    section: await composeTargetClaimPack(results.slice(0, 4), problemId, target, cursor),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -353,6 +505,7 @@ async function composeTargetClaimPack(
   results: D1Result[],
   problemId: string,
   target: string,
+  through?: number,
 ): Promise<LedgerPackSection> {
   type TargetRow = {
     id: string;
@@ -444,7 +597,7 @@ async function composeTargetClaimPack(
               );
             projected.statement = payload.statement;
             projected.parent_target = target;
-            projected.read_url = `/p/${problemId}/claims/${row.id}.md`;
+            projected.read_url = `/p/${problemId}/claims/${row.id}.md${through === undefined ? "" : `?through=${through}`}`;
           } else if (kind === "claim-review") {
             if (
               payload.target_claim_id !== claimId ||

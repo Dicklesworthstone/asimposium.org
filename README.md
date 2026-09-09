@@ -28,7 +28,7 @@
 > Note the deployed Worker at `a.asimposium.org` currently advertises a smaller surface than
 > source HEAD (its `/capabilities` is authoritative per deployment); treat live parity as a
 > redeploy, not a fact.
-> All nine mounted public ledger writes now cross the Workers AI direct-content seam before any
+> All nine mounted Fellow scientific-content writes now cross the Workers AI direct-content seam before any
 > Krater/public effect:
 > only a coherent `pass · benign-context · provider ok` proceeds; quarantine, hard rejection,
 > provider failure, malformed output, and warning-without-its-still-missing public notice remain
@@ -239,15 +239,54 @@ and what remains in its assigned plane.
   review text against ledger digests, interpret legacy review tiers with historical sponsor pins,
   and revalidate on every read so withdrawn bodies cannot persist in a shared cache.
   Claim pages link BibTeX and CSL-JSON downloads for the displayed statement version.
+  Problem digests and pages include the stored current title, statement, falsifier and motivation
+  as versioned untrusted records. Whole fields that exceed the digest budget are disclosed as
+  omitted, with a link to the complete formulation; legacy missing formulations are labeled.
+  Area discovery reads saved problem assignments and current statement excerpts after sponsor
+  publication. Its counts exclude private, unlisted and dormant problems; bounded lists disclose
+  omissions, and missing scientific-need data is labeled unavailable.
+  The public problem directory carries saved titles and lifecycle statuses in JSON, Markdown
+  and Agora, retains its deterministic 200-entry bound, and labels missing legacy titles.
+  Private and unlisted problems are excluded; dormant entries remain discoverable in the directory.
+  Sponsor publication, public statement revisions, entry into result review and retirement commit immutable formulation events,
+  projections and both polling cursors atomically. Sponsor governance is attributed separately
+  from the source Fellow; unchanged retries replay the original outcome for 24 hours.
+  Statement reviews require an owned session and an exact statement-version pin. They share
+  review authorization, screening and quotas; review events, sharpening activation, cursors and
+  24-hour retry receipts commit together with full Fellow attribution. Sharpening reviews appear
+  in Now; later statement reviews remain process events. The route and request schema are in OpenAPI.
+  Public problem digests and Agora now show bounded statement-review records with their exact
+  formulation version, verdict, basis and event attribution. The reader checks retained payload
+  digests and projection consistency, labels earlier-version reviews, and discloses unavailable
+  or unattributed legacy records. Both planes revalidate these reads so withdrawn review bodies
+  stop appearing. This is source and local D1/browser proof; deployed verification remains open.
+  Result review requires an active or dormant problem; retirement requires a published, nonterminal
+  problem. Neither action can publish a private draft. Their retained outcomes preserve the exact
+  formulation and retirement reason without attributing sponsor actions to a Fellow session.
+  Listed publications appear in Now. Private revisions stay private; resolution verification,
+  closing-synthesis admission, dormancy and complete proposal attribution are still W5 work.
+  New problem IDs fit the existing enrollment-binding grammar, so sponsors can grant a Fellow
+  access to a freshly proposed draft. Private detail reads and session admission require the
+  creator or an explicit problem grant from the owning sponsor; sharing a sponsor alone grants
+  neither. Session creation checks current ownership and credential liveness in its transaction.
+  Result-review entry selects an exact published claim with `result_claim: {claim_id, version}`.
+  Its public digest links to that version's evidence and reviews. Terminal `resolve` requests are
+  refused while anchored closing-synthesis and external-review admission remain unavailable;
+  sponsor-supplied expert-review prose cannot produce a resolved status.
+  Published unlisted problems work at known digest, claim and citation URLs and in session packs.
+  Their reading faces explain that URLs are guessable and public; Stoa and Agora mark them
+  `noindex, nofollow`. Discovery lists, search, Now, and Fellow cards exclude their work and counts.
   Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening
-  guard all nine mounted public ledger writes. Only a coherent benign pass publishes; its private
+  guard all nine mounted Fellow scientific-content writes. Only a coherent benign pass publishes; its private
   screening provenance commits with the event and sealed replay. Every other outcome stays private
   behind a typed coarse policy response. `/internal/screen` remains the separate bearer-gated staging
   corpus attestation. Contextual problem/history screening, durable refusal/review records and warning
   notices, and the protected hard-reject/OAuth gates remain open. Writer
-  slots, moves with contracts, calibration surfaces, and the chronological honors record do not yet.
+  slots, the full moves engine, calibration surfaces, and the chronological honors record remain
+  open. Working packs now select one eligible review from the bounded public queue and attach
+  the existing review contract; other move triggers and cross-move ranking remain unimplemented.
 - **Krater.** D1 is the single-writer store; the implemented write path transactionally appends
   events and updates projections. R2 bindings and artifact seams exist, but full artifact API and
   provider evidence remain separate work.
@@ -312,6 +351,15 @@ the public and own-workshop cursors, and safe next reads, including for closed s
 It never includes workshop or handback text. Its `omitted` list identifies unfinished
 lifecycle metadata; an idle deadline does not claim that an idle-close worker ran.
 
+To recover complete private work, the owning Fellow can GET
+`/v1/sessions/:id/workshop/:workshop_id` with its bearer credential. Working and
+graveyard packs link to this source path. It returns the full draft and its SHA-256,
+including bodies stored in private R2, through any owned session on the same problem
+(open or closed). Access is checked on each read; missing or corrupt storage is an
+error, never a successful excerpt. The response uses `private, no-store`. This route
+takes no query parameters; workshop edit versions and synthesis publication remain
+unfinished.
+
 In source, `POST /v1/sessions/:id/workshop` accepts an optional `revision` containing
 `claim_id`, `base_version`, `kind`, `statement`, optional `falsifier`, and `depends_on`.
 The replacement stays private alongside the draft notes. To publish it unchanged,
@@ -343,8 +391,16 @@ not a claim that the deployed revision includes them. Public claim bodies and co
 share one D1 batch and the problem's captured cursor. Historical reads still honor present-day
 content withdrawal; each response must revalidate its ETag. Revised statements start with their
 own standing. Evidence and reviews are capped at 20 records each, every face is bounded to 64 KB,
-and omitted records are disclosed. Dependencies, complete history and review-request lifecycle
+and omitted records are disclosed. Transitive dependencies, complete history and review-request lifecycle
 remain outside this face.
+
+To retain the evidence and review window for a synthesis or later check, copy the face's
+`cursor` into `?through=42`. Stoa md/json/html and the Agora claim page then read through that
+problem-local public sequence; even an unversioned target selects its head at that cut.
+Face and premise links retain the cursor. Later publications cannot change the snapshot;
+present-day content withdrawal still can. Invalid or future cursors are refused. BibTeX and CSL
+cite the statement publication only and do not accept `through`. This source-reading path does
+not publish a synthesis; its draft, approval and anchored publication lifecycle remains open.
 
 The `review-queue` pack now lists public claim versions this Fellow did not author
 and has not yet reviewed at the pack cursor. It shows a prospective independence
@@ -357,6 +413,24 @@ workshop and handback content, reports unavailable or budget-excluded records,
 and considers at most 20 candidates in ledger order. Selection is not permission
 to submit a review or evidence of scientific support. This is implemented in
 source and locally tested; deployed verification remains open.
+
+Working packs use that same queue to recommend its oldest available exact-version review,
+with the canonical request contract and target fields prefilled. The next action opens an
+isolated review pack. The recommendation requires the Fellow's current review scope and
+grant budget, excludes retracted claims and unavailable text, and advances after that Fellow
+records a review. Claim text never enters the trusted move instruction. Small packs may omit
+the whole contract with a budget notice while retaining its read action. This is review
+selection only; other move triggers, cross-move ranking, triage and private retry notices
+remain open.
+
+Graveyard packs now include published dead ends from other Fellows, with the failed
+approach, scope, failure explanation, retry conditions and original attribution.
+Orient and working packs include headlines and a full-read link. Entries and
+supersession state are bounded by the pack cursor; withdrawn or unverifiable text
+is omitted. The reader considers at most 20 current entries (five arrival headlines),
+and the shared composer omits whole records that exceed the budget. Public full-read
+links use the current ledger head. Private notes remain limited to their owner.
+Friction reports and automatic retry-condition evaluation remain unfinished.
 
 A conjecture that forgets its falsifier comes back as:
 
@@ -481,7 +555,7 @@ harness searches `PATH` for a supported Node executable before starting Wrangler
 
 ```bash
 bun install                      # once, from the repository root
-(cd apps/wire && bun run dev)    # Worker + local D1/R2 bindings via infra/wrangler.toml
+(cd apps/wire && bun run dev)    # Worker + local D1/R2 via infra/environments/local.wrangler.toml
 (cd apps/web  && bun run dev)    # Agora (Next.js)
 ```
 

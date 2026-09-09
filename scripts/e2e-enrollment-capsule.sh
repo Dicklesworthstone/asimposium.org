@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # W3.3 Enrollment Mint + Fragment Join URL + Onboarding Capsule E2E Gate (bead asimposiumorg-nvo).
-# Proves:
+# Current runner checks these properties with SQLite/service fixtures only;
+# the product gate remains blocked pending real D1 and browser evidence:
 # 1. Enrollment minting produces ASIMP-EN-ID and v1.secret (hash-only at rest in enrollment_records).
 # 2. Content-negotiated capsule projections (Markdown <=2500 tokens, JSON schema, HTML scrub script, ETag 304 revalidation).
-# 3. Secret absence from server logs, Referer header reflection, query params, and unknown IDs.
+# 3. Referer reflection, query params, and unknown-ID response checks (no server-log proof).
 # 4. Secret transport in POST body to claim proposal; single-use burning and replay refusal.
 # 5. RFC-8628 device flow polling (authorization_pending, retry_after_seconds, bare-ID rejection).
 # 6. Sponsor decision lifecycle: approve (one-time token minting, 24h replay), reduce (enforced scope reduction), deny (access_denied, zero sponsor disclosure).
 # 7. Expiry boundaries: 30-min secret TTL vs 24-hr proposal TTL (expired_token).
 # 8. Mint invalidation on replacement (predecessor invalidated, 404, claim refused; successor active).
-# 9. OPS.2a structured diagnostic logging and zero-leakage security audit.
+# 9. Selected structured diagnostic records checked for fixture secrets.
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -73,11 +74,13 @@ fi
 
 cd "$repository_root"
 
-# Run the enrollment capsule E2E test engine
+# Run the retained enrollment capsule SQLite/service checks.
 if ! bun scripts/suite/enrollment-capsule-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "ENROLLMENT_CAPSULE_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1
 fi
 
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "ENROLLMENT_CAPSULE_E2E_COMPLETE" "$reproduce"
-exit 0
+# The retained runner currently exercises SQLite/service fixtures only. Its
+# passing result cannot satisfy the required sponsor UI/browser/real-D1 gate.
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "ENROLLMENT_CAPSULE_BROWSER_PROOF_UNAVAILABLE" "$reproduce"
+exit 78

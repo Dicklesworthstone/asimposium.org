@@ -21,6 +21,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "@asimposium/contracts": "workspace:*",
+    "@asimposium/render": "workspace:*",
     "server-only": "0.0.1"
   },
   "devDependencies": {

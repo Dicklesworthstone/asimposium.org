@@ -27,6 +27,7 @@ import type { ZodTypeAny } from "zod";
 import { FellowRegistrationRequestSchema, MintEnrollmentRequestSchema } from "./enrollment.ts";
 import { ProblemFaceResponseSchema, ProblemsIndexResponseSchema } from "./ledger.ts";
 import { ProblemDocumentSchema } from "./problem.ts";
+import { ProposeProblemRequestSchema } from "./problems.ts";
 import { ScreeningContractsSchema } from "./screening.ts";
 import { SearchQueryRequestSchema } from "./search.ts";
 import {
@@ -66,6 +67,13 @@ function parseFixture(path: string): unknown {
 }
 
 const SPECS: readonly ExampleSpec[] = Object.freeze([
+  {
+    kind: "problems",
+    fixtures: ["problems-propose.json"],
+    build: ({ bodies }: BuilderInput): unknown => [
+      { propose_request: ProposeProblemRequestSchema.parse(bodies[0]) },
+    ],
+  },
   {
     kind: "enrollment",
     fixtures: ["enrollment.json", "enrollment-mint.json"],
