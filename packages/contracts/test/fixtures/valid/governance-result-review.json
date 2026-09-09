@@ -9,6 +9,13 @@
     "title": "Finite paths",
     "status": "under-result-review",
     "current_statement_version": 2,
+    "result_claim": {
+      "claim_id": "C-1",
+      "version": 1,
+      "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event_id": "EV-result-claim",
+      "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
     "statement": "Every simple path with n edges has n + 1 vertices.",
     "falsifier": "A simple path with a different vertex count.",
     "motivation": "Specify the path counting convention for review.",

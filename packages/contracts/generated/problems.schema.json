@@ -653,10 +653,31 @@
             "action": {
               "type": "string",
               "const": "enter-result-review"
+            },
+            "result_claim": {
+              "type": "object",
+              "properties": {
+                "claim_id": {
+                  "type": "string",
+                  "maxLength": 47,
+                  "pattern": "^C-[0-9]+$"
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "claim_id",
+                "version"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
-            "action"
+            "action",
+            "result_claim"
           ],
           "additionalProperties": false
         },
@@ -1482,6 +1503,41 @@
                 "status": {
                   "type": "string",
                   "const": "under-result-review"
+                },
+                "result_claim": {
+                  "type": "object",
+                  "properties": {
+                    "claim_id": {
+                      "type": "string",
+                      "maxLength": 47,
+                      "pattern": "^C-[0-9]+$"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "content_digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    },
+                    "event_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "claim_id",
+                    "version",
+                    "content_digest",
+                    "event_id",
+                    "payload_digest"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [

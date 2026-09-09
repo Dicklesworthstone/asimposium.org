@@ -1,4 +1,5 @@
 import {
+  type ClaimDependencyPin,
   type ProblemCode,
   ProblemGovernanceEventSchema,
   ProblemGovernanceKeySchema,
@@ -12,6 +13,12 @@ import {
   sha256Hex,
   writeLedgerEvent,
 } from "../krater/krater";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import {
+  findScientificClaim,
+  type ScientificClaim,
+  ScientificInputError,
+} from "../ledger/scientific-checks";
 import { normHash } from "../split/policy";
 
 interface ProblemSnapshot {
@@ -154,6 +161,41 @@ export async function applyPublicProblemGovernance(
       .first<{ status: string }>();
     if (fellow?.status !== "active") return problemGovernanceRefused();
   }
+  let resultClaim: ClaimDependencyPin | undefined;
+  if (action.action === "enter-result-review") {
+    const reference = action.result_claim;
+    const current = await db
+      .prepare(`SELECT claims.id FROM claims
+      WHERE claims.problem_id = ? AND claims.id = ? AND claims.statement_drift = 0
+        AND claims.statement_version = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+        AND (SELECT MAX(version) FROM claim_versions WHERE problem_id = claims.problem_id
+          AND claim_id = claims.id) = ?`)
+      .bind(problem.id, reference.claim_id, problem.current_statement_version, reference.version)
+      .first();
+    let claim: ScientificClaim | null;
+    try {
+      claim = current
+        ? await findScientificClaim(db, problem.id, reference.claim_id, reference.version)
+        : null;
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      claim = null;
+    }
+    if (!claim)
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "Result review requires an available current claim version anchored to the current problem statement.",
+        "Read the claim and problem, re-anchor any statement drift, and select the exact current claim version.",
+      );
+    resultClaim = {
+      claim_id: claim.claimId,
+      version: claim.version,
+      content_digest: claim.contentDigest,
+      event_id: claim.eventId,
+      payload_digest: claim.payloadDigest,
+    };
+  }
   const formulation = revising
     ? action
     : await db
@@ -188,6 +230,7 @@ export async function applyPublicProblemGovernance(
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
       ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
+      ...(resultClaim ? { result_claim: resultClaim } : {}),
       updated_at: now,
     },
   });
@@ -229,7 +272,25 @@ export async function applyPublicProblemGovernance(
         preconditionSql: ` AND sponsor_id = ? AND status = ? AND current_statement_version = ?
         AND created_by_fellow_id = ? AND title = ?
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
-        ${publishing ? "AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}`,
+        ${publishing ? "AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
+        ${
+          resultClaim
+            ? `AND EXISTS (
+          SELECT 1 FROM claims JOIN claim_versions cv
+            ON cv.problem_id = claims.problem_id AND cv.claim_id = claims.id
+          JOIN events ce ON ce.id = ? AND ce.problem_id = claims.problem_id
+            AND ce.object_id = claims.id AND ce.object_kind = 'claim'
+            AND ce.object_version = cv.version AND ce.payload_sha256 = ?
+          JOIN event_content cc ON cc.event_id = ce.id AND cc.payload_sha256 = ce.payload_sha256
+            AND cc.redacted_at IS NULL
+          WHERE claims.problem_id = ? AND claims.id = ? AND cv.version = ?
+            AND cv.content_digest = ? AND claims.statement_version = ? AND claims.statement_drift = 0
+            AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
+            AND cv.version = (SELECT MAX(version) FROM claim_versions
+              WHERE problem_id = claims.problem_id AND claim_id = claims.id)
+        )`
+            : ""
+        }`,
         preconditionBindings: [
           sponsorId,
           problem.status,
@@ -237,6 +298,17 @@ export async function applyPublicProblemGovernance(
           problem.created_by_fellow_id,
           problem.title,
           ...(publishing ? [problem.created_by_fellow_id] : []),
+          ...(resultClaim
+            ? [
+                resultClaim.event_id,
+                resultClaim.payload_digest,
+                problem.id,
+                resultClaim.claim_id,
+                resultClaim.version,
+                resultClaim.content_digest,
+                problem.current_statement_version,
+              ]
+            : []),
         ],
         statementsAfterEvent: () => [
           ...(revising

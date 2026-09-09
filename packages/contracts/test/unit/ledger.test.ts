@@ -380,6 +380,7 @@ test("the published ledger schema preserves the public face safety boundary", as
   const variants = face.items.items.oneOf;
   expect(variants.map((variant) => variant.properties.kind.const)).toEqual([
     "claim",
+    "result-review",
     "statement-review",
     "problem-title",
     "problem-statement",

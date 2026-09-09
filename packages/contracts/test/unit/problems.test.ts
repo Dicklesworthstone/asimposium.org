@@ -106,6 +106,25 @@ test("W5.1 Problem lifecycle contracts validate all states and directions", () =
   expect(ProblemResolutionDirectionSchema.safeParse("proven").success).toBe(false);
 });
 
+test("result-review requests require an exact claim version in Zod and the published schema", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.lifecycle_request);
+  for (const directory of ["valid", "invalid"]) {
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${directory}/result-review-request.json`, import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(ProblemLifecycleActionRequestSchema.safeParse(fixture).success).toBe(
+      directory === "valid",
+    );
+    expect(published(fixture)).toBe(directory === "valid");
+  }
+});
+
 test("governance state changes cannot publish private drafts or reopen closed problems", () => {
   const schema = JSON.parse(
     readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
@@ -274,8 +293,18 @@ test("W5.1 Problem lifecycle action discriminated union parses valid transitions
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "enter-result-review",
+      result_claim: { claim_id: "C-1", version: 1 },
     }).success,
   ).toBe(true);
+  for (const result_claim of [
+    undefined,
+    { claim_id: "C-1", version: 0 },
+    { claim_id: "../C-1", version: 1 },
+  ])
+    expect(
+      ProblemLifecycleActionRequestSchema.safeParse({ action: "enter-result-review", result_claim })
+        .success,
+    ).toBe(false);
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "resolve",

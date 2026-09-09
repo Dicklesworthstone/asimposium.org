@@ -43,7 +43,7 @@ await runLocalWorkerJourney(
     }
     const privateBefore = await state();
     for (const action of [
-      { action: "enter-result-review" },
+      { action: "enter-result-review", result_claim: { claim_id: "C-1", version: 1 } },
       { action: "retire", reason: "A private retirement must not publish its formulation." },
     ]) {
       const refused = await govern(action, `private-${action.action}`, 409);
@@ -245,7 +245,13 @@ await runLocalWorkerJourney(
     // A public formulation still needs the independent statement-clear gate before result review.
     const beforeSharpening = await state();
     assert.equal(
-      (await govern({ action: "enter-result-review" }, "sharpening-review", 409)).code,
+      (
+        await govern(
+          { action: "enter-result-review", result_claim: { claim_id: "C-1", version: 1 } },
+          "sharpening-review",
+          409,
+        )
+      ).code,
       "OBJECT_VERSION_CONFLICT",
     );
     assert.deepEqual(await state(), beforeSharpening);
@@ -268,12 +274,112 @@ await runLocalWorkerJourney(
     );
     assert.equal(clear.status, "active");
 
-    const entry = { action: "enter-result-review" };
+    const authorSession = await call("/v1/sessions", { problem_id: id }, token, 201);
+    const draft = await call(
+      `/v1/sessions/${authorSession.session_id}/workshop`,
+      {
+        type: "draft",
+        title: "Result for review",
+        body_md: "Finite simple paths count one more vertex than edge.",
+        relates_to: [],
+      },
+      token,
+      201,
+    );
+    const resultClaim = await call(
+      `/v1/sessions/${authorSession.session_id}/promote`,
+      {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement: revision.statement,
+        falsifier: revision.falsifier,
+        relates_to: [],
+      },
+      token,
+      201,
+    );
+    const entry = {
+      action: "enter-result-review",
+      result_claim: { claim_id: resultClaim.claim_id, version: 1 },
+    };
     const retirement = {
       action: "retire",
       reason: "Retain the explored formulation; no resolution is claimed.",
     };
+    // A real claim in another problem must not supply this problem's review target.
+    const foreign = await call(
+      "/v1/problems",
+      {
+        ...proposal,
+        title: "Foreign cycle problem",
+        statement: "Every finite cycle has equally many edges and vertices.",
+      },
+      token,
+      201,
+    );
+    const foreignId = foreign.problem.id;
+    await govern({ action: "publish" }, "foreign-publication", 200, foreignId);
+    const foreignReview = await call(
+      "/v1/sessions",
+      { problem_id: foreignId, intent: "review" },
+      reviewer,
+      201,
+    );
+    await call(
+      `/v1/problems/${foreignId}/statement-review`,
+      {
+        session_id: foreignReview.session_id,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "The finite cycle has a defined vertex and edge count.",
+      },
+      reviewer,
+    );
+    const foreignSession = await call("/v1/sessions", { problem_id: foreignId }, token, 201);
+    let foreignClaim;
+    for (const statement of [
+      "A triangular cycle has three vertices.",
+      "A square cycle has four vertices.",
+    ]) {
+      const foreignDraft = await call(
+        `/v1/sessions/${foreignSession.session_id}/workshop`,
+        {
+          type: "draft",
+          title: statement,
+          body_md: statement,
+          relates_to: [],
+        },
+        token,
+        201,
+      );
+      foreignClaim = await call(
+        `/v1/sessions/${foreignSession.session_id}/promote`,
+        {
+          workshop_id: foreignDraft.workshop_id,
+          kind: "conjecture",
+          statement,
+          falsifier: "A cycle of the named kind with a different vertex count.",
+          relates_to: [],
+        },
+        token,
+        201,
+      );
+    }
+    assert.notEqual(foreignClaim.claim_id, resultClaim.claim_id);
     const active = await state();
+    for (const result_claim of [
+      { claim_id: "C-999999", version: 1 },
+      { claim_id: resultClaim.claim_id, version: 2 },
+      { claim_id: foreignClaim.claim_id, version: 1 },
+    ]) {
+      const refused = await govern(
+        { ...entry, result_claim },
+        `bad-target-${result_claim.claim_id}-${result_claim.version}`,
+        409,
+      );
+      assert.equal(refused.code, "OBJECT_VERSION_CONFLICT");
+      assert.deepEqual(await state(), active);
+    }
     for (const action of [entry, retirement]) {
       for (const [label, patch, actor] of [
         [
@@ -357,6 +463,24 @@ await runLocalWorkerJourney(
       "problem.result-review-started",
       "under-result-review",
     );
+    const recordedTarget = entered.problem.result_claim;
+    const targetFace = await call(`/p/${id}.json`);
+    const targetItem = targetFace.items.find((item) => item.kind === "result-review");
+    assert.ok(
+      targetItem &&
+        targetItem.body.includes(`${recordedTarget.claim_id}@${recordedTarget.version}`),
+    );
+    assert.ok(targetItem.body.includes(recordedTarget.content_digest));
+    assert.ok(targetItem.body.includes(sponsor));
+    assert.ok(
+      targetFace.next_actions.some(
+        (action) => action.url === `/p/${id}/claims/${recordedTarget.claim_id}@1.json`,
+      ),
+    );
+    const targetMarkdown = await worker.fetch(`${origin}/p/${id}.md`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.ok((await targetMarkdown.text()).includes(targetItem.body));
 
     // Fault after event insertion: SQLite must undo the complete status-only governance write.
     await env.DB.prepare(
@@ -396,6 +520,30 @@ await runLocalWorkerJourney(
         "OBJECT_VERSION_CONFLICT",
       );
     assert.deepEqual(await state(), afterRetired);
+
+    // Lawful one-way withdrawal changes the public projection even without a new cursor.
+    const beforeWithdrawal = await worker.fetch(`${origin}/p/${id}.json`, {
+      headers: { "User-Agent": userAgent },
+    });
+    const beforeWithdrawalEtag = beforeWithdrawal.headers.get("etag");
+    await beforeWithdrawal.arrayBuffer();
+    await env.DB.prepare(`UPDATE event_content SET payload_json = '{"control":"redacted"}',
+      redacted_at = ?, redaction_reason = 'privacy' WHERE event_id = ?`)
+      .bind(new Date().toISOString(), recordedTarget.event_id)
+      .run();
+    const withdrawnFace = await worker.fetch(`${origin}/p/${id}.json`, {
+      headers: { "User-Agent": userAgent, "If-None-Match": beforeWithdrawalEtag },
+    });
+    assert.equal(withdrawnFace.status, 200);
+    assert.notEqual(withdrawnFace.headers.get("etag"), beforeWithdrawalEtag);
+    const withdrawn = await withdrawnFace.json();
+    assert.ok(!withdrawn.items.some((item) => item.kind === "result-review"));
+    assert.ok(withdrawn.omitted.some((item) => item.reason === "result_review_unavailable"));
+    assert.ok(
+      !withdrawn.next_actions.some((action) =>
+        action.url.includes(`/claims/${recordedTarget.claim_id}@1`),
+      ),
+    );
 
     const privateCreated = await call(
       "/v1/problems",

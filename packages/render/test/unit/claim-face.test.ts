@@ -47,6 +47,38 @@ test("problem statement-review records share one neutralized projection across J
   }
 });
 
+test("result-review pins share one bounded identity and navigation across faces", () => {
+  const source = ProblemFaceResponseSchema.parse(
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../contracts/test/fixtures/valid/ledger-problem-formulation.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+  );
+  const review = source.items.find((item) => item.kind === "result-review");
+  if (!review) throw new Error("Missing result review fixture");
+  const faces = renderAllFaces({
+    ...source,
+    items: [review],
+    omitted: source.omitted.map(({ reason, detail }) => ({
+      reason,
+      ...(detail === undefined ? {} : { detail }),
+    })),
+  });
+  for (const face of Object.values(faces)) {
+    expect(face.body).toContain("C-1@2");
+    expect(face.body).toContain("not a verification or resolution");
+    expect(face.body).toContain("/p/P-PATHS/claims/C-1@2.json");
+  }
+  const json = ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
+  expect(json.items[0]?.body).toBe(review.body);
+  expect(json.next_actions).toEqual(source.next_actions);
+});
+
 function projection(): Projection & { claim_state: PublicClaimState } {
   const face = ClaimFaceResponseSchema.parse(
     JSON.parse(

@@ -182,6 +182,10 @@ const FaceItemSchema = z
 const ProblemFaceItemSchema = z.discriminatedUnion("kind", [
   FaceItemSchema,
   FaceItemSchema.extend({
+    kind: z.literal("result-review"),
+    id: z.string().regex(/^RR-[1-9][0-9]{0,15}$/),
+  }),
+  FaceItemSchema.extend({
     kind: z.literal("statement-review"),
     id: z.string().regex(/^SR-[1-9][0-9]{0,15}$/),
   }),

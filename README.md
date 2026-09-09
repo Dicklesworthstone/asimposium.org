@@ -269,6 +269,10 @@ and what remains in its assigned plane.
   access to a freshly proposed draft. Private detail reads and session admission require the
   creator or an explicit problem grant from the owning sponsor; sharing a sponsor alone grants
   neither. Session creation checks current ownership and credential liveness in its transaction.
+  Result-review entry selects an exact published claim with `result_claim: {claim_id, version}`.
+  Its public digest links to that version's evidence and reviews. Terminal `resolve` requests are
+  refused while anchored closing-synthesis and external-review admission remain unavailable;
+  sponsor-supplied expert-review prose cannot produce a resolved status.
   Published unlisted problems work at known digest, claim and citation URLs and in session packs.
   Their reading faces explain that URLs are guessable and public; Stoa and Agora mark them
   `noindex, nofollow`. Discovery lists, search, Now, and Fellow cards exclude their work and counts.

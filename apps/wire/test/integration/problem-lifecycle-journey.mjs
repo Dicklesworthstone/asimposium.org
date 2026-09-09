@@ -710,12 +710,27 @@ export async function problemLifecycleJourney({
     "POST",
     `/v1/sponsors/problems/${problemId}/lifecycle`,
     "problem-lifecycle",
-    { action: "enter-result-review" },
+    {
+      action: "enter-result-review",
+      result_claim: { claim_id: promotedClaim.claim_id, version: 1 },
+    },
     200,
   );
   assert.equal(reviewStage.problem.status, "under-result-review");
+  assert.equal(reviewStage.problem.result_claim.claim_id, promotedClaim.claim_id);
+  const reviewFace = await call(`/p/${problemId}.json`);
+  assert.ok(
+    reviewFace.items.some(
+      (item) => item.kind === "result-review" && item.body.includes(`${promotedClaim.claim_id}@1`),
+    ),
+  );
+  const reviewLink = reviewFace.next_actions.find(
+    (action) => action.url === `/p/${problemId}/claims/${promotedClaim.claim_id}@1.json`,
+  );
+  assert.ok(reviewLink);
+  await call(reviewLink.url);
 
-  // Famous problem guardrail: requires external_expert_review_proof
+  // Missing external proof is insufficient; free-text proof below is insufficient too.
   const missingProofRefusal = await sponsorCall(
     sponsorA,
     "POST",
@@ -738,30 +753,60 @@ export async function problemLifecycleJourney({
   );
   assert.equal(missingProofRefusal.code, "PREMATURE_RESOLUTION");
 
-  // Resolution with valid external proof
-  const resolvedProblem = await sponsorCall(
-    sponsorA,
-    "POST",
-    `/v1/sponsors/problems/${problemId}/lifecycle`,
-    "problem-lifecycle",
-    {
-      action: "resolve",
-      direction: "affirmed",
-      closing_synthesis: {
-        summary: "The modular cycle length bound is settled.",
-        no_claim_boundary: {
-          verified: ["Modular cycle bounds"],
-          mechanisms: ["2-adic valuation"],
-          independence_tiers: ["T2"],
-          remaining_external_validation: ["Full integer Collatz map"],
+  // Plausible prose is not an external verification record or an anchored synthesis.
+  const beforeUnsupportedResolution = await privateState();
+  for (const direction of ["affirmed", "refuted-as-stated", "closed-with-negative-result"]) {
+    const unsupportedResolution = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problemId}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "resolve",
+        direction,
+        closing_synthesis: {
+          summary: "The modular cycle length bound is settled.",
+          no_claim_boundary: {
+            verified: ["Modular cycle bounds"],
+            mechanisms: ["2-adic valuation"],
+            independence_tiers: ["T2"],
+            remaining_external_validation: ["Full integer Collatz map"],
+          },
         },
+        external_expert_review_proof:
+          "Lean 4 formalized proof independently verified by 2 external experts.",
       },
-      external_expert_review_proof:
-        "Lean 4 formalized proof independently verified by 2 external experts.",
-    },
-    200,
+      422,
+    );
+    assert.equal(unsupportedResolution.code, "PREMATURE_RESOLUTION");
+    assert.deepEqual(await privateState(), beforeUnsupportedResolution);
+  }
+  console.log(
+    JSON.stringify({
+      stage: "anchored-result-review",
+      status: "pass",
+      result_target: "exact public claim version and evidence/review links",
+      unsupported_resolution_directions: 3,
+      refused_mutations: 0,
+      terminal_fixture_boundary:
+        "following resolved-row checks use an explicit retained-data fixture, not resolution admission",
+    }),
   );
-  assert.equal(resolvedProblem.problem.status, "resolved");
+
+  // Retained resolved-row fixture ONLY: preserve read/refusal coverage for historical
+  // data without presenting a seeded terminal state as successful resolution admission.
+  await env.DB.prepare(`UPDATE problems SET status = 'resolved', resolution_direction = 'affirmed',
+    resolution_summary = 'Historical resolution record', resolution_no_claim_boundary = ? WHERE id = ?`)
+    .bind(
+      JSON.stringify({
+        verified: ["Modular cycle bounds"],
+        mechanisms: ["2-adic valuation"],
+        independence_tiers: ["T2"],
+        remaining_external_validation: ["Full integer Collatz map"],
+      }),
+      problemId,
+    )
+    .run();
   const resolvedBefore = await env.DB.prepare("SELECT * FROM problems WHERE id = ?")
     .bind(problemId)
     .first();
@@ -772,7 +817,10 @@ export async function problemLifecycleJourney({
     .all();
   const resolvedCursorBefore = await call("/cursor");
   for (const action of [
-    { action: "enter-result-review" },
+    {
+      action: "enter-result-review",
+      result_claim: { claim_id: promotedClaim.claim_id, version: 1 },
+    },
     { action: "retire", reason: "Cannot replace an existing resolution." },
   ]) {
     const refusal = await sponsorCall(

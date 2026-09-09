@@ -205,6 +205,58 @@ test("statement review reader verifies event content, projection and attribution
   expect(bounded.items.some((item) => item.kind === "statement-review")).toBe(false);
 });
 
+test("legacy result-review records disclose unavailable identity without inventing a target (unit row double)", async () => {
+  const current = await Bun.file(
+    new URL(
+      "../../../../packages/contracts/test/fixtures/valid/governance-result-review.json",
+      import.meta.url,
+    ),
+  ).json();
+  const { result_claim: _pin, ...legacyProblem } = current.problem;
+  const legacyPayload = JSON.stringify({ ...current, problem: legacyProblem });
+  const row = {
+    problem_id: current.problem.id,
+    public_seq: 4,
+    unlisted: 0,
+    status: "under-result-review",
+    formulation_json: JSON.stringify(current.problem),
+    statement_reviews_json: "[]",
+    claim_id: null,
+    statement: null,
+    source_seq: null,
+    result_review_json: null as string | null,
+  };
+  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
+  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const app = createLedgerFaceRoutes();
+  for (const record of [
+    null,
+    { payload_json: legacyPayload, payload_sha256: await sha256Hex(legacyPayload) },
+    {
+      payload_json: "MALFORMED-RESULT-REVIEW",
+      payload_sha256: await sha256Hex("MALFORMED-RESULT-REVIEW"),
+    },
+    { payload_json: legacyPayload, payload_sha256: `sha256:${"0".repeat(64)}` },
+  ]) {
+    row.result_review_json = record === null ? null : JSON.stringify(record);
+    const response = await app.request(
+      `https://a.asimposium.org/p/${row.problem_id}.json`,
+      {
+        headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+      },
+      env,
+    );
+    expect(response.status).toBe(200);
+    const face = ProblemFaceResponseSchema.parse(await response.json());
+    expect(face.items.some((item) => item.kind === "result-review")).toBe(false);
+    expect(face.next_actions.some((action) => action.url.includes("/claims/"))).toBe(false);
+    expect(face.omitted).toContainEqual(
+      expect.objectContaining({ reason: "result_review_unavailable" }),
+    );
+    expect(JSON.stringify(face)).not.toContain("MALFORMED-RESULT-REVIEW");
+  }
+});
+
 test("dependency reads reject damaged pins and disclose unavailable legacy history (unit row double)", async () => {
   const dependencyPayload = { claim_id: "C-1", kind: "claim", statement: "PUBLIC_PREMISE_CANARY" };
   const dependencyJson = JSON.stringify(dependencyPayload);

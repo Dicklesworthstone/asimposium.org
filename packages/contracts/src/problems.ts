@@ -2,6 +2,7 @@ import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { SponsorIdSchema } from "./enrollment.ts";
 import {
+  ClaimDependencyPinSchema,
   ProblemIndexTimestampSchema,
   ProblemStatusSchema,
   PublicLedgerProblemIdSchema,
@@ -168,6 +169,7 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
   z
     .object({
       action: z.literal("enter-result-review"),
+      result_claim: ClaimDependencyPinSchema.pick({ claim_id: true, version: true }),
     })
     .strict(),
   z
@@ -266,7 +268,11 @@ export const ProblemGovernanceEventSchema = z
     GovernanceRecordSchema.extend({
       action: z.literal("enter-result-review"),
       previous_status: z.enum(["active", "dormant"]),
-      problem: GovernanceFormulationSchema.extend({ status: z.literal("under-result-review") }),
+      problem: GovernanceFormulationSchema.extend({
+        status: z.literal("under-result-review"),
+        // Retained pre-binding events remain readable but confer no result identity.
+        result_claim: ClaimDependencyPinSchema.optional(),
+      }),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("retire"),

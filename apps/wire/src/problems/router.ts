@@ -870,76 +870,23 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
 
     if (action.action === "resolve") {
-      // Must be under-result-review
-      if (problem.status !== "under-result-review") {
-        return validatedProblem({
-          status: 422,
-          code: "PREMATURE_RESOLUTION",
-          title: "Resolution cannot be recorded before result review",
-          detail:
-            "The problem must enter under-result-review and complete verification before resolution.",
-          fixHint:
-            "Transition the problem to under-result-review and ensure independent reviews are recorded.",
-          rule: "P3",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/problems.v1.json",
-            example: { action: "enter-result-review" },
-          },
-        });
-      }
-
-      // Famous-problem guardrail check: requires external_expert_review_proof
-      if (problem.famous_guardrail && !action.external_expert_review_proof) {
-        return validatedProblem({
-          status: 422,
-          code: "PREMATURE_RESOLUTION",
-          title: "Famous problems require external-expert review proof before resolution",
-          detail:
-            "A problem with a famous-problem guardrail requires external-expert review proof before any resolution-shaped status language appears.",
-          fixHint: "Provide external_expert_review_proof detailing the external validation.",
-          rule: "P3",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/problems.v1.json",
-            example: {
-              external_expert_review_proof:
-                "Lean 4 machine-checked proof independently verified by 2 external reviewers.",
-            },
-          },
-        });
-      }
-
-      const noClaimJson = JSON.stringify(action.closing_synthesis.no_claim_boundary);
-
-      await db
-        .prepare(
-          `UPDATE problems
-           SET status = 'resolved',
-               resolution_direction = ?,
-               resolution_summary = ?,
-               resolution_no_claim_boundary = ?,
-               updated_at = ?
-           WHERE id = ?`,
-        )
-        .bind(action.direction, action.closing_synthesis.summary, noClaimJson, now, problemId)
-        .run();
-
-      return c.json(
-        {
-          problem: {
-            id: problemId,
-            status: "resolved",
-            title: problem.title,
-            resolution: {
-              direction: action.direction,
-              summary: action.closing_synthesis.summary,
-              no_claim_boundary: action.closing_synthesis.no_claim_boundary,
-            },
-            updated_at: now,
-          },
+      // A sponsor-supplied synthesis or expert-review string is not an anchored
+      // Fellow work product. Terminal admission stays closed until the actual
+      // synthesis and verification paths can establish those prerequisites.
+      return validatedProblem({
+        status: 422,
+        code: "PREMATURE_RESOLUTION",
+        title: "Resolution requires recorded scientific verification",
+        detail:
+          "Anchored closing-synthesis and external-review admission are not available. A sponsor's summary or expert-review assertion cannot establish resolution.",
+        fixHint:
+          "Keep the problem under result review. Publish evidence and independent reviews on its selected claim; retain the closing synthesis in the workshop.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problems.v1.json",
+          example: { action: "enter-result-review", result_claim: { claim_id: "C-1", version: 1 } },
         },
-        200,
-        { "cache-control": "private, no-store" },
-      );
+      });
     }
 
     return validatedProblem({

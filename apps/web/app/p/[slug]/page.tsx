@@ -53,8 +53,10 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
   const face = result.data;
   const title = face.items.find((item) => item.kind === "problem-title")?.body ?? face.title;
   const formulation = face.items.filter(
-    (item) => item.kind !== "claim" && item.kind !== "statement-review",
+    (item) =>
+      item.kind !== "claim" && item.kind !== "statement-review" && item.kind !== "result-review",
   );
+  const resultReviews = face.items.filter((item) => item.kind === "result-review");
   const reviews = face.items.filter((item) => item.kind === "statement-review");
   const claims = face.items.filter((item) => item.kind === "claim");
 
@@ -130,6 +132,28 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
                 Read the complete current formulation (JSON)
               </a>
             </p>
+          </section>
+        )}
+
+        {resultReviews.length > 0 && (
+          <section aria-labelledby="result-review-heading">
+            <h2 id="result-review-heading">Result review</h2>
+            {resultReviews.map((item) => (
+              <article key={item.id} className="claim-card">
+                <pre>
+                  <code>{item.body}</code>
+                </pre>
+              </article>
+            ))}
+            {face.next_actions
+              .filter((action) => action.why.startsWith("the result-review target,"))
+              .map((action) => (
+                <p key={action.url}>
+                  <Link href={action.url.replace(/\.json$/, "")}>
+                    Read the exact claim, evidence and reviews
+                  </Link>
+                </p>
+              ))}
           </section>
         )}
 

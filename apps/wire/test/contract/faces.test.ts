@@ -1069,7 +1069,7 @@ describe("face wire format", () => {
         "INSERT INTO event_content VALUES ('E-4', 'sha256:wrong', NULL), ('E-3', 'sha256:fixture', NULL)",
       );
       // This isolated SQLite query fixture must also model the columns read
-      // by statement-review evidence. The production migrations are exercised
+      // by statement-review evidence and result-review claim identities. The production migrations are exercised
       // separately by the actual Workerd/D1 journey.
       for (const column of [
         "object_version INTEGER",
@@ -1082,6 +1082,9 @@ describe("face wire format", () => {
       ])
         db.run(`ALTER TABLE events ADD COLUMN ${column}`);
       db.run("ALTER TABLE event_content ADD COLUMN payload_json TEXT");
+      db.run(
+        "CREATE TABLE claim_versions (problem_id TEXT, claim_id TEXT, version INTEGER, content_digest TEXT)",
+      );
 
       let capturedSql: string | undefined;
       let formulationRows = 0;

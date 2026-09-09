@@ -3,6 +3,7 @@ import {
   EnrollmentDeclaredRuntimeSchema,
   ProblemDetailSchema,
   ProblemFaceResponseSchema,
+  ProblemGovernanceEventSchema,
   type ProblemIndexEntry,
   ProblemIndexTimestampSchema,
   ProblemStatementReviewEventSchema,
@@ -26,7 +27,7 @@ import { Hono } from "hono";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
-import { readEvents } from "./krater/krater";
+import { readEvents, sha256Hex } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
 import { displayClaimDisposition } from "./ledger/dispositions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
@@ -98,6 +99,7 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
   p.public_seq AS public_seq,
   p.unlisted AS unlisted,
+  p.status AS status,
   CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1
     AND v.version IS NOT NULL THEN json_object(
       'title', p.title, 'current_statement_version', v.version,
@@ -132,6 +134,28 @@ const PROBLEM_DIGEST_SELECT = `SELECT
       LIMIT ${STATEMENT_REVIEW_LIMIT + 1}
     )
   ) END AS statement_reviews_json,
+  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
+    SELECT json_object('seq', re.seq, 'sponsor', re.actor_sponsor_id,
+      'version', re.object_version, 'created_at', re.created_at,
+      'payload_sha256', re.payload_sha256,
+      'payload_json', CASE WHEN rc.redacted_at IS NULL
+        AND rc.payload_sha256 = re.payload_sha256
+        AND length(CAST(rc.payload_json AS BLOB)) <= 65536 THEN rc.payload_json END,
+      'target_json', CASE WHEN tc.redacted_at IS NULL AND tc.payload_sha256 = te.payload_sha256
+        AND length(CAST(tc.payload_json AS BLOB)) <= 65536 THEN tc.payload_json END,
+      'target_id', te.object_id, 'target_version', te.object_version,
+      'target_digest', te.payload_sha256, 'target_content_digest', tv.content_digest)
+    FROM events re LEFT JOIN event_content rc ON rc.event_id = re.id
+    LEFT JOIN events te ON te.id = json_extract(rc.payload_json, '$.problem.result_claim.event_id')
+      AND te.problem_id = re.problem_id AND te.object_kind = 'claim'
+      AND te.type IN ('claim.created', 'claim.revised') AND te.seq < re.seq
+    LEFT JOIN event_content tc ON tc.event_id = te.id
+    LEFT JOIN claim_versions tv ON tv.problem_id = te.problem_id AND tv.claim_id = te.object_id
+      AND tv.version = te.object_version
+    WHERE re.problem_id = p.id AND re.object_id = p.id AND re.object_kind = 'problem'
+      AND re.type = 'problem.result-review-started' AND re.seq <= p.public_seq
+    ORDER BY re.seq DESC LIMIT 1
+  ) END AS result_review_json,
   claims.id AS claim_id,
   CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN claims.statement END AS statement,
   claims.source_seq AS source_seq
@@ -149,8 +173,10 @@ interface ProblemDigestRow {
   readonly problem_id: string;
   readonly public_seq: number;
   readonly unlisted: number;
+  readonly status: string;
   readonly formulation_json: string | null;
   readonly statement_reviews_json: string | null;
+  readonly result_review_json: string | null;
   readonly claim_id: string | null;
   readonly statement: string | null;
   readonly source_seq: number | null;
@@ -286,6 +312,84 @@ async function statementReviewCandidates(first: ProblemDigestRow, currentVersion
   return {
     candidates,
     omitted: [...reasons].sort().map((reason) => ({ reason, detail: detail[reason] })),
+  };
+}
+
+/** The latest recorded review target is a pinned claim, never a resolution verdict.
+ * Both the governance record and target content come from the digest's SQL snapshot. */
+async function resultReviewCandidates(first: ProblemDigestRow) {
+  const unavailable = {
+    candidates: [],
+    actions: [],
+    omitted: [
+      {
+        reason: "result_review_unavailable",
+        detail:
+          "The recorded result-review target is missing, withdrawn, oversized or lacks a matching immutable claim identity.",
+      },
+    ],
+  };
+  if (!first.result_review_json)
+    return first.status === "under-result-review"
+      ? unavailable
+      : { candidates: [], actions: [], omitted: [] };
+  const row = JSON.parse(first.result_review_json);
+  if (typeof row.payload_json !== "string") return unavailable;
+  let payload: unknown;
+  try {
+    payload = await checkedScientificPayload(row);
+  } catch (error) {
+    if (!(error instanceof ScientificInputError)) throw error;
+    return unavailable;
+  }
+  const parsed = ProblemGovernanceEventSchema.safeParse(payload);
+  if (!parsed.success || parsed.data.action !== "enter-result-review") return unavailable;
+  const event = parsed.data;
+  const target = event.problem.result_claim;
+  if (
+    !target ||
+    event.problem.id !== first.problem_id ||
+    event.acting_principal.id !== row.sponsor ||
+    event.problem.current_statement_version !== row.version ||
+    event.problem.updated_at !== row.created_at ||
+    row.target_id !== target.claim_id ||
+    row.target_version !== target.version ||
+    row.target_digest !== target.payload_digest ||
+    row.target_content_digest !== target.content_digest ||
+    typeof row.target_json !== "string" ||
+    (await sha256Hex(row.target_json)) !== target.payload_digest
+  )
+    return unavailable;
+  const pin = `${target.claim_id}@${target.version}`;
+  return {
+    candidates: [
+      {
+        kind: "result-review",
+        id: `RR-${row.seq}`,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        stable_prefix: 0,
+        body: `Result review targets ${pin} at problem statement S@${row.version}.\nClaim content: ${target.content_digest}\nRequested by sponsor ${event.acting_principal.id} at ledger seq ${row.seq}.\nCurrent problem lifecycle: ${first.status}. This request is not a verification or resolution.`,
+        why_included:
+          "the latest recorded result-review request and its exact public claim identity",
+      },
+    ],
+    actions: [
+      {
+        method: "GET" as const,
+        url: `/p/${first.problem_id}/claims/${pin}.json`,
+        why: "the result-review target, with its computed standing, evidence and independent reviews",
+        public_read: true,
+      },
+      {
+        method: "GET" as const,
+        url: `/p/${first.problem_id}/claims/${pin}.md`,
+        why: "the readable result-review target and its evidence trail",
+        public_read: true,
+      },
+    ],
+    omitted: [],
   };
 }
 
@@ -450,6 +554,7 @@ async function loadProblemFace(
     first,
     formulation?.current_statement_version ?? null,
   );
+  const resultReview = await resultReviewCandidates(first);
   const formulationItems =
     formulation === null
       ? []
@@ -461,7 +566,7 @@ async function loadProblemFace(
           untrusted: true,
           body: formulation[field],
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank,
+          stable_prefix: rank + resultReview.candidates.length,
         }));
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
@@ -473,8 +578,12 @@ async function loadProblemFace(
     requested_max_tokens: PROBLEM_DIGEST_TOKEN_BUDGET,
     viewer: { audience: "public", membership: "none", effective_permissions: [] },
     candidates: [
+      ...resultReview.candidates,
       ...formulationItems,
-      ...reviews.candidates,
+      ...reviews.candidates.map((candidate) => ({
+        ...candidate,
+        stable_prefix: candidate.stable_prefix + resultReview.candidates.length,
+      })),
       ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
         kind: "claim",
         id: claim.id,
@@ -483,10 +592,11 @@ async function loadProblemFace(
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length,
+        stable_prefix: index + 4 + reviews.candidates.length + resultReview.candidates.length,
       })),
     ],
     action_candidates: [
+      ...resultReview.actions,
       ...(formulation === null
         ? []
         : [
@@ -517,6 +627,7 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...resultReview.omitted,
       ...reviews.omitted,
       ...(formulation === null
         ? [
