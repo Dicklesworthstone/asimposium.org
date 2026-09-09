@@ -90,6 +90,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0045_claim_dependency_cycles.sql"
   "0046_workshop_revision.sql"
   "0047_problem_lifecycle.sql"
+  "0048_reanchor_replay_scope.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

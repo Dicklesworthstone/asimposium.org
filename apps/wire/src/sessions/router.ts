@@ -1,5 +1,6 @@
 import {
   ClaimReanchorRequestSchema,
+  ClaimReanchorResponseSchema,
   ClaimRevisionSchema,
   CursorResponseSchema,
   EvidenceRequestSchema,
@@ -714,6 +715,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "workshop_push"
     | "promote"
     | "revise"
+    | "reanchor"
     | "gaps"
     | "relations"
     | "review"
@@ -882,28 +884,50 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     throw new Error("session replay retry budget exhausted");
   }
 
-  function atomicLedgerReplayCompanion<T>(input: {
-    readonly db: Env["DB"];
-    readonly scope: Extract<
-      ReplayScope,
-      "review" | "hypotheses" | "hypothesis-kill" | "evidence" | "gaps" | "relations"
-    >;
-    readonly principal: string;
-    readonly target: string;
-    readonly callerKey: string;
-    readonly requestDigest: string;
-    readonly claimToken: string;
-    readonly kraterIdempotencyKey: string;
-    readonly credentialId: string;
-    readonly session: SessionRow;
-    readonly screening: ScreenedPublication;
-    readonly reservationId?: string;
-    readonly responseFor: (settlement: {
-      readonly sequence: number;
-      readonly objectId: string;
-      readonly eventId: string;
-    }) => T;
-  }) {
+  type AtomicCompanionInput<T> =
+    | {
+        readonly db: Env["DB"];
+        readonly scope: "reanchor";
+        readonly principal: string;
+        readonly target: string;
+        readonly callerKey: string;
+        readonly requestDigest: string;
+        readonly claimToken: string;
+        readonly kraterIdempotencyKey: string;
+        readonly credentialId: string;
+        readonly session: SessionRow;
+        readonly screening?: undefined;
+        readonly reservationId?: undefined;
+        readonly responseFor: (settlement: {
+          readonly sequence: number;
+          readonly objectId: string;
+          readonly eventId: string;
+        }) => T;
+      }
+    | {
+        readonly db: Env["DB"];
+        readonly scope: Extract<
+          ReplayScope,
+          "review" | "hypotheses" | "hypothesis-kill" | "evidence" | "gaps" | "relations"
+        >;
+        readonly principal: string;
+        readonly target: string;
+        readonly callerKey: string;
+        readonly requestDigest: string;
+        readonly claimToken: string;
+        readonly kraterIdempotencyKey: string;
+        readonly credentialId: string;
+        readonly session: SessionRow;
+        readonly screening: ScreenedPublication;
+        readonly reservationId?: string;
+        readonly responseFor: (settlement: {
+          readonly sequence: number;
+          readonly objectId: string;
+          readonly eventId: string;
+        }) => T;
+      };
+
+  function atomicLedgerReplayCompanion<T>(input: AtomicCompanionInput<T>) {
     return {
       requestDigest: input.requestDigest,
       statementsAfterIdempotencySettlement: async (settlement: {
@@ -928,13 +952,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
         return [
-          screeningPublicationStatement(
-            input.db,
-            input.screening,
-            settlement.eventId,
-            input.session.session_id,
-            input.requestDigest,
-          ),
+          ...(input.screening === undefined
+            ? []
+            : [
+                screeningPublicationStatement(
+                  input.db,
+                  input.screening,
+                  settlement.eventId,
+                  input.session.session_id,
+                  input.requestDigest,
+                ),
+              ]),
           ...(input.reservationId === undefined
             ? []
             : [settleQuotaReservationStatement(input.db, input.reservationId)]),
@@ -2690,10 +2718,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (problemRow.status === "resolved" || problemRow.status === "retired") {
       return validatedProblem({
         status: 422,
-        code: "WRITE_REFUSED",
+        code: "CLAIMS_BOARD_LOCKED",
         title: "Cannot promote claim on closed problem",
         detail: `Problem '${session.problem_id}' is '${problemRow.status}'. No new claims can be promoted on resolved or retired problems.`,
         fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            workshop_id: parsed.data.workshop_id,
+            kind: parsed.data.kind,
+            statement: "Claim statement on active problem.",
+            falsifier: "Falsifier statement.",
+          },
+        },
       });
     }
 
@@ -3264,10 +3302,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (problemRow && (problemRow.status === "resolved" || problemRow.status === "retired")) {
       return validatedProblem({
         status: 422,
-        code: "WRITE_REFUSED",
+        code: "CLAIMS_BOARD_LOCKED",
         title: "Cannot revise claim on closed problem",
         detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Closed problems cannot accept revisions.`,
         fixHint: "Fork the problem or explore an alternate formulation.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: "C-1",
+            base_version: 1,
+            kind: "conjecture",
+            statement: "Revised statement",
+            falsifier: "Revised falsifier",
+          },
+        },
       });
     }
 
@@ -3832,6 +3881,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (!auth.ok) return auth.response;
     const db = c.env.DB;
     const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = ClaimReanchorRequestSchema.safeParse(rawBody);
@@ -3844,14 +3895,51 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Provide claim_id and base_version.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/problems.v1.json",
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: { claim_id: "C-1", base_version: 1 },
         },
       });
     }
 
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/reanchor`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "reanchor",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => ClaimReanchorResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
 
     const problem = await db
       .prepare("SELECT status, current_statement_version FROM problems WHERE id = ?")
@@ -3864,17 +3952,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "PROBLEM_NOT_FOUND",
         title: "Problem not found",
         detail: `No problem with id '${session.problem_id}' exists.`,
-        fixHint: "Check the problem id.",
+        fixHint: "Check the problem id against GET /problems.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.claim_id,
+            base_version: parsed.data.base_version,
+          },
+        },
       });
     }
 
     if (problem.status === "retired" || problem.status === "resolved") {
       return validatedProblem({
         status: 422,
-        code: "WRITE_REFUSED",
+        code: "CLAIMS_BOARD_LOCKED",
         title: "Cannot re-anchor claim on closed problem",
         detail: `Problem '${session.problem_id}' is '${problem.status}'.`,
         fixHint: "Closed problems cannot accept claim re-anchors.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.claim_id,
+            base_version: parsed.data.base_version,
+          },
+        },
       });
     }
 
@@ -3909,6 +4013,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "Claim not found",
         detail: `Claim '${parsed.data.claim_id}' not found on problem '${session.problem_id}'.`,
         fixHint: "Ensure the claim id exists on this problem.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.claim_id,
+            base_version: parsed.data.base_version,
+          },
+        },
       });
     }
 
@@ -3921,7 +4033,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Re-read the current head from your pack, then re-apply your reanchor.",
         rule: "P9",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/problems.v1.json",
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           head_version: claimHead.head_version,
           example: { claim_id: claimHead.id, base_version: claimHead.head_version },
         },
@@ -3929,36 +4041,136 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     if (claimHead.author_fellow_id !== auth.binding.fellowId) {
-      return validatedProblem({
-        status: 403,
-        code: "WRITE_REFUSED",
-        title: "Only claim author can re-anchor",
-        detail: "A claim can only be re-anchored by its author Fellow.",
-        fixHint: "Have the author Fellow re-anchor this claim.",
-      });
+      return writeRefusedProblem();
     }
 
-    const now = new Date().toISOString();
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("reanchor", claimToken);
+    const createdAt = new Date().toISOString();
 
-    await db
-      .prepare(
-        "UPDATE claims SET statement_version = ?, statement_drift = 0 WHERE id = ? AND problem_id = ?",
-      )
-      .bind(problem.current_statement_version, claimHead.id, session.problem_id)
-      .run();
-
-    return c.json(
-      {
-        reanchored: true,
-        claim_id: claimHead.id,
-        problem_id: session.problem_id,
-        statement_version: problem.current_statement_version,
-        statement_drift: false,
-        updated_at: now,
-      },
-      200,
-      { "cache-control": "private, no-store" },
-    );
+    try {
+      await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "claim.reanchored",
+          objectKind: "claim",
+          objectId: claimHead.id,
+          objectVersion: claimHead.head_version,
+          payloadJson: canonicalJson({
+            claim_id: claimHead.id,
+            base_version: claimHead.head_version,
+            statement_version: problem.current_statement_version,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM claims c WHERE c.problem_id = ? AND c.id = ? AND (SELECT MAX(v.version) FROM claim_versions v WHERE v.problem_id = c.problem_id AND v.claim_id = c.id) = ?) AND EXISTS (SELECT 1 FROM problems p WHERE p.id = ? AND p.current_statement_version = ? AND p.status NOT IN ('retired', 'resolved'))",
+          preconditionBindings: [
+            session.problem_id,
+            claimHead.id,
+            claimHead.head_version,
+            session.problem_id,
+            problem.current_statement_version,
+          ],
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `UPDATE claims
+                 SET statement_version = ?, statement_drift = 0
+                 WHERE problem_id = ? AND id = ?
+                   AND EXISTS (SELECT 1 FROM events e WHERE e.id = ? AND e.seq = ?)`,
+              )
+              .bind(
+                problem.current_statement_version,
+                session.problem_id,
+                claimHead.id,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "reanchor",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            ClaimReanchorResponseSchema.parse({
+              reanchored: true,
+              claim_id: claimHead.id,
+              statement_version: problem.current_statement_version,
+              statement_drift: false,
+            }),
+        }),
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(
+        db,
+        "reanchor",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) {
+        throw new Error("Krater claim reanchor committed without its atomic replay");
+      }
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 200));
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "reanchor",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+      }
+      if (error instanceof KraterLedgerPreconditionError) {
+        return validatedProblem({
+          status: 409,
+          code: "OBJECT_VERSION_CONFLICT",
+          title: "The base version is stale",
+          detail: `Claim ${parsed.data.claim_id} was modified concurrently.`,
+          fixHint: "Re-read the current head from your pack, then re-apply your reanchor.",
+          rule: "P9",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            head_version: claimHead.head_version,
+            example: { claim_id: claimHead.id, base_version: claimHead.head_version },
+          },
+        });
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      throw error;
+    }
   });
 
   // --- POST /v1/sessions/:id/gaps (W5.5: file a proof gap, G-n) ------------
@@ -4875,8 +5087,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "Claim addresses an older problem statement version",
         detail:
           "The problem statement has revised to a newer version. This claim must be re-anchored or retired.",
-        fixHint:
-          "Call /reanchor or revise the claim against the latest problem statement version.",
+        fixHint: "Call /reanchor or revise the claim against the latest problem statement version.",
         rule: "P9",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",

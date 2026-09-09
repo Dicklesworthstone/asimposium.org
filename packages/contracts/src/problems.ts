@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { SponsorIdSchema } from "./enrollment.ts";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
-import { ClaimIdSchema } from "./sessions.ts";
+import {
+  type ClaimReanchorRequest,
+  ClaimReanchorRequestSchema,
+  type ClaimReanchorResponse,
+  ClaimReanchorResponseSchema,
+} from "./sessions.ts";
 
 /**
  * W5.1 Problem lifecycle (Fable Rev 3.1 §6.2, §6.8, Rule P3).
@@ -188,14 +193,12 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
 export type ProblemLifecycleActionRequest = z.infer<typeof ProblemLifecycleActionRequestSchema>;
 
 /** Claim re-anchor to current problem statement version: POST /v1/sessions/:id/reanchor. */
-export const ClaimReanchorRequestSchema = z
-  .object({
-    claim_id: ClaimIdSchema,
-    base_version: z.number().int().positive(),
-  })
-  .strict();
-
-export type ClaimReanchorRequest = z.infer<typeof ClaimReanchorRequestSchema>;
+export {
+  type ClaimReanchorRequest,
+  ClaimReanchorRequestSchema,
+  type ClaimReanchorResponse,
+  ClaimReanchorResponseSchema,
+};
 
 /** Canonical problem representation. */
 export const ProblemDetailSchema = z
