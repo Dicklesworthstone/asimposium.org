@@ -583,6 +583,185 @@ export async function problemLifecycleJourney({
   );
   assert.equal(retireRes.problem.status, "retired");
 
+  // Pin the admission bound independently of the runtime constant. Padding
+  // valid JSON with whitespace proves that byte admission precedes parsing.
+  const problemBodyLimit = 512 * 1024;
+  const encoder = new TextEncoder();
+  const boundaryProposal = {
+    title: "BYTE_SENTINEL · bounded proposal",
+    statement: "Every edge in a finite matching has two distinct endpoints.",
+    falsifier: "An edge in the matching with fewer than two distinct endpoints.",
+    motivation: "Exercise problem ingress without oversized stored fields.",
+    areas: ["graph-theory"],
+  };
+  const boundaryBrief = await sponsorCall(
+    sponsorA,
+    "POST",
+    "/v1/sponsors/problem-briefs",
+    "save-problem-brief",
+    boundaryProposal,
+    201,
+  );
+  const boundaryReviewProblem = await call(
+    "/v1/problems",
+    {
+      ...boundaryProposal,
+      title: "Bounded statement review",
+      statement: "A finite path with n edges has n + 1 distinct vertices.",
+    },
+    fellowA1Token,
+    201,
+  );
+  const boundaryReviewId = boundaryReviewProblem.problem.id;
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${boundaryReviewId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    200,
+  );
+
+  async function problemWriteDigest() {
+    const rows = await env.DB.batch([
+      env.DB.prepare("SELECT * FROM problems ORDER BY id"),
+      env.DB.prepare("SELECT * FROM problem_statement_versions ORDER BY problem_id, version"),
+      env.DB.prepare("SELECT * FROM sponsor_problem_briefs ORDER BY id"),
+      env.DB.prepare("SELECT * FROM krater_integrity_backfill ORDER BY problem_id"),
+      env.DB.prepare("SELECT * FROM events ORDER BY problem_id, seq"),
+    ]);
+    return createHash("sha256")
+      .update(JSON.stringify(rows.map((row) => row.results)))
+      .digest("hex");
+  }
+
+  const boundaryRoutes = [
+    {
+      name: "proposal",
+      path: "/v1/problems",
+      token: fellowA1Token,
+      payload: { ...boundaryProposal, brief_id: boundaryBrief.brief.id },
+      malformedCode: "PROBLEM_PROPOSE_BODY_INVALID",
+      acceptedStatus: 201,
+    },
+    {
+      name: "statement-review",
+      path: `/v1/problems/${boundaryReviewId}/statement-review`,
+      token: fellowB1Token,
+      payload: { verdict: "statement-clear", basis: "BYTE_SENTINEL · independently checked." },
+      malformedCode: "REVIEW_BODY_INVALID",
+      acceptedStatus: 200,
+    },
+  ];
+  const boundaryFailures = [];
+  for (const route of boundaryRoutes) {
+    try {
+      const json = JSON.stringify(route.payload);
+      const encoded = encoder.encode(json);
+      const padded = new Uint8Array(problemBodyLimit + 1).fill(32);
+      padded.set(encoded);
+      const invalidUtf8 = encoded.slice();
+      assert.ok(json.includes("BYTE_SENTINEL"));
+      invalidUtf8[encoder.encode(json.slice(0, json.indexOf("BYTE_SENTINEL"))).length] = 255;
+
+      let requestIndex = 0;
+      async function submit(bytes, streamed, headers = {}) {
+        let offset = 0;
+        const body = streamed
+          ? new ReadableStream({
+              pull(controller) {
+                if (offset === bytes.byteLength) return controller.close();
+                const end = Math.min(offset + 16 * 1024, bytes.byteLength);
+                controller.enqueue(bytes.subarray(offset, end));
+                offset = end;
+              },
+            })
+          : bytes;
+        return worker.fetch(`${origin}${route.path}`, {
+          method: "POST",
+          headers: {
+            "User-Agent": userAgent,
+            authorization: `Bearer ${route.token}`,
+            "content-type": "application/json",
+            "idempotency-key": `body-boundary-${route.name}-${++requestIndex}`,
+            ...headers,
+          },
+          body,
+          duplex: "half",
+        });
+      }
+
+      const cases = [
+        {
+          name: "declared-overflow",
+          bytes: padded,
+          streamed: false,
+          headers: { "content-length": String(padded.byteLength) },
+          status: 413,
+          code: "REQUEST_BODY_TOO_LARGE",
+        },
+        {
+          name: "streamed-overflow-without-length",
+          bytes: padded,
+          streamed: true,
+          status: 413,
+          code: "REQUEST_BODY_TOO_LARGE",
+        },
+        { name: "malformed-json", bytes: encoder.encode("{"), streamed: false },
+        { name: "invalid-utf8", bytes: invalidUtf8, streamed: true },
+        {
+          name: "unsupported-encoding",
+          bytes: encoded,
+          streamed: true,
+          headers: { "content-encoding": "gzip" },
+        },
+      ];
+      for (const entry of cases) {
+        const before = await problemWriteDigest();
+        const response = await submit(entry.bytes, entry.streamed, entry.headers);
+        assert.equal(response.status, entry.status ?? 422, `${route.name}: ${entry.name}`);
+        const refused = await response.json();
+        assert.equal(refused.code, entry.code ?? route.malformedCode);
+        assert.ok(ProblemDocumentSchema.safeParse(refused).success);
+        assert.equal(await problemWriteDigest(), before, `${route.name}: refusal mutated D1`);
+      }
+
+      const accepted = await submit(padded.subarray(0, problemBodyLimit), true, {
+        "content-encoding": "identity",
+      });
+      assert.equal(accepted.status, route.acceptedStatus, `${route.name}: exact byte limit`);
+      const acceptedBody = await accepted.json();
+      assert.equal(accepted.headers.get("cache-control"), "private, no-store");
+      if (route.name === "proposal") {
+        assert.equal(acceptedBody.problem.status, "private-draft");
+        assert.equal((await storedBrief(boundaryBrief.brief.id)).status, "adopted");
+      } else {
+        assert.equal(acceptedBody.status, "active");
+        const stored = await env.DB.prepare("SELECT status FROM problems WHERE id = ?")
+          .bind(boundaryReviewId)
+          .first();
+        assert.equal(stored.status, "active");
+      }
+      console.log(
+        JSON.stringify({
+          stage: "problem-body-limits",
+          route: route.name,
+          status: "pass",
+          limit_bytes: problemBodyLimit,
+          refused_cases: cases.map((entry) => entry.name),
+          refused_mutations: 0,
+          exact_limit_write: "persisted",
+          boundary: "real local Workerd/D1; no deployment or OAuth claim",
+        }),
+      );
+    } catch (error) {
+      boundaryFailures.push(error);
+    }
+  }
+  if (boundaryFailures.length > 0) {
+    throw new AggregateError(boundaryFailures, "Problem body-limit checks failed");
+  }
+
   return {
     status: "pass",
     problem: problemId,
