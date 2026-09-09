@@ -1,4 +1,5 @@
 import {
+  ClaimReanchorRequestSchema,
   ClaimRevisionSchema,
   CursorResponseSchema,
   EvidenceRequestSchema,
@@ -1293,6 +1294,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/workshop",
     "/v1/sessions/:id/promote",
     "/v1/sessions/:id/revise",
+    "/v1/sessions/:id/reanchor",
     "/v1/sessions/:id/gaps",
     "/v1/sessions/:id/gaps/close",
     "/v1/sessions/:id/relations",
@@ -2648,6 +2650,61 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
 
+    // W5.1 Problem lifecycle gate: claims board locked while sharpening/draft
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+      });
+    }
+
+    if (problemRow.status === "private-draft" || problemRow.status === "sharpening") {
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "The claims board is locked while the problem is in sharpening",
+        detail:
+          "The problem is in sharpening status; claims cannot be promoted until an independent review certifies the statement as clear.",
+        fixHint:
+          "Submit a review on the problem statement certifying statement-clear, or wait for another Fellow to review.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target: "problem",
+            verdict: "statement-clear",
+            basis: "The formulation is rigorous and well-quantified.",
+          },
+        },
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return validatedProblem({
+        status: 422,
+        code: "WRITE_REFUSED",
+        title: "Cannot promote claim on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. No new claims can be promoted on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+      });
+    }
+
+    if (problemRow.status === "dormant") {
+      const nowIso = new Date().toISOString();
+      await db
+        .prepare("UPDATE problems SET status = 'active', updated_at = ? WHERE id = ?")
+        .bind(nowIso, session.problem_id)
+        .run();
+    }
+
     // The workshop object must belong to this session and this Fellow —
     // promotion of another's draft is a contract violation, not a validator
     // outcome.
@@ -3197,6 +3254,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
+
+    // W5.1 Problem lifecycle gate: closed problems cannot accept revisions
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (problemRow && (problemRow.status === "resolved" || problemRow.status === "retired")) {
+      return validatedProblem({
+        status: 422,
+        code: "WRITE_REFUSED",
+        title: "Cannot revise claim on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Closed problems cannot accept revisions.`,
+        fixHint: "Fork the problem or explore an alternate formulation.",
+      });
+    }
 
     // Revision authority (W5.3): only the claim's author mints a replacement;
     // a sponsor may promote that Fellow's drafts but never authors, retargets,
@@ -3751,6 +3824,141 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       throw error;
     }
+  });
+
+  // --- POST /v1/sessions/:id/reanchor (W5.1 Claim re-anchor to problem statement version) ---
+  app.post("/v1/sessions/:id/reanchor", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = ClaimReanchorRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "REANCHOR_BODY_INVALID",
+        title: "Invalid claim reanchor request body",
+        detail: "The request body did not match the claim reanchor contract.",
+        fixHint: "Provide claim_id and base_version.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problems.v1.json",
+          example: { claim_id: "C-1", base_version: 1 },
+        },
+      });
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const problem = await db
+      .prepare("SELECT status, current_statement_version FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string; current_statement_version: number }>();
+
+    if (!problem) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id.",
+      });
+    }
+
+    if (problem.status === "retired" || problem.status === "resolved") {
+      return validatedProblem({
+        status: 422,
+        code: "WRITE_REFUSED",
+        title: "Cannot re-anchor claim on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problem.status}'.`,
+        fixHint: "Closed problems cannot accept claim re-anchors.",
+      });
+    }
+
+    const claimHead = await db
+      .prepare(
+        `SELECT
+           c.id,
+           c.problem_id,
+           c.statement_version,
+           c.statement_drift,
+           (SELECT MAX(v.version) FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id) AS head_version,
+           (SELECT v.editor_fellow_id FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id AND v.version = 1
+           ) AS author_fellow_id
+         FROM claims c WHERE c.problem_id = ? AND c.id = ?`,
+      )
+      .bind(session.problem_id, parsed.data.claim_id)
+      .first<{
+        id: string;
+        problem_id: string;
+        statement_version: number;
+        statement_drift: number;
+        head_version: number;
+        author_fellow_id: string;
+      }>();
+
+    if (!claimHead) {
+      return validatedProblem({
+        status: 404,
+        code: "CLAIM_NOT_FOUND",
+        title: "Claim not found",
+        detail: `Claim '${parsed.data.claim_id}' not found on problem '${session.problem_id}'.`,
+        fixHint: "Ensure the claim id exists on this problem.",
+      });
+    }
+
+    if (claimHead.head_version !== parsed.data.base_version) {
+      return validatedProblem({
+        status: 409,
+        code: "OBJECT_VERSION_CONFLICT",
+        title: "The base version is stale",
+        detail: `Claim ${parsed.data.claim_id} is at head version ${claimHead.head_version}; the reanchor was based on ${parsed.data.base_version}.`,
+        fixHint: "Re-read the current head from your pack, then re-apply your reanchor.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problems.v1.json",
+          head_version: claimHead.head_version,
+          example: { claim_id: claimHead.id, base_version: claimHead.head_version },
+        },
+      });
+    }
+
+    if (claimHead.author_fellow_id !== auth.binding.fellowId) {
+      return validatedProblem({
+        status: 403,
+        code: "WRITE_REFUSED",
+        title: "Only claim author can re-anchor",
+        detail: "A claim can only be re-anchored by its author Fellow.",
+        fixHint: "Have the author Fellow re-anchor this claim.",
+      });
+    }
+
+    const now = new Date().toISOString();
+
+    await db
+      .prepare(
+        "UPDATE claims SET statement_version = ?, statement_drift = 0 WHERE id = ? AND problem_id = ?",
+      )
+      .bind(problem.current_statement_version, claimHead.id, session.problem_id)
+      .run();
+
+    return c.json(
+      {
+        reanchored: true,
+        claim_id: claimHead.id,
+        problem_id: session.problem_id,
+        statement_version: problem.current_statement_version,
+        statement_drift: false,
+        updated_at: now,
+      },
+      200,
+      { "cache-control": "private, no-store" },
+    );
   });
 
   // --- POST /v1/sessions/:id/gaps (W5.5: file a proof gap, G-n) ------------
@@ -4650,6 +4858,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             verdict: "confirm",
             basis: "I checked the statement against the proof.",
             body_md: "Verified the quantifier scope.",
+          },
+        },
+      });
+    }
+
+    // W5.1 Problem statement drift gate: cannot review a claim that has drifted
+    const claimHead = await db
+      .prepare("SELECT statement_drift FROM claims WHERE id = ? AND problem_id = ?")
+      .bind(parsed.data.target_claim_id, session.problem_id)
+      .first<{ statement_drift: number }>();
+    if (claimHead?.statement_drift === 1) {
+      return validatedProblem({
+        status: 422,
+        code: "STATEMENT_DRIFT",
+        title: "Claim addresses an older problem statement version",
+        detail:
+          "The problem statement has revised to a newer version. This claim must be re-anchored or retired.",
+        fixHint:
+          "Call /reanchor or revise the claim against the latest problem statement version.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.target_claim_id,
+            base_version: parsed.data.target_version,
           },
         },
       });

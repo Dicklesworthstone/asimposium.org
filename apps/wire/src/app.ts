@@ -47,6 +47,7 @@ import { validatedProblem as problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createLedgerFaceRoutes } from "./ledger-face";
+import { createProblemRouter } from "./problems/router";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSearchRoutes } from "./search/router";
 import { createSessionRouter, type PromotionScreener } from "./sessions/router";
@@ -71,6 +72,7 @@ const ENVELOPE_AUDIENCE = "stoa";
 interface EnrollmentStack {
   readonly router: Hono;
   readonly sessionRouter?: Hono<{ Bindings: Env }>;
+  readonly problemRouter?: Hono<{ Bindings: Env }>;
 }
 
 /**
@@ -443,6 +445,20 @@ function isEnrollmentPath(pathname: string): boolean {
   );
 }
 
+function isProblemPath(pathname: string): boolean {
+  if (pathname === "/v1/problems" || pathname.startsWith("/v1/problems/")) return true;
+  if (
+    pathname === "/v1/sponsors/problem-briefs" ||
+    pathname.startsWith("/v1/sponsors/problem-briefs/")
+  ) {
+    return true;
+  }
+  if (pathname.startsWith("/v1/sponsors/problems/") && pathname.endsWith("/lifecycle")) {
+    return true;
+  }
+  return false;
+}
+
 function routeNotFound(requestUrl: string, ownedPathMethod?: string): Response {
   const pathname = redactPathname(new URL(requestUrl).pathname);
   return problem({
@@ -677,6 +693,17 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
         headers: { [ROUTER_MISS_HEADER]: "1" },
       }),
   );
+  const problemRouter = createProblemRouter({
+    service,
+    verifiedSponsor,
+  });
+  problemRouter.notFound(
+    () =>
+      new Response(null, {
+        status: 404,
+        headers: { [ROUTER_MISS_HEADER]: "1" },
+      }),
+  );
   const stack: EnrollmentStack = {
     router,
     sessionRouter: createSessionRouter({
@@ -685,6 +712,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
       verifiedSponsor,
       screenPromotion: options.screenPromotion,
     }),
+    problemRouter,
   };
   cached = {
     db: env.DB,
@@ -885,6 +913,26 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       executionCtx = undefined;
     }
     const response = await stack.sessionRouter.fetch(c.req.raw, c.env, executionCtx);
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
+  });
+
+  // The problem lifecycle (W5.1): Fellow problem proposals, problem detail,
+  // statement reviews, and sponsor briefs & lifecycle actions.
+  app.use("*", async (c, next) => {
+    const { pathname } = new URL(c.req.url);
+    if (!isProblemPath(pathname)) {
+      await next();
+      return;
+    }
+    const stack = enrollmentStack(c.env, options);
+    if (stack instanceof Response) return stack;
+    if (stack.problemRouter === undefined) {
+      await next();
+      return;
+    }
+    const response = await stack.problemRouter.fetch(c.req.raw, c.env);
     return response.headers.get(ROUTER_MISS_HEADER) === "1"
       ? routeNotFound(c.req.url, c.req.method)
       : response;
