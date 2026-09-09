@@ -10,7 +10,17 @@ import {
 } from "./lib/sponsor-id";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Idp({ allowDangerousEmailAccountLinking: false })],
+  trustHost: true,
+  providers: [
+    Idp({
+      allowDangerousEmailAccountLinking: false,
+      authorization: {
+        params: {
+          scope: "openid email profile",
+        },
+      },
+    }),
+  ],
   callbacks: {
     async jwt({ token, account, profile }) {
       if (account) {
@@ -29,7 +39,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   cookies: {
     sessionToken: {
       name: "asimp.session",
-      options: { httpOnly: true, sameSite: "lax", path: "/" },
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: process.env.NODE_ENV === "production",
+      },
     },
   },
 });

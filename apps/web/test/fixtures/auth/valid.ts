@@ -5,7 +5,16 @@ import { authTimeFromIdToken } from "./lib/auth-time";
 import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-id";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Google],
+  trustHost: true,
+  providers: [
+    Google({
+      authorization: {
+        params: {
+          scope: "openid email profile",
+        },
+      },
+    }),
+  ],
   session: { strategy: "jwt" },
   callbacks: {
     async jwt({ token, account, profile }) {

@@ -182,7 +182,12 @@ function codesOf(violations: readonly AuthViolation[]): AuthViolationCode[] {
 }
 
 /** A clean configuration with one field substituted, for focused cases. */
-function config(overrides: { providers?: string; options?: string; extra?: string }): string {
+function config(overrides: {
+  providers?: string;
+  options?: string;
+  extra?: string;
+  trustHost?: string;
+}): string {
   return `
     import NextAuth from "next-auth";
     import Google from "next-auth/providers/google";
@@ -190,7 +195,8 @@ function config(overrides: { providers?: string; options?: string; extra?: strin
     import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-id";
     ${overrides.extra ?? ""}
     export const { handlers, auth, signIn, signOut } = NextAuth({
-      providers: ${overrides.providers ?? "[Google]"},
+      ${overrides.trustHost ?? "trustHost: true,"}
+      providers: ${overrides.providers ?? '[Google({ authorization: { params: { scope: "openid email profile" } } })]'},
       callbacks: {
         async jwt({ token, account, profile }) {
           if (account) {
@@ -209,7 +215,7 @@ function config(overrides: { providers?: string; options?: string; extra?: strin
       cookies: {
         sessionToken: {
           name: "asimp.session",
-          options: ${overrides.options ?? '{ httpOnly: true, sameSite: "lax", path: "/" }'},
+          options: ${overrides.options ?? '{ httpOnly: true, sameSite: "lax", path: "/", secure: process.env.NODE_ENV === "production" }'},
         },
       },
     });
@@ -1150,7 +1156,7 @@ describe("the environment rule is an allowlist over the whole file", () => {
 
   test("the one allowed spelling is accepted, and only in that exact shape", () => {
     const clean = config({
-      options: '{ httpOnly: true, secure: process.env.NODE_ENV === "production" }',
+      options: '{ httpOnly: true, sameSite: "lax", path: "/", secure: process.env.NODE_ENV === "production" }',
     });
     expect(formatAuthViolations(validateAuthConfig(clean))).toBe("no violations");
 
@@ -1233,5 +1239,158 @@ describe("diagnostics", () => {
     expect(codesOf(violations)).toContain("AUTH_ENV_ACCESS_FORBIDDEN");
     expect(detail).toContain("process.env");
     expect(detail).not.toContain("canary-secret-value");
+  });
+});
+
+describe("G1 — Google OAuth scope pinning", () => {
+  test("uninvoked bare Google provider is caught", () => {
+    const violations = validateAuthConfig(config({ providers: "[Google]" }));
+    expect(codesOf(violations)).toContain("AUTH_GOOGLE_SCOPE_NOT_PINNED");
+    const hit = violations.find((v) => v.code === "AUTH_GOOGLE_SCOPE_NOT_PINNED");
+    expect(hit?.rule).toBe("ASI-GOOGLE-SCOPE");
+    expect(hit?.detail).toContain("uninvoked");
+  });
+
+  test("Google provider without authorization object is caught", () => {
+    const violations = validateAuthConfig(config({ providers: "[Google({})]" }));
+    expect(codesOf(violations)).toContain("AUTH_GOOGLE_SCOPE_NOT_PINNED");
+  });
+
+  test("Google provider without authorization.params is caught", () => {
+    const violations = validateAuthConfig(
+      config({ providers: "[Google({ authorization: {} })]" }),
+    );
+    expect(codesOf(violations)).toContain("AUTH_GOOGLE_SCOPE_NOT_PINNED");
+  });
+
+  test("excessive scope request (e.g. drive access) is refused", () => {
+    const violations = validateAuthConfig(
+      config({
+        providers:
+          '[Google({ authorization: { params: { scope: "openid email profile https://www.googleapis.com/auth/drive" } } })]',
+      }),
+    );
+    expect(codesOf(violations)).toContain("AUTH_GOOGLE_SCOPE_NOT_PINNED");
+    const hit = violations.find((v) => v.code === "AUTH_GOOGLE_SCOPE_NOT_PINNED");
+    expect(hit?.detail).toContain("https://www.googleapis.com/auth/drive");
+  });
+
+  test("insufficient scope request (e.g. missing profile) is refused", () => {
+    const violations = validateAuthConfig(
+      config({
+        providers: '[Google({ authorization: { params: { scope: "openid email" } } })]',
+      }),
+    );
+    expect(codesOf(violations)).toContain("AUTH_GOOGLE_SCOPE_NOT_PINNED");
+  });
+
+  test("reordered valid scopes are accepted", () => {
+    const violations = validateAuthConfig(
+      config({
+        providers:
+          '[Google({ authorization: { params: { scope: "profile openid email" } } })]',
+      }),
+    );
+    expect(codesOf(violations)).not.toContain("AUTH_GOOGLE_SCOPE_NOT_PINNED");
+  });
+
+  test("exact canonical scopes produce no violations", () => {
+    const violations = validateAuthConfig(
+      config({
+        providers:
+          '[Google({ authorization: { params: { scope: "openid email profile" } } })]',
+      }),
+    );
+    expect(formatAuthViolations(violations)).toBe("no violations");
+  });
+});
+
+describe("G4 — trustHost configuration", () => {
+  test("omitting trustHost is refused", () => {
+    const violations = validateAuthConfig(config({ trustHost: "" }));
+    expect(codesOf(violations)).toContain("AUTH_TRUST_HOST_NOT_SET");
+    const hit = violations.find((v) => v.code === "AUTH_TRUST_HOST_NOT_SET");
+    expect(hit?.rule).toBe("ASI-PROPYLON-1");
+  });
+
+  test("setting trustHost: false is refused", () => {
+    const violations = validateAuthConfig(config({ trustHost: "trustHost: false," }));
+    expect(codesOf(violations)).toContain("AUTH_TRUST_HOST_NOT_SET");
+  });
+
+  test("setting trustHost: true is accepted", () => {
+    const violations = validateAuthConfig(config({ trustHost: "trustHost: true," }));
+    expect(codesOf(violations)).not.toContain("AUTH_TRUST_HOST_NOT_SET");
+  });
+});
+
+describe("G3 — cookie attributes pinning", () => {
+  test("omitting httpOnly is refused", () => {
+    const violations = validateAuthConfig(
+      config({
+        options: '{ sameSite: "lax", path: "/", secure: process.env.NODE_ENV === "production" }',
+      }),
+    );
+    expect(codesOf(violations)).toContain("AUTH_COOKIE_HTTPONLY_NOT_TRUE");
+  });
+
+  test("setting httpOnly: false is refused", () => {
+    const violations = validateAuthConfig(
+      config({
+        options:
+          '{ httpOnly: false, sameSite: "lax", path: "/", secure: process.env.NODE_ENV === "production" }',
+      }),
+    );
+    expect(codesOf(violations)).toContain("AUTH_COOKIE_HTTPONLY_NOT_TRUE");
+  });
+
+  test("omitting sameSite or setting strict/none is refused", () => {
+    const missing = validateAuthConfig(
+      config({
+        options: '{ httpOnly: true, path: "/", secure: process.env.NODE_ENV === "production" }',
+      }),
+    );
+    expect(codesOf(missing)).toContain("AUTH_COOKIE_SAMESITE_NOT_LAX");
+
+    const strict = validateAuthConfig(
+      config({
+        options:
+          '{ httpOnly: true, sameSite: "strict", path: "/", secure: process.env.NODE_ENV === "production" }',
+      }),
+    );
+    expect(codesOf(strict)).toContain("AUTH_COOKIE_SAMESITE_NOT_LAX");
+  });
+
+  test("omitting path or setting non-root path is refused", () => {
+    const missing = validateAuthConfig(
+      config({
+        options: '{ httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production" }',
+      }),
+    );
+    expect(codesOf(missing)).toContain("AUTH_COOKIE_PATH_NOT_ROOT");
+
+    const subpath = validateAuthConfig(
+      config({
+        options:
+          '{ httpOnly: true, sameSite: "lax", path: "/api", secure: process.env.NODE_ENV === "production" }',
+      }),
+    );
+    expect(codesOf(subpath)).toContain("AUTH_COOKIE_PATH_NOT_ROOT");
+  });
+
+  test("omitting secure or setting false is refused", () => {
+    const missing = validateAuthConfig(
+      config({
+        options: '{ httpOnly: true, sameSite: "lax", path: "/" }',
+      }),
+    );
+    expect(codesOf(missing)).toContain("AUTH_COOKIE_SECURE_NOT_PINNED");
+
+    const insecure = validateAuthConfig(
+      config({
+        options: '{ httpOnly: true, sameSite: "lax", path: "/", secure: false }',
+      }),
+    );
+    expect(codesOf(insecure)).toContain("AUTH_COOKIE_SECURE_NOT_PINNED");
   });
 });

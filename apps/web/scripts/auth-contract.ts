@@ -75,8 +75,14 @@ export type AuthViolationCode =
   | "AUTH_PROVIDERS_CONFIG_MISSING"
   | "AUTH_PROVIDERS_NOT_SINGLETON"
   | "AUTH_PROVIDERS_UNRESOLVABLE"
+  | "AUTH_GOOGLE_SCOPE_NOT_PINNED"
+  | "AUTH_TRUST_HOST_NOT_SET"
   | "AUTH_COOKIE_CONFIG_MISSING"
   | "AUTH_COOKIE_DOMAIN_SET"
+  | "AUTH_COOKIE_HTTPONLY_NOT_TRUE"
+  | "AUTH_COOKIE_SAMESITE_NOT_LAX"
+  | "AUTH_COOKIE_PATH_NOT_ROOT"
+  | "AUTH_COOKIE_SECURE_NOT_PINNED"
   | "AUTH_COOKIE_UNRESOLVABLE"
   | "AUTH_ENV_ACCESS_FORBIDDEN"
   | "AUTH_CALL_NOT_ALLOWED"
@@ -150,6 +156,16 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
     fix_hint:
       "Write `providers` as a literal array of imported bindings. A spread or a computed value hides what is configured.",
   },
+  AUTH_GOOGLE_SCOPE_NOT_PINNED: {
+    rule: "ASI-GOOGLE-SCOPE",
+    fix_hint:
+      'Pin the Google OAuth scope to exactly "openid email profile": Google({ authorization: { params: { scope: "openid email profile" } } }). Wider scopes require sensitive/restricted app verification.',
+  },
+  AUTH_TRUST_HOST_NOT_SET: {
+    rule: "ASI-PROPYLON-1",
+    fix_hint:
+      "Set `trustHost: true` explicitly in the NextAuth configuration to prevent host-header confusion.",
+  },
   AUTH_COOKIE_CONFIG_MISSING: {
     rule: "ASI-HOST-ONLY",
     fix_hint:
@@ -159,6 +175,26 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
     rule: "ASI-HOST-ONLY",
     fix_hint:
       "Delete the `domain` key. A domain-scoped cookie reaches a.asimposium.org, which is the cross-plane confusion WRONG_PRINCIPAL exists for (Fable §14.1).",
+  },
+  AUTH_COOKIE_HTTPONLY_NOT_TRUE: {
+    rule: "ASI-HOST-ONLY",
+    fix_hint:
+      "Set `httpOnly: true` in cookies.sessionToken.options to protect the sponsor session token from client script access.",
+  },
+  AUTH_COOKIE_SAMESITE_NOT_LAX: {
+    rule: "ASI-HOST-ONLY",
+    fix_hint:
+      'Set `sameSite: "lax"` in cookies.sessionToken.options so OAuth redirects can complete while isolating cross-site state.',
+  },
+  AUTH_COOKIE_PATH_NOT_ROOT: {
+    rule: "ASI-HOST-ONLY",
+    fix_hint:
+      'Set `path: "/"` in cookies.sessionToken.options to pin cookie scope to the entire origin.',
+  },
+  AUTH_COOKIE_SECURE_NOT_PINNED: {
+    rule: "ASI-HOST-ONLY",
+    fix_hint:
+      'Set `secure: process.env.NODE_ENV === "production"` in cookies.sessionToken.options.',
   },
   AUTH_COOKIE_UNRESOLVABLE: {
     rule: "ASI-HOST-ONLY",
@@ -245,6 +281,22 @@ export interface SessionCookieOptions {
   present: boolean;
   keys: string[];
   unresolvable: boolean;
+  httpOnlyTrue: boolean;
+  sameSiteLax: boolean;
+  pathRoot: boolean;
+  secureProduction: boolean;
+}
+
+export interface GoogleScopeStatus {
+  invoked: boolean;
+  pinned: boolean;
+  scope: string | undefined;
+  detail: string;
+}
+
+export interface TrustHostStatus {
+  set: boolean;
+  unresolvable: boolean;
 }
 
 export interface ConfiguredProvider {
@@ -284,6 +336,8 @@ export interface ExportWiring {
 export interface AuthSurface {
   imports: string[];
   providers: ProviderSurface;
+  googleScope: GoogleScopeStatus;
+  trustHost: TrustHostStatus;
   cookies: SessionCookieOptions;
   envAccesses: EnvAccess[];
   wiring: ExportWiring;
@@ -476,7 +530,15 @@ export function configuredProviders(sourceFile: ts.SourceFile): ProviderSurface 
 
 /** Resolve `cookies.sessionToken.options` structurally. */
 export function sessionCookieOptions(sourceFile: ts.SourceFile): SessionCookieOptions {
-  const empty: SessionCookieOptions = { present: false, keys: [], unresolvable: false };
+  const empty: SessionCookieOptions = {
+    present: false,
+    keys: [],
+    unresolvable: false,
+    httpOnlyTrue: false,
+    sameSiteLax: false,
+    pathRoot: false,
+    secureProduction: false,
+  };
   const config = nextAuthConfig(sourceFile);
   if (config === undefined) return empty;
 
@@ -489,19 +551,75 @@ export function sessionCookieOptions(sourceFile: ts.SourceFile): SessionCookieOp
     current = asObjectLiteral(lookup.value);
   }
 
-  if (current === undefined) return { present: false, keys: [], unresolvable };
+  if (current === undefined) return { ...empty, unresolvable };
 
   const keys: string[] = [];
+  let httpOnlyTrue = false;
+  let sameSiteLax = false;
+  let pathRoot = false;
+  let secureProduction = false;
+
   for (const element of current.properties) {
     if (ts.isSpreadAssignment(element)) {
       unresolvable = true;
       continue;
     }
     const name = literalPropertyName(element);
-    if (name === undefined) unresolvable = true;
-    else keys.push(name);
+    if (name === undefined) {
+      unresolvable = true;
+    } else {
+      keys.push(name);
+      if (name === "httpOnly" && ts.isPropertyAssignment(element)) {
+        const unwrapped = unwrapTransparentExpression(element.initializer);
+        if (unwrapped.kind === ts.SyntaxKind.TrueKeyword) {
+          httpOnlyTrue = true;
+        }
+      }
+      if (name === "sameSite" && ts.isPropertyAssignment(element)) {
+        const unwrapped = unwrapTransparentExpression(element.initializer);
+        if (ts.isStringLiteral(unwrapped) && unwrapped.text.toLowerCase() === "lax") {
+          sameSiteLax = true;
+        }
+      }
+      if (name === "path" && ts.isPropertyAssignment(element)) {
+        const unwrapped = unwrapTransparentExpression(element.initializer);
+        if (ts.isStringLiteral(unwrapped) && unwrapped.text === "/") {
+          pathRoot = true;
+        }
+      }
+      if (name === "secure" && ts.isPropertyAssignment(element)) {
+        const unwrapped = unwrapTransparentExpression(element.initializer);
+        if (unwrapped.kind === ts.SyntaxKind.TrueKeyword) {
+          secureProduction = true;
+        } else if (ts.isBinaryExpression(unwrapped)) {
+          const bin = unwrapped;
+          const isStrictEquals = bin.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken;
+          const leftText = bin.left.getText(sourceFile).trim();
+          const rightText = bin.right.getText(sourceFile).trim();
+          if (
+            isStrictEquals &&
+            ((leftText === "process.env.NODE_ENV" &&
+              ts.isStringLiteral(bin.right) &&
+              bin.right.text === "production") ||
+              (rightText === "process.env.NODE_ENV" &&
+                ts.isStringLiteral(bin.left) &&
+                bin.left.text === "production"))
+          ) {
+            secureProduction = true;
+          }
+        }
+      }
+    }
   }
-  return { present: true, keys, unresolvable };
+  return {
+    present: true,
+    keys,
+    unresolvable,
+    httpOnlyTrue,
+    sameSiteLax,
+    pathRoot,
+    secureProduction,
+  };
 }
 
 type CallbackFunction = (ts.MethodDeclaration | ts.ArrowFunction | ts.FunctionExpression) & {
@@ -678,6 +796,158 @@ function assignmentRoot(node: ts.Expression): string | undefined {
     current = unwrapTransparentExpression(current.expression);
   }
   return ts.isIdentifier(current) ? current.text : undefined;
+}
+
+/**
+ * Statically assert that the Google provider specifies explicit, pinned OAuth scope
+ * matching the lightweight verification tier: exactly "openid email profile".
+ */
+export function googleOAuthScope(sourceFile: ts.SourceFile): GoogleScopeStatus {
+  const config = nextAuthConfig(sourceFile);
+  if (config === undefined) {
+    return {
+      invoked: false,
+      pinned: false,
+      scope: undefined,
+      detail: "NextAuth config not resolved.",
+    };
+  }
+  const lookup = propertyOf(config, "providers");
+  if (lookup.value === undefined || !ts.isArrayLiteralExpression(lookup.value)) {
+    return {
+      invoked: false,
+      pinned: false,
+      scope: undefined,
+      detail: "Providers array missing or not literal.",
+    };
+  }
+  const bindings = importBindings(sourceFile);
+  for (const element of lookup.value.elements) {
+    let calleeExpr: ts.Expression | undefined;
+    let callExpr: ts.CallExpression | undefined;
+    if (ts.isCallExpression(element)) {
+      callExpr = element;
+      calleeExpr = element.expression;
+    } else if (ts.isIdentifier(element)) {
+      calleeExpr = element;
+    }
+    if (calleeExpr === undefined) continue;
+    const unwrapped = unwrapTransparentExpression(calleeExpr);
+    if (!ts.isIdentifier(unwrapped)) continue;
+    if (bindings.get(unwrapped.text) !== GOOGLE_PROVIDER) continue;
+
+    if (callExpr === undefined) {
+      return {
+        invoked: false,
+        pinned: false,
+        scope: undefined,
+        detail: `Google provider '${unwrapped.text}' is passed uninvoked without authorization scope.`,
+      };
+    }
+
+    const rawArg = callExpr.arguments[0];
+    if (rawArg === undefined) {
+      return {
+        invoked: true,
+        pinned: false,
+        scope: undefined,
+        detail: "Google provider invoked without configuration object literal.",
+      };
+    }
+    const arg = asObjectLiteral(unwrapTransparentExpression(rawArg));
+    if (arg === undefined) {
+      return {
+        invoked: true,
+        pinned: false,
+        scope: undefined,
+        detail: "Google provider argument is not an object literal.",
+      };
+    }
+
+    const authLookup = propertyOf(arg, "authorization");
+    const authObj =
+      authLookup.value !== undefined
+        ? asObjectLiteral(unwrapTransparentExpression(authLookup.value))
+        : undefined;
+    if (authObj === undefined) {
+      return {
+        invoked: true,
+        pinned: false,
+        scope: undefined,
+        detail: "Google provider configuration missing authorization object literal.",
+      };
+    }
+
+    const paramsLookup = propertyOf(authObj, "params");
+    const paramsObj =
+      paramsLookup.value !== undefined
+        ? asObjectLiteral(unwrapTransparentExpression(paramsLookup.value))
+        : undefined;
+    if (paramsObj === undefined) {
+      return {
+        invoked: true,
+        pinned: false,
+        scope: undefined,
+        detail: "authorization.params property missing or not an object literal.",
+      };
+    }
+
+    const scopeLookup = propertyOf(paramsObj, "scope");
+    const scopeVal =
+      scopeLookup.value !== undefined
+        ? unwrapTransparentExpression(scopeLookup.value)
+        : undefined;
+    if (scopeVal === undefined || !ts.isStringLiteral(scopeVal)) {
+      return {
+        invoked: true,
+        pinned: false,
+        scope: undefined,
+        detail: "authorization.params.scope missing or not a string literal.",
+      };
+    }
+
+    const rawScope = scopeVal.text;
+    const tokens = rawScope.trim().split(/\s+/).filter(Boolean).sort();
+    const expected = ["email", "openid", "profile"];
+    const isPinned =
+      tokens.length === 3 &&
+      tokens[0] === expected[0] &&
+      tokens[1] === expected[1] &&
+      tokens[2] === expected[2];
+
+    return {
+      invoked: true,
+      pinned: isPinned,
+      scope: rawScope,
+      detail: isPinned
+        ? "Scope pinned to openid email profile."
+        : `Google OAuth scope set to '${rawScope}' instead of exact 'openid email profile'.`,
+    };
+  }
+
+  return {
+    invoked: false,
+    pinned: false,
+    scope: undefined,
+    detail: "No configured provider resolves to the Google provider module.",
+  };
+}
+
+/**
+ * Statically assert that NextAuth configuration has `trustHost: true`.
+ */
+export function trustHostConfig(sourceFile: ts.SourceFile): TrustHostStatus {
+  const config = nextAuthConfig(sourceFile);
+  if (config === undefined) return { set: false, unresolvable: true };
+  const lookup = propertyOf(config, "trustHost");
+  if (lookup.unresolvable) return { set: false, unresolvable: true };
+  if (lookup.value !== undefined) {
+    const val = unwrapTransparentExpression(lookup.value);
+    if (val.kind === ts.SyntaxKind.TrueKeyword) {
+      return { set: true, unresolvable: false };
+    }
+  }
+  return { set: false, unresolvable: false };
 }
 
 function assignmentTargetContains(
@@ -2087,6 +2357,8 @@ export function readAuthSurface(source: string, fileName = "auth.ts"): AuthSurfa
   return {
     imports: importedModules(sourceFile),
     providers: configuredProviders(sourceFile),
+    googleScope: googleOAuthScope(sourceFile),
+    trustHost: trustHostConfig(sourceFile),
     cookies: sessionCookieOptions(sourceFile),
     envAccesses: envAccesses(sourceFile),
     wiring: propylonExportWiring(sourceFile),
@@ -2300,6 +2572,28 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
         ),
       );
     }
+    if (
+      providers.entries.some((entry) => entry.module === GOOGLE_PROVIDER) &&
+      !surface.googleScope.pinned
+    ) {
+      out.push(
+        violation(
+          "AUTH_GOOGLE_SCOPE_NOT_PINNED",
+          file,
+          surface.googleScope.detail,
+        ),
+      );
+    }
+  }
+
+  if (providers.factoryResolved && !surface.trustHost.set) {
+    out.push(
+      violation(
+        "AUTH_TRUST_HOST_NOT_SET",
+        file,
+        "NextAuth configuration does not set `trustHost: true`.",
+      ),
+    );
   }
 
   if (!surface.cookies.present) {
@@ -2310,14 +2604,52 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
         "cookies.sessionToken.options does not resolve to an object literal, so host-only cannot be verified.",
       ),
     );
-  } else if (surface.cookies.keys.includes("domain")) {
-    out.push(
-      violation(
-        "AUTH_COOKIE_DOMAIN_SET",
-        file,
-        "cookies.sessionToken.options sets `domain`; the sponsor cookie would leave the apex.",
-      ),
-    );
+  } else {
+    if (surface.cookies.keys.includes("domain")) {
+      out.push(
+        violation(
+          "AUTH_COOKIE_DOMAIN_SET",
+          file,
+          "cookies.sessionToken.options sets `domain`; the sponsor cookie would leave the apex.",
+        ),
+      );
+    }
+    if (!surface.cookies.httpOnlyTrue) {
+      out.push(
+        violation(
+          "AUTH_COOKIE_HTTPONLY_NOT_TRUE",
+          file,
+          "cookies.sessionToken.options must set `httpOnly: true`.",
+        ),
+      );
+    }
+    if (!surface.cookies.sameSiteLax) {
+      out.push(
+        violation(
+          "AUTH_COOKIE_SAMESITE_NOT_LAX",
+          file,
+          'cookies.sessionToken.options must set `sameSite: "lax"`.',
+        ),
+      );
+    }
+    if (!surface.cookies.pathRoot) {
+      out.push(
+        violation(
+          "AUTH_COOKIE_PATH_NOT_ROOT",
+          file,
+          'cookies.sessionToken.options must set `path: "/"`',
+        ),
+      );
+    }
+    if (!surface.cookies.secureProduction) {
+      out.push(
+        violation(
+          "AUTH_COOKIE_SECURE_NOT_PINNED",
+          file,
+          'cookies.sessionToken.options must set `secure: process.env.NODE_ENV === "production"`.',
+        ),
+      );
+    }
   }
   if (surface.cookies.unresolvable) {
     out.push(

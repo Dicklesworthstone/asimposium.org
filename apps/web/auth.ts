@@ -21,7 +21,16 @@ import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-
  * and never appear in a build artifact.
  */
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Google],
+  trustHost: true,
+  providers: [
+    Google({
+      authorization: {
+        params: {
+          scope: "openid email profile",
+        },
+      },
+    }),
+  ],
   session: { strategy: "jwt" },
   // OAuth failures land on a themed, honest face instead of the framework
   // default; the route renders the provider's raw code for correlation.
