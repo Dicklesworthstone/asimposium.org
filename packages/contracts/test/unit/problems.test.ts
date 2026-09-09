@@ -4,13 +4,10 @@ import Ajv2020 from "ajv/dist/2020";
 import {
   ClaimReanchorRequestSchema,
   ProblemClosingSynthesisSchema,
-  ProblemDetailSchema,
   ProblemFamousGuardrailSchema,
   ProblemGovernanceEventSchema,
   ProblemGovernanceKeySchema,
   ProblemLifecycleActionRequestSchema,
-  ProblemLifecycleContractsSchema,
-  ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
   ProblemStatementReviewEventSchema,
   ProblemStatementReviewRequestSchema,
@@ -18,7 +15,6 @@ import {
   ProblemStatementVersionSchema,
   ProblemStatusSchema,
   ProposeProblemRequestSchema,
-  SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
 } from "../../src/problems.ts";
 

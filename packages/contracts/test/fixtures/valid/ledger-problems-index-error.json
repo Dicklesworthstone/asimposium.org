@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/CURSOR_INVALID",
+  "title": "Invalid problem index query",
+  "status": 400,
+  "code": "CURSOR_INVALID",
+  "detail": "The index accepts only one optional after parameter containing a public problem id.",
+  "fix_hint": "Use next_after from the previous JSON page as ?after=<id>, or omit the query to restart.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query",
+  "example": { "method": "GET", "path": "/problems.json?after=P-4DSP" }
+}

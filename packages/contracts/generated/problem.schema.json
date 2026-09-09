@@ -105,7 +105,9 @@
                     "PROBLEM_BRIEF_BODY_INVALID",
                     "PROBLEM_LIFECYCLE_BODY_INVALID",
                     "REANCHOR_BODY_INVALID",
-                    "REVIEWER_ALREADY_REVIEWED"
+                    "REVIEWER_ALREADY_REVIEWED",
+                    "SYNTHESIZE_BODY_INVALID",
+                    "SYNTHESIS_UNANCHORED"
                   ]
                 },
                 "detail": {
@@ -131,6 +133,7 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
                     "§7.6"
                   ]
                 },
@@ -212,6 +215,15 @@
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
+                },
+                "unanchored": {
+                  "maxItems": 100,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
                 }
               },
               "required": [
@@ -272,6 +284,7 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
                     "§7.6"
                   ]
                 },
@@ -357,6 +370,7 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
                     "§7.6"
                   ]
                 },
@@ -442,6 +456,7 @@
                     "P9",
                     "P10",
                     "P11",
+                    "P13",
                     "§7.6"
                   ]
                 },
@@ -671,7 +686,9 @@
                 "PROBLEM_BRIEF_BODY_INVALID",
                 "PROBLEM_LIFECYCLE_BODY_INVALID",
                 "REANCHOR_BODY_INVALID",
-                "REVIEWER_ALREADY_REVIEWED"
+                "REVIEWER_ALREADY_REVIEWED",
+                "SYNTHESIZE_BODY_INVALID",
+                "SYNTHESIS_UNANCHORED"
               ]
             },
             "detail": {
@@ -697,6 +714,7 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
                 "§7.6"
               ]
             },
@@ -778,6 +796,15 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
+            },
+            "unanchored": {
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
             }
           },
           "required": [
@@ -838,6 +865,7 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
                 "§7.6"
               ]
             },
@@ -923,6 +951,7 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
                 "§7.6"
               ]
             },
@@ -1008,6 +1037,7 @@
                 "P9",
                 "P10",
                 "P11",
+                "P13",
                 "§7.6"
               ]
             },
@@ -1216,6 +1246,8 @@
         "PROBLEM_LIFECYCLE_BODY_INVALID",
         "REANCHOR_BODY_INVALID",
         "REVIEWER_ALREADY_REVIEWED",
+        "SYNTHESIZE_BODY_INVALID",
+        "SYNTHESIS_UNANCHORED",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

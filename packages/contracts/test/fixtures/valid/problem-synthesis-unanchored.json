@@ -1,0 +1,23 @@
+{
+  "type": "https://asimposium.org/errors/SYNTHESIS_UNANCHORED",
+  "title": "Synthesis anchors ungrounded in ledger",
+  "status": 422,
+  "code": "SYNTHESIS_UNANCHORED",
+  "detail": "Synthesis contains assertions referencing ledger objects that do not exist or were published after covers_through.",
+  "fix_hint": "Remove ungrounded anchors or advance covers_through to cover all referenced ledger objects.",
+  "rule": "P13",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "covers_through": 10,
+    "body_md": "## Synthesis\n\nState of the problem.",
+    "anchors": [
+      {
+        "target_kind": "claim",
+        "target_id": "C-1",
+        "target_version": 1
+      }
+    ],
+    "omitted": [],
+    "selection_policy": "Include all claims with corroborated disposition."
+  }
+}

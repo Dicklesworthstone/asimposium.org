@@ -27,6 +27,8 @@ import {
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
+  SynthesizeRequestSchema,
+  SynthesizeResponseSchema,
   WorkshopObjectResponseSchema,
   WorkshopPushRequestSchema,
 } from "../../src/sessions.ts";
@@ -760,4 +762,24 @@ test("relation schemas enforce version-pinned targets and addresses-gap discrimi
     seq: 13,
   };
   expect(RelationFiledResponseSchema.safeParse(validRelResponse).success).toBe(true);
+});
+
+test("synthesize schemas validate anchored digest payloads", async () => {
+  const validReq = await fixture(
+    new URL("../fixtures/valid/synthesize-request.json", import.meta.url),
+  );
+  const invalidReq = await fixture(
+    new URL("../fixtures/invalid/synthesize-request.json", import.meta.url),
+  );
+  expect(SynthesizeRequestSchema.safeParse(validReq).success).toBe(true);
+  expect(SynthesizeRequestSchema.safeParse(invalidReq).success).toBe(false);
+
+  const validResp = await fixture(
+    new URL("../fixtures/valid/synthesize-response.json", import.meta.url),
+  );
+  const invalidResp = await fixture(
+    new URL("../fixtures/invalid/synthesize-response.json", import.meta.url),
+  );
+  expect(SynthesizeResponseSchema.safeParse(validResp).success).toBe(true);
+  expect(SynthesizeResponseSchema.safeParse(invalidResp).success).toBe(false);
 });

@@ -125,6 +125,12 @@
             "additionalProperties": false
           }
         },
+        "next_after": {
+          "description": "When present, request the next page with ?after=<this id>; absent at the current end. Pages reflect live visibility, not a frozen snapshot.",
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
         "omitted": {
           "type": "array",
           "items": {
@@ -138,6 +144,17 @@
         "problems",
         "omitted"
       ],
+      "additionalProperties": false
+    },
+    "problems_index_query": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
       "additionalProperties": false
     },
     "problem_face_response": {
@@ -1408,6 +1425,7 @@
             "status": "sharpening"
           }
         ],
+        "next_after": "P-4DSP",
         "omitted": [
           "problem statements, scientific objects and review details are available through each problem digest"
         ]

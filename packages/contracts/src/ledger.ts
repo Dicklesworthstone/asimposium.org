@@ -88,8 +88,15 @@ export const ProblemIndexEntrySchema = z
 export const ProblemsIndexResponseSchema = z
   .object({
     problems: z.array(ProblemIndexEntrySchema).max(200),
+    next_after: PublicLedgerProblemIdSchema.optional().describe(
+      "When present, request the next page with ?after=<this id>; absent at the current end. Pages reflect live visibility, not a frozen snapshot.",
+    ),
     omitted: z.array(z.string().min(1).max(160)),
   })
+  .strict();
+
+export const ProblemsIndexQuerySchema = z
+  .object({ after: PublicLedgerProblemIdSchema.optional() })
   .strict();
 
 export type ProblemIndexEntry = z.infer<typeof ProblemIndexEntrySchema>;
@@ -419,6 +426,7 @@ export const LedgerContractsSchema = z
   .object({
     problem_index_entry: ProblemIndexEntrySchema,
     problems_index_response: ProblemsIndexResponseSchema,
+    problems_index_query: ProblemsIndexQuerySchema.optional(),
     problem_face_response: ProblemFaceResponseSchema,
     claim_face_response: ClaimFaceResponseSchema.optional(),
     claim_face_query: ClaimFaceQuerySchema.optional(),

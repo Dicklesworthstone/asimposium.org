@@ -11,10 +11,12 @@ import {
   LedgerContractsSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
+  ProblemsIndexQuerySchema,
   ProblemsIndexResponseSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
+import { ProblemDocumentSchema } from "../../src/problem.ts";
 
 test("claim snapshot cursor query has the same canonical bounded grammar in Zod and JSON Schema", async () => {
   const good = await fixture(
@@ -217,6 +219,53 @@ test("the problems index accepts the valid fixture and requires omitted[]", asyn
   // omitted[] is mandatory: an index that does not say what it left out is
   // not a valid face, even when the list itself is well-formed.
   expect(ProblemsIndexResponseSchema.safeParse(await fixture(INVALID_INDEX)).success).toBe(false);
+});
+
+test("problem-index continuation query and response agree with the served schema", async () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const query = new Ajv2020({ strict: true }).compile(schema.properties.problems_index_query);
+  const response = new Ajv2020({ strict: true }).compile(schema.properties.problems_index_response);
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-problems-index-query.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-query.json", import.meta.url),
+  );
+  for (const value of [{}, good, { after: "P-a:b.c_4" }]) {
+    expect(query(value)).toBe(true);
+    expect(ProblemsIndexQuerySchema.safeParse(value).success).toBe(true);
+  }
+  for (const value of [
+    bad,
+    { after: "" },
+    { after: ["P-A", "P-B"] },
+    { after: "../private" },
+    { after: "P--A" },
+    { after: "x".repeat(129) },
+  ]) {
+    expect(query(value)).toBe(false);
+    expect(ProblemsIndexQuerySchema.safeParse(value).success).toBe(false);
+  }
+  const invalidCursor = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-cursor.json", import.meta.url),
+  );
+  expect(response(invalidCursor)).toBe(false);
+  expect(ProblemsIndexResponseSchema.safeParse(invalidCursor).success).toBe(false);
+  expect(response(await fixture(VALID_INDEX))).toBe(true);
+  expect(
+    ProblemDocumentSchema.safeParse(
+      await fixture(new URL("../fixtures/valid/ledger-problems-index-error.json", import.meta.url)),
+    ).success,
+  ).toBe(true);
+  expect(
+    ProblemDocumentSchema.safeParse(
+      await fixture(
+        new URL("../fixtures/invalid/ledger-problems-index-error.json", import.meta.url),
+      ),
+    ).success,
+  ).toBe(false);
 });
 
 test("index metadata agrees with JSON Schema and refuses private or invented lifecycle states", async () => {

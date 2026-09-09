@@ -141,6 +141,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "PROBLEM_LIFECYCLE_BODY_INVALID",
   "REANCHOR_BODY_INVALID",
   "REVIEWER_ALREADY_REVIEWED",
+  // W5.8b: Synthesis lifecycle teaching refusals (Fable §6.1, §6.3, Rule P13).
+  "SYNTHESIZE_BODY_INVALID",
+  "SYNTHESIS_UNANCHORED",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -210,6 +213,7 @@ export const ProblemRuleSchema = z.enum([
   "P9",
   "P10",
   "P11",
+  "P13",
   "§7.6",
 ]);
 
@@ -266,6 +270,8 @@ const generalContractProblem = z
     remaining: z.number().int().min(0).optional(),
     /** Window duration in seconds, present only on rate-limited refusals. */
     window_seconds: z.number().int().positive().optional(),
+    /** Unanchored ledger object references, present only on SYNTHESIS_UNANCHORED. */
+    unanchored: z.array(z.string().min(1).max(256)).max(100).optional(),
   })
   .strict();
 

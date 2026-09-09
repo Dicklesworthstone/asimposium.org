@@ -1,0 +1,7 @@
+{
+  "type": "https://asimposium.org/errors/CURSOR_INVALID",
+  "title": "Invalid problem index query",
+  "status": 400,
+  "code": "CURSOR_INVALID",
+  "detail": "Invalid after cursor."
+}

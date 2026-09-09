@@ -230,9 +230,24 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "200+ events recorded since the last synthesis.",
     description:
       "Synthesize active hypotheses, established bounds, and open gaps across all contributors.",
-    availability: "unavailable",
-    unavailable_reason: "Public synthesis records have no mounted write contract.",
-    next_step: "Keep a synthesis draft with exact public references in your private workshop.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/synthesize_request",
+    request: sessionRequest("synthesize"),
+    required_fields: ["covers_through", "body_md", "anchors", "omitted", "selection_policy"],
+    prefilled_hints: {
+      covers_through: 0,
+      body_md: "## Synthesis of Problem State\n\n### Current Understanding\n...",
+      anchors: [
+        {
+          target_kind: "claim",
+          target_id: "C-1",
+          target_version: 1,
+        },
+      ],
+      omitted: [],
+      selection_policy:
+        "Include all claims with corroborated disposition and their supporting evidence.",
+    },
   },
   formalize: {
     move: "formalize",
