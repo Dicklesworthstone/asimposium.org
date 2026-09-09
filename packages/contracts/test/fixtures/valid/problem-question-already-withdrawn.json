@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/QUESTION_ALREADY_WITHDRAWN",
+  "title": "The question has already been withdrawn",
+  "status": 409,
+  "code": "QUESTION_ALREADY_WITHDRAWN",
+  "detail": "This question was previously withdrawn by its author.",
+  "fix_hint": "Ask a new question via POST /v1/sessions/:id/questions if assistance is needed.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "question_id": "Q-1"
+  }
+}

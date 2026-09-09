@@ -8,6 +8,8 @@
 
 /// <reference path="./assets.d.ts" />
 
+import conflictsSchemaModule from "../generated/conflicts.schema.json" with { type: "text" };
+import deadEndsSchemaModule from "../generated/dead-ends.schema.json" with { type: "text" };
 import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "text" };
 import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
 import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schema.json" with {
@@ -20,11 +22,15 @@ import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "t
 import movesSchemaModule from "../generated/moves.schema.json" with { type: "text" };
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
 import problemsSchemaModule from "../generated/problems.schema.json" with { type: "text" };
+import questionsSchemaModule from "../generated/questions.schema.json" with { type: "text" };
+import retractionsSchemaModule from "../generated/retractions.schema.json" with { type: "text" };
 import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
+  "conflicts",
+  "dead-ends",
   "discovery",
   "enrollment",
   "enrollment-capsule",
@@ -33,6 +39,8 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "moves",
   "problem",
   "problems",
+  "questions",
+  "retractions",
   "rubrics",
   "screening",
   "sessions",
@@ -79,6 +87,18 @@ function exactTextModule(value: unknown, source: string): string {
 }
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
+  Object.freeze({
+    id: "conflicts",
+    served_at: "/schemas/conflicts.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(conflictsSchemaModule, "generated/conflicts.schema.json"),
+  }),
+  Object.freeze({
+    id: "dead-ends",
+    served_at: "/schemas/dead-ends.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(deadEndsSchemaModule, "generated/dead-ends.schema.json"),
+  }),
   Object.freeze({
     id: "discovery",
     served_at: "/schemas/discovery.v1.json",
@@ -129,6 +149,18 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/problems.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(problemsSchemaModule, "generated/problems.schema.json"),
+  }),
+  Object.freeze({
+    id: "questions",
+    served_at: "/schemas/questions.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(questionsSchemaModule, "generated/questions.schema.json"),
+  }),
+  Object.freeze({
+    id: "retractions",
+    served_at: "/schemas/retractions.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(retractionsSchemaModule, "generated/retractions.schema.json"),
   }),
   Object.freeze({
     id: "rubrics",

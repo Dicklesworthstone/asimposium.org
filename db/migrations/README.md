@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0051_synthesize_replay_scope.sql`.
+schema through `0054_conflicts_fable_shape_and_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -80,6 +80,17 @@ before deploying the Worker that reads or writes problem areas.
 Migration `0051_synthesize_replay_scope.sql` widens the sealed replay scope to
 include 'synthesize', ensuring that periodic synthesis digests use the same 24-hour
 sealed replay, Rule P13 anchor validation, and atomic Krater event ledger transaction.
+
+Migration `0052_dead_ends_and_replay_scope.sql` retains dead-end ledger sequence,
+normalized approach identity and supersession, and admits its sealed replay scope.
+
+Migration `0053_questions_and_retractions_replay_scope.sql` adds question leases,
+withdrawal state and ledger sequence, retraction kinds, and their sealed replay scopes.
+
+Migration `0054_conflicts_fable_shape_and_replay_scope.sql` refits the conflicts
+table to the Fable §6.1 normalized shape (definition/scope/quantifier alignment,
+smallest disagreement, agreed facts, discriminating tests, persistent uncertainty)
+and admits its sealed replay scopes.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

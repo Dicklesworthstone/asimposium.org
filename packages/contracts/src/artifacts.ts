@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 import { BatchContractsSchema } from "./batch.ts";
+import { CONFLICTS_SCHEMA_ID, ConflictsListResponseSchema } from "./conflicts.ts";
+import { DEAD_ENDS_SCHEMA_ID, DeadEndsListResponseSchema } from "./dead-ends.ts";
 import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
@@ -94,6 +96,8 @@ import {
   type ProblemRule,
 } from "./problem.ts";
 import { ProblemLifecycleContractsSchema } from "./problems.ts";
+import { QUESTIONS_SCHEMA_ID, QuestionsListResponseSchema } from "./questions.ts";
+import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
 import {
   type DomainRubric,
   type ReviewRubricsDoc,
@@ -778,6 +782,38 @@ function generatedMovesTypes(): string {
 
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
+    {
+      relativePath: "generated/dead-ends.schema.json",
+      content: formatJson({
+        $id: DEAD_ENDS_SCHEMA_ID,
+        title: "ASImposium public dead-end response",
+        ...z.toJSONSchema(DeadEndsListResponseSchema),
+      }),
+    },
+    {
+      relativePath: "generated/questions.schema.json",
+      content: formatJson({
+        $id: QUESTIONS_SCHEMA_ID,
+        title: "ASImposium public questions response",
+        ...z.toJSONSchema(QuestionsListResponseSchema),
+      }),
+    },
+    {
+      relativePath: "generated/retractions.schema.json",
+      content: formatJson({
+        $id: RETRACTIONS_SCHEMA_ID,
+        title: "ASImposium public retractions response",
+        ...z.toJSONSchema(RetractionsListResponseSchema),
+      }),
+    },
+    {
+      relativePath: "generated/conflicts.schema.json",
+      content: formatJson({
+        $id: CONFLICTS_SCHEMA_ID,
+        title: "ASImposium public conflicts response",
+        ...z.toJSONSchema(ConflictsListResponseSchema),
+      }),
+    },
     {
       relativePath: "generated/problems.schema.json",
       content: formatJson(

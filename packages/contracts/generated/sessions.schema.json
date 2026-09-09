@@ -4777,6 +4777,190 @@
         "seq"
       ],
       "additionalProperties": false
+    },
+    "normalize_conflict_request": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "claims": {
+          "minItems": 2,
+          "maxItems": 2,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "claim_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,40}$"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "claim_id",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "aligned_definitions": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        },
+        "aligned_scope": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        },
+        "aligned_quantifiers": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        },
+        "smallest_disagreement": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 2000
+        },
+        "agreed_facts": {
+          "minItems": 1,
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "discriminating_tests": {
+          "minItems": 1,
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        }
+      },
+      "required": [
+        "claims",
+        "aligned_definitions",
+        "aligned_scope",
+        "aligned_quantifiers",
+        "smallest_disagreement",
+        "agreed_facts",
+        "discriminating_tests"
+      ],
+      "additionalProperties": false
+    },
+    "normalize_conflict_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "conflict_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)CF-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "status": {
+          "type": "string",
+          "const": "open"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "conflict_id",
+        "problem_id",
+        "status",
+        "seq",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "resolve_conflict_request": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "resolved",
+            "persistent-uncertainty"
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        }
+      },
+      "required": [
+        "status",
+        "resolution"
+      ],
+      "additionalProperties": false
+    },
+    "resolve_conflict_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "conflict_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)CF-[A-Z0-9][A-Z0-9-]{0,40}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "resolved",
+            "persistent-uncertainty"
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "resolved_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "conflict_id",
+        "problem_id",
+        "status",
+        "seq",
+        "resolved_at"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -4814,7 +4998,11 @@
     "synthesize_request",
     "synthesize_response",
     "record_dead_end_request",
-    "record_dead_end_response"
+    "record_dead_end_response",
+    "normalize_conflict_request",
+    "normalize_conflict_response",
+    "resolve_conflict_request",
+    "resolve_conflict_response"
   ],
   "additionalProperties": false,
   "examples": [

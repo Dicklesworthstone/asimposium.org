@@ -1,5 +1,15 @@
 import { z } from "zod";
 import {
+  type NormalizeConflictRequest,
+  NormalizeConflictRequestSchema,
+  type NormalizeConflictResponse,
+  NormalizeConflictResponseSchema,
+  type ResolveConflictRequest,
+  ResolveConflictRequestSchema,
+  type ResolveConflictResponse,
+  ResolveConflictResponseSchema,
+} from "./conflicts.ts";
+import {
   type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   type RecordDeadEndResponse,
@@ -15,12 +25,20 @@ import {
 } from "./scientific-provenance.ts";
 
 export {
+  type NormalizeConflictRequest,
+  NormalizeConflictRequestSchema,
+  type NormalizeConflictResponse,
+  NormalizeConflictResponseSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
   type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   type RecordDeadEndResponse,
   RecordDeadEndResponseSchema,
+  type ResolveConflictRequest,
+  ResolveConflictRequestSchema,
+  type ResolveConflictResponse,
+  ResolveConflictResponseSchema,
 };
 
 /**
@@ -1017,6 +1035,10 @@ export const SessionsContractsSchema = z
     synthesize_response: SynthesizeResponseSchema,
     record_dead_end_request: RecordDeadEndRequestSchema,
     record_dead_end_response: RecordDeadEndResponseSchema,
+    normalize_conflict_request: NormalizeConflictRequestSchema,
+    normalize_conflict_response: NormalizeConflictResponseSchema,
+    resolve_conflict_request: ResolveConflictRequestSchema,
+    resolve_conflict_response: ResolveConflictResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

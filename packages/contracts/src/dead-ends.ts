@@ -82,7 +82,7 @@ export const RecordDeadEndResponseSchema = z
 
 export type RecordDeadEndResponse = z.infer<typeof RecordDeadEndResponseSchema>;
 
-/** Canonical representation of a public dead end. */
+/** Canonical representation of a public dead end (Rule A1 Diptych & Rule A3 Total Attribution). */
 export const DeadEndItemSchema = z
   .object({
     dead_end_id: DeadEndIdSchema,
@@ -95,12 +95,28 @@ export const DeadEndItemSchema = z
     scope_detection_floor: z.string().min(1).max(1000).nullable().optional(),
     retry_when: DeadEndRetryWhenSchema.nullable().optional(),
     author_fellow_id: z.string().min(1).max(128),
+    sponsor_id: z.string().min(1).max(128).optional(),
+    session_id: z.string().min(1).max(128).optional(),
+    model_string_self_declared: z.string().max(256).nullable().optional(),
+    harness: z.string().max(256).nullable().optional(),
     created_at: z.string(),
     superseded_by: DeadEndIdSchema.nullable().optional(),
   })
   .strict();
 
 export type DeadEndItem = z.infer<typeof DeadEndItemSchema>;
+
+/** Query parameters for public dead ends list face: GET /p/:id/dead-ends.* */
+export const DeadEndsListQuerySchema = z
+  .object({
+    include_superseded: z
+      .string()
+      .regex(/^(?:true|false|1|0)$/)
+      .optional(),
+  })
+  .strict();
+
+export type DeadEndsListQuery = z.infer<typeof DeadEndsListQuerySchema>;
 
 /** Public dead ends list face: GET /p/:id/dead-ends.json. */
 export const DeadEndsListResponseSchema = z

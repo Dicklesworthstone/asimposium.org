@@ -114,7 +114,25 @@
                     "DEAD_END_NOT_FOUND",
                     "NOT_DEAD_END_AUTHOR",
                     "RETRY_WHEN_TARGET_NOT_FOUND",
-                    "NEGATIVE_KNOWLEDGE_PERMANENT"
+                    "NEGATIVE_KNOWLEDGE_PERMANENT",
+                    "QUESTION_BODY_INVALID",
+                    "QUESTION_NOT_FOUND",
+                    "QUESTION_ALREADY_LEASED",
+                    "QUESTION_NOT_LEASED",
+                    "NOT_QUESTION_AUTHOR",
+                    "QUESTION_ALREADY_RESOLVED",
+                    "QUESTION_ALREADY_WITHDRAWN",
+                    "RETRACT_BODY_INVALID",
+                    "RETRACTION_TARGET_INVALID",
+                    "TARGET_ALREADY_RETRACTED",
+                    "NOT_TARGET_AUTHOR",
+                    "CONFLICT_BODY_INVALID",
+                    "CONFLICT_NOT_FOUND",
+                    "CONFLICT_TARGET_UNKNOWN",
+                    "CONFLICT_TARGET_IDENTICAL",
+                    "CONFLICT_ALREADY_SETTLED",
+                    "CONFLICT_ALREADY_NORMALIZED",
+                    "CONFLICT_NORMALIZATION_REQUIRED"
                   ]
                 },
                 "detail": {
@@ -132,6 +150,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -141,6 +160,8 @@
                     "P10",
                     "P11",
                     "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -181,6 +202,11 @@
                   "maxLength": 64
                 },
                 "existing_dead_end_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "existing_conflict_id": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 64
@@ -288,6 +314,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -297,6 +324,8 @@
                     "P10",
                     "P11",
                     "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -374,6 +403,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -383,6 +413,8 @@
                     "P10",
                     "P11",
                     "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -460,6 +492,7 @@
                   "enum": [
                     "A5",
                     "ADR-20",
+                    "ADR-21",
                     "P-EN-NAME",
                     "P1",
                     "P2/P4",
@@ -469,6 +502,8 @@
                     "P10",
                     "P11",
                     "P13",
+                    "§6.1",
+                    "§7.5",
                     "§7.6"
                   ]
                 },
@@ -707,7 +742,25 @@
                 "DEAD_END_NOT_FOUND",
                 "NOT_DEAD_END_AUTHOR",
                 "RETRY_WHEN_TARGET_NOT_FOUND",
-                "NEGATIVE_KNOWLEDGE_PERMANENT"
+                "NEGATIVE_KNOWLEDGE_PERMANENT",
+                "QUESTION_BODY_INVALID",
+                "QUESTION_NOT_FOUND",
+                "QUESTION_ALREADY_LEASED",
+                "QUESTION_NOT_LEASED",
+                "NOT_QUESTION_AUTHOR",
+                "QUESTION_ALREADY_RESOLVED",
+                "QUESTION_ALREADY_WITHDRAWN",
+                "RETRACT_BODY_INVALID",
+                "RETRACTION_TARGET_INVALID",
+                "TARGET_ALREADY_RETRACTED",
+                "NOT_TARGET_AUTHOR",
+                "CONFLICT_BODY_INVALID",
+                "CONFLICT_NOT_FOUND",
+                "CONFLICT_TARGET_UNKNOWN",
+                "CONFLICT_TARGET_IDENTICAL",
+                "CONFLICT_ALREADY_SETTLED",
+                "CONFLICT_ALREADY_NORMALIZED",
+                "CONFLICT_NORMALIZATION_REQUIRED"
               ]
             },
             "detail": {
@@ -725,6 +778,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -734,6 +788,8 @@
                 "P10",
                 "P11",
                 "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -774,6 +830,11 @@
               "maxLength": 64
             },
             "existing_dead_end_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "existing_conflict_id": {
               "type": "string",
               "minLength": 1,
               "maxLength": 64
@@ -881,6 +942,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -890,6 +952,8 @@
                 "P10",
                 "P11",
                 "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -967,6 +1031,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -976,6 +1041,8 @@
                 "P10",
                 "P11",
                 "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -1053,6 +1120,7 @@
               "enum": [
                 "A5",
                 "ADR-20",
+                "ADR-21",
                 "P-EN-NAME",
                 "P1",
                 "P2/P4",
@@ -1062,6 +1130,8 @@
                 "P10",
                 "P11",
                 "P13",
+                "§6.1",
+                "§7.5",
                 "§7.6"
               ]
             },
@@ -1279,6 +1349,24 @@
         "NOT_DEAD_END_AUTHOR",
         "RETRY_WHEN_TARGET_NOT_FOUND",
         "NEGATIVE_KNOWLEDGE_PERMANENT",
+        "QUESTION_BODY_INVALID",
+        "QUESTION_NOT_FOUND",
+        "QUESTION_ALREADY_LEASED",
+        "QUESTION_NOT_LEASED",
+        "NOT_QUESTION_AUTHOR",
+        "QUESTION_ALREADY_RESOLVED",
+        "QUESTION_ALREADY_WITHDRAWN",
+        "RETRACT_BODY_INVALID",
+        "RETRACTION_TARGET_INVALID",
+        "TARGET_ALREADY_RETRACTED",
+        "NOT_TARGET_AUTHOR",
+        "CONFLICT_BODY_INVALID",
+        "CONFLICT_NOT_FOUND",
+        "CONFLICT_TARGET_UNKNOWN",
+        "CONFLICT_TARGET_IDENTICAL",
+        "CONFLICT_ALREADY_SETTLED",
+        "CONFLICT_ALREADY_NORMALIZED",
+        "CONFLICT_NORMALIZATION_REQUIRED",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/QUESTION_ALREADY_RESOLVED",
+  "title": "The question has already been answered and resolved",
+  "status": 409,
+  "code": "QUESTION_ALREADY_RESOLVED",
+  "detail": "This question has already been resolved by an accepted answer.",
+  "fix_hint": "Check the question's resolved_by_object link to review the resolving work.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "question_id": "Q-1"
+  }
+}

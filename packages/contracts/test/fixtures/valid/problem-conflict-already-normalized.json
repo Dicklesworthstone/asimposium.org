@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_ALREADY_NORMALIZED",
+  "title": "Conflict already normalized",
+  "status": 409,
+  "code": "CONFLICT_ALREADY_NORMALIZED",
+  "detail": "An active open conflict between C-1@1 and C-2@1 already exists as CF-1.",
+  "fix_hint": "Contribute evidence or tests to the existing open conflict CF-1.",
+  "rule": "§6.1",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "existing_conflict_id": "CF-1"
+  }
+}

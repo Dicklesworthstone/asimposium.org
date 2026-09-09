@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/QUESTION_BODY_INVALID",
+  "title": "The question request body does not match the contract",
+  "status": 422,
+  "code": "QUESTION_BODY_INVALID",
+  "detail": "The JSON body does not match the question request contract.",
+  "fix_hint": "Send problem_id and body_md (at least 10 chars) with optional target_refs and blocking.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "problem_id": "P-100",
+    "body_md": "Is there a known bounded gap for this residue class?"
+  }
+}

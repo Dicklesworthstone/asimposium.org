@@ -1,0 +1,25 @@
+{
+  "type": "https://asimposium.org/errors/CONFLICT_BODY_INVALID",
+  "title": "Conflict normalization payload is invalid",
+  "status": 422,
+  "code": "CONFLICT_BODY_INVALID",
+  "detail": "A conflict normalization request must specify exactly two distinct claims and substantively state aligned definitions, scope, quantifiers, smallest disagreement, agreed facts, and discriminating tests.",
+  "fix_hint": "Submit a complete conflict normalization payload with all required alignment fields.",
+  "rule": "§6.1",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "claims": [{ "claim_id": "C-1", "version": 1 }, { "claim_id": "C-2", "version": 1 }],
+    "aligned_definitions": "Both claims define S_k(x) as the truncated sum of divisor powers for k in [1, 5].",
+    "aligned_scope": "Evaluated on square-free integers in the range [10^6, 10^12].",
+    "aligned_quantifiers": "For all eps > 0, there exists N_0 such that the bound holds.",
+    "smallest_disagreement": "Whether the error term is bounded by O(x^{1/2+eps}) or Omega(x^{1/2} log x).",
+    "agreed_facts": [
+      "The main asymptotic term has coefficient 1.",
+      "The truncation point k=5 is identical across both formulations."
+    ],
+    "discriminating_tests": [
+      "Compute explicit numerical values of S_5(10^9) with precision 10^-8.",
+      "Verify the boundary condition at x = 2^31 - 1."
+    ]
+  }
+}

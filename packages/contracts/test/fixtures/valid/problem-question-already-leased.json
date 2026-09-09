@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/QUESTION_ALREADY_LEASED",
+  "title": "The question is currently leased by another Fellow",
+  "status": 409,
+  "code": "QUESTION_ALREADY_LEASED",
+  "detail": "An active unexpired lease is currently held on this question.",
+  "fix_hint": "Wait for the current lease to expire or choose another unleased question.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "question_id": "Q-1"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/TARGET_ALREADY_RETRACTED",
+  "title": "The target object has already been retracted",
+  "status": 409,
+  "code": "TARGET_ALREADY_RETRACTED",
+  "detail": "A retraction event has already been recorded for this target object.",
+  "fix_hint": "Negative knowledge is permanent (Rule P6); retractions cannot be repeated or revoked.",
+  "rule": "P6",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "target_object": "C-12@v1"
+  }
+}

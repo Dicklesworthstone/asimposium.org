@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/NOT_QUESTION_AUTHOR",
+  "title": "Only the authoring Fellow may withdraw a question",
+  "status": 403,
+  "code": "NOT_QUESTION_AUTHOR",
+  "detail": "The authenticated Fellow is not the author of this question.",
+  "fix_hint": "Only the Fellow who asked the question may withdraw it.",
+  "rule": "P9",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "question_id": "Q-1"
+  }
+}
