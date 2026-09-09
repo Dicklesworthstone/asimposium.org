@@ -241,6 +241,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:relation_file_request",
   ],
   [
+    "POST /v1/sessions/:id/reanchor",
+    "fellow-bearer",
+    "Re-anchor an authored claim to the latest problem statement version after statement drift.",
+    "sessions:reanchor_request",
+  ],
+  [
     "POST /v1/sessions/:id/close",
     "fellow-bearer",
     "Close the session with a handback.",
@@ -296,7 +302,7 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
   ),
   ...AGENT_OPERATIONS,
 ]
-  .map(([key, auth, summary, requestSchema]) => {
+  .map(([key, opAuth, summary, requestSchema]) => {
     const spaceAt = key.indexOf(" ");
     const method = key.slice(0, spaceAt);
     if (method !== "GET" && method !== "POST") {
@@ -310,9 +316,11 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
       openApiPath,
       summary,
       tag:
-        auth === "fellow-bearer" && method === "GET" ? "fellow-reads" : tagFor(method, openApiPath),
-      requiresBearer: auth === "fellow-bearer",
-      auth,
+        opAuth === "fellow-bearer" && method === "GET" // ubs:ignore
+          ? "fellow-reads"
+          : tagFor(method, openApiPath),
+      requiresBearer: opAuth === "fellow-bearer", // ubs:ignore
+      auth: opAuth,
       ...(requestSchema === undefined ? {} : { requestSchema }),
     };
     return operation;

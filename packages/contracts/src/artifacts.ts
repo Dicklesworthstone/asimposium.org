@@ -127,6 +127,8 @@ import {
 import {
   type ClaimId,
   type ClaimKind,
+  type ClaimReanchorRequest,
+  type ClaimReanchorResponse,
   type ClaimRevision,
   type CursorResponse,
   type NextAction,
@@ -520,6 +522,8 @@ function generatedSessionsTypes(): string {
   const typeNames = [
     "ClaimId",
     "ClaimKind",
+    "ClaimReanchorRequest",
+    "ClaimReanchorResponse",
     "ClaimRevision",
     "CursorResponse",
     "NextAction",
@@ -553,6 +557,8 @@ function generatedSessionsTypes(): string {
   ] as const satisfies readonly (keyof {
     ClaimId: ClaimId;
     ClaimKind: ClaimKind;
+    ClaimReanchorRequest: ClaimReanchorRequest;
+    ClaimReanchorResponse: ClaimReanchorResponse;
     ClaimRevision: ClaimRevision;
     CursorResponse: CursorResponse;
     NextAction: NextAction;

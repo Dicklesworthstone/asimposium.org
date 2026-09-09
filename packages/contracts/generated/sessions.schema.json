@@ -4239,6 +4239,54 @@
         "seq"
       ],
       "additionalProperties": false
+    },
+    "reanchor_request": {
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "base_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "claim_id",
+        "base_version"
+      ],
+      "additionalProperties": false
+    },
+    "reanchor_response": {
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "reanchored": {
+          "type": "boolean",
+          "const": true
+        },
+        "statement_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "statement_drift": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "claim_id",
+        "reanchored",
+        "statement_version",
+        "statement_drift"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -4269,7 +4317,9 @@
     "gap_transition_request",
     "gap_closed_response",
     "relation_file_request",
-    "relation_filed_response"
+    "relation_filed_response",
+    "reanchor_request",
+    "reanchor_response"
   ],
   "additionalProperties": false,
   "examples": [

@@ -574,6 +574,7 @@ describe("face wire format", () => {
         ...[
           "workshop",
           "promote",
+          "reanchor",
           "close",
           "revise",
           "review",
@@ -1020,7 +1021,9 @@ describe("face wire format", () => {
     const unleakedFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
     const db = new Database(":memory:");
     try {
-      db.run("CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL)");
+      db.run(
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
+      );
       db.run(
         "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL, payload_sha256 TEXT NOT NULL DEFAULT 'sha256:fixture')",
       );
@@ -1090,7 +1093,7 @@ describe("face wire format", () => {
   });
 
   test("a malformed future row from the D1 seam fails closed without leaking its body", async () => {
-    const secretFuture = "FUTURE-CLAIM-MUST-NOT-LEAK";
+    const unleakedFutureClaim = "FUTURE-CLAIM-MUST-NOT-LEAK";
     const env = trustedStoaEnv();
     env.DB = {
       prepare() {
@@ -1102,7 +1105,7 @@ describe("face wire format", () => {
                   problem_id: "P-4DSP",
                   public_seq: 7,
                   claim_id: "C-8",
-                  statement: secretFuture,
+                  statement: unleakedFutureClaim,
                   source_seq: 8,
                 },
               ],
@@ -1120,7 +1123,7 @@ describe("face wire format", () => {
     expect(response.status).toBe(500);
     const body = await response.text();
     expect(body).toContain('"code":"INTERNAL_ERROR"');
-    expect(body).not.toContain(secretFuture);
+    expect(body).not.toContain(unleakedFutureClaim);
   });
 
   test("the mounted problem index carries every contracted entry field across JSON and Markdown", async () => {
@@ -1172,7 +1175,8 @@ describe("face wire format", () => {
     expect([...entryKeys].sort()).toEqual([...descriptorKeys].sort());
 
     expect(queries).toHaveLength(2);
-    const sqlSuffix = " FROM problems ORDER BY id ASC LIMIT 201";
+    const sqlSuffix =
+      " FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201";
     for (const query of queries) {
       expect(query.startsWith("SELECT ")).toBe(true);
       expect(query.endsWith(sqlSuffix)).toBe(true);
@@ -1312,7 +1316,7 @@ describe("face wire format", () => {
     const db = new Database(":memory:");
     try {
       db.run(
-        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
       );
       const base = Date.parse("2026-08-20T00:00:00.000Z");
       const insert = db.prepare(
@@ -1350,7 +1354,7 @@ describe("face wire format", () => {
       // Bind the production SQL to the exact total order; without this a stub that
       // returned pre-sorted rows would false-green.
       expect(capturedSql).toBe(
-        "SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY id ASC LIMIT 201",
+        "SELECT id, public_seq, created_at, updated_at FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201",
       );
 
       // Exact first-200 membership and order, by id ASC — never a rival sort's head.

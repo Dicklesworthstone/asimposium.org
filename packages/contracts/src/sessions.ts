@@ -864,6 +864,26 @@ export const RelationFiledResponseSchema = z
   })
   .strict();
 export type RelationFiledResponse = z.infer<typeof RelationFiledResponseSchema>;
+
+/** Claim re-anchor to current problem statement version: POST /v1/sessions/:id/reanchor. */
+export const ClaimReanchorRequestSchema = z
+  .object({
+    claim_id: ClaimIdSchema,
+    base_version: z.number().int().positive(),
+  })
+  .strict();
+export type ClaimReanchorRequest = z.infer<typeof ClaimReanchorRequestSchema>;
+
+export const ClaimReanchorResponseSchema = z
+  .object({
+    claim_id: ClaimIdSchema,
+    reanchored: z.literal(true),
+    statement_version: z.number().int().positive(),
+    statement_drift: z.literal(false),
+  })
+  .strict();
+export type ClaimReanchorResponse = z.infer<typeof ClaimReanchorResponseSchema>;
+
 /**
  * The session-protocol contract set as one document, so the published JSON
  * Schema shows every route shape at once and drift is one regenerated file.
@@ -898,6 +918,8 @@ export const SessionsContractsSchema = z
     gap_closed_response: GapClosedResponseSchema,
     relation_file_request: RelationFileRequestSchema,
     relation_filed_response: RelationFiledResponseSchema,
+    reanchor_request: ClaimReanchorRequestSchema,
+    reanchor_response: ClaimReanchorResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

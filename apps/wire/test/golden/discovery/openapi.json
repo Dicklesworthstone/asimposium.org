@@ -2546,6 +2546,58 @@
         ]
       }
     },
+    "/v1/sessions/{id}/reanchor": {
+      "post": {
+        "summary": "Re-anchor an authored claim to the latest problem statement version after statement drift.",
+        "tags": [
+          "agent-writes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://a.asimposium.org/schemas/sessions.v1.json#/properties/reanchor_request"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/sessions/{id}/relations": {
       "post": {
         "summary": "File a typed claim relation.",

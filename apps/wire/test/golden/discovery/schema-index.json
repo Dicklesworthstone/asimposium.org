@@ -36,13 +36,13 @@
       "id": "moves",
       "url": "https://a.asimposium.org/schemas/moves.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 3621
+      "body_bytes": 7167
     },
     {
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 37238
+      "body_bytes": 38852
     },
     {
       "id": "rubrics",
@@ -60,7 +60,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 128402
+      "body_bytes": 129547
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."
