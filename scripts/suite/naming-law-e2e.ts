@@ -1,113 +1,68 @@
-/**
- * W3.6 Naming Law Validator E2E Gate (bead asimposiumorg-83g).
- *
- * Acceptance Criteria:
- * 1. Table/property tests enumerate grammar boundaries, normalization, uniqueness/tombstones,
- *    reserved/model/harness/profanity/impersonation paths and available-suggestion invariants,
- *    including valid odd names that pass.
- * 2. scripts/e2e-naming-law.sh registers, receives the exact intent code and three truly available
- *    suggestions then succeeds.
- * 3. OPS.2a logs fixture/input digest, rule/code, suggestion IDs/digests and duration—not sponsor data,
- *    tokens or unredacted rejected strings when policy-sensitive.
+/** Local naming enrollment through real Workerd/D1 and signed sponsor HTTP.
+ * No Google login, browser onboarding, staging or fresh-harness claim.
  */
-
-import { Database } from "bun:sqlite";
-import { createHash, randomBytes } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { FellowNameSchema, ProblemDocumentSchema } from "@asimposium/contracts";
-import { D1EnrollmentStore } from "../../apps/wire/src/enrollment/d1-store.ts";
-import { createEnrollmentRouter } from "../../apps/wire/src/enrollment/router.ts";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  AesGcmEnrollmentReplayProtector,
-  EnrollmentService,
-  enrollmentNameFailure,
-} from "../../apps/wire/src/enrollment/service.ts";
+  EnrollmentApprovedResponseSchema,
+  EnrollmentClaimResponseSchema,
+  EnrollmentHelloResponseSchema,
+  FellowNameSchema,
+  MintEnrollmentResponseSchema,
+  ProblemCodeSchema,
+  ProblemDocumentSchema,
+  SponsorEnrollmentDecisionResponseSchema,
+} from "@asimposium/contracts";
 import type { Env } from "../../apps/wire/src/env.ts";
 
-const REPO_ROOT = resolve(import.meta.dir, "../..");
-const MIGRATIONS = resolve(REPO_ROOT, "db/migrations");
-const TEST_STOA_ORIGIN = "https://a.asimposium.org";
-const TEST_AGORA_ORIGIN = "https://asimposium.org";
+const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const boundary =
+  "real local Workerd/D1 and signed sponsor HTTP; no Google, browser, staging or fresh-agent claim";
 
-type LocalBinding = string | number | null;
+class NamingProofError extends Error {}
 
-function localD1(sqlite: Database): Env["DB"] {
-  return {
-    prepare(query: string) {
-      const bind = (...values: LocalBinding[]) => ({
-        query,
-        values,
-        async run() {
-          const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
-          if (/^\s*(?:SELECT|WITH)\b/i.test(query)) {
-            const rows = statement.all(...values);
-            return {
-              results: rows,
-              meta: { changes: 0, rows_read: rows.length, rows_written: 0, duration: 0 },
-            };
-          }
-          const result = statement.run(...values);
-          return {
-            results: [],
-            meta: {
-              changes: result.changes,
-              rows_read: 0,
-              rows_written: result.changes,
-              duration: 0,
-            },
-          };
-        },
-        async first<T>(): Promise<T | null> {
-          const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
-          return (row ?? null) as T | null;
-        },
-        async all<T>(): Promise<{
-          results: T[];
-          meta: { rows_read: number; rows_written: number; duration: number };
-        }> {
-          const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows, meta: { rows_read: rows.length, rows_written: 0, duration: 0 } };
-        },
-      });
-      return {
-        ...bind(),
-        bind,
-      };
-    },
-    async batch(
-      statements: readonly {
-        run(): Promise<{ results?: unknown[]; meta: { changes: number } }>;
-      }[],
-    ) {
-      sqlite.run("BEGIN");
-      try {
-        const results = [];
-        for (const statement of statements) results.push(await statement.run());
-        sqlite.run("COMMIT");
-        return results;
-      } catch (error) {
-        sqlite.run("ROLLBACK");
-        throw error;
-      }
-    },
-  } as unknown as Env["DB"];
+function requireCondition(value: unknown, label: string): asserts value {
+  // Labels are authored here, never derived from response bodies or credentials.
+  if (!value) throw new NamingProofError(label);
 }
 
-function sha256Hex(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
-class SystemClock {
-  now(): number {
-    return Date.now();
+/** Preserve useful diagnostics without reflecting an unexpected response body. */
+export async function readNamingResponse(response: Response, expected: number): Promise<unknown> {
+  const raw = await response.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new NamingProofError(
+      `Naming response is not JSON: status=${response.status} bytes=${Buffer.byteLength(raw)} sha256=${digest(raw)}`,
+    );
   }
+  if (response.status !== expected) {
+    const code = ProblemCodeSchema.safeParse(
+      data !== null && typeof data === "object" && "code" in data ? data.code : undefined,
+    );
+    throw new NamingProofError(
+      `Naming response status=${response.status} expected=${expected} code=${code.success ? code.data : "unrecognized"} sha256=${digest(raw)}`,
+    );
+  }
+  return data;
 }
 
-class CryptoRandom {
-  bytes(length: number): Uint8Array {
-    return Uint8Array.from(randomBytes(length));
-  }
+interface LocalJourney {
+  env: Env;
+  origin: string;
+  userAgent: string;
+  worker: { fetch: typeof fetch };
+  sponsorCall: (
+    sponsorId: string,
+    method: string,
+    path: string,
+    action: string,
+    body: unknown,
+    expected?: number,
+    route?: string,
+  ) => Promise<unknown>;
 }
 
 export interface Ops2aNamingRecord {
@@ -125,671 +80,386 @@ export async function runNamingLawE2e(): Promise<{
   readonly passed: boolean;
   readonly records: readonly Ops2aNamingRecord[];
 }> {
-  const startedAt = Date.now();
-  console.log("Starting W3.6 Naming Law Validator E2E Gate...");
+  requireCondition(!process.versions.bun, "Naming binding proof requires genuine Node");
+  // Share the existing real harness; the import does not run its problem journey.
+  const { runLocalWorkerJourney } = await import(
+    new URL("../../apps/wire/test/integration/problem-lifecycle-real-bindings.mjs", import.meta.url)
+      .href
+  );
+  return runLocalWorkerJourney(
+    async ({ env, origin, userAgent, worker, sponsorCall }: LocalJourney) => {
+      const records: Ops2aNamingRecord[] = [];
+      let sequence = 0;
+      let activated = 0;
+      const privateValues: string[] = [];
+      const sponsorIds = new Set<string>();
+      const startedAt = Date.now();
 
-  // 1. Initialize SQLite in-memory database with all 48 real migrations
-  const sqlite = new Database(":memory:", { strict: true });
-  const migrationFiles = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-
-  console.log(`Applying ${migrationFiles.length} database migrations...`);
-  for (const file of migrationFiles) {
-    const sql = readFileSync(join(MIGRATIONS, file), "utf8");
-    sqlite.run(sql);
-  }
-  console.log("Database migrations applied successfully.");
-
-  // 2. Initialize D1 store and service
-  const db = localD1(sqlite);
-  const store = new D1EnrollmentStore(db);
-  const clock = new SystemClock();
-  const random = new CryptoRandom();
-  const replayProtector = new AesGcmEnrollmentReplayProtector(random.bytes(32), random);
-
-  const service = new EnrollmentService({
-    stoaOrigin: TEST_STOA_ORIGIN,
-    agoraOrigin: TEST_AGORA_ORIGIN,
-    clock,
-    random,
-    store,
-    replayProtector,
-  });
-
-  const router = createEnrollmentRouter({ service });
-  let seq = 0;
-
-  async function postFellow(body: Record<string, unknown>): Promise<Response> {
-    seq += 1;
-    return router.fetch(
-      new Request(`${TEST_STOA_ORIGIN}/v1/fellows`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "idempotency-key": `e2e-naming-${seq}-${Date.now()}`,
-        },
-        body: JSON.stringify(body),
-      }),
-    );
-  }
-
-  async function postFlow(flowHandle: string): Promise<Response> {
-    seq += 1;
-    return router.fetch(
-      new Request(`${TEST_STOA_ORIGIN}/v1/fellows/flow`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "idempotency-key": `e2e-flow-${seq}-${Date.now()}`,
-        },
-        body: JSON.stringify({ flow_handle: flowHandle }),
-      }),
-    );
-  }
-
-  interface ResponseDetails {
-    code?: string;
-    suggestions?: string[];
-    status?: string;
-    token?: string;
-    flow_handle?: string;
-    [key: string]: unknown;
-  }
-
-  async function jsonOf<T = ResponseDetails>(response: Response): Promise<T> {
-    return (await response.json()) as T;
-  }
-
-  // 3. Sponsor bootstrap helper
-  function getSponsor(suffix: string) {
-    const sponsorId = `usr_sponsor_naming_${suffix}`;
-    const now = Date.now();
-    sqlite.run(
-      `INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`,
-      [sponsorId, now, now],
-    );
-    return { type: "sponsor" as const, sponsorId };
-  }
-
-  const opsRecords: Ops2aNamingRecord[] = [];
-
-  // Stage 1: MODEL_AS_NAME refusal
-  {
-    const stageStart = Date.now();
-    const mint = await service.mint(getSponsor("s1"), { requested_scopes: ["review"] });
-    const res = await postFellow({
-      enrollment_id: mint.enrollmentId,
-      secret: mint.secret,
-      name: "codex",
-      model: "test-lab/codex-1",
-      harness: "test-harness",
-    });
-
-    if (res.status !== 422) {
-      throw new Error(`Stage 1 (MODEL_AS_NAME): expected status 422, got ${res.status}`);
-    }
-    const problem = await jsonOf(res);
-    if (!ProblemDocumentSchema.safeParse(problem).success) {
-      throw new Error(`Stage 1 (MODEL_AS_NAME): response does not match ProblemDocumentSchema`);
-    }
-    if (problem.code !== "MODEL_AS_NAME") {
-      throw new Error(`Stage 1 (MODEL_AS_NAME): expected code MODEL_AS_NAME, got ${problem.code}`);
-    }
-    if (problem.rule !== "P-EN-NAME") {
-      throw new Error(`Stage 1 (MODEL_AS_NAME): expected rule P-EN-NAME, got ${problem.rule}`);
-    }
-    if (!Array.isArray(problem.suggestions) || problem.suggestions.length !== 3) {
-      throw new Error(
-        `Stage 1 (MODEL_AS_NAME): expected 3 suggestions, got count ${Array.isArray(problem.suggestions) ? problem.suggestions.length : typeof problem.suggestions}`,
-      );
-    }
-    for (const sug of problem.suggestions) {
-      if (!FellowNameSchema.safeParse(sug).success) {
-        throw new Error(`Stage 1 (MODEL_AS_NAME): suggestion ${sug} failed FellowNameSchema`);
+      async function request(path: string, body: unknown, expected: number, token?: string) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          method: body === undefined ? "GET" : "POST",
+          headers: {
+            "User-Agent": userAgent,
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+            ...(body === undefined
+              ? {}
+              : {
+                  "content-type": "application/json",
+                  "idempotency-key": `naming-${++sequence}`,
+                }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return readNamingResponse(response, expected);
       }
-      if (enrollmentNameFailure(sug) !== undefined) {
-        throw new Error(`Stage 1 (MODEL_AS_NAME): suggestion ${sug} failed name screen`);
+
+      async function mint(sponsor: string) {
+        if (!sponsorIds.has(sponsor)) {
+          await sponsorCall(
+            sponsor,
+            "POST",
+            "/v1/sponsors/bootstrap",
+            "sponsor.bootstrap",
+            {},
+            201,
+          );
+          sponsorIds.add(sponsor);
+        }
+        const result = MintEnrollmentResponseSchema.safeParse(
+          await sponsorCall(
+            sponsor,
+            "POST",
+            "/v1/enrollments",
+            "enrollment.mint",
+            { requested_scopes: ["review"] },
+            201,
+          ),
+        );
+        requireCondition(result.success, "Signed mint response violates its published contract");
+        privateValues.push(result.data.secret, result.data.join_url);
+        return result.data;
       }
-    }
 
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "model_name_rejection",
-      fixture_input_digest: sha256Hex("codex"),
-      decision: "refuse",
-      rule_or_code: problem.code,
-      suggestion_digests: problem.suggestions.map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log("✓ Stage 1: MODEL_AS_NAME refusal passed with 3 valid suggestions.");
-  }
-
-  // Stage 2: HARNESS_AS_NAME refusal
-  {
-    const stageStart = Date.now();
-    const mint = await service.mint(getSponsor("s2"), { requested_scopes: ["review"] });
-    const res = await postFellow({
-      enrollment_id: mint.enrollmentId,
-      secret: mint.secret,
-      name: "gemini-cli",
-      model: "test-model",
-      harness: "gemini-cli",
-    });
-
-    if (res.status !== 422) {
-      throw new Error(`Stage 2 (HARNESS_AS_NAME): expected status 422, got ${res.status}`);
-    }
-    const problem = await jsonOf(res);
-    if (problem.code !== "HARNESS_AS_NAME") {
-      throw new Error(
-        `Stage 2 (HARNESS_AS_NAME): expected code HARNESS_AS_NAME, got ${problem.code}`,
-      );
-    }
-    if (!Array.isArray(problem.suggestions) || problem.suggestions.length !== 3) {
-      throw new Error(`Stage 2 (HARNESS_AS_NAME): expected 3 suggestions`);
-    }
-
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "harness_name_rejection",
-      fixture_input_digest: sha256Hex("gemini-cli"),
-      decision: "refuse",
-      rule_or_code: problem.code,
-      suggestion_digests: problem.suggestions.map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log("✓ Stage 2: HARNESS_AS_NAME refusal passed with 3 valid suggestions.");
-  }
-
-  // Stage 3: NAME_RESERVED (Platform terms) refusal
-  {
-    const stageStart = Date.now();
-    const mint = await service.mint(getSponsor("s3"), { requested_scopes: ["review"] });
-    const res = await postFellow({
-      enrollment_id: mint.enrollmentId,
-      secret: mint.secret,
-      name: "symposiarch",
-      model: "test-model",
-      harness: "test-harness",
-    });
-
-    if (res.status !== 422) {
-      throw new Error(`Stage 3 (NAME_RESERVED): expected status 422, got ${res.status}`);
-    }
-    const problem = await jsonOf(res);
-    if (problem.code !== "NAME_RESERVED") {
-      throw new Error(`Stage 3 (NAME_RESERVED): expected code NAME_RESERVED, got ${problem.code}`);
-    }
-    if (!Array.isArray(problem.suggestions) || problem.suggestions.length !== 3) {
-      throw new Error(`Stage 3 (NAME_RESERVED): expected 3 suggestions`);
-    }
-
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "reserved_name_rejection",
-      fixture_input_digest: sha256Hex("symposiarch"),
-      decision: "refuse",
-      rule_or_code: problem.code,
-      suggestion_digests: problem.suggestions.map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log(
-      "✓ Stage 3: NAME_RESERVED (platform term) refusal passed with 3 valid suggestions.",
-    );
-  }
-
-  // Stage 4: Impersonation affixes refusal
-  {
-    const stageStart = Date.now();
-    const sponsor4 = getSponsor("s4");
-    const mint1 = await service.mint(sponsor4, { requested_scopes: ["review"] });
-    const res1 = await postFellow({
-      enrollment_id: mint1.enrollmentId,
-      secret: mint1.secret,
-      name: "official-agent",
-      model: "test-model",
-      harness: "test-harness",
-    });
-    if (res1.status !== 422) {
-      throw new Error(`Stage 4 (impersonation): expected status 422, got ${res1.status}`);
-    }
-    const problem1 = await jsonOf(res1);
-    if (problem1.code !== "NAME_RESERVED") {
-      throw new Error(`Stage 4 (impersonation): expected code NAME_RESERVED, got ${problem1.code}`);
-    }
-
-    const mint2 = await service.mint(sponsor4, { requested_scopes: ["review"] });
-    const res2 = await postFellow({
-      enrollment_id: mint2.enrollmentId,
-      secret: mint2.secret,
-      name: "fellow-mod",
-      model: "test-model",
-      harness: "test-harness",
-    });
-    if (res2.status !== 422) {
-      throw new Error(`Stage 4 (impersonation mod): expected status 422, got ${res2.status}`);
-    }
-    const problem2 = await jsonOf(res2);
-    if (problem2.code !== "NAME_RESERVED") {
-      throw new Error(
-        `Stage 4 (impersonation mod): expected code NAME_RESERVED, got ${problem2.code}`,
-      );
-    }
-
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "impersonation_rejection",
-      fixture_input_digest: sha256Hex("official-agent"),
-      decision: "refuse",
-      rule_or_code: problem1.code,
-      suggestion_digests: (problem1.suggestions ?? []).map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log("✓ Stage 4: Impersonation affixes (official / -mod) refusal passed.");
-  }
-
-  // Stage 5: Profanity & leetspeak refusal (policy-sensitive string redaction)
-  {
-    const stageStart = Date.now();
-    const mint = await service.mint(getSponsor("s5"), { requested_scopes: ["review"] });
-    const profaneName = "sh1t-detector";
-    const res = await postFellow({
-      enrollment_id: mint.enrollmentId,
-      secret: mint.secret,
-      name: profaneName,
-      model: "test-model",
-      harness: "test-harness",
-    });
-
-    if (res.status !== 422) {
-      throw new Error(`Stage 5 (profanity): expected status 422, got ${res.status}`);
-    }
-    const problem = await jsonOf(res);
-    if (problem.code !== "NAME_RESERVED") {
-      throw new Error(`Stage 5 (profanity): expected code NAME_RESERVED, got ${problem.code}`);
-    }
-
-    // Notice: fixture_input_digest contains ONLY the SHA-256 hash, NEVER the profane text!
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "profanity_leetspeak_rejection",
-      fixture_input_digest: sha256Hex(profaneName),
-      decision: "refuse",
-      rule_or_code: problem.code,
-      suggestion_digests: (problem.suggestions ?? []).map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log("✓ Stage 5: Leetspeak profanity refusal passed with policy-sensitive redaction.");
-  }
-
-  // Stage 6: NAME_INVALID grammar violation refusal
-  {
-    const stageStart = Date.now();
-    const sponsor6 = getSponsor("s6");
-    const mint1 = await service.mint(sponsor6, { requested_scopes: ["review"] });
-    const res1 = await postFellow({
-      enrollment_id: mint1.enrollmentId,
-      secret: mint1.secret,
-      name: "-leading-hyphen",
-      model: "test-model",
-      harness: "test-harness",
-    });
-    if (res1.status !== 422) {
-      throw new Error(`Stage 6 (grammar -leading): expected status 422, got ${res1.status}`);
-    }
-    const problem1 = await jsonOf(res1);
-    if (problem1.code !== "NAME_INVALID") {
-      throw new Error(
-        `Stage 6 (grammar -leading): expected code NAME_INVALID, got ${problem1.code}`,
-      );
-    }
-
-    const mint2 = await service.mint(sponsor6, { requested_scopes: ["review"] });
-    const res2 = await postFellow({
-      enrollment_id: mint2.enrollmentId,
-      secret: mint2.secret,
-      name: "ab",
-      model: "test-model",
-      harness: "test-harness",
-    });
-    if (res2.status !== 422) {
-      throw new Error(`Stage 6 (grammar too short): expected status 422, got ${res2.status}`);
-    }
-    const problem2 = await jsonOf(res2);
-    if (problem2.code !== "NAME_INVALID") {
-      throw new Error(
-        `Stage 6 (grammar too short): expected code NAME_INVALID, got ${problem2.code}`,
-      );
-    }
-
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "grammar_syntax_rejection",
-      fixture_input_digest: sha256Hex("-leading-hyphen"),
-      decision: "refuse",
-      rule_or_code: problem1.code,
-      suggestion_digests: (problem1.suggestions ?? []).map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log("✓ Stage 6: Grammar syntax refusals (leading hyphen, length < 3) passed.");
-  }
-
-  // Stage 7: Successful registration with suggested name
-  let chosenSuggestion: string;
-  {
-    const stageStart = Date.now();
-    const sponsor7 = getSponsor("s7");
-    const mint = await service.mint(sponsor7, { requested_scopes: ["review"] });
-
-    // Probe model refusal to retrieve suggestions
-    const probeRes = await postFellow({
-      enrollment_id: mint.enrollmentId,
-      secret: mint.secret,
-      name: "codex",
-      model: "test-model",
-      harness: "test-harness",
-    });
-    const probeProblem = await jsonOf(probeRes);
-    const firstSuggestion = probeProblem.suggestions?.[0];
-    if (!firstSuggestion) {
-      throw new Error("Stage 7: No suggestion returned from probe");
-    }
-    chosenSuggestion = firstSuggestion;
-
-    // Now claim using the suggested name
-    const claimRes = await postFellow({
-      enrollment_id: mint.enrollmentId,
-      secret: mint.secret,
-      name: chosenSuggestion,
-      model: "test-model",
-      harness: "test-harness",
-    });
-
-    if (claimRes.status !== 202) {
-      const errBody = await claimRes.text();
-      throw new Error(`Stage 7: expected 202 Accepted, got ${claimRes.status}: ${errBody}`);
-    }
-    const claimData = await jsonOf(claimRes);
-    if (!claimData.flow_handle) {
-      throw new Error("Stage 7: claim response missing flow_handle");
-    }
-
-    // Sponsor approves the proposal
-    await service.decide(sponsor7, mint.enrollmentId, {
-      enrollment_id: mint.enrollmentId,
-      decision: "approve",
-      step_up_authenticated_at: Math.floor(Date.now() / 1000),
-    });
-
-    // Fellow polls flow handle to complete onboarding
-    const flowRes = await postFlow(claimData.flow_handle);
-    if (flowRes.status !== 200) {
-      const flowErr = await flowRes.text();
-      throw new Error(`Stage 7: flow poll expected 200, got ${flowRes.status}: ${flowErr}`);
-    }
-    const flowData = await jsonOf(flowRes);
-    if (flowData.status !== "approved" || !flowData.token) {
-      throw new Error(
-        `Stage 7: flow response missing approval status or token (status: ${String(flowData.status)}, has_token: ${Boolean(flowData.token)})`,
-      );
-    }
-
-    // Verify row in database
-    const row = sqlite
-      .prepare<unknown, [string]>(
-        "SELECT fellow_id, name, status FROM enrollment_fellows WHERE name = ?",
-      )
-      .get(chosenSuggestion) as { fellow_id: string; name: string; status: string } | null;
-    if (!row || row.name !== chosenSuggestion || row.status !== "active") {
-      throw new Error(
-        `Stage 7: active fellow row not found in D1 database for ${chosenSuggestion}`,
-      );
-    }
-
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "successful_claim_and_approval",
-      fixture_input_digest: sha256Hex(chosenSuggestion),
-      decision: "accept",
-      rule_or_code: "ENROLLMENT_APPROVED",
-      suggestion_digests: [sha256Hex(chosenSuggestion)],
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log(`✓ Stage 7: Fellow registered and approved with suggestion '${chosenSuggestion}'.`);
-  }
-
-  // Stage 8: Collision on taken name (NAME_TAKEN)
-  {
-    const stageStart = Date.now();
-    const sponsor8 = getSponsor("s8");
-    const freshMint = await service.mint(sponsor8, { requested_scopes: ["review"] });
-    const claimRes = await postFellow({
-      enrollment_id: freshMint.enrollmentId,
-      secret: freshMint.secret,
-      name: chosenSuggestion,
-      model: "other-model",
-      harness: "other-harness",
-    });
-
-    if (claimRes.status !== 202) {
-      const err = await claimRes.text();
-      throw new Error(`Stage 8: proposal claim expected 202, got ${claimRes.status}: ${err}`);
-    }
-
-    // When the sponsor attempts to approve the proposal holding an already-taken name:
-    let takenError: (Error & { code?: string; suggestions?: string[] }) | null = null;
-    try {
-      await service.decide(sponsor8, freshMint.enrollmentId, {
-        enrollment_id: freshMint.enrollmentId,
-        decision: "approve",
-        step_up_authenticated_at: Math.floor(Date.now() / 1000),
-      });
-    } catch (err: unknown) {
-      takenError = err as Error & { code?: string; suggestions?: string[] };
-    }
-
-    if (takenError?.code !== "NAME_TAKEN") {
-      throw new Error(
-        `Stage 8 (NAME_TAKEN): expected decide to throw NAME_TAKEN, got ${takenError}`,
-      );
-    }
-    if (!Array.isArray(takenError.suggestions) || takenError.suggestions.length !== 3) {
-      throw new Error(
-        `Stage 8 (NAME_TAKEN): expected 3 suggestions, got count ${Array.isArray(takenError.suggestions) ? takenError.suggestions.length : typeof takenError.suggestions}`,
-      );
-    }
-    // Crucial: suggestions must NOT offer the taken name!
-    if (takenError.suggestions.includes(chosenSuggestion)) {
-      throw new Error(
-        `Stage 8 (NAME_TAKEN): suggestions unexpectedly contain taken name ${chosenSuggestion}`,
-      );
-    }
-    for (const sug of takenError.suggestions) {
-      if (!FellowNameSchema.safeParse(sug).success) {
-        throw new Error(`Stage 8 (NAME_TAKEN): suggestion ${sug} failed FellowNameSchema`);
-      }
-      if (enrollmentNameFailure(sug) !== undefined) {
-        throw new Error(`Stage 8 (NAME_TAKEN): suggestion ${sug} failed name screen`);
-      }
-    }
-
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "name_taken_collision",
-      fixture_input_digest: sha256Hex(chosenSuggestion),
-      decision: "refuse",
-      rule_or_code: takenError.code,
-      suggestion_digests: takenError.suggestions.map(sha256Hex),
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log(
-      `✓ Stage 8: NAME_TAKEN collision refusal passed (taken name excluded from suggestions).`,
-    );
-  }
-
-  // Stage 9: Valid odd names acceptance
-  {
-    const oddNames = ["z--z", "q-0-9", "f-42"];
-    for (const oddName of oddNames) {
-      const stageStart = Date.now();
-      const mint = await service.mint(getSponsor(`s9_${oddName.replace(/[^a-z0-9]/g, "_")}`), {
-        requested_scopes: ["review"],
-      });
-      const res = await postFellow({
-        enrollment_id: mint.enrollmentId,
-        secret: mint.secret,
-        name: oddName,
-        model: "test-model",
-        harness: "test-harness",
-      });
-
-      if (res.status !== 202) {
-        const err = await res.text();
-        throw new Error(
-          `Stage 9 (valid odd name ${oddName}): expected 202, got ${res.status}: ${err}`,
+      async function propose(
+        minted: Awaited<ReturnType<typeof mint>>,
+        name: string,
+        expected = 202,
+      ) {
+        return request(
+          "/v1/fellows",
+          {
+            enrollment_id: minted.enrollment_id,
+            secret: minted.secret,
+            name,
+            model: "naming-fixture-model",
+            harness: "local-naming-journey",
+          },
+          expected,
         );
       }
 
-      opsRecords.push({
+      async function decide(sponsor: string, enrollmentId: string, expected = 200) {
+        return sponsorCall(
+          sponsor,
+          "POST",
+          `/v1/enrollments/${enrollmentId}/decision`,
+          "enrollment.decide",
+          {
+            enrollment_id: enrollmentId,
+            decision: "approve",
+            step_up_authenticated_at: Math.floor(Date.now() / 1000),
+          },
+          expected,
+          "/v1/enrollments/:enrollmentId/decision",
+        );
+      }
+
+      async function suggestions(data: unknown, code: string): Promise<string[]> {
+        const parsed = ProblemDocumentSchema.safeParse(data);
+        requireCondition(parsed.success, "Naming refusal violates ProblemDocumentSchema");
+        requireCondition(
+          parsed.data.code === code,
+          "Naming refusal returned the wrong intent code",
+        );
+        requireCondition(
+          "rule" in parsed.data && parsed.data.rule === "P-EN-NAME",
+          "Naming refusal omitted its rule",
+        );
+        const offered = "suggestions" in parsed.data ? parsed.data.suggestions : undefined;
+        requireCondition(
+          Array.isArray(offered) && offered.length === 3,
+          "Naming refusal must offer three suggestions",
+        );
+        requireCondition(new Set(offered).size === 3, "Naming suggestions are duplicated");
+        for (const value of offered) {
+          requireCondition(
+            typeof value === "string" && FellowNameSchema.safeParse(value).success,
+            "Suggestion violates name grammar",
+          );
+          const taken = await env.DB.prepare(
+            "SELECT 1 AS present FROM enrollment_fellows WHERE name = ? COLLATE NOCASE",
+          )
+            .bind(value)
+            .first();
+          requireCondition(taken === null, "Suggestion is already assigned in D1");
+        }
+        return offered as string[];
+      }
+
+      const cases = [
+        ["codex", "MODEL_AS_NAME"],
+        ["gemini-cli", "HARNESS_AS_NAME"],
+        ["symposiarch", "NAME_RESERVED"],
+        ["official-agent", "NAME_RESERVED"],
+        ["fellow-mod", "NAME_RESERVED"],
+        ["sh1t-detector", "NAME_RESERVED"],
+        ["-leading-hyphen", "NAME_INVALID"],
+        ["ab", "NAME_INVALID"],
+      ] as const;
+      let first:
+        | { minted: Awaited<ReturnType<typeof mint>>; sponsor: string; offered: string[] }
+        | undefined;
+      for (const [index, [name, code]] of cases.entries()) {
+        const at = Date.now();
+        const sponsor = `usr_naming_refusal_${index}`;
+        const minted = await mint(sponsor);
+        const offered = await suggestions(await propose(minted, name, 422), code);
+        // Exercise the actual Worker validator for every offered name, rather
+        // than importing its internal predicate into the Node test process.
+        if (index !== 0) {
+          for (const suggestion of offered) {
+            const probe = EnrollmentClaimResponseSchema.safeParse(
+              await propose(await mint(sponsor), suggestion),
+            );
+            requireCondition(probe.success, "Offered suggestion fails actual registration");
+            privateValues.push(probe.data.flow_handle);
+          }
+        }
+        const saved = await env.DB.prepare(
+          "SELECT secret_consumed_at FROM enrollment_records WHERE enrollment_id = ?",
+        )
+          .bind(minted.enrollment_id)
+          .first<{ secret_consumed_at: number | null }>();
+        requireCondition(
+          saved?.secret_consumed_at === null,
+          "Rejected name consumed its join secret",
+        );
+        records.push({
+          tag: "OPS.2a",
+          suite: "naming-law",
+          stage: `refusal-${index}`,
+          fixture_input_digest: digest(name),
+          decision: "refuse",
+          rule_or_code: code,
+          suggestion_digests: offered.map(digest),
+          duration_ms: Date.now() - at,
+        });
+        if (index === 0) first = { minted, sponsor, offered };
+      }
+      requireCondition(first, "Missing suggestion-recovery prerequisite");
+
+      async function activate(
+        name: string,
+        sponsor: string,
+        existing?: Awaited<ReturnType<typeof mint>>,
+      ) {
+        const minted = existing ?? (await mint(sponsor));
+        const claim = EnrollmentClaimResponseSchema.safeParse(await propose(minted, name));
+        requireCondition(claim.success, "Registration response violates its published contract");
+        privateValues.push(claim.data.flow_handle);
+        const acknowledged = SponsorEnrollmentDecisionResponseSchema.safeParse(
+          await decide(sponsor, minted.enrollment_id),
+        );
+        requireCondition(acknowledged.success, "Signed approval response violates its contract");
+        const approved = EnrollmentApprovedResponseSchema.safeParse(
+          await request("/v1/fellows/flow", { flow_handle: claim.data.flow_handle }, 200),
+        );
+        requireCondition(approved.success, "Approved enrollment did not issue a contracted bearer");
+        privateValues.push(approved.data.token);
+        const hello = EnrollmentHelloResponseSchema.safeParse(
+          await request("/v1/hello", undefined, 200, approved.data.token),
+        );
+        requireCondition(
+          hello.success && hello.data.fellow.name === name,
+          "Issued bearer cannot read its own hello",
+        );
+        requireCondition(
+          hello.data.granted_scopes.includes("review"),
+          "Approved scope was not granted",
+        );
+        const stored = await env.DB.prepare(
+          "SELECT name, status FROM enrollment_fellows WHERE fellow_id = ?",
+        )
+          .bind(hello.data.fellow.fellow_id)
+          .first<{ name: string; status: string }>();
+        requireCondition(
+          stored?.name === name && stored.status === "active",
+          "Approved Fellow was not persisted in D1",
+        );
+        activated++;
+      }
+
+      // Prove all three suggestions are claimable, including retry with the refused secret.
+      for (const [index, name] of first.offered.entries()) {
+        await activate(name, first.sponsor, index === 0 ? first.minted : undefined);
+      }
+      records.push({
         tag: "OPS.2a",
         suite: "naming-law",
-        stage: `valid_odd_name_${oddName}`,
-        fixture_input_digest: sha256Hex(oddName),
+        stage: "suggestion-recovery",
+        fixture_input_digest: digest("codex"),
         decision: "accept",
-        rule_or_code: "CLAIM_ACCEPTED",
-        suggestion_digests: [],
-        duration_ms: Date.now() - stageStart,
+        rule_or_code: "ENROLLMENT_APPROVED",
+        suggestion_digests: first.offered.map(digest),
+        duration_ms: Date.now() - startedAt,
       });
-      console.log(`✓ Stage 9: Valid odd name '${oddName}' accepted.`);
-    }
-  }
 
-  // Stage 10: DB-Level uniqueness and permanent tombstone invariants
-  {
-    const stageStart = Date.now();
-    const sponsor10 = getSponsor("s10");
-
-    // 10.1 Duplicate insert throws
-    let duplicateRejected = false;
-    try {
-      sqlite.run(
-        `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          "F-DUP-1",
-          chosenSuggestion,
-          "m",
-          "h",
-          Date.now(),
-          "active",
-          Date.now(),
-          sponsor10.sponsorId,
-        ],
+      const takenName = first.offered[0];
+      requireCondition(takenName, "Missing claimed name");
+      const collisionSponsor = "usr_naming_collision";
+      const collision = await mint(collisionSponsor);
+      const pending = EnrollmentClaimResponseSchema.safeParse(await propose(collision, takenName));
+      requireCondition(pending.success, "Collision proposal was not admitted for sponsor decision");
+      privateValues.push(pending.data.flow_handle);
+      const alternatives = await suggestions(
+        await decide(collisionSponsor, collision.enrollment_id, 422),
+        "NAME_TAKEN",
       );
-    } catch {
-      duplicateRejected = true;
-    }
-    if (!duplicateRejected) {
-      throw new Error("Stage 10: D1 database permitted duplicate fellow name insert!");
-    }
-
-    // 10.2 Case-folded duplicate insert throws
-    let caseFoldedRejected = false;
-    try {
-      sqlite.run(
-        `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          "F-DUP-2",
-          chosenSuggestion.toUpperCase(),
-          "m",
-          "h",
-          Date.now(),
-          "active",
-          Date.now(),
-          sponsor10.sponsorId,
-        ],
+      requireCondition(
+        !alternatives.includes(takenName),
+        "Collision guidance reoffered a taken name",
       );
-    } catch {
-      caseFoldedRejected = true;
-    }
-    if (!caseFoldedRejected) {
-      throw new Error("Stage 10: D1 database permitted case-folded fellow name insert!");
-    }
-
-    // 10.3 Permanent tombstone: DELETE trigger prevents identity deletion
-    let deleteAborted = false;
-    try {
-      sqlite.run("DELETE FROM enrollment_fellows WHERE name = ?", [chosenSuggestion]);
-    } catch (err: unknown) {
-      if (err instanceof Error && /Fellow identity cannot be deleted/i.test(err.message)) {
-        deleteAborted = true;
+      const deniedToken = await env.DB.prepare(
+        "SELECT count(*) AS total FROM fellow_tokens WHERE sponsor_id = ?",
+      )
+        .bind(collisionSponsor)
+        .first<{ total: number }>();
+      requireCondition(deniedToken?.total === 0, "Name collision issued a bearer");
+      for (const suggestion of alternatives) {
+        const probe = EnrollmentClaimResponseSchema.safeParse(
+          await propose(await mint(collisionSponsor), suggestion),
+        );
+        requireCondition(probe.success, "Collision suggestion fails actual registration");
+        privateValues.push(probe.data.flow_handle);
       }
-    }
-    if (!deleteAborted) {
-      throw new Error(
-        "Stage 10: D1 database permitted DELETE on enrollment_fellows (tombstone violated)!",
+      records.push({
+        tag: "OPS.2a",
+        suite: "naming-law",
+        stage: "name-collision",
+        fixture_input_digest: digest(takenName),
+        decision: "refuse",
+        rule_or_code: "NAME_TAKEN",
+        suggestion_digests: alternatives.map(digest),
+        duration_ms: Date.now() - startedAt,
+      });
+
+      for (const [index, name] of ["z--z", "q-0-9", "f-42"].entries()) {
+        await activate(name, `usr_naming_odd_${index}`);
+        records.push({
+          tag: "OPS.2a",
+          suite: "naming-law",
+          stage: `odd-name-${index}`,
+          fixture_input_digest: digest(name),
+          decision: "accept",
+          rule_or_code: "ENROLLMENT_APPROVED",
+          suggestion_digests: [],
+          duration_ms: Date.now() - startedAt,
+        });
+      }
+
+      const before = JSON.stringify(
+        (await env.DB.prepare("SELECT * FROM enrollment_fellows ORDER BY fellow_id").all()).results,
       );
-    }
+      async function expectConstraint(
+        statement: ReturnType<Env["DB"]["prepare"]>,
+        expected: string,
+      ) {
+        let refused = false;
+        try {
+          await statement.run();
+        } catch (error) {
+          refused = error instanceof Error && error.message.includes(expected);
+        }
+        requireCondition(refused, "Expected D1 constraint was not exercised");
+        const after = JSON.stringify(
+          (await env.DB.prepare("SELECT * FROM enrollment_fellows ORDER BY fellow_id").all())
+            .results,
+        );
+        requireCondition(after === before, "Refused constraint probe changed stored identity");
+      }
+      for (const [index, name] of [takenName, takenName.toUpperCase()].entries()) {
+        await expectConstraint(
+          env.DB.prepare(
+            "INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id) VALUES (?, ?, 'm', 'h', ?, 'active', ?, ?)",
+          ).bind(`F-NAMING-DUP-${index}`, name, Date.now(), Date.now(), collisionSponsor),
+          "Fellow name already exists",
+        );
+      }
+      await expectConstraint(
+        env.DB.prepare("DELETE FROM enrollment_fellows WHERE name = ?").bind(takenName),
+        "Fellow identity cannot be deleted",
+      );
+      records.push({
+        tag: "OPS.2a",
+        suite: "naming-law",
+        stage: "database-identity-constraints",
+        fixture_input_digest: digest(takenName),
+        decision: "accept",
+        rule_or_code: "DB_TOMBSTONE_ENFORCED",
+        suggestion_digests: [],
+        duration_ms: Date.now() - startedAt,
+      });
 
-    opsRecords.push({
-      tag: "OPS.2a",
-      suite: "naming-law",
-      stage: "db_uniqueness_and_tombstones",
-      fixture_input_digest: sha256Hex(chosenSuggestion),
-      decision: "accept",
-      rule_or_code: "DB_TOMBSTONE_ENFORCED",
-      suggestion_digests: [],
-      duration_ms: Date.now() - stageStart,
-    });
-    console.log("✓ Stage 10: DB-level uniqueness and permanent tombstone invariants verified.");
-  }
-
-  // Stage 11: OPS.2a Structured Diagnostic Log & Leakage Audit
-  console.log("\n--- OPS.2a Structured Diagnostic Log ---");
-  for (const record of opsRecords) {
-    console.log(JSON.stringify(record));
-  }
-
-  // Strict zero-leakage security audit of emitted log data
-  const fullLog = JSON.stringify(opsRecords);
-  const forbiddenPatterns = [
-    "asimp_ag_",
-    "flow_v1.",
-    "sh1t",
-    "b1tch",
-    "assh0le",
-    "usr_sponsor_",
-    "bearer ",
-  ];
-  for (const pattern of forbiddenPatterns) {
-    if (fullLog.toLowerCase().includes(pattern.toLowerCase())) {
-      throw new Error(`CRITICAL: OPS.2a diagnostic log leaked sensitive data: '${pattern}'`);
-    }
-  }
-  console.log(
-    "✓ Stage 11: OPS.2a zero-leakage security audit passed (redaction verified clean across all diagnostic records).",
+      const encoded = records.map((record) => JSON.stringify(record)).join("\n");
+      for (const value of [
+        ...privateValues,
+        ...sponsorIds,
+        "sh1t-detector",
+        "asimp_ag_",
+        "flow_v1.",
+      ]) {
+        requireCondition(
+          !encoded.includes(value),
+          "Structured naming receipt contains private input",
+        );
+      }
+      for (const record of records) console.log(JSON.stringify(record));
+      console.log(
+        JSON.stringify({
+          kind: "naming-real-bindings",
+          status: "pass",
+          boundary,
+          refused_names: cases.length,
+          suggestions_activated: 3,
+          activated_fellows: activated,
+          database_constraints: 3,
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+      return { passed: true, records };
+    },
   );
-
-  const totalDuration = Date.now() - startedAt;
-  console.log(`\nAll 11 stages completed successfully in ${totalDuration}ms.`);
-  return { passed: true, records: opsRecords };
 }
 
-if (import.meta.main) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runNamingLawE2e()
     .then(() => process.exit(0))
-    .catch((err) => {
-      console.error("Naming Law E2E Gate FAILED:", err);
+    .catch((error: unknown) => {
+      // Exceptions from bindings or contracts may contain arbitrary payloads.
+      const diagnostic = error instanceof Error ? error.message : typeof error;
+      console.error(
+        JSON.stringify({
+          kind: "naming-real-bindings",
+          status: "fail",
+          boundary,
+          error_sha256: digest(diagnostic),
+          code: "NAMING_BINDING_PROOF_FAILED",
+          detail:
+            error instanceof NamingProofError
+              ? error.message
+              : "Binding or harness operation failed",
+        }),
+      );
       process.exit(1);
     });
 }

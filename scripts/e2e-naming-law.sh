@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # W3.6 Naming Law Validator E2E Gate (bead asimposiumorg-83g).
-# Proves:
+# Exercises these representative cases through real local Worker/D1 bindings;
+# the unit suite retains the wider table-driven grammar/property coverage:
 # 1. Regex ^[a-z][a-z0-9-]{2,31}$ edge rules, lowercase ASCII constraints, and valid odd names.
 # 2. Rejection of model identities with MODEL_AS_NAME and three available suggestions.
 # 3. Rejection of harness identities with HARNESS_AS_NAME and three available suggestions.
@@ -8,10 +9,10 @@
 # 5. Rejection of impersonation affixes (official / real / -mod) with NAME_RESERVED.
 # 6. Rejection of exact and leetspeak-normalized profanities with NAME_RESERVED.
 # 7. Rejection of grammar violations with NAME_INVALID.
-# 8. Successful registration with an offered suggestion, approved by sponsor, completing onboarding.
+# 8. Suggested names accepted, sponsor-approved, and usable through bearer-authenticated hello.
 # 9. Rejection of collision on already-taken names with NAME_TAKEN (excluding taken name from suggestions).
 # 10. DB-level uniqueness constraint COLLATE NOCASE and permanent tombstone (DELETE prohibited).
-# 11. OPS.2a structured diagnostic logging (zero secrets, tokens, or unredacted profanity leaked).
+# 11. OPS.2a records exclude tested secrets, tokens, and the profanity fixture.
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,11 +76,24 @@ fi
 
 cd "$repository_root"
 
-# Run the naming law E2E test engine
-if ! bun scripts/suite/naming-law-e2e.ts; then
+# Wrangler requires genuine Node. Honor an explicit runtime; otherwise allow
+# the system Node when PATH's node is a Bun shim.
+node_binary="${ASIMPOSIUM_NODE_BINARY:-node}"
+if [[ -z "${ASIMPOSIUM_NODE_BINARY:-}" ]] \
+  && ! "$node_binary" -e 'process.exit(process.versions.bun ? 1 : 0)' >/dev/null 2>&1; then
+  node_binary="/usr/bin/node"
+fi
+if ! "$node_binary" -e 'process.exit(process.versions.bun ? 1 : 0)' >/dev/null 2>&1; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "NAMING_NODE_UNAVAILABLE" "$reproduce"
+  exit 78
+fi
+
+if ! "$node_binary" scripts/suite/naming-law-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "NAMING_LAW_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1
 fi
 
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "NAMING_LAW_E2E_COMPLETE" "$reproduce"
+# This receipt certifies the local Worker/D1 naming journey. Google, browser,
+# staging and fresh-harness enrollment remain separate G0 gates.
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "NAMING_LAW_LOCAL_BINDINGS_COMPLETE" "$reproduce"
 exit 0

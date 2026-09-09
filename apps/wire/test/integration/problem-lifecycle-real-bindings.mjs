@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ProblemCodeSchema } from "@asimposium/contracts";
 import { createTestHarness } from "wrangler";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { problemLifecycleJourney } from "./problem-lifecycle-journey.mjs";
@@ -16,176 +18,192 @@ const publicKeyHex = Buffer.from(
   await crypto.subtle.exportKey("raw", signingKeys.publicKey),
 ).toString("hex");
 
-const server = createTestHarness({
-  root,
-  workers: [
-    {
-      // Wrangler's test secret overrides take precedence over workstation
-      // .dev.vars. The signer must match this run's fresh public keyring.
-      secrets: {
-        SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: keyId, publicKeyHex, notBefore: 0 }]),
-      },
-      config: {
-        name: "asimposium-problem-lifecycle-proof",
-        main: `${root}/apps/wire/test/integration/discovery-local-worker.ts`,
-        compatibility_date: "2026-08-13",
-        compatibility_flags: ["nodejs_compat"],
-        d1_databases: [
-          {
-            binding: "DB",
-            database_name: "problem-lifecycle-proof",
-            database_id: "00000000-0000-0000-0000-000000000000",
-            migrations_dir: `${root}/db/migrations`,
+function createLocalWorkerHarness() {
+  return createTestHarness({
+    root,
+    workers: [
+      {
+        // Wrangler's test secret overrides take precedence over workstation
+        // .dev.vars. The signer must match this run's fresh public keyring.
+        secrets: {
+          SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: keyId, publicKeyHex, notBefore: 0 }]),
+        },
+        config: {
+          name: "asimposium-problem-lifecycle-proof",
+          main: `${root}/apps/wire/test/integration/discovery-local-worker.ts`,
+          compatibility_date: "2026-08-13",
+          compatibility_flags: ["nodejs_compat"],
+          d1_databases: [
+            {
+              binding: "DB",
+              database_name: "problem-lifecycle-proof",
+              database_id: "00000000-0000-0000-0000-000000000000",
+              migrations_dir: `${root}/db/migrations`,
+            },
+          ],
+          r2_buckets: [
+            { binding: "ARTIFACTS", bucket_name: "problem-lifecycle-private" },
+            { binding: "PUBLIC_ARTIFACTS", bucket_name: "problem-lifecycle-public" },
+          ],
+          durable_objects: {
+            bindings: [{ name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" }],
           },
-        ],
-        r2_buckets: [
-          { binding: "ARTIFACTS", bucket_name: "problem-lifecycle-private" },
-          { binding: "PUBLIC_ARTIFACTS", bucket_name: "problem-lifecycle-public" },
-        ],
-        durable_objects: {
-          bindings: [{ name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" }],
-        },
-        exports: { KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" } },
-        rules: [
-          { type: "Text", globs: ["**/*.md", "**/*.txt", "**/*.schema.json"], fallthrough: true },
-        ],
-        vars: {
-          STOA_ORIGIN: origin,
-          AGORA_ORIGIN: "https://staging.asimposium.org",
-          SPONSOR_PROMOTION_RATE_LIMIT: "100",
-          ENROLLMENT_REPLAY_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString(
-            "base64url",
-          ),
+          exports: { KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" } },
+          rules: [
+            { type: "Text", globs: ["**/*.md", "**/*.txt", "**/*.schema.json"], fallthrough: true },
+          ],
+          vars: {
+            STOA_ORIGIN: origin,
+            AGORA_ORIGIN: "https://staging.asimposium.org",
+            SPONSOR_PROMOTION_RATE_LIMIT: "100",
+            ENROLLMENT_REPLAY_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString(
+              "base64url",
+            ),
+          },
         },
       },
-    },
-  ],
-});
+    ],
+  });
+}
 
-async function runProblemLifecycleProof() {
-  await server.listen();
-  console.log(JSON.stringify({ stage: "workerd-started" }));
-  const worker = server.getWorker();
-  await worker.applyD1Migrations("DB");
-  console.log(JSON.stringify({ stage: "d1-migrated" }));
+// Reuse this real binding/signed-request setup for related product journeys.
+// Importing it never starts a journey or certifies another product surface.
+export async function runLocalWorkerJourney(journey) {
+  const server = createLocalWorkerHarness();
+  try {
+    await server.listen();
+    console.log(JSON.stringify({ stage: "workerd-started" }));
+    const worker = server.getWorker();
+    await worker.applyD1Migrations("DB");
+    console.log(JSON.stringify({ stage: "d1-migrated" }));
 
-  const fixtures = await worker.getExport();
-  const env = await worker.getEnv();
-  let key = 0;
+    const fixtures = await worker.getExport();
+    const env = await worker.getEnv();
+    let key = 0;
 
-  async function call(path, body, token, expected = 200, idempotencyKey) {
-    const response = await worker.fetch(`${origin}${path}`, {
-      method: body === undefined ? "GET" : "POST",
-      headers: {
-        "User-Agent": userAgent,
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-        ...(body === undefined
-          ? {}
-          : {
-              "content-type": "application/json",
-              "idempotency-key": idempotencyKey ?? `problem-key-${++key}`,
-            }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+    async function call(path, body, token, expected = 200, idempotencyKey) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          "User-Agent": userAgent,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+          ...(body === undefined
+            ? {}
+            : {
+                "content-type": "application/json",
+                "idempotency-key": idempotencyKey ?? `problem-key-${++key}`,
+              }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
 
-    const raw = await response.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      throw new Error(
-        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} sha256=${createHash("sha256").update(raw).digest("hex")}`,
-      );
+      const raw = await response.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(
+          `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(raw)} sha256=${createHash("sha256").update(raw).digest("hex")}`,
+        );
+      }
+
+      if (expected !== null && expected !== undefined) {
+        const code = ProblemCodeSchema.safeParse(data?.code);
+        assert.equal(
+          response.status,
+          expected,
+          `${path}: status=${response.status} expected=${expected} code=${code.success ? code.data : "unrecognized"}`,
+        );
+      }
+      return data;
     }
 
-    if (expected !== null && expected !== undefined) {
+    const discovery = await call("/openapi.json");
+    function discoveredRequest(property) {
+      const matches = Object.entries(discovery.paths).filter(([, methods]) =>
+        methods.post?.requestBody?.content?.["application/json"]?.schema?.$ref?.endsWith(
+          `/properties/${property}`,
+        ),
+      );
+      assert.ok(matches.length > 0, `Missing published request schema: ${property}`);
+      const [path] = matches[0];
+      return path;
+    }
+
+    async function enroll(name, sponsor = "usr_sponsor_problems") {
+      const minted = await fixtures.mint(sponsor);
+      const claimed = await call(
+        discoveredRequest("fellow_registration_request"),
+        {
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name,
+          model: "synthetic-problem-model",
+          harness: "local-problem-lifecycle-proof",
+        },
+        undefined,
+        202,
+      );
+      await fixtures.approve(sponsor, minted.enrollmentId);
+      const issued = await call(discoveredRequest("flow_poll_request"), {
+        flow_handle: claimed.flow_handle,
+      });
+      assert.equal(typeof issued.token, "string");
+      return issued.token;
+    }
+
+    async function sponsorCall(
+      sponsorId,
+      method,
+      path,
+      action,
+      body,
+      expected = 200,
+      route = path,
+    ) {
+      const raw = body === undefined ? "" : JSON.stringify(body);
+      const envelope = await mintServiceEnvelope({
+        privateKey: signingKeys.privateKey,
+        kid: keyId,
+        now: Math.floor(Date.now() / 1000),
+        method,
+        route,
+        action,
+        principalId: sponsorId,
+        body: raw,
+      });
+      const response = await worker.fetch(`${origin}${path}`, {
+        method,
+        headers: {
+          ...serviceEnvelopeHeaders(envelope),
+          "User-Agent": userAgent,
+          "Idempotency-Key": `local-sponsor-${++key}`,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: raw }),
+      });
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(
+          `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(text)} sha256=${createHash("sha256").update(text).digest("hex")}`,
+        );
+      }
+      const code = ProblemCodeSchema.safeParse(data?.code);
       assert.equal(
         response.status,
         expected,
-        `${path}: status=${response.status} expected=${expected} code=${data.code ?? "none"}`,
+        `${path}: signed sponsor call status=${response.status} expected=${expected} code=${code.success ? code.data : "unrecognized"}`,
       );
+      if (expected >= 200 && expected < 300) {
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+      }
+      return data;
     }
-    return data;
-  }
 
-  const discovery = await call("/openapi.json");
-  function discoveredRequest(property) {
-    const matches = Object.entries(discovery.paths).filter(([, methods]) =>
-      methods.post?.requestBody?.content?.["application/json"]?.schema?.$ref?.endsWith(
-        `/properties/${property}`,
-      ),
-    );
-    assert.ok(matches.length > 0, `Missing published request schema: ${property}`);
-    const [path] = matches[0];
-    return path;
-  }
-
-  async function enroll(name, sponsor = "usr_sponsor_problems") {
-    const minted = await fixtures.mint(sponsor);
-    const claimed = await call(
-      discoveredRequest("fellow_registration_request"),
-      {
-        enrollment_id: minted.enrollmentId,
-        secret: minted.secret,
-        name,
-        model: "synthetic-problem-model",
-        harness: "local-problem-lifecycle-proof",
-      },
-      undefined,
-      202,
-    );
-    await fixtures.approve(sponsor, minted.enrollmentId);
-    const issued = await call(discoveredRequest("flow_poll_request"), {
-      flow_handle: claimed.flow_handle,
-    });
-    assert.equal(typeof issued.token, "string");
-    return issued.token;
-  }
-
-  async function sponsorCall(sponsorId, method, path, action, body, expected = 200) {
-    const raw = body === undefined ? "" : JSON.stringify(body);
-    const envelope = await mintServiceEnvelope({
-      privateKey: signingKeys.privateKey,
-      kid: keyId,
-      now: Math.floor(Date.now() / 1000),
-      method,
-      route: path,
-      action,
-      principalId: sponsorId,
-      body: raw,
-    });
-    const response = await worker.fetch(`${origin}${path}`, {
-      method,
-      headers: {
-        ...serviceEnvelopeHeaders(envelope),
-        "User-Agent": userAgent,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: raw }),
-    });
-    const text = await response.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(
-        `${path}: status=${response.status} non-JSON bytes=${Buffer.byteLength(text)} sha256=${createHash("sha256").update(text).digest("hex")}`,
-      );
-    }
-    assert.equal(
-      response.status,
-      expected,
-      `${path}: signed sponsor call status=${response.status} expected=${expected} code=${data.code ?? "none"}`,
-    );
-    if (expected >= 200 && expected < 300) {
-      assert.equal(response.headers.get("cache-control"), "private, no-store");
-    }
-    return data;
-  }
-
-  try {
-    const result = await problemLifecycleJourney({
+    const result = await journey({
       call,
       enroll,
       fixtures,
@@ -201,14 +219,28 @@ async function runProblemLifecycleProof() {
   }
 }
 
-runProblemLifecycleProof()
-  .then((receipt) => {
-    console.log(
-      JSON.stringify({ kind: "problem-lifecycle-real-bindings-complete", status: "pass", receipt }),
-    );
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error("Problem lifecycle real bindings failed:", err);
-    process.exit(1);
-  });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runLocalWorkerJourney(problemLifecycleJourney)
+    .then((receipt) => {
+      console.log(
+        JSON.stringify({
+          kind: "problem-lifecycle-real-bindings-complete",
+          status: "pass",
+          receipt,
+        }),
+      );
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error(
+        JSON.stringify({
+          kind: "problem-lifecycle-real-bindings-complete",
+          status: "fail",
+          error_sha256: createHash("sha256")
+            .update(err instanceof Error ? err.message : typeof err)
+            .digest("hex"),
+        }),
+      );
+      process.exit(1);
+    });
+}

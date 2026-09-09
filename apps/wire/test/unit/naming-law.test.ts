@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { FellowNameSchema } from "@asimposium/contracts";
+import { readNamingResponse } from "../../../../scripts/suite/naming-law-e2e.ts";
 import {
   AesGcmEnrollmentReplayProtector,
   EnrollmentError,
@@ -10,6 +11,51 @@ import {
   enrollmentNameFailure,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+
+describe("naming journey credential-safe diagnostics", () => {
+  const token = "asimp_ag_diagnostic_canary_only";
+  const secret = "v1.diagnostic_canary_only";
+
+  test("unexpected credential-bearing status fails without reflecting the payload", async () => {
+    const response = Response.json(
+      { status: "approved", token, secret, code: token },
+      { status: 202 },
+    );
+    const error = await readNamingResponse(response, 200).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(Error);
+    const message = String(error);
+    expect(message).toContain("status=202 expected=200 code=unrecognized");
+    expect(message).toMatch(/sha256=[a-f0-9]{64}/);
+    expect(message).not.toContain(token);
+    expect(message).not.toContain(secret);
+  });
+
+  test("malformed credential-bearing JSON fails without parser excerpts", async () => {
+    const error = await readNamingResponse(
+      new Response(`{${token}:${secret}`, { status: 502 }),
+      200,
+    ).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(Error);
+    const message = String(error);
+    expect(message).toContain("not JSON: status=502 bytes=");
+    expect(message).toMatch(/sha256=[a-f0-9]{64}/);
+    expect(message).not.toContain(token);
+    expect(message).not.toContain(secret);
+  });
+
+  test("canonical error codes survive while private body fields do not", async () => {
+    const response = Response.json({ code: "NAME_TAKEN", detail: token }, { status: 422 });
+    const error = await readNamingResponse(response, 202).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("code=NAME_TAKEN");
+    expect(String(error)).not.toContain(token);
+  });
+
+  test("successful responses retain the private payload for assertions", async () => {
+    const body = { status: "approved", token };
+    expect(await readNamingResponse(Response.json(body), 200)).toEqual(body);
+  });
+});
 
 function initTestDatabase(): Database {
   const sqlite = new Database(":memory:", { strict: true });
