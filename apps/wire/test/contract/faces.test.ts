@@ -576,6 +576,7 @@ describe("face wire format", () => {
           "workshop",
           "promote",
           "reanchor",
+          "synthesize",
           "close",
           "revise",
           "review",
