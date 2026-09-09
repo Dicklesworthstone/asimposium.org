@@ -1,4 +1,8 @@
 import {
+  AnswerQuestionRequestSchema,
+  AnswerQuestionResponseSchema,
+  AskQuestionRequestSchema,
+  AskQuestionResponseSchema,
   ClaimReanchorRequestSchema,
   ClaimReanchorResponseSchema,
   ClaimRevisionSchema,
@@ -14,6 +18,8 @@ import {
   HypothesisKillResponseSchema,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
+  LeaseQuestionRequestSchema,
+  LeaseQuestionResponseSchema,
   type PackProfile,
   PackResponseSchema,
   PackTargetQuerySchema,
@@ -28,6 +34,8 @@ import {
   RecordDeadEndResponseSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
+  RetractRequestSchema,
+  RetractResponseSchema,
   ReviewRequestSchema,
   ReviewResponseSchema,
   ReviseRequestSchema,
@@ -54,6 +62,8 @@ import {
   SponsorWorkshopViewSchema,
   SynthesizeRequestSchema,
   SynthesizeResponseSchema,
+  WithdrawQuestionRequestSchema,
+  WithdrawQuestionResponseSchema,
   WorkshopObjectResponseSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
@@ -97,7 +107,9 @@ import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 import { validateDeadEndPreconditions } from "../ledger/dead-ends";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
+import { validateQuestionSubstance } from "../ledger/questions";
 import { parseRelationTarget } from "../ledger/relations";
+import { determineRetractionKind, validateRetractionSubstance } from "../ledger/retractions";
 import { gateReviewSubmission } from "../ledger/review-gate";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
@@ -133,7 +145,13 @@ import {
   rejectAuthoritativeFields,
   sha256Hex,
 } from "../split/policy";
-import { readLedgerPackSection, readReviewQueuePack, readTargetClaimPack } from "./ledger-pack";
+import {
+  readDeadEndPack,
+  readLedgerPackSection,
+  readReviewQueuePack,
+  readTargetClaimPack,
+  workingReviewMove,
+} from "./ledger-pack";
 import {
   checkAndReserveQuota,
   getRemainingBudget,
@@ -632,6 +650,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     evidence: ["evidence", EvidenceResponseSchema],
     synthesize: ["synthesize", SynthesizeResponseSchema],
     "dead-ends": ["dead_end", RecordDeadEndResponseSchema],
+    questions: ["ask_question", AskQuestionResponseSchema],
+    retract: ["retract", RetractResponseSchema],
   } as const;
 
   async function screenWithQuota(
@@ -739,6 +759,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "evidence"
     | "synthesize"
     | "dead_end"
+    | "ask_question"
+    | "lease_question"
+    | "answer_question"
+    | "withdraw_question"
+    | "retract"
     | "session_close";
 
   interface ReplayRecord {
@@ -933,6 +958,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "relations"
           | "synthesize"
           | "dead_end"
+          | "ask_question"
+          | "retract"
         >;
         readonly principal: string;
         readonly target: string;
@@ -944,6 +971,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly session: SessionRow;
         readonly screening: ScreenedPublication;
         readonly reservationId?: string;
+        readonly responseFor: (settlement: {
+          readonly sequence: number;
+          readonly objectId: string;
+          readonly eventId: string;
+        }) => T;
+      }
+    | {
+        readonly db: Env["DB"];
+        readonly scope: Extract<
+          ReplayScope,
+          "lease_question" | "answer_question" | "withdraw_question"
+        >;
+        readonly principal: string;
+        readonly target: string;
+        readonly callerKey: string;
+        readonly requestDigest: string;
+        readonly claimToken: string;
+        readonly kraterIdempotencyKey: string;
+        readonly credentialId: string;
+        readonly session: SessionRow;
+        readonly screening?: undefined;
+        readonly reservationId?: undefined;
         readonly responseFor: (settlement: {
           readonly sequence: number;
           readonly objectId: string;
@@ -1391,6 +1440,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/evidence",
     "/v1/sessions/:id/synthesize",
     "/v1/sessions/:id/dead-ends",
+    "/v1/sessions/:id/questions",
+    "/v1/sessions/:id/questions/:qid/lease",
+    "/v1/sessions/:id/questions/:qid/answer",
+    "/v1/sessions/:id/questions/:qid/withdraw",
+    "/v1/sessions/:id/retract",
     "/v1/sessions/:id/close",
     "/v1/problems/:id/statement-review",
   ] as const;
@@ -2019,6 +2073,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             composed = composePack({ ...input, omitted });
           }
         }
+        // A section-level disclosure stays bounded even when all twenty
+        // records miss the smallest bucket. Listing every excluded ID here
+        // would itself overflow that bucket. Full-read actions remain usable.
+        if (
+          input.candidates.some(
+            (item) =>
+              item.scope === "ledger" &&
+              (item.kind === "dead-end" || item.kind === "dead-end-headline") &&
+              !composed.items.some((included) => included.id === item.id),
+          )
+        ) {
+          composed = composePack({
+            ...input,
+            omitted: [
+              ...(input.omitted ?? []),
+              {
+                reason: "budget_exceeded",
+                detail: "public-dead-ends: whole entries omitted; follow the full-read action",
+              },
+            ],
+          });
+        }
         return await packResponse(composed);
       } catch (error) {
         if (error instanceof PackComposerError) {
@@ -2237,15 +2313,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const ledgerSection = await readLedgerPackSection(db, session.problem_id, cursor, profile);
     candidates.push(...ledgerSection.candidates);
+    const deadEndSection = await readDeadEndPack(db, session.problem_id, cursor, profile);
+    candidates.push(...deadEndSection.candidates);
     const reviewQueue =
-      profile === "review-queue"
+      profile === "review-queue" || profile === "working"
         ? await readReviewQueuePack(db, session.problem_id, cursor, {
             fellowId: auth.binding.fellowId,
             sponsorId: auth.binding.sponsorId,
           })
         : { candidates: [], omitted: [], targets: [] };
-    candidates.push(...reviewQueue.candidates);
-    const firstReviewTarget = reviewQueue.targets[0];
+    if (profile === "review-queue") candidates.push(...reviewQueue.candidates);
 
     // W2.6: the digest profile surfaces the projection staleness line — how many
     // of this problem's claim projections are flagged stale (drifted from the
@@ -2386,7 +2463,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
       claim: targetParam === null ? ["claim-detail"] : [],
       review: ["author-isolation-proof"],
-      graveyard: ["public-dead-ends", "friction-reports", "retry-predicates"],
+      graveyard: ["friction-reports"],
       literature: ["citations"],
       formal: ["formal-artifacts", "friction-reports", "verification-records"],
       "claim-graph": ["relation-disputes", "weakest-link-paths"],
@@ -2437,6 +2514,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       promotionBudget?.sponsor_limit === 0
         ? "Sponsor public writes are disabled; continue drafting in your private workshop."
         : `Promotion rate limit reached; continue drafting privately and recheck the budget after ${promotionBudget?.retry_after_seconds ?? 3600}s.`;
+    const reviewAllowed =
+      authorizeFellowWrite({
+        effect: "review",
+        credential: auth.binding,
+        target: authorizationTarget,
+        usage: authorizationUsage,
+        now: authorizationObservedAt,
+      }).decision === "allow";
+    const firstReviewTarget =
+      profile === "working" && !reviewAllowed ? undefined : reviewQueue.targets[0];
+    const recommendedReview =
+      profile === "working" ? workingReviewMove(firstReviewTarget) : undefined;
+    if (recommendedReview) candidates.push(recommendedReview);
     return composePackResponse({
       schema: "asimposium.pack.v1",
       session: session.session_id,
@@ -2454,6 +2544,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
+        ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
+        deadEndSection.omitted.length > 0
+          ? [
+              {
+                method: "GET" as const,
+                url: `/p/${session.problem_id}/dead-ends.json`,
+                why: "Read complete published dead ends and retry conditions; this public list reads the current ledger head.",
+                public_read: true,
+              },
+              ...(profile !== "graveyard" || requestedMaxTokens < 8000
+                ? [
+                    {
+                      method: "GET" as const,
+                      url: `/v1/sessions/${session.session_id}/pack?profile=graveyard&max_tokens=8000`,
+                      why: "Read a larger graveyard pack with whole failure records and recorded retry conditions.",
+                      public_read: false,
+                    },
+                  ]
+                : []),
+            ]
+          : []),
         ...targetSection.candidates
           .filter((item) => item.kind === "claim-dependency")
           // Actions are mandatory envelope bytes. Every premise carries its
@@ -2470,7 +2581,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               {
                 method: "GET" as const,
                 url: `/v1/sessions/${session.session_id}/pack?profile=review&target=${encodeURIComponent(firstReviewTarget)}&max_tokens=8000`,
-                why: "Read the first queue candidate's exact public version and review context; submission still requires current authorization and the review validator.",
+                why: "Read the selected claim's exact version in an isolated review pack; submission rechecks authorization and the review validator.",
                 public_read: false,
               },
             ]
@@ -2520,9 +2631,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       ],
       omitted: [
         ...targetSection.omitted,
+        ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
-        ...reviewQueue.omitted,
+        ...(profile === "working"
+          ? [...new Set(reviewQueue.omitted.map((item) => item.reason))].map((reason) => ({
+              reason,
+              detail: "eligible-reviews",
+            }))
+          : reviewQueue.omitted),
+        ...(profile === "working"
+          ? [{ reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" }]
+          : []),
         ...graveyardOmissions,
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget
@@ -7264,7 +7384,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "dead-end",
-        statement: `${parsed.data.approach}\n\nWhy it fails: ${parsed.data.why_it_fails}\n\nRetry predicate: ${parsed.data.retry_predicate}`,
+        statement: JSON.stringify(parsed.data),
         falsifier: null,
       },
     );
@@ -7393,6 +7513,1424 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const winner = await readReplayRecord(
           db,
           "dead_end",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/questions (W5.8d: Questions & leasable help requests) ---
+  app.post("/v1/sessions/:id/questions", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = AskQuestionRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "QUESTION_BODY_INVALID",
+        title: "Invalid question body",
+        detail: "The question request body did not match the question contract.",
+        fixHint: "Provide body_md (at least 10 characters) and optional target_refs or blocking.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
+            target_refs: ["C-1"],
+          },
+        },
+      });
+    }
+
+    const substance = validateQuestionSubstance(parsed.data);
+    if (!substance.valid) {
+      return validatedProblem({
+        status: 422,
+        code: "QUESTION_BODY_INVALID",
+        title: "Question body lacks substance",
+        detail: substance.reason ?? "Question body lacks sufficient mathematical substance.",
+        fixHint: "Provide a specific, substantive question explaining the technical obstacle.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/questions", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "ask_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => AskQuestionResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            problem_id: session.problem_id,
+          },
+        },
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot ask question on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Questions cannot be asked on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            problem_id: session.problem_id,
+          },
+        },
+      });
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "questions",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "question",
+        statement: parsed.data.body_md,
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    const questionId = mintId("Q");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("ask_question", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "question.asked",
+          objectKind: "question",
+          objectId: questionId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            question_id: questionId,
+            problem_id: session.problem_id,
+            target_refs: parsed.data.target_refs ?? [],
+            blocking: parsed.data.blocking ?? null,
+            body_md: parsed.data.body_md,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO questions
+                   (question_id, problem_id, seq, target_refs_json, blocking, body_md,
+                    author_fellow_id, status, leased_by, leased_until, resolved_by_object, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, 'open', NULL, NULL, NULL, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                questionId,
+                session.problem_id,
+                sequence,
+                JSON.stringify(parsed.data.target_refs ?? []),
+                parsed.data.blocking ?? null,
+                parsed.data.body_md,
+                auth.binding.fellowId,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "ask_question",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: ({ sequence }) =>
+            AskQuestionResponseSchema.parse({
+              ok: true,
+              question_id: questionId,
+              problem_id: session.problem_id,
+              status: "open",
+              seq: sequence,
+              created_at: createdAt,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "ask_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("ask_question committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "ask_question",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/questions/:qid/lease (W5.8d: Lease a question) ---
+  app.post("/v1/sessions/:id/questions/:qid/lease", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const questionId = c.req.param("qid");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = LeaseQuestionRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "QUESTION_BODY_INVALID",
+        title: "Invalid lease request body",
+        detail: "The request body did not match the question lease contract.",
+        fixHint: "Provide optional objective, deliverable, and ttl_seconds (60..7200).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            ttl_seconds: 3600,
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/:id/questions/${questionId}/lease`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "lease_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => LeaseQuestionResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const question = await db
+      .prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?")
+      .bind(session.problem_id, questionId)
+      .first<{
+        question_id: string;
+        problem_id: string;
+        status: string;
+        leased_by: string | null;
+        leased_until: string | null;
+      }>();
+
+    if (!question) {
+      return validatedProblem({
+        status: 404,
+        code: "QUESTION_NOT_FOUND",
+        title: "Question not found",
+        detail: `No question '${questionId}' exists on problem '${session.problem_id}'.`,
+        fixHint: "Check the question ID against GET /p/:id/questions.json.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.status === "resolved") {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_RESOLVED",
+        title: "Question already resolved",
+        detail: `Question '${questionId}' has already been resolved.`,
+        fixHint: "Explore active open questions.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.status === "withdrawn") {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_WITHDRAWN",
+        title: "Question withdrawn",
+        detail: `Question '${questionId}' was withdrawn by its author.`,
+        fixHint: "Explore active open questions.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    const now = new Date();
+    const leaseExpiry = question.leased_until ? new Date(question.leased_until) : null;
+    const isExpired = leaseExpiry !== null && leaseExpiry.getTime() <= now.getTime();
+    if (
+      question.status === "leased" &&
+      !isExpired &&
+      question.leased_by !== auth.binding.fellowId
+    ) {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_LEASED",
+        title: "Question already leased",
+        detail: `Question '${questionId}' is currently leased by fellow '${question.leased_by}' until ${question.leased_until}.`,
+        fixHint: "Choose an unleased question or wait until the lease expires.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    const ttlSeconds = parsed.data.ttl_seconds ?? 7200;
+    const leasedUntil = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("lease_question", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "question.leased",
+          objectKind: "question",
+          objectId: questionId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            question_id: questionId,
+            leased_by: auth.binding.fellowId,
+            leased_until: leasedUntil,
+            objective: parsed.data.objective ?? "Answer question",
+            deliverable: parsed.data.deliverable ?? "Resolution artifact",
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE questions
+                 SET status = 'leased', leased_by = ?, leased_until = ?
+                 WHERE problem_id = ? AND question_id = ?`,
+              )
+              .bind(auth.binding.fellowId, leasedUntil, session.problem_id, questionId),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "lease_question",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            LeaseQuestionResponseSchema.parse({
+              ok: true,
+              question_id: questionId,
+              status: "leased",
+              leased_by: auth.binding.fellowId,
+              leased_until: leasedUntil,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "lease_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("lease_question committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "lease_question",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/questions/:qid/answer (W5.8d: Answer a question) ---
+  app.post("/v1/sessions/:id/questions/:qid/answer", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const questionId = c.req.param("qid");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = AnswerQuestionRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "QUESTION_BODY_INVALID",
+        title: "Invalid answer request body",
+        detail: "The request body did not match the question answer contract.",
+        fixHint: "Provide resolved_by_object referencing a valid claim or evidence.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            resolved_by_object: "C-1",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/:id/questions/${questionId}/answer`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "answer_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => AnswerQuestionResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const question = await db
+      .prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?")
+      .bind(session.problem_id, questionId)
+      .first<{
+        question_id: string;
+        problem_id: string;
+        status: string;
+        resolved_by_object: string | null;
+      }>();
+
+    if (!question) {
+      return validatedProblem({
+        status: 404,
+        code: "QUESTION_NOT_FOUND",
+        title: "Question not found",
+        detail: `No question '${questionId}' exists on problem '${session.problem_id}'.`,
+        fixHint: "Check the question ID against GET /p/:id/questions.json.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.status === "resolved") {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_RESOLVED",
+        title: "Question already resolved",
+        detail: `Question '${questionId}' has already been resolved by '${question.resolved_by_object}'.`,
+        fixHint: "Answer an open or leased question.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.status === "withdrawn") {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_WITHDRAWN",
+        title: "Question withdrawn",
+        detail: `Question '${questionId}' was withdrawn.`,
+        fixHint: "Answer an open or leased question.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    const target = parsed.data.resolved_by_object;
+    let targetExists = false;
+    if (target.startsWith("C-")) {
+      const claim = await db
+        .prepare("SELECT id FROM claims WHERE problem_id = ? AND id = ?")
+        .bind(session.problem_id, target.split("@")[0])
+        .first();
+      if (claim) targetExists = true;
+    } else if (target.startsWith("E-")) {
+      const ev = await db
+        .prepare("SELECT id FROM evidence WHERE problem_id = ? AND id = ?")
+        .bind(session.problem_id, target)
+        .first();
+      if (ev) targetExists = true;
+    } else if (target.startsWith("REV-")) {
+      const rev = await db
+        .prepare("SELECT id FROM reviews WHERE problem_id = ? AND id = ?")
+        .bind(session.problem_id, target)
+        .first();
+      if (rev) targetExists = true;
+    }
+
+    if (!targetExists) {
+      return validatedProblem({
+        status: 422,
+        code: "QUESTION_BODY_INVALID",
+        title: "Unknown answer target object",
+        detail: `Target object '${target}' was not found on problem '${session.problem_id}'.`,
+        fixHint: "Reference a valid claim, evidence, or review on this problem.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            resolved_by_object: "C-1",
+          },
+        },
+      });
+    }
+
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("answer_question", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "question.answered",
+          objectKind: "question",
+          objectId: questionId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            question_id: questionId,
+            resolved_by_object: target,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE questions
+                 SET status = 'resolved', resolved_by_object = ?
+                 WHERE problem_id = ? AND question_id = ?`,
+              )
+              .bind(target, session.problem_id, questionId),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "answer_question",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            AnswerQuestionResponseSchema.parse({
+              ok: true,
+              question_id: questionId,
+              status: "resolved",
+              resolved_by_object: target,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "answer_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("answer_question committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "answer_question",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/questions/:qid/withdraw (W5.8d: Withdraw a question) ---
+  app.post("/v1/sessions/:id/questions/:qid/withdraw", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const questionId = c.req.param("qid");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = WithdrawQuestionRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "QUESTION_BODY_INVALID",
+        title: "Invalid withdraw request body",
+        detail: "The request body did not match the question withdraw contract.",
+        fixHint: "Provide an optional reason (at least 5 characters).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            reason: "Obstacle resolved via independent literature discovery.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/:id/questions/${questionId}/withdraw`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "withdraw_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => WithdrawQuestionResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const question = await db
+      .prepare("SELECT * FROM questions WHERE problem_id = ? AND question_id = ?")
+      .bind(session.problem_id, questionId)
+      .first<{
+        question_id: string;
+        problem_id: string;
+        status: string;
+        author_fellow_id: string;
+      }>();
+
+    if (!question) {
+      return validatedProblem({
+        status: 404,
+        code: "QUESTION_NOT_FOUND",
+        title: "Question not found",
+        detail: `No question '${questionId}' exists on problem '${session.problem_id}'.`,
+        fixHint: "Check the question ID against GET /p/:id/questions.json.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.author_fellow_id !== auth.binding.fellowId) {
+      return validatedProblem({
+        status: 403,
+        code: "NOT_QUESTION_AUTHOR",
+        title: "Not question author",
+        detail: `Only the authoring fellow ('${question.author_fellow_id}') may withdraw question '${questionId}'.`,
+        fixHint: "Only withdraw questions that you created.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.status === "withdrawn") {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_WITHDRAWN",
+        title: "Question already withdrawn",
+        detail: `Question '${questionId}' has already been withdrawn.`,
+        fixHint: "Cannot withdraw an already-withdrawn question.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    if (question.status === "resolved") {
+      return validatedProblem({
+        status: 409,
+        code: "QUESTION_ALREADY_RESOLVED",
+        title: "Question already resolved",
+        detail: `Question '${questionId}' has already been resolved and cannot be withdrawn.`,
+        fixHint: "Resolved questions remain permanently in the ledger.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            question_id: questionId,
+          },
+        },
+      });
+    }
+
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("withdraw_question", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "question.withdrawn",
+          objectKind: "question",
+          objectId: questionId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            question_id: questionId,
+            reason: parsed.data.reason ?? "Question withdrawn by author",
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE questions
+                 SET status = 'withdrawn'
+                 WHERE problem_id = ? AND question_id = ?`,
+              )
+              .bind(session.problem_id, questionId),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "withdraw_question",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            WithdrawQuestionResponseSchema.parse({
+              ok: true,
+              question_id: questionId,
+              status: "withdrawn",
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "withdraw_question",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("withdraw_question committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "withdraw_question",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/retract (W5.8d: Author strike-through & history-preserving retraction) ---
+  app.post("/v1/sessions/:id/retract", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = RetractRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "RETRACT_BODY_INVALID",
+        title: "Invalid retraction request body",
+        detail: "The request body did not match the retraction contract.",
+        fixHint: "Provide target_object and substantive reason (at least 10 characters).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: "C-1",
+            reason:
+              "Author self-correction: found counterexample in 2-adic valuations at depth 12.",
+          },
+        },
+      });
+    }
+
+    const substance = validateRetractionSubstance(parsed.data.reason);
+    if (!substance.valid) {
+      return validatedProblem({
+        status: 422,
+        code: "RETRACT_BODY_INVALID",
+        title: "Retraction reason lacks substance",
+        detail:
+          substance.reason ?? "Retraction reason must contain substantive technical explanation.",
+        fixHint: "Provide a substantive explanation of why the object is retracted.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: parsed.data.target_object,
+            reason:
+              "Author self-correction: found counterexample in 2-adic valuations at depth 12.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/retract", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "retract",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => RetractResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            problem_id: session.problem_id,
+          },
+        },
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot retract on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Retractions cannot be recorded on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            problem_id: session.problem_id,
+          },
+        },
+      });
+    }
+
+    if (!parsed.data.target_object.startsWith("C-")) {
+      return validatedProblem({
+        status: 422,
+        code: "RETRACTION_TARGET_INVALID",
+        title: "Invalid retraction target",
+        detail: `Target '${parsed.data.target_object}' is not a valid retractable object.`,
+        fixHint: "Specify an authored claim (e.g. C-1) to retract.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: parsed.data.target_object,
+          },
+        },
+      });
+    }
+
+    const claimRow = await db
+      .prepare(
+        `SELECT
+           c.id,
+           (SELECT v.editor_fellow_id FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id AND v.version = 1
+           ) AS author_fellow_id
+         FROM claims c WHERE c.problem_id = ? AND c.id = ?`,
+      )
+      .bind(session.problem_id, parsed.data.target_object)
+      .first<{ id: string; author_fellow_id: string }>();
+
+    if (!claimRow) {
+      return validatedProblem({
+        status: 422,
+        code: "RETRACTION_TARGET_INVALID",
+        title: "Retraction target not found",
+        detail: `No target object '${parsed.data.target_object}' exists on problem '${session.problem_id}'.`,
+        fixHint: "Check the target ID against your problem's claims.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: parsed.data.target_object,
+          },
+        },
+      });
+    }
+
+    if (claimRow.author_fellow_id !== auth.binding.fellowId) {
+      return validatedProblem({
+        status: 403,
+        code: "NOT_TARGET_AUTHOR",
+        title: "Not target author",
+        detail: `Only the authoring fellow ('${claimRow.author_fellow_id}') may retract target '${parsed.data.target_object}'.`,
+        fixHint: "Only retract objects that you authored.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: parsed.data.target_object,
+          },
+        },
+      });
+    }
+
+    const alreadyRetracted = await db
+      .prepare("SELECT retraction_id FROM retractions WHERE problem_id = ? AND target_object = ?")
+      .bind(session.problem_id, parsed.data.target_object)
+      .first<{ retraction_id: string }>();
+
+    if (alreadyRetracted) {
+      return validatedProblem({
+        status: 409,
+        code: "TARGET_ALREADY_RETRACTED",
+        title: "Target already retracted",
+        detail: `Target '${parsed.data.target_object}' was already retracted by retraction '${alreadyRetracted.retraction_id}'.`,
+        fixHint: "Cannot retract an already retracted object.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: parsed.data.target_object,
+          },
+        },
+      });
+    }
+
+    const retractionKind = await determineRetractionKind(
+      db,
+      session.problem_id,
+      parsed.data.target_object,
+      auth.binding.fellowId,
+    );
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "retract",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "retraction",
+        statement: parsed.data.reason,
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    const retractionId = mintId("R");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("retract", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "object.retracted",
+          objectKind: "retraction",
+          objectId: retractionId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            retraction_id: retractionId,
+            target_object: parsed.data.target_object,
+            retraction_kind: retractionKind,
+            reason: parsed.data.reason,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO retractions
+                   (retraction_id, problem_id, seq, target_object, retraction_kind, reason,
+                    author_fellow_id, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                retractionId,
+                session.problem_id,
+                sequence,
+                parsed.data.target_object,
+                retractionKind,
+                parsed.data.reason,
+                auth.binding.fellowId,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "retract",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: ({ sequence }) =>
+            RetractResponseSchema.parse({
+              ok: true,
+              retraction_id: retractionId,
+              problem_id: session.problem_id,
+              target_object: parsed.data.target_object,
+              retraction_kind: retractionKind,
+              seq: sequence,
+              created_at: createdAt,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "retract",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("retract committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "retract",
           auth.binding.fellowId,
           key,
           digest,

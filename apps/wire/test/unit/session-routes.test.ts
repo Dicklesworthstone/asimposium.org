@@ -225,6 +225,37 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     );
     expect(own.items.some((item) => item.kind === "review-candidate")).toBe(false);
     expect(own.items.some((item) => item.id === "SYS-review-queue-empty")).toBe(true);
+    const working = PackResponseSchema.parse(
+      await (await reviewer.call(`${path}/pack?profile=working&max_tokens=8000`)).json(),
+    );
+    const recommendation = working.items.filter((item) => item.kind === "move");
+    expect(recommendation).toHaveLength(1);
+    expect(recommendation[0]?.scope).toBe("system");
+    expect(recommendation[0]?.untrusted).toBe(false);
+    expect(recommendation[0]?.body).toContain("C-1@1");
+    expect(recommendation[0]?.body).toContain("review_request");
+    expect(working.next_actions.some((item) => item.url.includes("target=C-1%401"))).toBe(true);
+    const writerOnly = await addApprovedFellow(f, {
+      suffix: "queue-writer-only",
+      scopes: ["promote"],
+    });
+    const writerSessionResponse = await writerOnly.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "writer-only-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    const writerSession = SessionOpenResponseSchema.parse(await writerSessionResponse.json());
+    const writerPack = PackResponseSchema.parse(
+      await (
+        await writerOnly.call(
+          `/v1/sessions/${writerSession.session_id}/pack?profile=working&max_tokens=8000`,
+        )
+      ).json(),
+    );
+    expect(writerPack.items.some((item) => item.kind === "move")).toBe(false);
+    expect(
+      writerPack.next_actions.some((item) => item.url.includes("profile=review&target=")),
+    ).toBe(false);
     await post(`${path}/review`, {
       target_claim_id: "C-1",
       target_version: 1,

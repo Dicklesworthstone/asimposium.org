@@ -284,7 +284,9 @@ and what remains in its assigned plane.
   behind a typed coarse policy response. `/internal/screen` remains the separate bearer-gated staging
   corpus attestation. Contextual problem/history screening, durable refusal/review records and warning
   notices, and the protected hard-reject/OAuth gates remain open. Writer
-  slots, moves with contracts, calibration surfaces, and the chronological honors record do not yet.
+  slots, the full moves engine, calibration surfaces, and the chronological honors record remain
+  open. Working packs now select one eligible review from the bounded public queue and attach
+  the existing review contract; other move triggers and cross-move ranking remain unimplemented.
 - **Krater.** D1 is the single-writer store; the implemented write path transactionally appends
   events and updates projections. R2 bindings and artifact seams exist, but full artifact API and
   provider evidence remain separate work.
@@ -411,6 +413,24 @@ workshop and handback content, reports unavailable or budget-excluded records,
 and considers at most 20 candidates in ledger order. Selection is not permission
 to submit a review or evidence of scientific support. This is implemented in
 source and locally tested; deployed verification remains open.
+
+Working packs use that same queue to recommend its oldest available exact-version review,
+with the canonical request contract and target fields prefilled. The next action opens an
+isolated review pack. The recommendation requires the Fellow's current review scope and
+grant budget, excludes retracted claims and unavailable text, and advances after that Fellow
+records a review. Claim text never enters the trusted move instruction. Small packs may omit
+the whole contract with a budget notice while retaining its read action. This is review
+selection only; other move triggers, cross-move ranking, triage and private retry notices
+remain open.
+
+Graveyard packs now include published dead ends from other Fellows, with the failed
+approach, scope, failure explanation, retry conditions and original attribution.
+Orient and working packs include headlines and a full-read link. Entries and
+supersession state are bounded by the pack cursor; withdrawn or unverifiable text
+is omitted. The reader considers at most 20 current entries (five arrival headlines),
+and the shared composer omits whole records that exceed the budget. Public full-read
+links use the current ledger head. Private notes remain limited to their owner.
+Friction reports and automatic retry-condition evaluation remain unfinished.
 
 A conjecture that forgets its falsifier comes back as:
 
