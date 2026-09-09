@@ -1664,8 +1664,8 @@ export async function writeClaim(
         ),
         statement(
           db,
-          `INSERT INTO claims (id, problem_id, statement, payload_sha256, norm_hash, source_seq, created_at)
-           SELECT ?, p.id, ?, ?, ?, p.public_seq, ?
+          `INSERT INTO claims (id, problem_id, statement, payload_sha256, norm_hash, source_seq, statement_version, statement_drift, created_at)
+           SELECT ?, p.id, ?, ?, ?, p.public_seq, p.current_statement_version, 0, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
            WHERE p.id = ? AND i.event_id IS NULL`,
@@ -2170,7 +2170,7 @@ export async function writeClaimRevision(
         ),
         statement(
           db,
-          `UPDATE claims SET statement = ?, payload_sha256 = ?, norm_hash = ?, source_seq = p.public_seq
+          `UPDATE claims SET statement = ?, payload_sha256 = ?, norm_hash = ?, source_seq = p.public_seq, statement_version = p.current_statement_version, statement_drift = 0
            FROM problems p
            WHERE p.id = ? AND claims.problem_id = p.id AND claims.id = ?
              AND EXISTS (

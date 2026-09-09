@@ -60,7 +60,7 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
 
 const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
   ({ key }) => key,
-).join(", ")} FROM problems ORDER BY id ASC LIMIT 201`;
+).join(", ")} FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201`;
 
 function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
   return PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ renderEntry }) =>
@@ -81,7 +81,7 @@ FROM problems p
 LEFT JOIN claims
   ON claims.problem_id = p.id
  AND claims.source_seq <= p.public_seq
-WHERE p.id = ?
+WHERE p.id = ? AND p.status != 'private-draft' AND p.unlisted = 0
 ORDER BY claims.source_seq ASC, claims.id ASC
 LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 
@@ -356,7 +356,7 @@ async function loadClaimFace(
        AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.public_seq) AS latest_version
     FROM problems p JOIN events e ON e.problem_id = p.id AND e.seq <= p.public_seq
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
-    WHERE p.id = ? AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
+    WHERE p.id = ? AND p.status != 'private-draft' AND p.unlisted = 0 AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
     ORDER BY e.seq DESC LIMIT 1
   `)
     .bind(problemId, claimId, requestedVersion ?? null, requestedVersion ?? null)
@@ -526,7 +526,8 @@ async function loadClaimCitation(
       SELECT e.id, e.type, e.object_version AS version, e.actor_fellow_id AS fellow_id,
         e.created_at AS published_at, e.payload_sha256
       FROM events e JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
-      WHERE e.problem_id = ? AND e.object_id = ? AND e.object_kind = 'claim'
+      WHERE e.problem_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+        AND e.object_id = ? AND e.object_kind = 'claim'
         AND e.type IN ('claim.created', 'claim.revised')
         AND (? IS NULL OR e.object_version = ?)
       ORDER BY e.object_version DESC, e.seq DESC LIMIT 1
@@ -654,7 +655,9 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
         },
       });
     }
-    const problemRow = await c.env.DB.prepare("SELECT id FROM problems WHERE id = ?")
+    const problemRow = await c.env.DB.prepare(
+      "SELECT id FROM problems WHERE id = ? AND status != 'private-draft' AND unlisted = 0",
+    )
       .bind(problemId)
       .first<{ id: string }>();
     if (problemRow === null || problemRow === undefined) {

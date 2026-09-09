@@ -100,7 +100,9 @@ export async function executeSearch(
   if (exactTarget) {
     if ((filterKind === "all" || filterKind === "problem") && exactTarget.kind === "problem") {
       const problem = await db
-        .prepare("SELECT id, public_seq, created_at, updated_at FROM problems WHERE id = ?")
+        .prepare(
+          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id = ? AND status != 'private-draft' AND unlisted = 0",
+        )
         .bind(exactTarget.id)
         .first<ProblemRow>();
 
@@ -144,8 +146,10 @@ export async function executeSearch(
       } else {
         const claim = await db
           .prepare(
-            `SELECT id, problem_id, statement, source_seq, created_at FROM claims
-               WHERE id = ? AND problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
+            `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at
+               FROM claims
+               JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
+               WHERE claims.id = ? AND claims.problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
           )
           .bind(exactTarget.id, exactTarget.problemId)
           .first<ClaimRow>();
@@ -220,6 +224,7 @@ export async function executeSearch(
              JOIN claims ON claims.id = public_claim_fts.claim_id
                AND claims.problem_id = public_claim_fts.problem_id
                AND claims.statement = public_claim_fts.statement
+             JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
              WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
              ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC
              LIMIT ?`,
@@ -257,7 +262,7 @@ export async function executeSearch(
     try {
       const problemRows = await db
         .prepare(
-          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id LIKE ? ESCAPE '\\' ORDER BY id ASC LIMIT ?",
+          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id LIKE ? ESCAPE '\\' AND status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT ?",
         )
         .bind(cleanPattern, candidateLimit("problem"))
         .all<ProblemRow>();
