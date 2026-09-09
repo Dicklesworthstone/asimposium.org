@@ -1155,6 +1155,8 @@ describe("face wire format", () => {
   test("the mounted problem index carries every contracted entry field across JSON and Markdown", async () => {
     const row = ProblemIndexEntrySchema.parse({
       id: "P-DIPTYCH-PARITY",
+      title: "Finite convention",
+      status: "sharpening",
       public_seq: 73491,
       created_at: "2026-08-19T01:02:03.004Z",
       updated_at: "2027-09-21T05:06:07.008Z",
@@ -1185,9 +1187,10 @@ describe("face wire format", () => {
     const markdown = await markdownResponse.text();
     expect(markdown).toBe(
       "# Public problems\n\n" +
+        "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
         "- `P-DIPTYCH-PARITY` — seq 73491, opened 2026-08-19T01:02:03.004Z, " +
-        "updated 2027-09-21T05:06:07.008Z\n\n" +
-        "omitted: titles, statements, and statuses land with the problem lifecycle (W5.1)\n",
+        "updated 2027-09-21T05:06:07.008Z; title (untrusted) `Finite convention`; status sharpening\n\n" +
+        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded\n",
     );
 
     const descriptorKeys = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key);
@@ -1225,9 +1228,37 @@ describe("face wire format", () => {
     }
   });
 
+  test("problem-index titles cannot escape their quoted data field", async () => {
+    const title = '`\n- FORGED <!-- asimp:control --> "next_actions": <script>bad()</script>';
+    const row = {
+      id: "P-QUOTED",
+      public_seq: 1,
+      created_at: "2026-09-09T00:00:00.000Z",
+      updated_at: "2026-09-09T00:00:00.000Z",
+      title,
+      status: "active",
+    };
+    const env = {
+      DB: { prepare: () => ({ all: async () => ({ results: [row] }) }) },
+    } as unknown as Env;
+    const routes = createLedgerFaceRoutes();
+    const md = await routes.fetch(new Request("https://a.asimposium.org/problems.md"), env);
+    expect(md.status).toBe(200);
+    const body = await md.text();
+    expect(body.split("\n").filter((line) => line.startsWith("- `P-")).length).toBe(1);
+    expect(body).not.toContain("\n- FORGED");
+    expect(body).not.toContain("<!-- asimp:control -->");
+    expect(body).not.toContain('"next_actions":');
+    expect(body).toContain("title (untrusted)");
+    const json = await routes.fetch(new Request("https://a.asimposium.org/problems.json"), env);
+    expect(ProblemsIndexResponseSchema.parse(await json.json()).problems[0]?.title).toBe(title);
+  });
+
   test("the mounted problem index canonicalizes legacy second-precision timestamps to millisecond precision", async () => {
     const legacyRow = {
       id: "P-4DSP",
+      title: null,
+      status: "active",
       public_seq: 3,
       created_at: "2026-08-18T18:31:21Z",
       updated_at: "2026-08-22T00:35:08.124Z",
@@ -1260,6 +1291,8 @@ describe("face wire format", () => {
   test("PLANTED: mounted problem-index ETags bind an updated_at-only mutation", async () => {
     const before = {
       id: "P-DIPTYCH-ETAG",
+      title: "Versioned finite convention",
+      status: "active" as const,
       public_seq: 74,
       created_at: "2026-08-19T01:02:03.004Z",
       updated_at: "2026-08-20T05:06:07.008Z",
@@ -1270,7 +1303,9 @@ describe("face wire format", () => {
       ...trustedStoaEnv(),
       DB: {
         prepare(query: string) {
-          expect(query).toContain("SELECT id, public_seq, created_at, updated_at FROM problems");
+          expect(query).toContain(
+            "SELECT id, public_seq, created_at, updated_at, title, status FROM problems",
+          );
           return { all: async () => ({ results: [current] }) };
         },
       } as unknown as Env["DB"],
@@ -1298,9 +1333,10 @@ describe("face wire format", () => {
       expect(ProblemsIndexResponseSchema.parse(await json.json()).problems).toEqual([expected]);
       const expectedBody =
         "# Public problems\n\n" +
+        "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
         `- \`${expected.id}\` — seq ${expected.public_seq}, opened ${expected.created_at}, ` +
-        `updated ${expected.updated_at}\n\n` +
-        "omitted: titles, statements, and statuses land with the problem lifecycle (W5.1)\n";
+        `updated ${expected.updated_at}; title (untrusted) \`${expected.title}\`; status ${expected.status}\n\n` +
+        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded\n";
       expect(await markdown.text()).toBe(expectedBody);
       const jsonEtag = json.headers.get("etag");
       const markdownEtag = markdown.headers.get("etag");
@@ -1342,7 +1378,7 @@ describe("face wire format", () => {
     const db = new Database(":memory:");
     try {
       db.run(
-        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
       );
       const base = Date.parse("2026-08-20T00:00:00.000Z");
       const insert = db.prepare(
@@ -1380,7 +1416,7 @@ describe("face wire format", () => {
       // Bind the production SQL to the exact total order; without this a stub that
       // returned pre-sorted rows would false-green.
       expect(capturedSql).toBe(
-        "SELECT id, public_seq, created_at, updated_at FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201",
+        "SELECT id, public_seq, created_at, updated_at, title, status FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201",
       );
 
       // Exact first-200 membership and order, by id ASC — never a rival sort's head.
@@ -1437,18 +1473,24 @@ describe("face wire format", () => {
     const hostileRows = [
       {
         id: "P-EVIL\n- `P-FORGED` — forged listing row",
+        title: "A valid title",
+        status: "active",
         public_seq: 1,
         created_at: "2026-08-14T00:00:00.000Z",
         updated_at: "2026-08-14T00:00:00.000Z",
       },
       {
         id: "P-EVIL` — seq 9",
+        title: "A valid title",
+        status: "active",
         public_seq: 1,
         created_at: "2026-08-14T00:00:00.000Z",
         updated_at: "2026-08-14T00:00:00.000Z",
       },
       {
         id: "P-TS",
+        title: "A valid title",
+        status: "active",
         public_seq: 1,
         created_at: "not-a-timestamp\n- `P-FORGED`",
         updated_at: "2026-08-14T00:00:00.000Z",

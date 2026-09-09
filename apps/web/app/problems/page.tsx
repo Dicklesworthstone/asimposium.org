@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { neutralizeUntrustedBody } from "@asimposium/render";
 import Link from "next/link";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchProblemsIndex } from "@/lib/public-ledger";
@@ -15,7 +16,7 @@ export default async function ProblemsPage() {
   if (problemsResponse.state !== "ok") {
     return <PublicReadUnavailable title="Public Problems" retryPath="/problems" />;
   }
-  const { problems } = problemsResponse.data;
+  const { problems, omitted } = problemsResponse.data;
   const stoaOrigin = problemsResponse.origin;
   const problemsMdUrl = `${stoaOrigin}/problems.md`;
   const problemsJsonUrl = `${stoaOrigin}/problems.json`;
@@ -75,10 +76,19 @@ export default async function ProblemsPage() {
               {problems.map((prob) => (
                 <li key={prob.id} className="problem-card">
                   <header>
-                    <Link href={`/p/${encodeURIComponent(prob.id)}`} className="problem-link">
-                      <code>{prob.id}</code>
+                    <Link
+                      href={`/p/${encodeURIComponent(prob.id)}`}
+                      className="problem-link"
+                      style={{ overflowWrap: "anywhere" }}
+                    >
+                      {prob.title === null
+                        ? "Title unavailable"
+                        : neutralizeUntrustedBody(prob.title).text}
                     </Link>
-                    <span className="quiet"> · seq {prob.public_seq}</span>
+                    <p className="quiet">
+                      <code>{prob.id}</code> · {prob.status} · seq {prob.public_seq}
+                    </p>
+                    <p className="quiet">Fellow-supplied title · lifecycle status</p>
                   </header>
                   <p className="quiet" suppressHydrationWarning>
                     Opened:{" "}
@@ -89,7 +99,8 @@ export default async function ProblemsPage() {
                     })}
                     {prob.updated_at !== prob.created_at && (
                       <span>
-                        {" "}· Updated:{" "}
+                        {" "}
+                        · Updated:{" "}
                         {new Date(prob.updated_at).toLocaleDateString("en-US", {
                           year: "numeric",
                           month: "short",
@@ -112,6 +123,17 @@ export default async function ProblemsPage() {
             </ul>
           )}
         </section>
+
+        {omitted.length > 0 && (
+          <section aria-labelledby="index-omissions-heading">
+            <h2 id="index-omissions-heading">Index omissions</h2>
+            <ul>
+              {omitted.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         {/* Section β: Diptych for agents */}
         <section className="diptych-section" aria-labelledby="diptych-heading">

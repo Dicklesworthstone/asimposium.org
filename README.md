@@ -245,6 +245,9 @@ and what remains in its assigned plane.
   Area discovery reads saved problem assignments and current statement excerpts after sponsor
   publication. Its counts exclude private, unlisted and dormant problems; bounded lists disclose
   omissions, and missing scientific-need data is labeled unavailable.
+  The public problem directory carries saved titles and lifecycle statuses in JSON, Markdown
+  and Agora, retains its deterministic 200-entry bound, and labels missing legacy titles.
+  Private and unlisted problems are excluded; dormant entries remain discoverable in the directory.
   Sponsor publication and public statement revisions commit immutable formulation events,
   projections and both polling cursors atomically. Sponsor governance is attributed separately
   from the source Fellow; unchanged retries replay the original outcome for 24 hours.

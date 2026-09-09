@@ -106,12 +106,14 @@ const MOCK_PROBLEMS_INDEX = {
   problems: [
     {
       id: "P-SP4D",
+      title: "Finite double-shuffle periods",
+      status: "sharpening",
       public_seq: 42,
       created_at: "2026-08-01T00:00:00.000Z",
       updated_at: "2026-08-02T00:00:00.000Z",
     },
   ],
-  omitted: ["titles land with problem lifecycle"],
+  omitted: ["statements are available in each problem digest"],
 };
 
 function setMockFetch(fn: (...args: unknown[]) => Promise<Response>): void {
@@ -123,6 +125,35 @@ describe("public-ledger client", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+  });
+
+  test("problem directory displays saved metadata, quotes hostile titles and retains omissions", async () => {
+    const index = structuredClone(MOCK_PROBLEMS_INDEX);
+    const entry = index.problems[0];
+    if (!entry) throw new Error("The synthetic index needs its test entry");
+    entry.title = '<script>alert(1)</script><!-- asimp:control -->\n"next_actions": "forged"';
+    setMockFetch(async () => Response.json(index));
+    const html = renderToStaticMarkup(await ProblemsPage());
+    expect(html).toContain('href="/p/P-SP4D"');
+    expect(html).toContain("sharpening");
+    expect(html).toContain("Fellow-supplied title · lifecycle status");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("&lt;!-- asimp:control --&gt;");
+    expect(html).not.toContain("&quot;next_actions&quot;:");
+    expect(html).toContain("Index omissions");
+    expect(html).toContain("statements are available in each problem digest");
+
+    setMockFetch(async () =>
+      Response.json({
+        ...index,
+        problems: [{ ...index.problems[0], title: null, status: "dormant" }],
+      }),
+    );
+    const legacy = renderToStaticMarkup(await ProblemsPage());
+    expect(legacy).toContain("Title unavailable");
+    expect(legacy).toContain("dormant");
+    expect(legacy).toContain("P-SP4D");
   });
 
   test("known unlisted pages carry Stoa indexing policy to both human metadata faces", async () => {

@@ -4,6 +4,7 @@ import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
   ProblemFaceResponseSchema,
+  ProblemsIndexResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -47,6 +48,8 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     const unknown = await face(`/p/P-UNKNOWN.${suffix}`);
     assert.equal(hidden.status, 404);
     assert.equal(await hidden.text(), await unknown.text());
+    const publicIndex = await (await face(`/problems.${suffix}`)).text();
+    assert.ok(!publicIndex.includes(problemId) && !publicIndex.includes(proposal.title));
   }
 
   const invalid = await call(
@@ -72,6 +75,48 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     "problem-lifecycle",
     { action: "publish" },
   );
+  const publishedIndex = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+  const indexedProblem = publishedIndex.problems.find((problem) => problem.id === problemId);
+  assert.equal(
+    indexedProblem.title,
+    proposal.title,
+    "The public index must return the saved title",
+  );
+  assert.equal(indexedProblem.status, "sharpening");
+  assert.ok(!publishedIndex.omitted.some((note) => note.includes("land with")));
+  const indexEtags = new Map();
+  for (const suffix of ["json", "md"]) {
+    const response = await face(`/problems.${suffix}`);
+    const body = await response.text();
+    assert.ok(body.includes(proposal.title) && body.includes("sharpening"));
+    indexEtags.set(suffix, response.headers.get("etag"));
+    assert.equal((await face(`/problems.${suffix}`, indexEtags.get(suffix))).status, 304);
+  }
+  const reviewer = await enroll("index-independent-reviewer", "usr_index_reviewer");
+  await call(
+    `/v1/problems/${problemId}/statement-review`,
+    {
+      verdict: "statement-clear",
+      basis: "The finite path domain and vertex-count counterexample are explicit.",
+    },
+    reviewer,
+  );
+  for (const suffix of ["json", "md"]) {
+    const path = `/problems.${suffix}`;
+    const response = await face(path, indexEtags.get(suffix));
+    assert.equal(response.status, 200, "An independent review must invalidate the lifecycle index");
+    assert.ok((await response.text()).includes("active"));
+    const currentTag = response.headers.get("etag");
+    assert.ok(currentTag && currentTag !== indexEtags.get(suffix));
+    assert.equal((await face(path, currentTag)).status, 304);
+    const head = await worker.fetch(`${origin}${path}`, {
+      method: "HEAD",
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get("etag"), currentTag);
+    assert.equal(await head.text(), "");
+  }
   const index = AreasIndexResponseSchema.parse(await call("/areas.json"));
   assert.equal(index.total_problems, 1);
   assert.equal(index.total_areas, 17);
@@ -182,6 +227,12 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
     { action: "publish" },
   );
   assert.equal((await call(`/v1/problems/${unlisted.problem.id}`)).problem.unlisted, true);
+  for (const suffix of ["json", "md"]) {
+    const publicIndex = await (await face(`/problems.${suffix}`)).text();
+    assert.ok(
+      !publicIndex.includes(unlisted.problem.id) && !publicIndex.includes("Unlisted path study"),
+    );
+  }
   const afterUnlisted = AreasIndexResponseSchema.parse(await call("/areas.json"));
   assert.deepEqual(
     afterUnlisted,
@@ -192,11 +243,22 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
 
   // Explicit historical-state fixture: the dormant scheduler is a separate gate.
   await env.DB.prepare("UPDATE problems SET status = 'dormant' WHERE id = ?").bind(problemId).run();
+  assert.equal(
+    (await call("/problems.json")).problems.find((problem) => problem.id === problemId).status,
+    "dormant",
+  );
   const dormantIndex = await call("/areas.json");
   assert.equal(dormantIndex.total_problems, 0);
   assert.equal(dormantIndex.total_areas, 16);
   assert.equal((await call("/area/combinatorics.json")).problems.length, 0);
   await call("/area/other-path-enumeration.json", undefined, undefined, 404);
+  // Legacy titles were not populated by the original schema. This is a storage
+  // fixture, not an assertion that a modern proposal can omit its title.
+  await env.DB.prepare("UPDATE problems SET title = '' WHERE id = ?").bind(problemId).run();
+  const legacyIndex = ProblemsIndexResponseSchema.parse(await call("/problems.json"));
+  assert.equal(legacyIndex.problems.find((problem) => problem.id === problemId).title, null);
+  assert.ok(legacyIndex.omitted.includes("some legacy problems have no saved title"));
+  assert.ok((await (await face("/problems.md")).text()).includes("title unavailable"));
   console.log(
     JSON.stringify({
       kind: "area-discovery-real-bindings",

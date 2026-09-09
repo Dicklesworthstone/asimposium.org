@@ -1,13 +1,20 @@
 import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { SponsorIdSchema } from "./enrollment.ts";
-import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
+import {
+  ProblemIndexTimestampSchema,
+  ProblemStatusSchema,
+  PublicLedgerProblemIdSchema,
+} from "./ledger.ts";
+
 import {
   type ClaimReanchorRequest,
   ClaimReanchorRequestSchema,
   type ClaimReanchorResponse,
   ClaimReanchorResponseSchema,
 } from "./sessions.ts";
+
+export { PROBLEM_STATUSES, type ProblemStatus, ProblemStatusSchema } from "./ledger.ts";
 
 /**
  * W5.1 Problem lifecycle (Fable Rev 3.1 §6.2, §6.8, Rule P3).
@@ -20,19 +27,6 @@ import {
  * Claimed resolution enters under-result-review, then resolved or retired.
  * Resolved records direction and closing synthesis stating the no-claim boundary.
  */
-
-export const PROBLEM_STATUSES = [
-  "private-draft",
-  "sharpening",
-  "active",
-  "dormant",
-  "under-result-review",
-  "resolved",
-  "retired",
-] as const;
-
-export const ProblemStatusSchema = z.enum(PROBLEM_STATUSES);
-export type ProblemStatus = z.infer<typeof ProblemStatusSchema>;
 
 export const PROBLEM_RESOLUTION_DIRECTIONS = [
   "affirmed",

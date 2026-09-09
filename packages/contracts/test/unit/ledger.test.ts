@@ -171,6 +171,46 @@ test("the problems index accepts the valid fixture and requires omitted[]", asyn
   expect(ProblemsIndexResponseSchema.safeParse(await fixture(INVALID_INDEX)).success).toBe(false);
 });
 
+test("index metadata agrees with JSON Schema and refuses private or invented lifecycle states", async () => {
+  const good = ProblemsIndexResponseSchema.parse(await fixture(VALID_INDEX));
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(
+    schema.properties.problems_index_response,
+  );
+  expect(published(good)).toBe(true);
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/ledger-problems-index-status.json", import.meta.url),
+  );
+  expect(published(invalid)).toBe(false);
+  expect(ProblemsIndexResponseSchema.safeParse(invalid).success).toBe(false);
+  const row = good.problems[0];
+  for (const patch of [
+    { status: "proved" },
+    { status: "private-draft" },
+    { title: "" },
+    { title: "x".repeat(121) },
+    { status: undefined },
+  ]) {
+    const candidate = { ...good, problems: [{ ...row, ...patch }] };
+    expect(published(candidate)).toBe(false);
+    expect(ProblemsIndexResponseSchema.safeParse(candidate).success).toBe(false);
+  }
+  for (const status of [
+    "sharpening",
+    "active",
+    "dormant",
+    "under-result-review",
+    "resolved",
+    "retired",
+  ]) {
+    const candidate = { ...good, problems: [{ ...row, status, title: null }] };
+    expect(published(candidate)).toBe(true);
+    expect(ProblemsIndexResponseSchema.safeParse(candidate).success).toBe(true);
+  }
+});
+
 test("the index rejects a hostile markdown-structural id (gfbc golden)", async () => {
   const HOSTILE_INDEX = new URL(
     "../fixtures/invalid/ledger-problems-index-hostile-id.json",
@@ -457,12 +497,14 @@ test("the public ledger id grammar is renderer-safe without rewriting Krater's f
 
 test("every contract-valid entry has an unambiguous bounded markdown row", () => {
   // The markdown face renders `- \`${id}\` — seq N, opened TS, updated TS`.
-  // Hostile scalars — newlines that would forge extra listing rows, backticks
+  // Hostile identifiers and timestamps — newlines that would forge extra listing rows, backticks
   // that would escape the id code span, control text, non-canonical
   // timestamps — are contract-invalid, so the mounted reader refuses the row
   // instead of interpolating it (asimposiumorg-gfbc).
   const canonical = {
     id: "P-4DSP",
+    title: "Finite periods",
+    status: "active",
     public_seq: 1,
     created_at: "2026-08-14T00:00:00.000Z",
     updated_at: "2026-08-14T00:00:00.000Z",

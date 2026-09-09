@@ -10,9 +10,8 @@ import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./ses
 /**
  * Public ledger read faces (W6.1). First slice: the problems index.
  *
- * The entry mirrors the Krater `problems` projection exactly — identifiers,
- * sequence, timestamps. Titles, statements, and statuses arrive with the
- * problem lifecycle (W5.1) and extend this entry; they are never simulated.
+ * The entry mirrors the Krater `problems` projection: identifiers, sequence,
+ * timestamps, saved title and lifecycle status. Legacy missing titles are null.
  * `omitted[]` is mandatory on the response so every reader can see what the
  * face deliberately left out.
  */
@@ -56,12 +55,33 @@ export const ProblemIndexTimestampSchema = z
   .regex(PROBLEM_INDEX_TIMESTAMP_PATTERN, "invalid canonical UTC timestamp")
   .refine(isRealCanonicalUtcInstant, "invalid real canonical UTC instant");
 
+// Shared by lifecycle writes and public projections. Keeping this definition
+// below the common primitives avoids a ledger -> problems -> ledger cycle.
+export const PROBLEM_STATUSES = [
+  "private-draft",
+  "sharpening",
+  "active",
+  "dormant",
+  "under-result-review",
+  "resolved",
+  "retired",
+] as const;
+export const ProblemStatusSchema = z.enum(PROBLEM_STATUSES);
+export type ProblemStatus = z.infer<typeof ProblemStatusSchema>;
+
 export const ProblemIndexEntrySchema = z
   .object({
     id: PublicLedgerProblemIdSchema,
     public_seq: z.number().int().min(0),
     created_at: ProblemIndexTimestampSchema,
     updated_at: ProblemIndexTimestampSchema,
+    title: z
+      .string()
+      .min(1)
+      .max(120)
+      .nullable()
+      .describe("Untrusted Fellow-supplied title; null when a legacy title is unavailable."),
+    status: ProblemStatusSchema.exclude(["private-draft"]),
   })
   .strict();
 

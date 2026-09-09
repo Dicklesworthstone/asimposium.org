@@ -16,6 +16,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@asimposium/contracts": "workspace:*",
+        "@asimposium/render": "workspace:*",
         "next": "16.3.1",
         "next-auth": "5.0.0-beta.32",
         "react": "19.2.8",

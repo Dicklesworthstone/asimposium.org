@@ -16,6 +16,7 @@ import {
   type RenderedFace,
   renderAllFaces,
   renderProjection,
+  safeCodeSpan,
 } from "@asimposium/render";
 import { Hono } from "hono";
 
@@ -33,7 +34,12 @@ import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
  * Rows come from Krater's public projections directly, so an empty ledger
  * answers honestly and every bounded digest declares what it omitted.
  */
-const OMITTED = ["titles, statements, and statuses land with the problem lifecycle (W5.1)"];
+const OMITTED = [
+  "problem statements and scientific details are available through each problem digest",
+  "private and unlisted problems are excluded",
+];
+const INDEX_PREAMBLE =
+  "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.";
 
 type ProblemIndexMarkdownFieldDescriptor<K extends keyof ProblemIndexEntry> = Readonly<{
   key: K;
@@ -57,6 +63,10 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
   defineProblemIndexMarkdownField("public_seq", (value) => ` — seq ${value}`),
   defineProblemIndexMarkdownField("created_at", (value) => `, opened ${value}`),
   defineProblemIndexMarkdownField("updated_at", (value) => `, updated ${value}`),
+  defineProblemIndexMarkdownField("title", (value) =>
+    value === null ? "; title unavailable" : `; title (untrusted) ${safeCodeSpan(value)}`,
+  ),
+  defineProblemIndexMarkdownField("status", (value) => `; status ${value}`),
 ] as const;
 
 const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
@@ -682,14 +692,19 @@ async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
   // is not, omitted[] says so rather than silently truncating.
   const rows = await db.prepare(PROBLEM_INDEX_SELECT).all<ProblemIndexEntry>();
   const truncated = rows.results.length > 200;
-  const omitted = truncated
-    ? [...OMITTED, "results beyond the first 200 in canonical problem-id order"]
-    : OMITTED;
   const problems = rows.results.slice(0, 200).map((row) => ({
     ...row,
+    title: typeof row.title === "string" && row.title.trim().length > 0 ? row.title : null,
     created_at: canonicalizeIndexTimestamp(row.created_at),
     updated_at: canonicalizeIndexTimestamp(row.updated_at),
   }));
+  const omitted = [
+    ...OMITTED,
+    ...(truncated ? ["results beyond the first 200 in canonical problem-id order"] : []),
+    ...(problems.some((problem) => problem.title === null)
+      ? ["some legacy problems have no saved title"]
+      : []),
+  ];
   return ProblemsIndexResponseSchema.parse({
     problems,
     omitted,
@@ -867,7 +882,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       data.problems.length === 0
         ? "No problems have been promoted to the public ledger yet."
         : data.problems.map((problem) => renderProblemIndexMarkdownRow(problem)).join("\n");
-    const body = `# Public problems\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
+    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
