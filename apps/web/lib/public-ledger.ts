@@ -28,7 +28,7 @@ export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
 const PUBLIC_READ_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 
 export type PublicRead<T> =
-  | { readonly state: "ok"; readonly data: T; readonly origin: string }
+  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true }
   | { readonly state: "not_found"; readonly origin: string }
   | {
       readonly state: "unavailable";
@@ -123,7 +123,16 @@ async function readPublic<T>(
     }
     const parsed = schema.safeParse(value);
     return parsed.success
-      ? { state: "ok", data: parsed.data, origin }
+      ? {
+          state: "ok",
+          data: parsed.data,
+          origin,
+          ...(/(?:^|[,\s])(?:noindex|none)(?:$|[,\s])/i.test(
+            response.headers.get("x-robots-tag") ?? "",
+          )
+            ? { noindex: true as const }
+            : {}),
+        }
       : { state: "unavailable", reason: "invalid_response" };
   } catch {
     return { state: "unavailable", reason: expired ? "timeout" : "network" };

@@ -18,7 +18,9 @@ const {
   stoaFetchSearch,
 } = await import("../../lib/public-ledger.ts");
 const { default: ProblemPage, generateMetadata } = await import("../../app/p/[slug]/page.tsx");
-const { default: ClaimPage } = await import("../../app/p/[slug]/claims/[claim]/page.tsx");
+const { default: ClaimPage, generateMetadata: claimMetadata } = await import(
+  "../../app/p/[slug]/claims/[claim]/page.tsx"
+);
 const { default: ExplorePage } = await import("../../app/explore/page.tsx");
 const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
@@ -121,6 +123,71 @@ describe("public-ledger client", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+  });
+
+  test("known unlisted pages carry Stoa indexing policy to both human metadata faces", async () => {
+    const claim = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    for (const unlisted of [true, false]) {
+      setMockFetch(async (input) =>
+        Response.json(String(input).includes("/claims/") ? claim : MOCK_PROBLEM_FACE, {
+          headers: unlisted ? { "X-Robots-Tag": "noindex, nofollow" } : {},
+        }),
+      );
+      const problemProps = { params: Promise.resolve({ slug: "P-SP4D" }) };
+      const claimProps = { params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) };
+      for (const metadata of [
+        await generateMetadata(problemProps),
+        await claimMetadata(claimProps),
+      ]) {
+        expect(metadata.robots).toEqual(unlisted ? { index: false, follow: false } : undefined);
+      }
+      expect(renderToStaticMarkup(await ProblemPage(problemProps))).toContain("C-1");
+      expect(renderToStaticMarkup(await ClaimPage(claimProps))).toContain("Computed standing");
+    }
+    setMockFetch(async () => new Response("Unavailable", { status: 503 }));
+    expect(
+      (await claimMetadata({ params: Promise.resolve({ slug: "P-CALIBRATION", claim: "C-1@1" }) }))
+        .robots,
+    ).toEqual({ index: false, follow: false });
+  });
+
+  test("exact claim pages decode a route segment once and retain canonical pin validation", async () => {
+    const face = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    let reads = 0;
+    setMockFetch(async (input) => {
+      reads++;
+      expect(String(input)).toBe(`${PRODUCTION_STOA_ORIGIN}/p/P-CALIBRATION/claims/C-1%401.json`);
+      return Response.json(face);
+    });
+    for (const claim of ["C-1@1", "C-1%401"]) {
+      const props = { params: Promise.resolve({ slug: "P-CALIBRATION", claim }) };
+      expect(renderToStaticMarkup(await ClaimPage(props))).toContain("Computed standing");
+      expect((await claimMetadata(props)).title).toBe("P-CALIBRATION — C-1@1 | ASImposium");
+    }
+    expect(reads).toBe(4);
+    for (const claim of ["C-1%25401", "C-1%40%2e%2e%2fconsole", "C-1%ZZ"]) {
+      const html = renderToStaticMarkup(
+        await ClaimPage({ params: Promise.resolve({ slug: "P-CALIBRATION", claim }) }),
+      );
+      expect(html).toContain("temporarily unavailable");
+    }
+    expect(reads).toBe(4);
   });
 
   test("exact claim page uses an uncached anonymous read and shows the canonical state and omissions", async () => {

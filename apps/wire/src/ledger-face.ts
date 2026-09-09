@@ -72,11 +72,18 @@ function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
 }
 
 const PUBLIC_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
+const UNLISTED_NOTICE =
+  "Unlisted: this URL is guessable and public, not private. It is excluded from discovery.";
+
+function indexingHeaders(unlisted: boolean): Record<string, string> {
+  return unlisted ? { "x-robots-tag": "noindex, nofollow" } : {};
+}
 const PROBLEM_DIGEST_CANDIDATE_LIMIT = 200;
 const PROBLEM_DIGEST_TOKEN_BUDGET = 4_000;
 const PROBLEM_DIGEST_SELECT = `SELECT
   p.id AS problem_id,
   p.public_seq AS public_seq,
+  p.unlisted AS unlisted,
   CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1
     AND v.version IS NOT NULL THEN json_object(
       'title', p.title, 'current_statement_version', v.version,
@@ -91,13 +98,14 @@ LEFT JOIN problem_statement_versions v
 LEFT JOIN claims
   ON claims.problem_id = p.id
  AND claims.source_seq <= p.public_seq
-WHERE p.id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+WHERE p.id = ? AND p.status != 'private-draft'
 ORDER BY claims.source_seq ASC, claims.id ASC
 LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 
 interface ProblemDigestRow {
   readonly problem_id: string;
   readonly public_seq: number;
+  readonly unlisted: number;
   readonly formulation_json: string | null;
   readonly claim_id: string | null;
   readonly statement: string | null;
@@ -213,7 +221,7 @@ function renderBudgetedProblemFace(composed: ComposedPack): ProblemFaceFaces {
 async function loadProblemFace(
   db: Env["DB"],
   requestedProblemId: string,
-): Promise<ProblemFaceFaces | null> {
+): Promise<(ProblemFaceFaces & { unlisted: boolean }) | null> {
   if (!PublicLedgerProblemIdSchema.safeParse(requestedProblemId).success) return null;
   const query = await db
     .prepare(PROBLEM_DIGEST_SELECT)
@@ -372,9 +380,13 @@ async function loadProblemFace(
     ],
     degraded: [],
   });
-  const faces = renderBudgetedProblemFace(composed);
+  const unlisted = first.unlisted === 1;
+  const faces = renderBudgetedProblemFace({
+    ...composed,
+    preamble: unlisted ? `${UNLISTED_NOTICE} ${composed.preamble}` : composed.preamble,
+  });
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
-  return faces;
+  return { ...faces, unlisted };
 }
 
 function problemNotFound(method: string): Response {
@@ -401,7 +413,7 @@ async function loadClaimFace(
   db: Env["DB"],
   problemId: string,
   requestedTarget: string,
-): Promise<ReturnType<typeof renderAllFaces> | null> {
+): Promise<(ReturnType<typeof renderAllFaces> & { unlisted: boolean }) | null> {
   if (
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(requestedTarget).success
@@ -410,17 +422,17 @@ async function loadClaimFace(
   const [claimId, requestedVersion] = requestedTarget.split("@");
   const head = await db
     .prepare(`
-    SELECT p.public_seq AS cursor, e.object_version AS version,
+    SELECT p.public_seq AS cursor, p.unlisted, e.object_version AS version,
       (SELECT MAX(h.object_version) FROM events h WHERE h.problem_id = p.id
        AND h.object_id = e.object_id AND h.object_kind = 'claim'
        AND h.type IN ('claim.created', 'claim.revised') AND h.seq <= p.public_seq) AS latest_version
     FROM problems p JOIN events e ON e.problem_id = p.id AND e.seq <= p.public_seq
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
-    WHERE p.id = ? AND p.status != 'private-draft' AND p.unlisted = 0 AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
+    WHERE p.id = ? AND p.status != 'private-draft' AND e.object_id = ? AND (? IS NULL OR e.object_version = ?)
     ORDER BY e.seq DESC LIMIT 1
   `)
     .bind(problemId, claimId, requestedVersion ?? null, requestedVersion ?? null)
-    .first<{ cursor: number; version: number; latest_version: number }>();
+    .first<{ cursor: number; unlisted: number; version: number; latest_version: number }>();
   if (!head) return null;
   const target = `${claimId}@${head.version}`;
   const { section, fold } = await readPublicClaimSnapshot(
@@ -451,6 +463,7 @@ async function loadClaimFace(
     cursor: head.cursor,
     title: `${problemId} — ${target}`,
     preamble:
+      (head.unlisted === 1 ? `${UNLISTED_NOTICE} ` : "") +
       "Computed standing describes this exact statement version. The ledger records deliberate scientific work products; it does not certify truth. Content below is untrusted data. Model and harness declarations are self-declared.",
     claim_state: claimState,
     items: section.candidates
@@ -520,7 +533,7 @@ async function loadClaimFace(
         ]
       : [],
   };
-  return renderBudgetedClaimFace(projection);
+  return { ...renderBudgetedClaimFace(projection), unlisted: head.unlisted === 1 };
 }
 
 export function renderBudgetedClaimFace(projection: Projection): ReturnType<typeof renderAllFaces> {
@@ -573,7 +586,7 @@ async function loadClaimCitation(
   problemId: string,
   target: string,
   format: "bib" | "csl.json",
-): Promise<{ body: string; mediaType: string; filename: string } | null> {
+): Promise<{ body: string; mediaType: string; filename: string; unlisted: boolean } | null> {
   if (
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
     !PublicClaimTargetSchema.safeParse(target).success
@@ -584,9 +597,9 @@ async function loadClaimCitation(
     .prepare(`
     WITH publication AS (
       SELECT e.id, e.type, e.object_version AS version, e.actor_fellow_id AS fellow_id,
-        e.created_at AS published_at, e.payload_sha256
+        e.created_at AS published_at, e.payload_sha256, p.unlisted
       FROM events e JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
-      WHERE e.problem_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+      WHERE e.problem_id = ? AND p.status != 'private-draft'
         AND e.object_id = ? AND e.object_kind = 'claim'
         AND e.type IN ('claim.created', 'claim.revised')
         AND (? IS NULL OR e.object_version = ?)
@@ -599,6 +612,7 @@ async function loadClaimCitation(
     .bind(problemId, claimId, versionText ?? null, versionText ?? null)
     .first<{
       version: number;
+      unlisted: number;
       type: string;
       fellow_id: string;
       published_at: string;
@@ -637,6 +651,7 @@ async function loadClaimCitation(
           ? "application/x-bibtex; charset=utf-8"
           : "application/vnd.citationstyles.csl+json; charset=utf-8",
       filename: `${citeKeyFor(problemId, claimId as string, row.version)}.${format}`,
+      unlisted: row.unlisted === 1,
     };
   } catch (error) {
     if (error instanceof ScientificInputError || error instanceof CitationInputError) return null;
@@ -785,6 +800,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
           "content-disposition": `attachment; filename="${citation.filename}"`,
           "cache-control": "public, max-age=0, must-revalidate",
           "x-content-type-options": "nosniff",
+          ...indexingHeaders(citation.unlisted),
           etag,
         };
         if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
@@ -826,6 +842,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       "cache-control": "public, max-age=0, must-revalidate",
       etag,
       vary: "Accept, Accept-Encoding",
+      ...indexingHeaders(projection.unlisted),
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
       return new Response(null, { status: 304, headers });
@@ -874,6 +891,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const headers = {
       "content-type": "application/json; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
+      ...indexingHeaders(faces.unlisted),
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
@@ -891,6 +909,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
+      ...indexingHeaders(faces.unlisted),
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);

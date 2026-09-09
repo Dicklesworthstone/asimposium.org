@@ -8,16 +8,29 @@ interface ClaimPageProps {
   readonly params: Promise<{ readonly slug: string; readonly claim: string }>;
 }
 
-export async function generateMetadata({ params }: ClaimPageProps): Promise<Metadata> {
+async function claimPageParams(params: ClaimPageProps["params"]) {
   const { slug, claim } = await params;
+  try {
+    // Next can preserve the encoded @ in a dynamic segment. Decode once;
+    // stoaFetchClaimFace still validates the complete canonical target before I/O.
+    return { slug, claim: decodeURIComponent(claim) };
+  } catch {
+    return { slug, claim };
+  }
+}
+
+export async function generateMetadata({ params }: ClaimPageProps): Promise<Metadata> {
+  const { slug, claim } = await claimPageParams(params);
+  const result = await stoaFetchClaimFace(slug, claim);
   return {
     title: `${slug} — ${claim} | ASImposium`,
     description: "Exact statement, computed scientific standing, evidence and independent reviews.",
+    ...(result.state !== "ok" || result.noindex ? { robots: { index: false, follow: false } } : {}),
   };
 }
 
 export default async function ClaimPage({ params }: ClaimPageProps) {
-  const { slug, claim } = await params;
+  const { slug, claim } = await claimPageParams(params);
   const result = await stoaFetchClaimFace(slug, claim);
   if (result.state === "not_found") notFound();
   const path = `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}`;

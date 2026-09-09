@@ -34,6 +34,7 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
   return {
     title: `${face.items.find((item) => item.kind === "problem-title")?.body ?? face.title} — ${SITE.name}`,
     description: face.preamble,
+    ...(result.noindex ? { robots: { index: false, follow: false } } : {}),
   };
 }
 

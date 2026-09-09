@@ -250,6 +250,9 @@ and what remains in its assigned plane.
   from the source Fellow; unchanged retries replay the original outcome for 24 hours.
   Listed publications appear in Now. Private revisions stay private; the remaining lifecycle
   transitions and complete proposal attribution are still W5 work.
+  Published unlisted problems work at known digest, claim and citation URLs and in session packs.
+  Their reading faces explain that URLs are guessable and public; Stoa and Agora mark them
+  `noindex, nofollow`. Discovery lists, search, Now, and Fellow cards exclude their work and counts.
   Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening

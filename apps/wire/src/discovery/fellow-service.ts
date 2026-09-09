@@ -71,7 +71,8 @@ export async function loadFellowCard(
   let sessionsCount = 0;
   {
     const sessionRes = await db
-      .prepare("SELECT COUNT(*) as count FROM sessions WHERE fellow_id = ?")
+      .prepare(`SELECT COUNT(*) as count FROM sessions s JOIN problems p ON p.id = s.problem_id
+        WHERE s.fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0`)
       .bind(fellow.fellow_id)
       .first<CountRecord>();
     if (!sessionRes) throw new Error("Fellow session count unavailable");
@@ -106,7 +107,7 @@ export async function loadFellowCard(
          JOIN event_content content ON content.event_id = e.id
           AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
-         WHERE cv.editor_fellow_id = ?
+         WHERE cv.editor_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
       )
@@ -169,7 +170,7 @@ export async function loadFellowCard(
           AND author.type IN ('claim.created', 'claim.revised')
           AND author.seq < e.seq
           AND author.actor_sponsor_id IS NOT NULL
-         WHERE r.reviewer_fellow_id = ?
+         WHERE r.reviewer_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
       )
@@ -216,12 +217,13 @@ export async function loadFellowCard(
     SELECT COUNT(CASE WHEN cv.kind = 'conjecture' THEN 1 END) AS conjectures,
            COUNT(CASE WHEN cv.kind IN ('theorem', 'theorem-attempt', 'lemma') THEN 1 END) AS theorems
       FROM claim_versions cv
+      JOIN problems p ON p.id = cv.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
      WHERE cv.editor_fellow_id = ? AND cv.version = 1
        AND EXISTS (SELECT 1 FROM events e
          WHERE e.problem_id = cv.problem_id AND e.object_id = cv.claim_id
            AND e.object_version = cv.version AND e.object_kind = 'claim'
            AND e.type = 'claim.created' AND e.actor_fellow_id = cv.editor_fellow_id
-           AND e.actor_sponsor_id IS NOT NULL)
+           AND e.actor_sponsor_id IS NOT NULL AND e.seq <= p.public_seq)
   `)
     .bind(fellow.fellow_id)
     .first<{ conjectures: number; theorems: number }>();
@@ -230,7 +232,8 @@ export async function loadFellowCard(
   let deadEndsRecorded = 0;
   {
     const deadEndsRes = await db
-      .prepare("SELECT COUNT(*) as count FROM dead_ends WHERE author_fellow_id = ?")
+      .prepare(`SELECT COUNT(*) as count FROM dead_ends d JOIN problems p ON p.id = d.problem_id
+        WHERE d.author_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0`)
       .bind(fellow.fellow_id)
       .first<CountRecord>();
     if (!deadEndsRes) throw new Error("Fellow dead-end count unavailable");
@@ -259,6 +262,7 @@ export async function loadFellowCard(
       dead_ends_recorded: deadEndsRecorded,
     },
     omitted: [
+      "private and unlisted problems are excluded from contribution and review lists and all activity counts",
       "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
       ...(moreContributions
         ? [

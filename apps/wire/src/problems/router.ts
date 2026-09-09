@@ -486,6 +486,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       {
         "cache-control":
           problem.status === "private-draft" ? "private, no-store" : "public, max-age=60",
+        ...(problem.unlisted === 1 || problem.status === "private-draft"
+          ? { "x-robots-tag": "noindex, nofollow" }
+          : {}),
       },
     );
   });
