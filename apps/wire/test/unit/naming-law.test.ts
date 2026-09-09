@@ -5,8 +5,9 @@ import { join, resolve } from "node:path";
 import { FellowNameSchema } from "@asimposium/contracts";
 import {
   AesGcmEnrollmentReplayProtector,
-  enrollmentNameFailure,
+  EnrollmentError,
   EnrollmentService,
+  enrollmentNameFailure,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
 
@@ -93,13 +94,7 @@ describe("W3.6 Naming Law Validator", () => {
     });
 
     test("refuses names not starting with a lowercase ASCII letter", () => {
-      const invalidStarts = [
-        "-fellow",
-        "0agent",
-        "1orchid",
-        "9vector",
-        "_orchid",
-      ];
+      const invalidStarts = ["-fellow", "0agent", "1orchid", "9vector", "_orchid"];
       for (const name of invalidStarts) {
         expect(FellowNameSchema.safeParse(name).success).toBe(false);
         expect(enrollmentNameFailure(name)).toBe("NAME_INVALID");
@@ -175,12 +170,7 @@ describe("W3.6 Naming Law Validator", () => {
 
   describe("Reserved Words & Product Identities", () => {
     test("rejects system and platform reserved terms with NAME_RESERVED", () => {
-      const reserved = [
-        "admin",
-        "charter",
-        "system",
-        "symposiarch",
-      ];
+      const reserved = ["admin", "charter", "system", "symposiarch"];
       for (const name of reserved) {
         expect(FellowNameSchema.safeParse(name).success).toBe(true);
         expect(enrollmentNameFailure(name)).toBe("NAME_RESERVED");
@@ -188,12 +178,7 @@ describe("W3.6 Naming Law Validator", () => {
     });
 
     test("rejects company and product identity terms with NAME_RESERVED", () => {
-      const productNames = [
-        "anthropic",
-        "anthropic-ai",
-        "openai",
-        "openai-fellow",
-      ];
+      const productNames = ["anthropic", "anthropic-ai", "openai", "openai-fellow"];
       for (const name of productNames) {
         expect(FellowNameSchema.safeParse(name).success).toBe(true);
         expect(enrollmentNameFailure(name)).toBe("NAME_RESERVED");
@@ -220,11 +205,7 @@ describe("W3.6 Naming Law Validator", () => {
     });
 
     test("rejects names ending with -mod affix", () => {
-      const modNames = [
-        "fellow-mod",
-        "admin-mod",
-        "reviewer-mod",
-      ];
+      const modNames = ["fellow-mod", "admin-mod", "reviewer-mod"];
       for (const name of modNames) {
         expect(FellowNameSchema.safeParse(name).success).toBe(true);
         expect(enrollmentNameFailure(name)).toBe("NAME_RESERVED");
@@ -234,12 +215,7 @@ describe("W3.6 Naming Law Validator", () => {
 
   describe("Profanity & Leetspeak Denylist", () => {
     test("rejects exact profanity with NAME_RESERVED", () => {
-      const profane = [
-        "shit-bot",
-        "fuck-agent",
-        "bitch-solver",
-        "asshole-fellow",
-      ];
+      const profane = ["shit-bot", "fuck-agent", "bitch-solver", "asshole-fellow"];
       for (const name of profane) {
         expect(FellowNameSchema.safeParse(name).success).toBe(true);
         expect(enrollmentNameFailure(name)).toBe("NAME_RESERVED");
@@ -247,11 +223,7 @@ describe("W3.6 Naming Law Validator", () => {
     });
 
     test("rejects leetspeak-normalized profanity with NAME_RESERVED", () => {
-      const leetProfane = [
-        "sh1t-proof",
-        "b1tch-core",
-        "assh0le-math",
-      ];
+      const leetProfane = ["sh1t-proof", "b1tch-core", "assh0le-math"];
       for (const name of leetProfane) {
         expect(FellowNameSchema.safeParse(name).success).toBe(true);
         expect(enrollmentNameFailure(name)).toBe("NAME_RESERVED");
@@ -274,10 +246,12 @@ describe("W3.6 Naming Law Validator", () => {
           harness: "test-harness",
         });
         expect.unreachable("expected error");
-      } catch (error: any) {
-        expect(error.code).toBe("MODEL_AS_NAME");
-        expect(error.suggestions).toHaveLength(3);
-        for (const suggestion of error.suggestions) {
+      } catch (error: unknown) {
+        expect(error instanceof EnrollmentError).toBe(true);
+        const err = error as EnrollmentError;
+        expect(err.code).toBe("MODEL_AS_NAME");
+        expect(err.suggestions).toHaveLength(3);
+        for (const suggestion of err.suggestions) {
           expect(FellowNameSchema.safeParse(suggestion).success).toBe(true);
           expect(enrollmentNameFailure(suggestion)).toBeUndefined();
           expect(suggestion.endsWith("-")).toBe(false);
@@ -317,10 +291,12 @@ describe("W3.6 Naming Law Validator", () => {
           harness: "test-harness",
         });
         expect.unreachable("expected error");
-      } catch (error: any) {
-        expect(error.code).toBe("MODEL_AS_NAME");
-        expect(error.suggestions).toEqual(["fellow-5", "fellow-6", "fellow-7"]);
-        for (const suggestion of error.suggestions) {
+      } catch (error: unknown) {
+        expect(error instanceof EnrollmentError).toBe(true);
+        const err = error as EnrollmentError;
+        expect(err.code).toBe("MODEL_AS_NAME");
+        expect(err.suggestions).toEqual(["fellow-5", "fellow-6", "fellow-7"]);
+        for (const suggestion of err.suggestions) {
           expect(FellowNameSchema.safeParse(suggestion).success).toBe(true);
           expect(enrollmentNameFailure(suggestion)).toBeUndefined();
         }
@@ -338,9 +314,21 @@ describe("W3.6 Naming Law Validator", () => {
       { name: "a".repeat(32), valid: true, reason: "length 32 is valid maximum" },
       { name: "a".repeat(33), valid: false, reason: "length 33 is above maximum 32" },
       // Start character edge cases
-      ...["a", "b", "m", "z"].map((c) => ({ name: `${c}bc`, valid: true, reason: `starts with lowercase ${c}` })),
-      ...["0", "1", "9"].map((c) => ({ name: `${c}bc`, valid: false, reason: `starts with digit ${c}` })),
-      ...["-", "_"].map((c) => ({ name: `${c}bc`, valid: false, reason: `starts with symbol ${c}` })),
+      ...["a", "b", "m", "z"].map((c) => ({
+        name: `${c}bc`,
+        valid: true,
+        reason: `starts with lowercase ${c}`,
+      })),
+      ...["0", "1", "9"].map((c) => ({
+        name: `${c}bc`,
+        valid: false,
+        reason: `starts with digit ${c}`,
+      })),
+      ...["-", "_"].map((c) => ({
+        name: `${c}bc`,
+        valid: false,
+        reason: `starts with symbol ${c}`,
+      })),
       // Hyphen placement
       { name: "a-b", valid: true, reason: "single hyphen separating letters" },
       { name: "a--b", valid: true, reason: "double hyphen satisfies regex" },
@@ -356,24 +344,27 @@ describe("W3.6 Naming Law Validator", () => {
       { name: "foobar1", valid: true, reason: "ends with digit" },
     ];
 
-    test.each(grammarMatrix)("grammar rule: $name ($reason) -> valid: $valid", ({ name, valid }) => {
-      const parsed = FellowNameSchema.safeParse(name);
-      expect(parsed.success).toBe(valid);
-      if (valid) {
-        expect(enrollmentNameFailure(name)).toBeUndefined();
-      } else {
-        expect(enrollmentNameFailure(name)).toBe("NAME_INVALID");
-      }
-    });
+    test.each(grammarMatrix)(
+      "grammar rule: $name ($reason) -> valid: $valid",
+      ({ name, valid }) => {
+        const parsed = FellowNameSchema.safeParse(name);
+        expect(parsed.success).toBe(valid);
+        if (valid) {
+          expect(enrollmentNameFailure(name)).toBeUndefined();
+        } else {
+          expect(enrollmentNameFailure(name)).toBe("NAME_INVALID");
+        }
+      },
+    );
 
     test("property test: random valid-grammar strings always parse successfully", () => {
       const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-";
       const startChars = "abcdefghijklmnopqrstuvwxyz";
       for (let run = 0; run < 100; run++) {
         const len = 3 + (run % 30); // 3 to 32
-        let randomName = startChars[run % startChars.length];
+        let randomName = startChars.charAt(run % startChars.length);
         for (let j = 1; j < len; j++) {
-          randomName += alphabet[(run * 7 + j * 13) % alphabet.length];
+          randomName += alphabet.charAt((run * 7 + j * 13) % alphabet.length);
         }
         expect(FellowNameSchema.safeParse(randomName).success).toBe(true);
       }
@@ -385,14 +376,24 @@ describe("W3.6 Naming Law Validator", () => {
       const db = initTestDatabase();
       const now = Date.now();
       const sponsorId = "usr_sponsor_naming_1";
-      db.run(
-        `INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`,
-        [sponsorId, now, now],
-      );
+      db.run(`INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`, [
+        sponsorId,
+        now,
+        now,
+      ]);
       db.run(
         `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["F-01JXYZ1111", "stellar-orbit", "test-model", "test-harness", now, "active", now, sponsorId],
+        [
+          "F-01JXYZ1111",
+          "stellar-orbit",
+          "test-model",
+          "test-harness",
+          now,
+          "active",
+          now,
+          sponsorId,
+        ],
       );
 
       // Attempt exact match insert
@@ -400,7 +401,16 @@ describe("W3.6 Naming Law Validator", () => {
         db.run(
           `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ["F-01JXYZ2222", "stellar-orbit", "test-model-2", "test-harness-2", now, "active", now, sponsorId],
+          [
+            "F-01JXYZ2222",
+            "stellar-orbit",
+            "test-model-2",
+            "test-harness-2",
+            now,
+            "active",
+            now,
+            sponsorId,
+          ],
         );
       }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
 
@@ -409,7 +419,16 @@ describe("W3.6 Naming Law Validator", () => {
         db.run(
           `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ["F-01JXYZ3333", "STELLAR-ORBIT", "test-model-2", "test-harness-2", now, "active", now, sponsorId],
+          [
+            "F-01JXYZ3333",
+            "STELLAR-ORBIT",
+            "test-model-2",
+            "test-harness-2",
+            now,
+            "active",
+            now,
+            sponsorId,
+          ],
         );
       }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
 
@@ -417,7 +436,16 @@ describe("W3.6 Naming Law Validator", () => {
         db.run(
           `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ["F-01JXYZ4444", "Stellar-Orbit", "test-model-2", "test-harness-2", now, "active", now, sponsorId],
+          [
+            "F-01JXYZ4444",
+            "Stellar-Orbit",
+            "test-model-2",
+            "test-harness-2",
+            now,
+            "active",
+            now,
+            sponsorId,
+          ],
         );
       }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
     });
@@ -426,14 +454,24 @@ describe("W3.6 Naming Law Validator", () => {
       const db = initTestDatabase();
       const now = Date.now();
       const sponsorId = "usr_sponsor_naming_2";
-      db.run(
-        `INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`,
-        [sponsorId, now, now],
-      );
+      db.run(`INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)`, [
+        sponsorId,
+        now,
+        now,
+      ]);
       db.run(
         `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ["F-01JXYZ5555", "quantum-wave", "test-model", "test-harness", now, "active", now, sponsorId],
+        [
+          "F-01JXYZ5555",
+          "quantum-wave",
+          "test-model",
+          "test-harness",
+          now,
+          "active",
+          now,
+          sponsorId,
+        ],
       );
 
       // Attempting to delete must throw with trigger abort
@@ -447,7 +485,16 @@ describe("W3.6 Naming Law Validator", () => {
         db.run(
           `INSERT INTO enrollment_fellows (fellow_id, name, model, harness, created_at, status, status_changed_at, sponsor_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ["F-01JXYZ6666", "quantum-wave", "other-model", "other-harness", now, "active", now, sponsorId],
+          [
+            "F-01JXYZ6666",
+            "quantum-wave",
+            "other-model",
+            "other-harness",
+            now,
+            "active",
+            now,
+            sponsorId,
+          ],
         );
       }).toThrow(/Fellow name already exists|UNIQUE constraint failed/);
     });
