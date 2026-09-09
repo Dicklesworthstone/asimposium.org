@@ -9,6 +9,7 @@ import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposiu
 import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 import { normalizeClaimStatement, sha256Hex } from "../split/policy";
+import { readScientificDispositions } from "./scientific-disposition";
 
 /**
  * W5.8a / Fable §6.1, §9.4, Rule P6, P11:
@@ -674,4 +675,249 @@ export function renderDeadEndsHtmlFragment(
 
   lines.push("</section>");
   return lines.join("\n");
+}
+
+export interface FiredDeadEndTrigger {
+  readonly dead_end_id: string;
+  readonly trigger_kind: string;
+  readonly reason: string;
+  readonly event_id: string;
+  readonly fired_at: string;
+}
+
+export interface FiredDeadEndTriggerRow {
+  readonly dead_end_id: string;
+  readonly trigger_kind: string;
+  readonly reason: string;
+  readonly event_id: string;
+  readonly fired_at: string;
+  readonly approach: string;
+  readonly why_it_fails: string;
+  readonly retry_predicate: string;
+  readonly author_fellow_id: string;
+}
+
+/**
+ * Evaluates structured retry_when triggers against relevant ledger events.
+ * Inserts fired triggers into dead_end_fired_triggers table.
+ * Exactly-once firing is guaranteed by PRIMARY KEY (problem_id, dead_end_id).
+ */
+export async function evaluateAndRecordDeadEndTriggers(
+  db: D1Database,
+  problemId: string,
+  eventId: string,
+  eventType: string,
+  firedAt: string,
+  details?: {
+    claimId?: string;
+    targetDisposition?: string;
+    gapId?: string;
+  },
+): Promise<FiredDeadEndTrigger[]> {
+  const candidates = await db
+    .prepare(
+      `SELECT d.dead_end_id, d.retry_when_json, d.approach, d.author_fellow_id
+       FROM dead_ends d
+       WHERE d.problem_id = ?
+         AND d.superseded_by IS NULL
+         AND d.retry_when_json IS NOT NULL
+         AND d.dead_end_id NOT IN (
+           SELECT dead_end_id FROM dead_end_fired_triggers WHERE problem_id = ?
+         )`,
+    )
+    .bind(problemId, problemId)
+    .all<{
+      dead_end_id: string;
+      retry_when_json: string;
+      approach: string;
+      author_fellow_id: string;
+    }>();
+
+  if (!candidates.results || candidates.results.length === 0) {
+    return [];
+  }
+
+  const fired: FiredDeadEndTrigger[] = [];
+
+  for (const row of candidates.results) {
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(row.retry_when_json);
+    } catch {
+      continue;
+    }
+    const parsed = DeadEndRetryWhenSchema.safeParse(parsedJson);
+    if (!parsed.success) continue;
+
+    const trigger = parsed.data;
+    let didFire = false;
+    let reason = "";
+
+    if (trigger.kind === "statement-revised") {
+      if (eventType === "problem.statement-revised" || eventType === "problem.statement_revised") {
+        didFire = true;
+        reason = "Problem statement was revised.";
+      } else {
+        const prob = await db
+          .prepare("SELECT current_statement_version FROM problems WHERE id = ?")
+          .bind(problemId)
+          .first<{ current_statement_version: number }>();
+        if (prob && prob.current_statement_version > 1) {
+          didFire = true;
+          reason = `Problem statement was revised to version ${prob.current_statement_version}.`;
+        }
+      }
+    } else if (trigger.kind === "gap-closed") {
+      if (
+        (eventType === "gap.closed" && details?.gapId === trigger.gap_id) ||
+        details?.gapId === trigger.gap_id
+      ) {
+        didFire = true;
+        reason = `Proof gap '${trigger.gap_id}' was closed.`;
+      } else {
+        const gapRow = await db
+          .prepare("SELECT status FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+          .bind(problemId, trigger.gap_id)
+          .first<{ status: string }>();
+        if (gapRow?.status === "closed") {
+          didFire = true;
+          reason = `Proof gap '${trigger.gap_id}' was closed.`;
+        }
+      }
+    } else if (trigger.kind === "claim-reaches") {
+      if (details?.claimId === trigger.claim_id && details.targetDisposition === trigger.reaches) {
+        didFire = true;
+        reason = `Claim '${trigger.claim_id}' reached disposition '${trigger.reaches}'.`;
+      } else {
+        try {
+          const dispositions = await readScientificDispositions(
+            db,
+            problemId,
+            Number.MAX_SAFE_INTEGER,
+            50,
+          );
+          const fold = dispositions.get(trigger.claim_id);
+          if (fold && fold.disposition === trigger.reaches) {
+            didFire = true;
+            reason = `Claim '${trigger.claim_id}' reached disposition '${trigger.reaches}'.`;
+          }
+        } catch {
+          // If claim disposition cannot be computed or claim has no timeline yet, do not fire
+        }
+      }
+    }
+
+    if (didFire) {
+      let recordEventId: string | null = eventId;
+      if (recordEventId.startsWith("pack-eval-")) {
+        if (trigger.kind === "statement-revised") {
+          const stmtEvent = await db
+            .prepare(
+              `SELECT id FROM events
+               WHERE problem_id = ? AND type IN ('problem.statement-revised', 'problem.statement_revised')
+               ORDER BY seq DESC LIMIT 1`,
+            )
+            .bind(problemId)
+            .first<{ id: string }>();
+          if (stmtEvent) recordEventId = stmtEvent.id;
+        } else if (trigger.kind === "gap-closed") {
+          const gapEvent = await db
+            .prepare(
+              `SELECT id FROM events
+               WHERE problem_id = ? AND object_id = ?
+               ORDER BY seq DESC LIMIT 1`,
+            )
+            .bind(problemId, trigger.gap_id)
+            .first<{ id: string }>();
+          if (gapEvent) recordEventId = gapEvent.id;
+        } else if (trigger.kind === "claim-reaches") {
+          const claimEvent = await db
+            .prepare(
+              `SELECT id FROM events
+               WHERE problem_id = ? AND object_id = ?
+               ORDER BY seq DESC LIMIT 1`,
+            )
+            .bind(problemId, trigger.claim_id)
+            .first<{ id: string }>();
+          if (claimEvent) recordEventId = claimEvent.id;
+        }
+      }
+
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO dead_end_fired_triggers
+             (problem_id, dead_end_id, trigger_kind, event_id, reason, fired_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(problemId, row.dead_end_id, trigger.kind, recordEventId, reason, firedAt)
+        .run();
+
+      fired.push({
+        dead_end_id: row.dead_end_id,
+        trigger_kind: trigger.kind,
+        reason,
+        event_id: recordEventId,
+        fired_at: firedAt,
+      });
+    }
+  }
+
+  return fired;
+}
+
+/**
+ * Loads fired dead-end triggers for a problem, excluding superseded dead ends.
+ */
+export async function loadFiredDeadEndTriggers(
+  db: D1Database,
+  problemId: string,
+  limit = 10,
+  through?: number,
+): Promise<FiredDeadEndTriggerRow[]> {
+  const boundedLimit = Math.max(1, Math.min(limit, MAX_DEAD_ENDS_PER_PAGE));
+  // Use the same verified, withdrawal-aware public source as the quoted pack
+  // objects. A mutable projection or old trigger row cannot restore its body.
+  const readable = await loadProblemDeadEnds(db, problemId, {
+    limit: MAX_DEAD_ENDS_PER_PAGE,
+    through,
+  });
+  const sourceById = new Map(readable.items.map((item) => [item.dead_end_id, item]));
+  if (sourceById.size === 0) return [];
+  const rows = await db
+    .prepare(
+      `SELECT t.dead_end_id, t.trigger_kind, t.reason, e.id AS event_id,
+              e.created_at AS fired_at
+       FROM dead_end_fired_triggers t
+       JOIN dead_ends d ON d.problem_id = t.problem_id AND d.dead_end_id = t.dead_end_id
+       JOIN events source ON source.problem_id = d.problem_id AND source.object_id = d.dead_end_id
+         AND source.type = 'dead_end.recorded' AND source.object_kind = 'dead_end'
+       JOIN event_content content ON content.event_id = source.id
+         AND content.payload_sha256 = source.payload_sha256
+         AND content.redacted_at IS NULL AND content.payload_json IS NOT NULL
+       JOIN events e ON e.problem_id = t.problem_id AND e.id = t.event_id AND e.seq > source.seq
+       JOIN problems p ON p.id = t.problem_id
+       WHERE t.problem_id = ?
+         AND p.status != 'private-draft'
+         AND e.seq <= MIN(p.public_seq, COALESCE(?, p.public_seq))
+       ORDER BY e.seq ASC, t.dead_end_id ASC
+       LIMIT ?`,
+    )
+    .bind(problemId, through ?? null, MAX_DEAD_ENDS_PER_PAGE)
+    .all<FiredDeadEndTrigger>();
+
+  return (rows.results ?? [])
+    .flatMap((row) => {
+      const source = sourceById.get(row.dead_end_id);
+      if (!source || source.retry_when?.kind !== row.trigger_kind) return [];
+      return [
+        {
+          ...row,
+          approach: source.approach,
+          why_it_fails: source.why_it_fails,
+          retry_predicate: source.retry_predicate,
+          author_fellow_id: source.author_fellow_id,
+        },
+      ];
+    })
+    .slice(0, boundedLimit);
 }

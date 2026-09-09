@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   computeDeadEndNormHash,
+  evaluateAndRecordDeadEndTriggers,
+  loadFiredDeadEndTriggers,
   loadProblemDeadEnds,
   renderDeadEndsHtmlFragment,
   renderDeadEndsMarkdown,
@@ -284,5 +286,203 @@ describe("W5.8a dead-ends unit tests", () => {
   test("renderDeadEndsHtmlFragment handles empty list honestly", () => {
     const html = renderDeadEndsHtmlFragment("P-EMPTY", []);
     expect(html).toContain("No readable current negative results in this view");
+  });
+
+  test("evaluateAndRecordDeadEndTriggers fires statement-revised triggers", async () => {
+    const inserted: unknown[] = [];
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: (...args: unknown[]) => ({
+          all: async () => {
+            if (sql.includes("FROM dead_ends")) {
+              return {
+                results: [
+                  {
+                    dead_end_id: "DE-STMT",
+                    retry_when_json: JSON.stringify({ kind: "statement-revised" }),
+                    approach: "Naive trial factoring.",
+                    author_fellow_id: "F-AUTHOR",
+                  },
+                ],
+              };
+            }
+            return { results: [] };
+          },
+          run: async () => {
+            if (sql.includes("INSERT OR IGNORE INTO dead_end_fired_triggers")) {
+              inserted.push(args);
+            }
+            return {};
+          },
+          first: async () => null,
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const fired = await evaluateAndRecordDeadEndTriggers(
+      mockDb,
+      "P-TEST",
+      "E-STMT-REV",
+      "problem.statement-revised",
+      "2026-09-09T12:00:00.000Z",
+    );
+
+    expect(fired).toHaveLength(1);
+    expect(fired[0]?.dead_end_id).toBe("DE-STMT");
+    expect(fired[0]?.trigger_kind).toBe("statement-revised");
+    expect(inserted).toHaveLength(1);
+  });
+
+  test("evaluateAndRecordDeadEndTriggers fires gap-closed triggers", async () => {
+    const inserted: unknown[] = [];
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: (...args: unknown[]) => ({
+          all: async () => {
+            if (sql.includes("FROM dead_ends")) {
+              return {
+                results: [
+                  {
+                    dead_end_id: "DE-GAP",
+                    retry_when_json: JSON.stringify({ kind: "gap-closed", gap_id: "G-12" }),
+                    approach: "Exhaustive search bounded by G-12 obligation.",
+                    author_fellow_id: "F-AUTHOR",
+                  },
+                ],
+              };
+            }
+            return { results: [] };
+          },
+          run: async () => {
+            if (sql.includes("INSERT OR IGNORE INTO dead_end_fired_triggers")) {
+              inserted.push(args);
+            }
+            return {};
+          },
+          first: async () => ({ status: "closed" }),
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const fired = await evaluateAndRecordDeadEndTriggers(
+      mockDb,
+      "P-TEST",
+      "E-GAP-CLOSE",
+      "gap.closed",
+      "2026-09-09T12:00:00.000Z",
+      { gapId: "G-12" },
+    );
+
+    expect(fired).toHaveLength(1);
+    expect(fired[0]?.dead_end_id).toBe("DE-GAP");
+    expect(fired[0]?.trigger_kind).toBe("gap-closed");
+    expect(fired[0]?.reason).toContain("G-12");
+    expect(inserted).toHaveLength(1);
+  });
+
+  test("evaluateAndRecordDeadEndTriggers fires claim-reaches triggers", async () => {
+    const inserted: unknown[] = [];
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: (...args: unknown[]) => ({
+          all: async () => {
+            if (sql.includes("FROM dead_ends")) {
+              return {
+                results: [
+                  {
+                    dead_end_id: "DE-CLAIM",
+                    retry_when_json: JSON.stringify({
+                      kind: "claim-reaches",
+                      claim_id: "C-42",
+                      reaches: "corroborated",
+                    }),
+                    approach: "Direct proof assuming C-42 holds.",
+                    author_fellow_id: "F-AUTHOR",
+                  },
+                ],
+              };
+            }
+            return { results: [] };
+          },
+          run: async () => {
+            if (sql.includes("INSERT OR IGNORE INTO dead_end_fired_triggers")) {
+              inserted.push(args);
+            }
+            return {};
+          },
+          first: async () => ({ disposition: "corroborated" }),
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const fired = await evaluateAndRecordDeadEndTriggers(
+      mockDb,
+      "P-TEST",
+      "E-CLAIM-REVIEW",
+      "review.created",
+      "2026-09-09T12:00:00.000Z",
+      { claimId: "C-42", targetDisposition: "corroborated" },
+    );
+
+    expect(fired).toHaveLength(1);
+    expect(fired[0]?.dead_end_id).toBe("DE-CLAIM");
+    expect(fired[0]?.trigger_kind).toBe("claim-reaches");
+    expect(fired[0]?.reason).toContain("corroborated");
+    expect(inserted).toHaveLength(1);
+  });
+
+  test("loadFiredDeadEndTriggers returns joined trigger rows", async () => {
+    const body = JSON.stringify({
+      approach: "Finite residue search.",
+      why_it_fails: "Leaves unbounded period unexamined.",
+      retry_predicate: "Worth retrying with algebraic induction.",
+      retry_when: { kind: "statement-revised" },
+    });
+    let unavailable = false;
+    const source = {
+      dead_end_id: "DE-1",
+      problem_id: "P-TEST",
+      seq: 4,
+      author_fellow_id: "F-TEST",
+      event_created_at: "2026-09-09T11:00:00.000Z",
+      actor_sponsor_id: null,
+      actor_session_id: null,
+      model_string_self_declared: null,
+      harness: null,
+      superseded_by: null,
+      redacted_at: null,
+      payload_json: body,
+      payload_sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"),
+    };
+    const mockDb = {
+      prepare: (query: string) => ({
+        bind: () => ({
+          all: async () => ({
+            results: query.includes("FROM dead_ends d")
+              ? [{ ...source, payload_json: unavailable ? null : body }]
+              : [
+                  {
+                    dead_end_id: "DE-1",
+                    trigger_kind: "statement-revised",
+                    reason: "Problem statement was revised.",
+                    event_id: "E-100",
+                    fired_at: "2026-09-09T12:00:00.000Z",
+                    approach: "UNVERIFIED-PROJECTION-PROSE",
+                    why_it_fails: "Leaves unbounded period unexamined.",
+                    retry_predicate: "Worth retrying with algebraic induction.",
+                    author_fellow_id: "F-TEST",
+                  },
+                ],
+          }),
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const rows = await loadFiredDeadEndTriggers(mockDb, "P-TEST", 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.dead_end_id).toBe("DE-1");
+    expect(rows[0]?.approach).toBe("Finite residue search.");
+    unavailable = true;
+    expect(await loadFiredDeadEndTriggers(mockDb, "P-TEST", 5)).toEqual([]);
   });
 });
