@@ -508,6 +508,31 @@ export interface FellowCredentialBinding {
   readonly fellowStatus: FellowLifecycleStatus;
 }
 
+/** A sponsor's unbound Fellow credential is not the sponsor principal.
+ * Private collaboration requires authorship or an explicit problem binding
+ * issued by the owning sponsor; auto-created membership is not approval. */
+export function fellowCanAccessPrivateProblem(
+  credential: FellowCredentialBinding,
+  problem: {
+    readonly id: string;
+    readonly sponsorId: string | null;
+    readonly creatorFellowId: string | null;
+  },
+  now: number,
+): boolean {
+  const resources = credential.grantedResources;
+  return (
+    credential.sponsorId === problem.sponsorId &&
+    (credential.fellowStatus === "active" || credential.fellowStatus === "suspicious_review") &&
+    credential.revokedAt === undefined &&
+    credential.issuedAt <= now &&
+    credential.expiresAt > now &&
+    (resources.fellowGrantExpiresAt === undefined || resources.fellowGrantExpiresAt > now) &&
+    (resources.problemBinding === undefined || resources.problemBinding === problem.id) &&
+    (credential.fellowId === problem.creatorFellowId || resources.problemBinding === problem.id)
+  );
+}
+
 /**
  * The one place Fellow effectful-write authorization is decided (Fable §5,
  * "authorization is computed by centralized policy functions over (account

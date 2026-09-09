@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import {
+  EnrollmentProblemBindingSchema,
+  ProblemIdSchema,
+  PublicLedgerProblemIdSchema,
+} from "@asimposium/contracts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 
 /**
@@ -27,6 +32,7 @@ export async function problemLifecycleJourney({
   origin,
   userAgent,
   sponsorCall,
+  fixtures,
 }) {
   const sponsorA = "usr_problem_sponsor_a";
   const sponsorB = "usr_problem_sponsor_b";
@@ -161,7 +167,13 @@ export async function problemLifecycleJourney({
   // Authorized Fellow A1 adopts the brief and proposes the problem
   const proposed = await call("/v1/problems", proposalPayload, fellowA1Token, 201);
   const problemId = proposed.problem.id;
-  assert.ok(problemId.startsWith("P-COLLATZ"));
+  for (const schema of [
+    EnrollmentProblemBindingSchema,
+    ProblemIdSchema,
+    PublicLedgerProblemIdSchema,
+  ])
+    assert.equal(schema.parse(problemId), problemId);
+  assert.equal(proposed.problem.title, proposalPayload.title);
   assert.equal(proposed.problem.status, "private-draft");
   assert.equal(proposed.problem.current_statement_version, 1);
   await refuseBriefEdit(sponsorA, savedBrief.brief.id, "Edit after adoption");
@@ -210,6 +222,191 @@ export async function problemLifecycleJourney({
   const visibleDraft = await call(`/v1/problems/${problemId}`, undefined, fellowA1Token, 200);
   assert.equal(visibleDraft.problem.id, problemId);
   assert.equal(visibleDraft.problem.status, "private-draft");
+
+  const peerToken = await enroll("fellow-a-private-peer", sponsorA);
+  async function privateState() {
+    const result = {};
+    for (const [name, sql] of Object.entries({
+      problems: "SELECT * FROM problems WHERE id = ?",
+      sessions: "SELECT * FROM sessions WHERE problem_id = ? ORDER BY session_id",
+      members: "SELECT * FROM problem_memberships WHERE problem_id = ? ORDER BY fellow_id",
+      workshop: "SELECT * FROM workshop_objects WHERE problem_id = ? ORDER BY workshop_id",
+      events: "SELECT * FROM events WHERE problem_id = ? ORDER BY seq",
+    }))
+      result[name] = (await env.DB.prepare(sql).bind(problemId).all()).results;
+    result.replays = (
+      await env.DB.prepare(
+        "SELECT * FROM session_write_replays ORDER BY scope, principal_scope, idempotency_key",
+      ).all()
+    ).results;
+    result.cursor = await call("/cursor");
+    return result;
+  }
+  const beforePrivateRefusals = await privateState();
+  for (const token of [peerToken, fellowB1Token]) {
+    assert.equal(
+      (await call(`/v1/problems/${problemId}`, undefined, token, 404)).code,
+      "PROBLEM_NOT_FOUND",
+    );
+    assert.equal(
+      (await call("/v1/sessions", { problem_id: problemId }, token, 404)).code,
+      "PROBLEM_NOT_FOUND",
+    );
+    assert.deepEqual(await privateState(), beforePrivateRefusals);
+  }
+  async function boundFellow(name, actor, binding) {
+    const minted = await sponsorCall(
+      actor,
+      "POST",
+      "/v1/enrollments",
+      "enrollment.mint",
+      {
+        requested_scopes: ["review"],
+        problem_binding: binding,
+      },
+      201,
+    );
+    const claimed = await call(
+      "/v1/fellows",
+      {
+        enrollment_id: minted.enrollment_id,
+        secret: minted.secret,
+        name,
+        model: "synthetic-problem-model",
+        harness: "local-problem-lifecycle-proof",
+      },
+      undefined,
+      202,
+    );
+    await sponsorCall(
+      actor,
+      "POST",
+      `/v1/enrollments/${minted.enrollment_id}/decision`,
+      "enrollment.decide",
+      {
+        enrollment_id: minted.enrollment_id,
+        decision: "approve",
+        step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      },
+      200,
+      "/v1/enrollments/:enrollmentId/decision",
+    );
+    return (await call("/v1/fellows/flow", { flow_handle: claimed.flow_handle })).token;
+  }
+  const boundPeer = await boundFellow("fellow-a-bound-peer", sponsorA, problemId);
+  const foreignBound = await boundFellow("fellow-b-bound-peer", sponsorB, problemId);
+  const wrongTarget = await boundFellow("fellow-a-other-binding", sponsorA, "P-OTHER");
+  const beforeBoundRefusals = await privateState();
+  for (const [token, status, code] of [
+    [foreignBound, 404, "PROBLEM_NOT_FOUND"],
+    [wrongTarget, 403, "WRITE_REFUSED"],
+  ]) {
+    await call(`/v1/problems/${problemId}`, undefined, token, 404);
+    assert.equal((await call("/v1/sessions", { problem_id: problemId }, token, status)).code, code);
+    assert.deepEqual(await privateState(), beforeBoundRefusals);
+  }
+  for (const [label, token] of [
+    ["creator", fellowA1Token],
+    ["explicit-owner-grant", boundPeer],
+  ]) {
+    assert.equal(
+      (await call(`/v1/problems/${problemId}`, undefined, token)).problem.statement,
+      proposalPayload.statement,
+    );
+    const key = `private-authority-${label}`;
+    const session = await call("/v1/sessions", { problem_id: problemId }, token, 201, key);
+    const afterOpen = await privateState();
+    assert.deepEqual(
+      await call("/v1/sessions", { problem_id: problemId }, token, 200, key),
+      session,
+    );
+    assert.deepEqual(await privateState(), afterOpen);
+    const canary = `PRIVATE_WORKSPACE_${label}_CANARY`;
+    const pushed = await call(
+      `/v1/sessions/${session.session_id}/workshop`,
+      {
+        type: "draft",
+        title: "Private work",
+        body_md: canary,
+        relates_to: [],
+      },
+      token,
+      201,
+    );
+    const pack = await call(
+      `/v1/sessions/${session.session_id}/pack?profile=working`,
+      undefined,
+      token,
+    );
+    assert.ok(
+      pack.items.some((item) => item.kind === "workshop-head" && item.id === pushed.workshop_id),
+    );
+    const stored = await env.DB.prepare(
+      "SELECT fellow_id, body_md FROM workshop_objects WHERE workshop_id = ?",
+    )
+      .bind(pushed.workshop_id)
+      .first();
+    assert.equal(stored.body_md, canary);
+    const sponsorView = await sponsorCall(
+      sponsorA,
+      "POST",
+      "/v1/sponsors/workshop",
+      "workshop.read",
+      {
+        problem_id: problemId,
+        fellow_id: stored.fellow_id,
+      },
+    );
+    assert.equal(
+      sponsorView.objects.find((object) => object.workshop_id === pushed.workshop_id).body_md,
+      canary,
+    );
+    await call(
+      `/v1/sessions/${session.session_id}/close`,
+      { handback: "Private work retained for later publication." },
+      token,
+      201,
+    );
+    await call(`/p/${problemId}.json`, undefined, undefined, 404);
+  }
+  const nonLatinTitle = "有限経路の研究".repeat(15);
+  const nonLatin = await call(
+    "/v1/problems",
+    {
+      title: nonLatinTitle,
+      statement: "Every finite path over this alphabet has finitely many vertices.",
+      falsifier: "A finite path in this domain with infinitely many vertices.",
+      motivation: "Display text must not control whether enrollment can bind the problem.",
+      areas: ["combinatorics"],
+    },
+    fellowA1Token,
+    201,
+  );
+  for (const schema of [
+    EnrollmentProblemBindingSchema,
+    ProblemIdSchema,
+    PublicLedgerProblemIdSchema,
+  ])
+    assert.equal(schema.parse(nonLatin.problem.id), nonLatin.problem.id);
+  assert.notEqual(nonLatin.problem.id, problemId);
+  assert.equal(
+    (await call(`/v1/problems/${nonLatin.problem.id}`, undefined, fellowA1Token)).problem.title,
+    nonLatinTitle,
+  );
+  // An explicit legacy read fixture proves this repair does not narrow retained IDs.
+  await fixtures.seedProblem("P-LEGACY-TITLE-12345678", sponsorA);
+  assert.equal((await call("/p/P-LEGACY-TITLE-12345678.json")).problem, "P-LEGACY-TITLE-12345678");
+  console.log(
+    JSON.stringify({
+      stage: "private-problem-authority",
+      status: "pass",
+      enrollment_binding: "real signed mint and explicit approval",
+      owner_and_granted_workshop: "readable",
+      ungranted_and_foreign_admission: "refused",
+      retained_ids: "readable",
+      boundary: "real local D1 and signed ingress; no OAuth or deployment claim",
+    }),
+  );
 
   // --- Step 3: Sponsor Publishes to Sharpening ---
   const publishRes = await sponsorCall(

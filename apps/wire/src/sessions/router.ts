@@ -68,7 +68,7 @@ import type {
   EnrollmentService,
   FellowCredentialBinding,
 } from "../enrollment/service";
-import { authorizeFellowWrite } from "../enrollment/service";
+import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
@@ -1164,6 +1164,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row !== null && row !== undefined;
   }
 
+  async function requireSessionProblemAccess(
+    db: Env["DB"],
+    problemId: string,
+    binding: FellowCredentialBinding,
+  ): Promise<void> {
+    const problem = await db
+      .prepare("SELECT id, status, sponsor_id, created_by_fellow_id FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{
+        id: string;
+        status: string;
+        sponsor_id: string | null;
+        created_by_fellow_id: string | null;
+      }>();
+    if (
+      !problem ||
+      (problem.status === "private-draft" &&
+        !fellowCanAccessPrivateProblem(
+          binding,
+          {
+            id: problem.id,
+            sponsorId: problem.sponsor_id,
+            creatorFellowId: problem.created_by_fellow_id,
+          },
+          Date.now(),
+        ))
+    )
+      throw new SessionProblemMissingError(problemId);
+  }
+
   async function authenticate(
     request: Request,
   ): Promise<
@@ -1475,7 +1505,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         c.req.path,
         (raw) => SessionOpenResponseSchema.parse(JSON.parse(raw)),
       );
-      if (replay !== undefined) return replay;
+      if (replay !== undefined) {
+        // A receipt from the old permissive admission path is not a private grant.
+        await requireSessionProblemAccess(db, parsed.data.problem_id, auth.binding);
+        return replay;
+      }
       const decision = authorizeFellowWrite({
         effect: "session.open",
         credential: auth.binding,
@@ -1498,13 +1532,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         c.req.path,
         (raw) => SessionOpenResponseSchema.parse(JSON.parse(raw)),
         async () => {
-          const problemRow = await db
-            .prepare("SELECT id FROM problems WHERE id = ?")
-            .bind(parsed.data.problem_id)
-            .first<{ id: string }>();
-          if (problemRow === null || problemRow === undefined) {
-            throw new SessionProblemMissingError(parsed.data.problem_id);
-          }
+          await requireSessionProblemAccess(db, parsed.data.problem_id, auth.binding);
           const existing = await db
             .prepare(
               "SELECT session_id FROM sessions WHERE fellow_id = ? AND problem_id = ? AND closed_at IS NULL",
@@ -1547,15 +1575,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      (scope, principal_scope, idempotency_key, request_digest,
                       response_ciphertext, response_initialization_vector, expires_at, claim_token)
                    SELECT 'session_open', ?, ?, ?, ?, ?, ?, ?
-                   WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+                   WHERE EXISTS (
+                     SELECT 1 FROM problems WHERE id = ? AND (
+                       status <> 'private-draft' OR (
+                         sponsor_id = ? AND (created_by_fellow_id = ? OR id = ?)
+                       )
+                     )
+                   )
                      AND NOT EXISTS (
                        SELECT 1 FROM sessions
                        WHERE fellow_id = ? AND problem_id = ? AND closed_at IS NULL
                      )
-                     AND EXISTS (
-                       SELECT 1 FROM fellow_tokens
-                       WHERE credential_id = ? AND revoked_at IS NULL
-                     )
+                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
@@ -1567,6 +1598,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
                   claimToken,
                   parsed.data.problem_id,
+                  auth.binding.sponsorId,
+                  auth.binding.fellowId,
+                  auth.binding.grantedResources.problemBinding ?? null,
                   auth.binding.fellowId,
                   parsed.data.problem_id,
                   auth.binding.credentialId,

@@ -1202,6 +1202,94 @@ async function addApprovedFellow(
 }
 
 describe("session protocol routes", () => {
+  for (const initiallyPrivate of [true, false]) {
+    test(`private admission checks current ownership inside the session batch (initially private: ${initiallyPrivate})`, async () => {
+      let mutate: (() => Promise<void>) | undefined;
+      const f = await fixture({
+        beforeBatch: async () => {
+          const run = mutate;
+          mutate = undefined;
+          await run?.();
+        },
+      });
+      await f.db
+        .prepare(
+          "UPDATE problems SET status = ?, sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
+        )
+        .bind(
+          initiallyPrivate ? "private-draft" : "active",
+          f.binding.sponsorId,
+          f.binding.fellowId,
+        )
+        .run();
+      async function footprint() {
+        const result: Record<string, unknown> = {};
+        for (const table of [
+          "sessions",
+          "problem_memberships",
+          "session_write_replays",
+          "workshop_objects",
+          "events",
+          "public_cursor",
+        ])
+          result[table] = (await f.db.prepare(`SELECT * FROM ${table}`).all()).results;
+        return result;
+      }
+      const before = await footprint();
+      mutate = async () => {
+        await f.db
+          .prepare(
+            "UPDATE problems SET status = 'private-draft', sponsor_id = 'usr_new_owner' WHERE id = 'P-4DSP'",
+          )
+          .run();
+      };
+      const result = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "private-owner-race",
+        },
+        body: JSON.stringify({ problem_id: "P-4DSP" }),
+      });
+      expect(result.status).toBe(403);
+      expect(((await result.json()) as { code: string }).code).toBe("WRITE_REFUSED");
+      expect(await footprint()).toEqual(before);
+    });
+  }
+
+  test("a retained session-open receipt is not a grant after private ownership changes", async () => {
+    const f = await fixture();
+    await f.db
+      .prepare(
+        "UPDATE problems SET status = 'private-draft', sponsor_id = ?, created_by_fellow_id = ? WHERE id = 'P-4DSP'",
+      )
+      .bind(f.binding.sponsorId, f.binding.fellowId)
+      .run();
+    const open = () =>
+      f.call("/v1/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "private-open-receipt",
+        },
+        body: JSON.stringify({ problem_id: "P-4DSP" }),
+      });
+    expect((await open()).status).toBe(201);
+    const before = (await f.db.prepare("SELECT * FROM session_write_replays").all()).results;
+    await f.db
+      .prepare("UPDATE problems SET sponsor_id = 'usr_new_owner' WHERE id = 'P-4DSP'")
+      .run();
+    const replay = await open();
+    expect(replay.status).toBe(404);
+    expect(((await replay.json()) as { code: string }).code).toBe("PROBLEM_NOT_FOUND");
+    expect((await f.db.prepare("SELECT * FROM session_write_replays").all()).results).toEqual(
+      before,
+    );
+    expect(
+      (await f.db.prepare("SELECT count(*) AS n FROM sessions").first<{ n: number }>())?.n,
+    ).toBe(1);
+  });
+
   async function dependencyRevisionFixture(options: LocalD1Options = {}) {
     const f = await fixture(options);
     let key = 0;

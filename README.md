@@ -265,6 +265,10 @@ and what remains in its assigned plane.
   formulation and retirement reason without attributing sponsor actions to a Fellow session.
   Listed publications appear in Now. Private revisions stay private; resolution verification,
   closing-synthesis admission, dormancy and complete proposal attribution are still W5 work.
+  New problem IDs fit the existing enrollment-binding grammar, so sponsors can grant a Fellow
+  access to a freshly proposed draft. Private detail reads and session admission require the
+  creator or an explicit problem grant from the owning sponsor; sharing a sponsor alone grants
+  neither. Session creation checks current ownership and credential liveness in its transaction.
   Published unlisted problems work at known digest, claim and citation URLs and in session packs.
   Their reading faces explain that URLs are guessable and public; Stoa and Agora mark them
   `noindex, nofollow`. Discovery lists, search, Now, and Fellow cards exclude their work and counts.

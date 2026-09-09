@@ -25,6 +25,7 @@ import {
   type FellowWriteEffect,
   type FellowWriteGrantUsage,
   fellowAuthorizationResponse,
+  fellowCanAccessPrivateProblem,
   InMemoryEnrollmentStore,
   inspectFellowWriteAuthorization,
   SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
@@ -1882,6 +1883,35 @@ describe("centralized Fellow write authorization", () => {
   function inspect(overrides: DecisionOverrides = {}) {
     return inspectFellowWriteAuthorization(input(overrides));
   }
+
+  test("private problems require authorship or an owner-issued explicit binding", () => {
+    const problem = { id: "P-1", sponsorId: "S-alpha", creatorFellowId: "F-alpha" };
+    const access = (patch: Partial<FellowCredentialBinding>) =>
+      fellowCanAccessPrivateProblem(binding(patch), problem, NOW);
+    expect(access({})).toBe(true);
+    expect(access({ grantedScopes: [] })).toBe(true);
+    expect(access({ fellowId: "F-peer" })).toBe(false);
+    expect(access({ fellowId: "F-peer", grantedResources: { problemBinding: "P-1" } })).toBe(true);
+    expect(
+      access({
+        fellowId: "F-peer",
+        sponsorId: "S-other",
+        grantedResources: { problemBinding: "P-1" },
+      }),
+    ).toBe(false);
+    expect(access({ grantedResources: { problemBinding: "P-other" } })).toBe(false);
+    expect(access({ grantedResources: { fellowGrantExpiresAt: NOW } })).toBe(false);
+    expect(access({ grantedResources: { fellowGrantExpiresAt: NOW + 1 } })).toBe(true);
+    expect(access({ issuedAt: NOW + 1 })).toBe(false);
+    expect(access({ expiresAt: NOW })).toBe(false);
+    expect(access({ revokedAt: NOW })).toBe(false);
+    for (const fellowStatus of ["paused", "revoked", "archived", "compromised"] as const)
+      expect(access({ fellowStatus })).toBe(false);
+    expect(access({ fellowStatus: "suspicious_review" })).toBe(true);
+    expect(fellowCanAccessPrivateProblem(binding(), { ...problem, sponsorId: null }, NOW)).toBe(
+      false,
+    );
+  });
 
   test("the happy paths follow effect-specific Fable semantics", () => {
     expect(

@@ -11,6 +11,7 @@ import {
 import { type Context, Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
+import { fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
@@ -253,14 +254,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    const rawSlug = parsed.data.title
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "")
-      .slice(0, 20);
-    const slug = rawSlug.replace(/-+$/, "") || "PROB";
-    const problemId = `P-${slug}-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+    // New identities must also be valid enrollment problem bindings. Titles
+    // remain display data; retained IDs continue to use the public read grammar.
+    const problemId = `P-${crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase()}`;
     const now = new Date().toISOString();
     const genesis = await genesisChainDigest(problemId);
 
@@ -388,7 +384,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    // Private draft visibility gate: visible only to sponsor and creator fellow
+    // A Fellow may read its own draft or an explicit owner-issued problem grant.
     if (problem.status === "private-draft") {
       const token = bearerToken(c.req.raw);
       let allowed = false;
@@ -397,8 +393,15 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           const binding = await options.service.credentialBinding(token);
           if (
             binding &&
-            (binding.fellowId === problem.created_by_fellow_id ||
-              binding.sponsorId === problem.sponsor_id)
+            fellowCanAccessPrivateProblem(
+              binding,
+              {
+                id: problem.id,
+                sponsorId: problem.sponsor_id,
+                creatorFellowId: problem.created_by_fellow_id,
+              },
+              Date.now(),
+            )
           ) {
             allowed = true;
           }
