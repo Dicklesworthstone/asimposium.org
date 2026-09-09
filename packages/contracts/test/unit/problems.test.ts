@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import Ajv2020 from "ajv/dist/2020";
 import {
   ClaimReanchorRequestSchema,
   ProblemClosingSynthesisSchema,
   ProblemDetailSchema,
   ProblemFamousGuardrailSchema,
+  ProblemGovernanceEventSchema,
+  ProblemGovernanceKeySchema,
   ProblemLifecycleActionRequestSchema,
   ProblemLifecycleContractsSchema,
   ProblemNoClaimBoundarySchema,
@@ -16,6 +20,49 @@ import {
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
 } from "../../src/problems.ts";
+
+test("public governance events preserve the sponsor actor and exact formulation transition", () => {
+  const valid = JSON.parse(
+    readFileSync(new URL("../fixtures/valid/governance-event.json", import.meta.url), "utf8"),
+  );
+  const invalid = JSON.parse(
+    readFileSync(new URL("../fixtures/invalid/governance-event.json", import.meta.url), "utf8"),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.governance_event);
+  expect(ProblemGovernanceEventSchema.safeParse(valid).success).toBe(true);
+  expect(published(valid)).toBe(true);
+  expect(ProblemGovernanceEventSchema.safeParse(invalid).success).toBe(false);
+  expect(published(invalid)).toBe(false);
+  const publishedKey = new Ajv2020({ strict: true }).compile(
+    schema.properties.governance_idempotency_key,
+  );
+  for (const key of ["publish-1", "a".repeat(160)]) {
+    expect(ProblemGovernanceKeySchema.safeParse(key).success).toBe(true);
+    expect(publishedKey(key)).toBe(true);
+  }
+  for (const key of [null, "", "a/b", "a".repeat(161)]) {
+    expect(ProblemGovernanceKeySchema.safeParse(key).success).toBe(false);
+    expect(publishedKey(key)).toBe(false);
+  }
+  for (const patch of [
+    { source_fellow_id: null },
+    { session: "invented" },
+    { acting_principal: { type: "sponsor", id: "bad" } },
+  ]) {
+    expect(ProblemGovernanceEventSchema.safeParse({ ...valid, ...patch }).success).toBe(false);
+    expect(published({ ...valid, ...patch })).toBe(false);
+  }
+  // Cross-field version comparisons are enforced by Zod; JSON Schema pins individual fields.
+  expect(
+    ProblemGovernanceEventSchema.safeParse({
+      ...valid,
+      problem: { ...valid.problem, current_statement_version: 2 },
+    }).success,
+  ).toBe(false);
+});
 
 test("W5.1 Problem lifecycle contracts validate all states and directions", () => {
   const validStatuses = [

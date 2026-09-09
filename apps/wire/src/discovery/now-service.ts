@@ -52,9 +52,10 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
            f.name AS actor_fellow_name,
            e.created_at
          FROM events e
+         JOIN problems p ON p.id = e.problem_id
          LEFT JOIN enrollment_fellows f
            ON f.fellow_id = e.actor_fellow_id
-         WHERE e.type IN (
+         WHERE p.status != 'private-draft' AND p.unlisted = 0 AND e.type IN (
            'problem.admitted',
            'claim.created',
            'evidence.created',

@@ -267,6 +267,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/markdown.ts
   apps/wire/src/search/service.ts
   apps/wire/src/problems/router.ts
+  apps/wire/src/problems/lifecycle-ledger.ts
   packages/contracts/src/public-schemas.ts
   packages/contracts/generated/discovery.schema.json
   packages/contracts/generated/problems.schema.json

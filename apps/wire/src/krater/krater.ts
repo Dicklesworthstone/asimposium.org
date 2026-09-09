@@ -394,7 +394,8 @@ function eventRowWithSafeSequence(row: EventRow): EventRow {
 }
 
 function requireIdentifier(label: string, value: string): void {
-  if (!IDENTIFIER.test(value)) inputError(`${label} must be a bounded identifier.`);
+  if (typeof value !== "string" || !IDENTIFIER.test(value))
+    inputError(`${label} must be a bounded identifier.`);
 }
 
 function requireServerTimestampMillis(value: number): void {
@@ -2405,14 +2406,25 @@ export interface KraterLedgerEventInput {
   readonly objectVersion: number;
   readonly payloadJson: string;
   readonly createdAt: string;
-  readonly attribution: {
-    readonly fellowId: string;
-    readonly sponsorId: string;
-    readonly sessionId: string;
-    readonly modelSelfDeclared: string;
-    readonly harness: string;
-    readonly credentialId?: string;
-  };
+  readonly attribution:
+    | {
+        readonly principalType?: never;
+        readonly fellowId: string;
+        readonly sponsorId: string;
+        readonly sessionId: string;
+        readonly modelSelfDeclared: string;
+        readonly harness: string;
+        readonly credentialId?: string;
+      }
+    | {
+        readonly principalType: "sponsor";
+        readonly sponsorId: string;
+        readonly fellowId: null;
+        readonly sessionId: null;
+        readonly modelSelfDeclared: null;
+        readonly harness: null;
+        readonly credentialId?: never;
+      };
 }
 
 export interface KraterLedgerProjectionPlan {
@@ -2441,9 +2453,29 @@ export async function writeLedgerEvent(
   requireIdentifier("eventType", input.eventType);
   requireIdentifier("objectKind", input.objectKind);
   requireIdentifier("objectId", input.objectId);
-  requireIdentifier("attribution.fellowId", input.attribution.fellowId);
   requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
-  requireIdentifier("attribution.sessionId", input.attribution.sessionId);
+  const governance = input.attribution.principalType === "sponsor";
+  if (governance) {
+    if (
+      input.objectKind !== "problem" ||
+      input.objectId !== input.problemId ||
+      !["problem.admitted", "problem.statement-revised"].includes(input.eventType) ||
+      input.attribution.fellowId !== null ||
+      input.attribution.sessionId !== null ||
+      input.attribution.modelSelfDeclared !== null ||
+      input.attribution.harness !== null ||
+      input.attribution.credentialId !== undefined
+    )
+      inputError("sponsor governance cannot impersonate a Fellow or write scientific objects.");
+  } else {
+    requireIdentifier("attribution.fellowId", input.attribution.fellowId);
+    requireIdentifier("attribution.sessionId", input.attribution.sessionId);
+  }
+  // Public governance responses live in immutable event content. The scoped
+  // request key is reusable after 24 hours; other writer replay protocols are unchanged.
+  const expiredBefore = governance
+    ? new Date(serverNowMs - 24 * 60 * 60 * 1000).toISOString()
+    : null;
   if (
     !Number.isSafeInteger(input.objectVersion) ||
     input.objectVersion < 1 ||
@@ -2527,12 +2559,17 @@ export async function writeLedgerEvent(
           db,
           `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
            SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
-           ON CONFLICT(problem_id, idempotency_key) DO NOTHING`,
+           ON CONFLICT(problem_id, idempotency_key) DO UPDATE SET
+             request_digest = excluded.request_digest, created_at = excluded.created_at,
+             event_id = NULL, event_seq = NULL
+           WHERE ? IS NOT NULL AND idempotency.created_at <= ?`,
           input.problemId,
           input.idempotencyKey,
           input.requestDigest,
           input.createdAt,
           input.problemId,
+          expiredBefore,
+          expiredBefore,
         ),
         statement(
           db,

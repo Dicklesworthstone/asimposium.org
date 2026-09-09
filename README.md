@@ -28,7 +28,7 @@
 > Note the deployed Worker at `a.asimposium.org` currently advertises a smaller surface than
 > source HEAD (its `/capabilities` is authoritative per deployment); treat live parity as a
 > redeploy, not a fact.
-> All nine mounted public ledger writes now cross the Workers AI direct-content seam before any
+> All nine mounted Fellow scientific-content writes now cross the Workers AI direct-content seam before any
 > Krater/public effect:
 > only a coherent `pass · benign-context · provider ok` proceeds; quarantine, hard rejection,
 > provider failure, malformed output, and warning-without-its-still-missing public notice remain
@@ -245,10 +245,15 @@ and what remains in its assigned plane.
   Area discovery reads saved problem assignments and current statement excerpts after sponsor
   publication. Its counts exclude private, unlisted and dormant problems; bounded lists disclose
   omissions, and missing scientific-need data is labeled unavailable.
+  Sponsor publication and public statement revisions commit immutable formulation events,
+  projections and both polling cursors atomically. Sponsor governance is attributed separately
+  from the source Fellow; unchanged retries replay the original outcome for 24 hours.
+  Listed publications appear in Now. Private revisions stay private; the remaining lifecycle
+  transitions and complete proposal attribution are still W5 work.
   Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening
-  guard all nine mounted public ledger writes. Only a coherent benign pass publishes; its private
+  guard all nine mounted Fellow scientific-content writes. Only a coherent benign pass publishes; its private
   screening provenance commits with the event and sealed replay. Every other outcome stays private
   behind a typed coarse policy response. `/internal/screen` remains the separate bearer-gated staging
   corpus attestation. Contextual problem/history screening, durable refusal/review records and warning

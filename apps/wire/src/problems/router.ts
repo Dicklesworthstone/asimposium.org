@@ -17,6 +17,7 @@ import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
 import { normHash } from "../split/policy";
+import { applyPublicProblemGovernance, problemGovernanceRefused } from "./lifecycle-ledger";
 
 export interface ProblemRouterOptions {
   readonly service: EnrollmentService;
@@ -64,6 +65,19 @@ async function readJsonBody(request: Request): Promise<unknown> {
 
 export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  // This router is fetched as a nested app; its own error boundary runs
+  // before the outer Worker's handler. Never return raw D1 exception text.
+  app.onError(() =>
+    validatedProblem({
+      status: 500,
+      code: "INTERNAL_ERROR",
+      title: "The Worker failed to handle this request",
+      detail: "An unexpected error occurred. Its details are not disclosed on this face.",
+      fixHint:
+        "Retry the request with the same Idempotency-Key. If it persists, report the route and time.",
+      headers: { "cache-control": "private, no-store" },
+    }),
+  );
 
   async function authenticateFellow(
     request: Request,
@@ -897,13 +911,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     // Sponsor authority check
     if (problem.sponsor_id !== sponsor.sponsorId) {
-      return validatedProblem({
-        status: 403,
-        code: "WRITE_REFUSED",
-        title: "Not the problem sponsor or steward",
-        detail: "Only the accountable sponsor or steward can perform lifecycle actions.",
-        fixHint: "Issue the lifecycle action using the problem sponsor's key.",
-      });
+      return problemGovernanceRefused();
     }
 
     let rawJson: unknown;
@@ -933,53 +941,11 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const action = parsed.data;
     const now = new Date().toISOString();
 
-    if (action.action === "publish") {
-      if (problem.status !== "private-draft") {
-        return validatedProblem({
-          status: 422,
-          code: "WRITE_REFUSED",
-          title: "Problem is not in private-draft",
-          detail: `Cannot publish problem '${problemId}' which is already in '${problem.status}'.`,
-          fixHint: "Only private-draft problems can be published.",
-        });
-      }
-
-      // Check that source fellow is not revoked
-      if (problem.created_by_fellow_id) {
-        const fellow = await db
-          .prepare("SELECT status FROM enrollment_fellows WHERE fellow_id = ?")
-          .bind(problem.created_by_fellow_id)
-          .first<{ status: string }>();
-
-        if (fellow && fellow.status === "revoked") {
-          return validatedProblem({
-            status: 403,
-            code: "WRITE_REFUSED",
-            title: "Source Fellow is revoked",
-            detail: "Cannot publish a problem whose creator Fellow has been revoked.",
-            fixHint: "Have an active Fellow adopt or propose the problem.",
-          });
-        }
-      }
-
-      await db
-        .prepare("UPDATE problems SET status = 'sharpening', updated_at = ? WHERE id = ?")
-        .bind(now, problemId)
-        .run();
-
-      return c.json(
-        {
-          problem: {
-            id: problemId,
-            status: "sharpening",
-            title: problem.title,
-            current_statement_version: problem.current_statement_version,
-            updated_at: now,
-          },
-        },
-        200,
-        { "cache-control": "private, no-store" },
-      );
+    if (
+      action.action === "publish" ||
+      (action.action === "revise-statement" && problem.status !== "private-draft")
+    ) {
+      return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);
     }
 
     if (action.action === "revise-statement") {

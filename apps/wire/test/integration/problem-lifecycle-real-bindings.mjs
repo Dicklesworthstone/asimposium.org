@@ -160,6 +160,7 @@ export async function runLocalWorkerJourney(journey) {
       body,
       expected = 200,
       route = path,
+      idempotencyKey,
     ) {
       const raw = body === undefined ? "" : JSON.stringify(body);
       const envelope = await mintServiceEnvelope({
@@ -177,7 +178,7 @@ export async function runLocalWorkerJourney(journey) {
         headers: {
           ...serviceEnvelopeHeaders(envelope),
           "User-Agent": userAgent,
-          "Idempotency-Key": `local-sponsor-${++key}`,
+          "Idempotency-Key": idempotencyKey ?? `local-sponsor-${++key}`,
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         },
         ...(body === undefined ? {} : { body: raw }),
@@ -192,9 +193,12 @@ export async function runLocalWorkerJourney(journey) {
         );
       }
       const code = ProblemCodeSchema.safeParse(data?.code);
-      assert.equal(
-        response.status,
-        expected,
+      if (response.status >= 500) {
+        assert.match(response.headers.get("content-type") ?? "", /^application\/problem\+json\b/);
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+      }
+      assert.ok(
+        (Array.isArray(expected) ? expected : [expected]).includes(response.status),
         `${path}: signed sponsor call status=${response.status} expected=${expected} code=${code.success ? code.data : "unrecognized"}`,
       );
       if (expected >= 200 && expected < 300) {

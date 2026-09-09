@@ -15,6 +15,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
+import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
@@ -158,6 +159,30 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   screeningCalls(): number {
     return screenCalls;
+  }
+
+  // HTTP journeys cover signed ingress. This seam isolates an authenticated
+  // writer holding an obsolete read, against real D1 without a timer race.
+  async governanceFromSnapshot(
+    snapshot: Parameters<typeof applyPublicProblemGovernance>[1],
+    sponsorId: string,
+    action: Parameters<typeof applyPublicProblemGovernance>[3],
+    key: string,
+  ) {
+    const response = await applyPublicProblemGovernance(
+      this.env.DB,
+      snapshot,
+      sponsorId,
+      action,
+      new Request(`${this.env.STOA_ORIGIN}/v1/sponsors/problems/${snapshot.id}/lifecycle`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": key,
+          "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        },
+      }),
+    );
+    return { status: response.status, body: await response.json() };
   }
 
   redactPublicContent(eventId: string) {

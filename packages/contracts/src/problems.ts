@@ -232,6 +232,46 @@ export const ProblemDetailSchema = z
 
 export type ProblemDetail = z.infer<typeof ProblemDetailSchema>;
 
+/** Immutable public governance record. A sponsor action never impersonates a Fellow session. */
+export const ProblemGovernanceEventSchema = z
+  .object({
+    action: z.enum(["publish", "revise-statement"]),
+    acting_principal: z.object({ type: z.literal("sponsor"), id: SponsorIdSchema }).strict(),
+    source_fellow_id: z.string().min(1).max(128),
+    previous_status: ProblemStatusSchema,
+    previous_statement_version: z.number().int().positive(),
+    problem: ProblemDetailSchema.pick({
+      id: true,
+      title: true,
+      current_statement_version: true,
+      statement: true,
+      falsifier: true,
+      motivation: true,
+      updated_at: true,
+    })
+      .extend({ status: z.enum(["sharpening", "active", "dormant", "under-result-review"]) })
+      .strict(),
+  })
+  .strict()
+  .superRefine((event, context) => {
+    const publishing = event.action === "publish";
+    const valid = publishing
+      ? event.previous_status === "private-draft" &&
+        event.problem.status === "sharpening" &&
+        event.problem.current_statement_version === event.previous_statement_version
+      : event.problem.status === event.previous_status &&
+        event.problem.current_statement_version === event.previous_statement_version + 1;
+    if (!valid)
+      context.addIssue({
+        code: "custom",
+        message: "Governance transition and statement versions disagree",
+        path: ["problem"],
+      });
+  });
+export type ProblemGovernanceEvent = z.infer<typeof ProblemGovernanceEventSchema>;
+
+export const ProblemGovernanceKeySchema = z.string().regex(/^[A-Za-z0-9._-]{1,160}$/);
+
 export const PROBLEM_STATEMENT_REVIEW_VERDICTS = ["statement-clear", "statement-unclear"] as const;
 export const ProblemStatementReviewVerdictSchema = z.enum(PROBLEM_STATEMENT_REVIEW_VERDICTS);
 export type ProblemStatementReviewVerdict = z.infer<typeof ProblemStatementReviewVerdictSchema>;
@@ -273,5 +313,7 @@ export const ProblemLifecycleContractsSchema = z
     statement_review_request: ProblemStatementReviewRequestSchema,
     statement_review_response: ProblemStatementReviewResponseSchema,
     detail: ProblemDetailSchema,
+    governance_event: ProblemGovernanceEventSchema,
+    governance_idempotency_key: ProblemGovernanceKeySchema,
   })
   .strict();
