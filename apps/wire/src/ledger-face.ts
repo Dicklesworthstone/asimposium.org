@@ -445,6 +445,7 @@ function problemFaceProjection(
   composed: ComposedPack,
   itemCount: number,
   forceBudgetOmission: boolean,
+  status: NonNullable<Projection["problem_status"]>,
 ): Projection {
   const omitted =
     forceBudgetOmission && !composed.omitted.some((entry) => entry.reason === "budget_exceeded")
@@ -455,6 +456,7 @@ function problemFaceProjection(
   return {
     schema: "asimposium.problem-face.v1",
     kind: "problem-face",
+    problem_status: status,
     problem: composed.problem,
     profile: "face",
     cursor: composed.cursor,
@@ -492,9 +494,12 @@ function facesFitDigestBudget(faces: ProblemFaceFaces): boolean {
  * problem projection has a different envelope and Markdown can be larger than
  * JSON, so measure the actual pair and use a logarithmic tail drop if needed.
  */
-function renderBudgetedProblemFace(composed: ComposedPack): ProblemFaceFaces {
+function renderBudgetedProblemFace(
+  composed: ComposedPack,
+  status: NonNullable<Projection["problem_status"]>,
+): ProblemFaceFaces {
   const initial = renderProblemFacePair(
-    problemFaceProjection(composed, composed.items.length, false),
+    problemFaceProjection(composed, composed.items.length, false, status),
   );
   if (facesFitDigestBudget(initial)) return initial;
 
@@ -503,7 +508,7 @@ function renderBudgetedProblemFace(composed: ComposedPack): ProblemFaceFaces {
   let best: ProblemFaceFaces | undefined;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = renderProblemFacePair(problemFaceProjection(composed, middle, true));
+    const candidate = renderProblemFacePair(problemFaceProjection(composed, middle, true, status));
     if (facesFitDigestBudget(candidate)) {
       best = candidate;
       low = middle + 1;
@@ -534,6 +539,7 @@ async function loadProblemFace(
 
   const first = rows[0];
   if (first === undefined) return null;
+  const status = ProblemFaceResponseSchema.shape.problem_status.parse(first.status);
   if (
     first.problem_id !== requestedProblemId ||
     !PublicLedgerProblemIdSchema.safeParse(first.problem_id).success ||
@@ -547,7 +553,11 @@ async function loadProblemFace(
     [];
   let contentUnavailable = false;
   for (const [index, row] of rows.entries()) {
-    if (row.problem_id !== first.problem_id || row.public_seq !== first.public_seq) {
+    if (
+      row.problem_id !== first.problem_id ||
+      row.public_seq !== first.public_seq ||
+      row.status !== first.status
+    ) {
       throw new Error("the problem digest snapshot mixed problem heads");
     }
     const { claim_id: claimId, statement, source_seq: sourceSeq } = row;
@@ -695,13 +705,16 @@ async function loadProblemFace(
     degraded: [],
   });
   const unlisted = first.unlisted === 1;
-  const faces = renderBudgetedProblemFace({
-    ...composed,
-    preamble:
-      (unlisted ? `${UNLISTED_NOTICE} ` : "") +
-      composed.preamble +
-      " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
-  });
+  const faces = renderBudgetedProblemFace(
+    {
+      ...composed,
+      preamble:
+        (unlisted ? `${UNLISTED_NOTICE} ` : "") +
+        composed.preamble +
+        " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
+    },
+    status,
+  );
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return { ...faces, unlisted };
 }

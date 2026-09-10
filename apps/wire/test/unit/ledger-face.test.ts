@@ -31,6 +31,7 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
   const row = {
     problem_id: "P-PATHS",
     public_seq: 2,
+    status: "sharpening",
     formulation_json: JSON.stringify(formulation),
     claim_id: null,
     statement: null,
@@ -51,6 +52,7 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
   expect(initial.status).toBe(200);
   const face = ProblemFaceResponseSchema.parse(await initial.json());
   expect(face.title).toBe("P-PATHS — public ledger digest");
+  expect(face.problem_status).toBe("sharpening");
   expect(face.items.map((item) => item.id)).toEqual([
     "S@2-title",
     "S@2-statement",
@@ -131,6 +133,7 @@ test("statement review reader verifies event content, projection and attribution
   const row = {
     problem_id: "P-PATHS",
     public_seq: 2,
+    status: "active",
     unlisted: 0,
     claim_id: null,
     statement: null,

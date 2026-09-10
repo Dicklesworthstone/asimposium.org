@@ -287,7 +287,7 @@ const FaceNextActionSchema = NextActionSchema.extend({
     .refine(isSafePublicActionPath, "invalid public Worker action path"),
 }).strict();
 
-export const ProblemFaceResponseSchema = z
+const PublicFaceResponseSchema = z
   .object({
     schema: z.literal("asimposium.problem-face.v1"),
     face: z.literal("json"),
@@ -312,25 +312,29 @@ export const ProblemFaceResponseSchema = z
     next_actions: z.array(FaceNextActionSchema),
     degraded: z.array(z.string().min(1).max(240)),
   })
-  .strict()
-  .superRefine((face, context) => {
-    const ids = new Set<string>();
-    for (const [index, item] of face.items.entries()) {
-      if (ids.has(item.id)) {
-        context.addIssue({
-          code: "custom",
-          path: ["items", index, "id"],
-          message: "public problem-face item ids must be unique",
-        });
-      }
-      ids.add(item.id);
+  .strict();
+
+export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
+  // Administrative lifecycle at the digest cursor, never scientific standing.
+  problem_status: ProblemStatusSchema.exclude(["private-draft"]),
+}).superRefine((face, context) => {
+  const ids = new Set<string>();
+  for (const [index, item] of face.items.entries()) {
+    if (ids.has(item.id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["items", index, "id"],
+        message: "public problem-face item ids must be unique",
+      });
     }
-  });
+    ids.add(item.id);
+  }
+});
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
 
 export const ClaimFaceResponseSchema = z
   .object({
-    ...ProblemFaceResponseSchema.shape,
+    ...PublicFaceResponseSchema.shape,
     schema: z.literal("asimposium.claim-face.v1"),
     kind: z.literal("claim-face"),
     profile: z.literal("claim"),

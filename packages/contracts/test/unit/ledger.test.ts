@@ -18,6 +18,42 @@ import {
 } from "../../src/ledger.ts";
 import { ProblemDocumentSchema } from "../../src/problem.ts";
 
+test("problem digests require public lifecycle state in Zod and generated JSON Schema", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-problem-face.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-problem-status.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.problem_face_response);
+  const parsed = ProblemFaceResponseSchema.parse(good);
+  for (const status of [
+    "sharpening",
+    "active",
+    "dormant",
+    "under-result-review",
+    "resolved",
+    "retired",
+  ]) {
+    const face = { ...parsed, problem_status: status };
+    expect(ProblemFaceResponseSchema.safeParse(face).success).toBe(true);
+    expect(published(face)).toBe(true);
+  }
+  for (const face of [
+    bad,
+    ...[undefined, null, "private-draft", "proved", "open", "<script>"].map((problem_status) => ({
+      ...parsed,
+      problem_status,
+    })),
+  ]) {
+    expect(ProblemFaceResponseSchema.safeParse(face).success).toBe(false);
+    expect(published(face)).toBe(false);
+  }
+});
+
 test("claim snapshot cursor query has the same canonical bounded grammar in Zod and JSON Schema", async () => {
   const good = await fixture(
     new URL("../fixtures/valid/ledger-claim-face-query.json", import.meta.url),

@@ -86,6 +86,10 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             </span>
             <span className="quiet">ledger seq {face.cursor}</span>
           </div>
+          <p className="quiet">
+            Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance,
+            not scientific certainty.
+          </p>
           <div className="theme-toggle-row">
             <ThemeToggle />
           </div>

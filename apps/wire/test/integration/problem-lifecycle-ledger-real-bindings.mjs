@@ -106,7 +106,30 @@ await runLocalWorkerJourney(
       "writer_credential_id",
     ])
       assert.equal(events[0][field], null);
-    assert.equal((await call(`/p/${id}.json`)).cursor, 1);
+    async function assertDigestLifecycle(expectedStatus) {
+      const json = await call(`/p/${id}.json`);
+      assert.equal(json.problem_status, expectedStatus);
+      const response = await worker.fetch(`${origin}/p/${id}.md`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      const markdown = await response.text();
+      assert.ok(markdown.includes(`Problem lifecycle: **${expectedStatus}**`));
+      assert.ok(markdown.includes("governance, not scientific certainty"));
+      assert.ok(markdown.includes(json.fingerprint));
+      const etag = response.headers.get("etag");
+      assert.ok(etag);
+      for (const method of ["GET", "HEAD"]) {
+        const cached = await worker.fetch(`${origin}/p/${id}.md`, {
+          method,
+          headers: { "User-Agent": userAgent, "If-None-Match": etag },
+        });
+        assert.equal(cached.status, 304);
+        assert.equal(await cached.text(), "");
+      }
+      return json;
+    }
+    assert.equal((await assertDigestLifecycle("sharpening")).cursor, 1);
     assert.equal(await call("/cursor"), globalBefore + 1);
     const sourceFellow = created.problem.created_by_fellow_id;
     assert.equal((await state()).problem[0].created_by_fellow_id, sourceFellow);
@@ -273,6 +296,7 @@ await runLocalWorkerJourney(
       reviewer,
     );
     assert.equal(clear.status, "active");
+    await assertDigestLifecycle("active");
 
     const authorSession = await call("/v1/sessions", { problem_id: id }, token, 201);
     const draft = await call(
@@ -447,7 +471,10 @@ await runLocalWorkerJourney(
       });
       assert.equal(changedFace.status, 200);
       assert.notEqual(changedFace.headers.get("etag"), etag);
-      assert.equal((await changedFace.json()).cursor, after.problem[0].public_seq);
+      const digest = await changedFace.json();
+      assert.equal(digest.cursor, after.problem[0].public_seq);
+      assert.equal(digest.problem_status, nextStatus);
+      await assertDigestLifecycle(nextStatus);
       assert.equal((await call(`/v1/problems/${id}`)).problem.status, nextStatus);
       assert.equal(
         (await call("/problems.json")).problems.find((item) => item.id === id).status,

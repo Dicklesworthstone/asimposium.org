@@ -252,6 +252,8 @@ and what remains in its assigned plane.
   omissions, and missing scientific-need data is labeled unavailable.
   The public problem directory carries saved titles and lifecycle statuses in JSON, Markdown
   and Agora, retains its deterministic 200-entry bound, and labels missing legacy titles.
+  Each public problem digest also carries its canonical lifecycle in JSON, Markdown and Agora;
+  this governance status is separate from the computed scientific standing of its claims.
   Private and unlisted problems are excluded; dormant entries remain discoverable in the directory.
   Now serves 20 material events per page with `next_before` continuation in JSON and native
   older-event links in Markdown, HTML and Agora. Its cursor preserves event time and all

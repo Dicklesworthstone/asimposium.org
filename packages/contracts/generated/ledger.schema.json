@@ -728,6 +728,17 @@
             "minLength": 1,
             "maxLength": 240
           }
+        },
+        "problem_status": {
+          "type": "string",
+          "enum": [
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review",
+            "resolved",
+            "retired"
+          ]
         }
       },
       "required": [
@@ -743,7 +754,8 @@
         "items",
         "omitted",
         "next_actions",
-        "degraded"
+        "degraded",
+        "problem_status"
       ],
       "additionalProperties": false
     },
@@ -1466,7 +1478,8 @@
             "why": "the canonical readable Markdown face"
           }
         ],
-        "degraded": []
+        "degraded": [],
+        "problem_status": "active"
       }
     },
     {

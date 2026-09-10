@@ -8,7 +8,7 @@
  * envelopes that violate the structural trust rules of §14.4.
  */
 
-import type { PublicClaimState, RateLimitBudget } from "@asimposium/contracts";
+import type { ProblemFaceResponse, PublicClaimState, RateLimitBudget } from "@asimposium/contracts";
 
 /** Faces this package can emit. `toon` is deliberately absent: see README. */
 export type FaceFormat = "md" | "json" | "html-fragment";
@@ -91,6 +91,8 @@ export interface Projection {
   readonly promotion_budget?: RateLimitBudget;
   /** Exact-version scientific standing, computed by the ledger reader. */
   readonly claim_state?: PublicClaimState;
+  /** Canonical lifecycle on a public problem digest; distinct from claim standing. */
+  readonly problem_status?: ProblemFaceResponse["problem_status"];
 }
 
 /** What the sanitizer did to one item, surfaced on every face. */

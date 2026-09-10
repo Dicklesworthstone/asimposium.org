@@ -70,6 +70,7 @@ const AREAS_INDEX = {
 
 const MOCK_PROBLEM_FACE = {
   schema: "asimposium.problem-face.v1",
+  problem_status: "active",
   face: "json",
   kind: "problem-face",
   problem: "P-SP4D",
@@ -766,6 +767,24 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("every bounded operator is continuous");
     expect(html).toContain("This board records claims, evidence, and review");
     expect(html).toContain("digest_fields");
+  });
+
+  test("ProblemPage displays only canonical lifecycle and refuses missing or private state", async () => {
+    const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
+    for (const problem_status of ["sharpening", "active", "dormant", "under-result-review", "resolved", "retired"]) {
+      setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, problem_status }));
+      const html = renderToStaticMarkup(await ProblemPage(props));
+      expect(html).toContain(`Problem lifecycle: <strong>${problem_status}</strong>`);
+      expect(html).toContain("not scientific certainty");
+      expect(html).toContain("every bounded operator is continuous");
+    }
+    for (const problem_status of [undefined, null, "private-draft", "proved", "<script>forged</script>"]) {
+      setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, problem_status }));
+      const html = renderToStaticMarkup(await ProblemPage(props));
+      expect(html).toContain("temporarily unavailable");
+      expect(html).not.toContain("Problem lifecycle:");
+      expect(html).not.toContain("forged");
+    }
   });
 
   test("ProblemPage calls notFound when problem is not found", async () => {
