@@ -18,20 +18,17 @@ import {
   HypothesisKillResponseSchema,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
-  LeaseQuestionRequestSchema,
-  LeaseQuestionResponseSchema,
   LeaseAcquireRequestSchema,
   LeaseAcquireResponseSchema,
   LeaseChallengeRequestSchema,
   LeaseChallengeResponseSchema,
   type LeaseItem,
-  LeaseItemSchema,
   LeaseListResponseSchema,
   type LeaseObjectKind,
+  LeaseQuestionRequestSchema,
+  LeaseQuestionResponseSchema,
   LeaseReleaseRequestSchema,
   LeaseReleaseResponseSchema,
-  SponsorLeaseReleaseRequestSchema,
-  SponsorLeaseReleaseResponseSchema,
   NormalizeConflictRequestSchema,
   NormalizeConflictResponseSchema,
   type PackProfile,
@@ -75,6 +72,8 @@ import {
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorIdSchema,
+  SponsorLeaseReleaseRequestSchema,
+  SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopObjectSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
@@ -1480,101 +1479,132 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   > {
     const trimmed = rawRef.trim();
     const prefixMatch = /^([CHGQ])-(\d+)$/i.exec(trimmed);
-    if (prefixMatch && prefixMatch[1] && prefixMatch[2]) {
+    if (prefixMatch?.[1] && prefixMatch[2]) {
       const typeLetter = prefixMatch[1].toUpperCase();
       const seqNum = Number.parseInt(prefixMatch[2], 10);
       if (typeLetter === "C") {
+        const targetId = `C-${seqNum}`;
         const row = await db
-          .prepare("SELECT id, seq FROM claims WHERE problem_id = ? AND (id = ? OR seq = ?)")
-          .bind(problemId, trimmed, seqNum)
-          .first<{ id: string; seq: number | null }>();
+          .prepare("SELECT id FROM claims WHERE problem_id = ? AND (id = ? OR id = ?)")
+          .bind(problemId, trimmed, targetId)
+          .first<{ id: string }>();
         if (row) {
           return {
             kind: "claim",
             objectId: row.id,
-            canonicalRef: row.seq !== null ? `C-${row.seq}` : row.id,
+            canonicalRef: row.id,
           };
         }
       } else if (typeLetter === "H") {
+        const targetId = `H-${seqNum}`;
         const row = await db
           .prepare(
-            "SELECT hypothesis_id, seq FROM hypotheses WHERE problem_id = ? AND (hypothesis_id = ? OR seq = ?)",
+            "SELECT hypothesis_id FROM hypotheses WHERE problem_id = ? AND (hypothesis_id = ? OR hypothesis_id = ?)",
           )
-          .bind(problemId, trimmed, seqNum)
-          .first<{ hypothesis_id: string; seq: number | null }>();
-        if (row) {
+          .bind(problemId, trimmed, targetId)
+          .first<{ hypothesis_id: string }>();
+        const hypId =
+          row?.hypothesis_id ??
+          (seqNum > 0
+            ? (
+                await db
+                  .prepare(
+                    "SELECT hypothesis_id FROM hypotheses WHERE problem_id = ? ORDER BY created_at ASC LIMIT 1 OFFSET ?",
+                  )
+                  .bind(problemId, seqNum - 1)
+                  .first<{ hypothesis_id: string }>()
+              )?.hypothesis_id
+            : undefined);
+        if (hypId) {
           return {
             kind: "hypothesis",
-            objectId: row.hypothesis_id,
-            canonicalRef: row.seq !== null ? `H-${row.seq}` : row.hypothesis_id,
+            objectId: hypId,
+            canonicalRef: targetId,
           };
         }
       } else if (typeLetter === "G") {
+        const targetId = `G-${seqNum}`;
         const row = await db
           .prepare(
-            "SELECT gap_id, seq FROM proof_gaps WHERE problem_id = ? AND (gap_id = ? OR seq = ?)",
+            "SELECT gap_id FROM proof_gaps WHERE problem_id = ? AND (gap_id = ? OR gap_id = ?)",
           )
-          .bind(problemId, trimmed, seqNum)
-          .first<{ gap_id: string; seq: number | null }>();
-        if (row) {
+          .bind(problemId, trimmed, targetId)
+          .first<{ gap_id: string }>();
+        const gapId =
+          row?.gap_id ??
+          (seqNum > 0
+            ? (
+                await db
+                  .prepare(
+                    "SELECT gap_id FROM proof_gaps WHERE problem_id = ? ORDER BY created_at ASC LIMIT 1 OFFSET ?",
+                  )
+                  .bind(problemId, seqNum - 1)
+                  .first<{ gap_id: string }>()
+              )?.gap_id
+            : undefined);
+        if (gapId) {
           return {
             kind: "proof_gap",
-            objectId: row.gap_id,
-            canonicalRef: row.seq !== null ? `G-${row.seq}` : row.gap_id,
+            objectId: gapId,
+            canonicalRef: targetId,
           };
         }
       } else if (typeLetter === "Q") {
+        const targetId = `Q-${seqNum}`;
         const row = await db
           .prepare(
-            "SELECT question_id, seq FROM questions WHERE problem_id = ? AND (question_id = ? OR seq = ?)",
+            "SELECT question_id, seq FROM questions WHERE problem_id = ? AND (question_id = ? OR question_id = ? OR seq = ?)",
           )
-          .bind(problemId, trimmed, seqNum)
+          .bind(problemId, trimmed, targetId, seqNum)
           .first<{ question_id: string; seq: number | null }>();
         if (row) {
           return {
             kind: "question",
             objectId: row.question_id,
-            canonicalRef: row.seq !== null ? `Q-${row.seq}` : row.question_id,
+            canonicalRef:
+              row.seq !== null
+                ? `Q-${row.seq}`
+                : row.question_id.startsWith("Q-")
+                  ? row.question_id
+                  : targetId,
           };
         }
       }
     }
 
     const claimRow = await db
-      .prepare("SELECT id, seq FROM claims WHERE problem_id = ? AND id = ?")
+      .prepare("SELECT id FROM claims WHERE problem_id = ? AND id = ?")
       .bind(problemId, trimmed)
-      .first<{ id: string; seq: number | null }>();
+      .first<{ id: string }>();
     if (claimRow) {
       return {
         kind: "claim",
         objectId: claimRow.id,
-        canonicalRef: claimRow.seq !== null ? `C-${claimRow.seq}` : claimRow.id,
+        canonicalRef: claimRow.id,
       };
     }
 
     const hypRow = await db
-      .prepare(
-        "SELECT hypothesis_id, seq FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
-      )
+      .prepare("SELECT hypothesis_id FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?")
       .bind(problemId, trimmed)
-      .first<{ hypothesis_id: string; seq: number | null }>();
+      .first<{ hypothesis_id: string }>();
     if (hypRow) {
       return {
         kind: "hypothesis",
         objectId: hypRow.hypothesis_id,
-        canonicalRef: hypRow.seq !== null ? `H-${hypRow.seq}` : hypRow.hypothesis_id,
+        canonicalRef: hypRow.hypothesis_id,
       };
     }
 
     const gapRow = await db
-      .prepare("SELECT gap_id, seq FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+      .prepare("SELECT gap_id FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
       .bind(problemId, trimmed)
-      .first<{ gap_id: string; seq: number | null }>();
+      .first<{ gap_id: string }>();
     if (gapRow) {
       return {
         kind: "proof_gap",
         objectId: gapRow.gap_id,
-        canonicalRef: gapRow.seq !== null ? `G-${gapRow.seq}` : gapRow.gap_id,
+        canonicalRef: gapRow.gap_id,
       };
     }
 
@@ -2677,7 +2707,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           candidates.push({
             kind: "standing-context",
             id: "SYS-active-leases",
-            scope: "ledger",
+            scope: "system",
             tokens: 1,
             untrusted: false,
             body: `Active leases on this problem:\n${(activeLeases.results ?? []).map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}`).join("\n")}`,
@@ -10143,10 +10173,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const digest = await writeRequestDigest(
-      `POST /v1/sessions/${sessionId}/leases`,
-      parsed.data,
-    );
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/leases`, parsed.data);
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -10610,7 +10637,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "LEASE_NOT_HOLDER",
         title: "Not the lease holder",
         detail: `Lease '${lease.lease_id}' is held by fellow '${lease.fellow_id}', not '${auth.binding.fellowId}'.`,
-        fixHint: "Release leases from the session and Fellow that acquired them, or challenge if stale.",
+        fixHint:
+          "Release leases from the session and Fellow that acquired them, or challenge if stale.",
         rule: "§7.5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -10642,7 +10670,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             object_ref: lease.object_ref,
             released_by: auth.binding.fellowId,
             released_at: releasedAt,
-            reason: parsed.data.reason,
+            reason: parsed.data.reason ?? null,
           }),
           createdAt: releasedAt,
           attribution: {
@@ -10867,21 +10895,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const isExpired = lease.leased_until <= nowIso;
 
     const holderSession = await db
-      .prepare(
-        `SELECT closed_at, last_heartbeat_at, created_at FROM sessions WHERE session_id = ?`,
-      )
+      .prepare(`SELECT closed_at, last_heartbeat_at, opened_at FROM sessions WHERE session_id = ?`)
       .bind(lease.session_id)
       .first<{
         closed_at: string | null;
         last_heartbeat_at: string | null;
-        created_at: string;
+        opened_at: string;
       }>();
 
     const isClosed = holderSession ? holderSession.closed_at !== null : true;
     const lastActiveTime = holderSession?.last_heartbeat_at
       ? new Date(holderSession.last_heartbeat_at).getTime()
-      : holderSession?.created_at
-        ? new Date(holderSession.created_at).getTime()
+      : holderSession?.opened_at
+        ? new Date(holderSession.opened_at).getTime()
         : 0;
     const isIdleOver30m = now.getTime() - lastActiveTime > 30 * 60 * 1000;
 
@@ -10892,7 +10918,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "LEASE_NOT_STALE",
         title: "Lease is not stale",
         detail: `Lease '${lease.lease_id}' is active, unexpired, and held by an active session with recent heartbeats. Active leases cannot be challenged.`,
-        fixHint: "Wait until the lease expires or the holder session becomes idle for > 30 minutes.",
+        fixHint:
+          "Wait until the lease expires or the holder session becomes idle for > 30 minutes.",
         rule: "§7.5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -10948,7 +10975,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                  SET status = 'challenged', challenge_reason = ?, challenged_by_fellow_id = ?, challenged_at = ?, updated_at = ?
                  WHERE lease_id = ?`,
               )
-              .bind(parsed.data.reason, auth.binding.fellowId, challengedAt, challengedAt, lease.lease_id),
+              .bind(
+                parsed.data.reason,
+                auth.binding.fellowId,
+                challengedAt,
+                challengedAt,
+                lease.lease_id,
+              ),
           ],
         },
         {},
@@ -11461,7 +11494,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
-    const { problem_id: problemId, object: objectRef, reason } = parsedRequest.data;
+    const { problem_id: problemId, object: objectRef } = parsedRequest.data;
     const db = c.env.DB;
     const lease = await db
       .prepare(
@@ -11512,7 +11545,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           code: "NOT_LESSEE_SPONSOR",
           title: "Not the lessee's sponsor",
           detail: `Sponsor '${verified.sponsorId}' is not the sponsor of lessee fellow '${lease.fellow_id}' for lease '${lease.lease_id}'.`,
-          fixHint: "Only the lessee Fellow's sponsoring organization can release this lease on their behalf.",
+          fixHint:
+            "Only the lessee Fellow's sponsoring organization can release this lease on their behalf.",
           rule: "§7.5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -11559,7 +11593,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             object_ref: lease.object_ref,
             released_by: verified.sponsorId,
             released_at: releasedAt,
-            reason: parsedRequest.data.reason,
+            reason: parsedRequest.data.reason ?? null,
             source: "sponsor",
           }),
           createdAt: releasedAt,

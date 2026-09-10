@@ -7,6 +7,10 @@ import {
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
   HypothesisResponseSchema,
+  LeaseAcquireResponseSchema,
+  LeaseChallengeResponseSchema,
+  LeaseListResponseSchema,
+  LeaseReleaseResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
@@ -18,6 +22,7 @@ import {
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
+  SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -10490,6 +10495,659 @@ describe("committed promotion outbox nudge", () => {
       const replayJson = (await replayResponse.json()) as Record<string, unknown>;
       expect(replayJson.synthesis_id).toBe(validSynth.synthesis_id);
       expect(replayJson.sequence).toBe(validSynth.sequence);
+    });
+  });
+
+  describe("W4.4 Leases: coordination without ownership (Fable §7.5)", () => {
+    test("lease acquisition validates object reference, enforces 2h TTL, and supports idempotent replay", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-acq-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // 1. Refuse nonexistent object
+      const badRef = await post(
+        `${f.path}/leases`,
+        {
+          object: "C-999",
+          objective: "Nonexistent claim",
+          deliverable: "Proof",
+          parallel_safe: false,
+        },
+        404,
+      );
+      expect(((await badRef.json()) as { code: string }).code).toBe("LEASE_TARGET_NOT_FOUND");
+
+      // 2. Refuse invalid body (empty objective)
+      const invalidBody = await post(
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "",
+          deliverable: "Proof",
+        },
+        422,
+      );
+      expect(((await invalidBody.json()) as { code: string }).code).toBe("LEASE_BODY_INVALID");
+
+      // 3. Acquire exclusive lease on C-1
+      const acq = await post(
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Prove C-1 using lemma decomposition",
+          deliverable: "A completed proof of C-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+      const acqJson = LeaseAcquireResponseSchema.parse(await acq.json());
+      expect(acqJson.ok).toBe(true);
+      expect(acqJson.lease.object).toBe("C-1");
+      expect(acqJson.lease.parallel_safe).toBe(false);
+      expect(acqJson.lease.status).toBe("active");
+      expect(acqJson.lease.fellow_id).toBe(f.binding.fellowId);
+
+      // Check TTL is approximately 2 hours (leased_until - leased_at)
+      const startMs = new Date(acqJson.lease.leased_at).getTime();
+      const expMs = new Date(acqJson.lease.leased_until).getTime();
+      expect(expMs - startMs).toBe(2 * 60 * 60 * 1000);
+
+      // 4. Idempotent replay with same key returns 200 with identical lease
+      const replay = await f.call(`${f.path}/leases`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `lease-acq-${key}` },
+        body: JSON.stringify({
+          object: "C-1",
+          objective: "Prove C-1 using lemma decomposition",
+          deliverable: "A completed proof of C-1",
+          parallel_safe: false,
+        }),
+      });
+      expect(replay.status).toBe(200);
+      const replayJson = LeaseAcquireResponseSchema.parse(await replay.json());
+      expect(replayJson.lease.lease_id).toBe(acqJson.lease.lease_id);
+    });
+
+    test("exclusive collision blocks another fellow from acquiring or promoting colliding revision, while reviews remain allowed", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-coll-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A acquires exclusive lease on C-1
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Owner Fellow A working on C-1",
+          deliverable: "Proof of C-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      // Fellow B arrives
+      const fellowB = await addApprovedFellow(f, {
+        suffix: "fellow-b",
+        scopes: ["promote", "review"],
+      });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "prove" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      // Fellow B tries to acquire exclusive lease on C-1 -> 409 LEASED
+      const collAcq = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "C-1",
+          objective: "Fellow B trying to take C-1",
+          deliverable: "Competing work",
+          parallel_safe: false,
+        },
+        409,
+      );
+      expect(((await collAcq.json()) as { code: string }).code).toBe("LEASED");
+
+      // Fellow B tries to acquire parallel-safe lease on C-1 -> 409 LEASED (existing is exclusive)
+      const collSafe = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "C-1",
+          objective: "Fellow B trying parallel safe on exclusive C-1",
+          deliverable: "Competing work",
+          parallel_safe: true,
+        },
+        409,
+      );
+      expect(((await collSafe.json()) as { code: string }).code).toBe("LEASED");
+
+      // Fellow B tries to revise C-1 -> 409 LEASED
+      const collRevise = await post(
+        fellowB.call,
+        `${pathB}/revise`,
+        {
+          claim_id: "C-1",
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Colliding revision by Fellow B",
+          falsifier: "None",
+        },
+        409,
+      );
+      expect(((await collRevise.json()) as { code: string }).code).toBe("LEASED");
+
+      // Reviews are ALWAYS permitted without leases (Fable §7.5)
+      const reviewRes = await post(
+        fellowB.call,
+        `${pathB}/review`,
+        {
+          target_claim_id: "C-1",
+          target_version: 1,
+          verdict: "inform",
+          basis: "Independent review while leased",
+          capable_of_failure: "Failure criterion",
+          rubric: [],
+          body_md: "Reviewing C-1 while under exclusive lease by Fellow A.",
+        },
+        201,
+      );
+      expect(reviewRes.status).toBe(201);
+
+      // Fellow A CAN revise C-1
+      const ownerRevise = await post(
+        f.call,
+        `${f.path}/revise`,
+        {
+          claim_id: "C-1",
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Revised C-1 by lease holder",
+          falsifier: "Falsifier by holder",
+        },
+        201,
+      );
+      expect(ownerRevise.status).toBe(201);
+    });
+
+    test("parallel-safe mode allows independent replication leases", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-par-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A acquires parallel-safe lease on H-1
+      const acqA = await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "H-1",
+          objective: "Replicate hypothesis H-1 route",
+          deliverable: "Verification script",
+          parallel_safe: true,
+        },
+        201,
+      );
+      expect(LeaseAcquireResponseSchema.parse(await acqA.json()).lease.parallel_safe).toBe(true);
+
+      // Fellow B also acquires parallel-safe lease on H-1 -> 201 permitted!
+      const fellowB = await addApprovedFellow(f, {
+        suffix: "fellow-b-par",
+        scopes: ["promote", "review"],
+      });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      const acqB = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "H-1",
+          objective: "Independent replication of H-1 by Fellow B",
+          deliverable: "Independent check",
+          parallel_safe: true,
+        },
+        201,
+      );
+      expect(LeaseAcquireResponseSchema.parse(await acqB.json()).lease.parallel_safe).toBe(true);
+
+      // But a third fellow trying to acquire exclusive lease on H-1 is refused (409 LEASED)
+      const fellowC = await addApprovedFellow(f, {
+        suffix: "fellow-c-excl",
+        scopes: ["promote", "review"],
+      });
+      const openC = await post(
+        fellowC.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionC = SessionOpenResponseSchema.parse(await openC.json());
+      const pathC = `/v1/sessions/${sessionC.session_id}`;
+
+      const collExcl = await post(
+        fellowC.call,
+        `${pathC}/leases`,
+        {
+          object: "H-1",
+          objective: "Exclusive takeover of parallel H-1",
+          deliverable: "None",
+          parallel_safe: false,
+        },
+        409,
+      );
+      expect(((await collExcl.json()) as { code: string }).code).toBe("LEASED");
+    });
+
+    test("heartbeat renews active leases and session close auto-releases them", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `lease-renew-${++key}`,
+          },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow acquires lease on G-1 (proof gap)
+      const acq = await post(
+        `${f.path}/leases`,
+        {
+          object: "G-1",
+          objective: "Fill gap G-1",
+          deliverable: "Lemma closing G-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+      const lease = LeaseAcquireResponseSchema.parse(await acq.json()).lease;
+
+      // Artificially wind back leased_until in db to 5 minutes from now
+      const in5Min = new Date(Date.now() + 300 * 1000).toISOString();
+      await f.db
+        .prepare("UPDATE leases SET leased_until = ? WHERE lease_id = ?")
+        .bind(in5Min, lease.lease_id)
+        .run();
+
+      // Send heartbeat
+      const hbRes = await post(`${f.path}/heartbeat`, {}, 200);
+      expect(hbRes.status).toBe(200);
+
+      // Verify leased_until has been extended back to ~7200s from now
+      const updatedRow = await f.db
+        .prepare("SELECT leased_until FROM leases WHERE lease_id = ?")
+        .bind(lease.lease_id)
+        .first<{ leased_until: string }>();
+      expect(updatedRow).toBeDefined();
+      const updatedExp = new Date(updatedRow?.leased_until ?? 0).getTime();
+      expect(updatedExp - Date.now()).toBeGreaterThan(7100 * 1000);
+
+      // Close session with handback
+      const closeRes = await post(`${f.path}/close`, { handback: "Finished work on G-1" }, 201);
+      expect(closeRes.status).toBe(201);
+
+      // Verify lease status in DB is released
+      const closedRow = await f.db
+        .prepare("SELECT status, released_at FROM leases WHERE lease_id = ?")
+        .bind(lease.lease_id)
+        .first<{ status: string; released_at: string | null }>();
+      expect(closedRow?.status).toBe("released");
+      expect(closedRow?.released_at).not.toBeNull();
+    });
+
+    test("lease release by holder (POST and DELETE), non-holder refusal, and list active leases", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-rel-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Acquire two leases
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Work on C-1",
+          deliverable: "Deliverable 1",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "G-1",
+          objective: "Work on G-1",
+          deliverable: "Deliverable 2",
+          parallel_safe: true,
+        },
+        201,
+      );
+
+      // List active leases
+      const listRes = await f.call(`${f.path}/leases`);
+      expect(listRes.status).toBe(200);
+      const listJson = LeaseListResponseSchema.parse(await listRes.json());
+      expect(listJson.leases).toHaveLength(2);
+      expect(listJson.leases.some((l) => l.object === "C-1")).toBe(true);
+      expect(listJson.leases.some((l) => l.object === "G-1")).toBe(true);
+
+      // Release C-1 via POST
+      const relPost = await post(
+        f.call,
+        `${f.path}/leases/C-1/release`,
+        { reason: "Finished with C-1" },
+        200,
+      );
+      const relBody = LeaseReleaseResponseSchema.parse(await relPost.json());
+      expect(relBody.ok).toBe(true);
+      expect(relBody.status).toBe("released");
+      expect(relBody.object).toBe("C-1");
+
+      // Now list again -> only G-1 remains active
+      const listAfter = LeaseListResponseSchema.parse(
+        await (await f.call(`${f.path}/leases`)).json(),
+      );
+      expect(listAfter.leases).toHaveLength(1);
+      expect(listAfter.leases[0]?.object).toBe("G-1");
+
+      // Non-holder attempts to release G-1 -> 403 LEASE_NOT_HOLDER
+      const fellowB = await addApprovedFellow(f, { suffix: "fellow-b-rel", scopes: ["promote"] });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      const unauthRel = await fellowB.call(`${pathB}/leases/G-1/release`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "unauth-rel-1" },
+        body: JSON.stringify({}),
+      });
+      expect(unauthRel.status).toBe(403);
+      expect(((await unauthRel.json()) as { code: string }).code).toBe("LEASE_NOT_HOLDER");
+
+      // Holder releases G-1 via DELETE
+      const relDel = await f.call(`${f.path}/leases/G-1`, {
+        method: "DELETE",
+        headers: { "idempotency-key": "rel-del-g1" },
+      });
+      expect(relDel.status).toBe(200);
+      const delBody = LeaseReleaseResponseSchema.parse(await relDel.json());
+      expect(delBody.status).toBe("released");
+      expect(delBody.object).toBe("G-1");
+
+      // List now empty
+      const listEmpty = LeaseListResponseSchema.parse(
+        await (await f.call(`${f.path}/leases`)).json(),
+      );
+      expect(listEmpty.leases).toHaveLength(0);
+    });
+
+    test("stale challenge is refused on active lease and permitted on expired lease", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-chal-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A acquires exclusive lease on C-1
+      const acq = await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Active lease on C-1",
+          deliverable: "Deliverable",
+          parallel_safe: false,
+        },
+        201,
+      );
+      const lease = LeaseAcquireResponseSchema.parse(await acq.json()).lease;
+
+      // Fellow B arrives to challenge
+      const fellowB = await addApprovedFellow(f, {
+        suffix: "fellow-b-chal",
+        scopes: ["promote"],
+      });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      // Challenge on active, healthy lease is refused (409 LEASE_NOT_STALE)
+      const prematureChal = await post(
+        fellowB.call,
+        `${pathB}/leases/C-1/challenge`,
+        {
+          reason: "I want this object now!",
+        },
+        409,
+      );
+      expect(((await prematureChal.json()) as { code: string }).code).toBe("LEASE_NOT_STALE");
+
+      // Artificially expire the lease in DB
+      const pastTime = new Date(Date.now() - 3600 * 1000).toISOString();
+      await f.db
+        .prepare("UPDATE leases SET leased_until = ? WHERE lease_id = ?")
+        .bind(pastTime, lease.lease_id)
+        .run();
+
+      // Now challenge succeeds!
+      const validChal = await post(
+        fellowB.call,
+        `${pathB}/leases/C-1/challenge`,
+        {
+          reason: "Lease has expired and abandoned without handback.",
+        },
+        200,
+      );
+      const chalBody = LeaseChallengeResponseSchema.parse(await validChal.json());
+      expect(chalBody.ok).toBe(true);
+      expect(chalBody.status).toBe("challenged");
+      expect(chalBody.object).toBe("C-1");
+      expect(chalBody.challenged_by).toBe(fellowB.binding.fellowId);
+
+      // Now Fellow B can acquire lease on C-1
+      const acqAfterChal = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "C-1",
+          objective: "Fellow B taking over expired C-1",
+          deliverable: "New proof",
+          parallel_safe: false,
+        },
+        201,
+      );
+      expect(acqAfterChal.status).toBe(201);
+    });
+
+    test("sponsor authority release allows lessee sponsor to release, refusing foreign sponsors", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-sp-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A (sponsored by f.sponsor.sponsorId) acquires lease on C-1
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Work on C-1",
+          deliverable: "Deliverable",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      // Create sponsor router with custom verifiedSponsor to simulate sponsor callers
+      const makeSponsorRouter = (sponsorId: string) =>
+        createSessionRouter({
+          service: f.service,
+          replayProtector: f.replayProtector,
+          verifiedSponsor: async (request) => ({
+            principal: { type: "sponsor", sponsorId },
+            rawBody: new Uint8Array(await request.arrayBuffer()),
+          }),
+        });
+
+      // 1. Foreign sponsor tries to release C-1 -> 403 NOT_LESSEE_SPONSOR
+      const foreignRouter = makeSponsorRouter("usr_foreign_sponsor");
+      const foreignRel = await foreignRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sp-rel-foreign",
+          },
+          body: JSON.stringify({
+            problem_id: "P-4DSP",
+            object: "C-1",
+            reason: "Foreign sponsor trying to release",
+          }),
+        }),
+        f.env,
+      );
+      expect(foreignRel.status).toBe(403);
+      expect(((await foreignRel.json()) as { code: string }).code).toBe("NOT_LESSEE_SPONSOR");
+
+      // 2. Lessee's sponsor releases C-1 -> 200
+      const lesseeRouter = makeSponsorRouter(f.sponsor.sponsorId);
+      const lesseeRel = await lesseeRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sp-rel-lessee",
+          },
+          body: JSON.stringify({
+            problem_id: "P-4DSP",
+            object: "C-1",
+            reason: "Lessee sponsor administrative release",
+          }),
+        }),
+        f.env,
+      );
+      expect(lesseeRel.status).toBe(200);
+      const lesseeBody = SponsorLeaseReleaseResponseSchema.parse(await lesseeRel.json());
+      expect(lesseeBody.ok).toBe(true);
+      expect(lesseeBody.status).toBe("released");
+      expect(lesseeBody.object).toBe("C-1");
+      expect(lesseeBody.released_by).toBe(f.sponsor.sponsorId);
+    });
+
+    test("pack surfaces active leases in SYS-active-leases and marks leased claims", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-pack-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Acquire exclusive lease on C-1
+      await post(
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Prove C-1 with active lease",
+          deliverable: "Deliverable C-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      // Fetch working pack
+      const packRes = await f.call(`${f.path}/pack?profile=working`);
+      expect(packRes.status, await packRes.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await packRes.json());
+
+      // Check SYS-active-leases item exists in pack items
+      const leaseItem = pack.items.find((item) => item.id === "SYS-active-leases");
+      expect(leaseItem).toBeDefined();
+      expect(leaseItem?.scope).toBe("system");
+      expect(leaseItem?.body).toContain("C-1");
+
+      // Check claim C-1 detail item carries leased_by in body
+      const claimDetail = pack.items.find((item) => item.id === "C-1@1" || item.id === "C-1");
+      expect(claimDetail).toBeDefined();
+      expect(claimDetail?.body).toContain(`leased by ${f.binding.fellowId}`);
     });
   });
 });
