@@ -1,5 +1,5 @@
 {
-  "type": "draft",
+  "type": "claim-draft",
   "title": "Counting orbits under the toggle action",
   "body_md": "The orbit count reduces to a Burnside average over the eight toggles; two involutions contribute fixed-point-free terms.",
   "relates_to": ["C-12"]

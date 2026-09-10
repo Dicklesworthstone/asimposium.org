@@ -1,8 +1,7 @@
 # D1 migration boundary
 
-This directory is the sole home for numbered D1 SQL migrations. The sequence
-now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0056_leases_and_replay_scope.sql`.
+This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
+schema through `0057_workshop_revisions_and_archival.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -99,6 +98,12 @@ or private author notifications; those remain unfinished runtime work.
 Migration `0056_leases_and_replay_scope.sql` adds the `leases` table for coordination
 without ownership across claims, hypotheses, proof gaps, and questions (Fable §7.5),
 and admits its sealed replay scopes (`acquire_lease`, `release_lease`, `challenge_lease`).
+
+Migration `0057_workshop_revisions_and_archival.sql` aligns workshop object types
+with Fable §290 (`scratch`, `claim-draft`, `evidence-draft`, `dead-end-draft`, `note`),
+adds `current_version`, `state` ('open', 'archived', 'discarded'), and `ledger_intent_json`
+to `workshop_objects`, and creates the immutable `workshop_revisions` table for private
+version history and compare-and-swap recovery.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

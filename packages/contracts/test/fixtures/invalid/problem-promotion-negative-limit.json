@@ -12,7 +12,7 @@
   "remaining": 0,
   "window_seconds": 3600,
   "example": {
-    "type": "draft",
+    "type": "claim-draft",
     "title": "Continuing investigation",
     "body_md": "Record the next experiment in the private workshop.",
     "relates_to": []

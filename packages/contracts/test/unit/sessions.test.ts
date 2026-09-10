@@ -123,7 +123,7 @@ test("complete private workshop response agrees with generated schema", async ()
     invalid,
     { ...parsed, cas_hash: parsed.body_sha256 },
     { ...parsed, object: { ...parsed.object, body_md: "" } },
-    { ...parsed, object: { ...parsed.object, current_version: 1 } },
+    { ...parsed, object: { ...parsed.object, undeclared_field: "unexpected" } },
   ]) {
     expect(WorkshopObjectResponseSchema.safeParse(value).success).toBe(false);
     expect(validate(value)).toBe(false);

@@ -401,18 +401,43 @@ export const ClaimRevisionSchema = z
   .strict();
 export type ClaimRevision = z.infer<typeof ClaimRevisionSchema>;
 
-/** §7.4 workshop push. Policy screening applies; structural rules do not. */
+/** §7.4 workshop push. Fable §290 types: scratch | claim-draft | evidence-draft | dead-end-draft | note */
 export const WorkshopPushTypeSchema = z.enum([
+  "scratch",
+  "claim-draft",
+  "evidence-draft",
+  "dead-end-draft",
   "note",
-  "draft",
-  "computation",
-  "dead-end",
-  "friction",
-  "artifact-ref",
 ]);
 export type WorkshopPushType = z.infer<typeof WorkshopPushTypeSchema>;
 
-export const WorkshopPushRequestSchema = z
+export const LedgerIntentKindSchema = z.enum(["create", "revise"]);
+export type LedgerIntentKind = z.infer<typeof LedgerIntentKindSchema>;
+
+export const LedgerCreateIntentSchema = z
+  .object({
+    kind: z.literal("create"),
+    target_kind: z.enum(["claim", "hypothesis", "evidence", "dead-end"]),
+  })
+  .strict();
+export type LedgerCreateIntent = z.infer<typeof LedgerCreateIntentSchema>;
+
+export const LedgerReviseIntentSchema = z
+  .object({
+    kind: z.literal("revise"),
+    target_id: z.string().min(1).max(64),
+    base_version: z.number().int().min(1),
+  })
+  .strict();
+export type LedgerReviseIntent = z.infer<typeof LedgerReviseIntentSchema>;
+
+export const LedgerIntentSchema = z.discriminatedUnion("kind", [
+  LedgerCreateIntentSchema,
+  LedgerReviseIntentSchema,
+]);
+export type LedgerIntent = z.infer<typeof LedgerIntentSchema>;
+
+export const WorkshopCreateRequestSchema = z
   .object({
     type: WorkshopPushTypeSchema,
     title: z.string().trim().min(1).max(200),
@@ -428,17 +453,50 @@ export const WorkshopPushRequestSchema = z
     force_note: z.literal(true).optional(),
     /** Optional publication-ready replacement; draft prose stays private. */
     revision: ClaimRevisionSchema.optional(),
+    ledger_intent: LedgerIntentSchema.optional(),
   })
   .strict();
+export type WorkshopCreateRequest = z.infer<typeof WorkshopCreateRequestSchema>;
+
+export const WorkshopReviseActionSchema = z.enum(["edit", "keep", "archive", "discard"]);
+export type WorkshopReviseAction = z.infer<typeof WorkshopReviseActionSchema>;
+
+export const WorkshopReviseRequestSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema,
+    base_version: z.number().int().min(1),
+    type: WorkshopPushTypeSchema.optional(),
+    title: z.string().trim().min(1).max(200).optional(),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024)
+      .optional(),
+    relates_to: z.array(z.string().min(1).max(64)).max(16).optional(),
+    revision: ClaimRevisionSchema.optional(),
+    ledger_intent: LedgerIntentSchema.optional(),
+    action: WorkshopReviseActionSchema.optional(),
+  })
+  .strict();
+export type WorkshopReviseRequest = z.infer<typeof WorkshopReviseRequestSchema>;
+
+export const WorkshopPushRequestSchema = z.union([
+  WorkshopReviseRequestSchema,
+  WorkshopCreateRequestSchema,
+]);
 export type WorkshopPushRequest = z.infer<typeof WorkshopPushRequestSchema>;
 
 export const WorkshopPushResponseSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
     workshop_seq: z.number().int().positive(),
+    version: z.number().int().positive().default(1),
   })
   .strict();
 export type WorkshopPushResponse = z.infer<typeof WorkshopPushResponseSchema>;
+
+export const WorkshopObjectStateSchema = z.enum(["open", "archived", "discarded"]);
+export type WorkshopObjectState = z.infer<typeof WorkshopObjectStateSchema>;
 
 /** Rule A2: complete private workshop bytes are visible only to the Fellow and sponsor. */
 export const SponsorWorkshopObjectSchema = z
@@ -453,6 +511,10 @@ export const SponsorWorkshopObjectSchema = z
     relates_to: z.array(z.string().min(1).max(64)).max(16),
     workshop_seq: z.number().int().positive(),
     created_at: z.string().datetime(),
+    version: z.number().int().positive().optional().default(1),
+    current_version: z.number().int().positive().optional().default(1),
+    state: WorkshopObjectStateSchema.optional().default("open"),
+    ledger_intent: LedgerIntentSchema.optional(),
     revision: ClaimRevisionSchema.optional(),
   })
   .strict();
