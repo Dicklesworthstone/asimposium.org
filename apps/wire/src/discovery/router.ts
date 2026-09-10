@@ -1,9 +1,4 @@
 import { AreaSlugSchema } from "@asimposium/contracts";
-import { type Context, Hono } from "hono";
-import type { Env } from "../env";
-import { problem as problemDocument } from "../http/envelope";
-import { loadAreaDetail, loadAreasIndex } from "./areas-service";
-import { loadFellowCard } from "./fellow-service";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -13,7 +8,12 @@ import {
   renderFellowCardMarkdown,
   renderNowStripHtmlFragment,
   renderNowStripMarkdown,
-} from "./markdown";
+} from "@asimposium/render";
+import { type Context, Hono } from "hono";
+import type { Env } from "../env";
+import { problem as problemDocument } from "../http/envelope";
+import { loadAreaDetail, loadAreasIndex } from "./areas-service";
+import { loadFellowCard } from "./fellow-service";
 import { loadNowStrip } from "./now-service";
 
 const DISCOVERY_CACHE_CONTROL = "public, max-age=60, s-maxage=60, stale-while-revalidate=120";

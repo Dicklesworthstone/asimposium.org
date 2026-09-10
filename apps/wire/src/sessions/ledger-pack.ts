@@ -380,7 +380,7 @@ export function workingRetryDeadEndMove(
         },
       },
       selection_boundary:
-        "Recorded retry candidate only; causal trigger delivery and author notifications remain incomplete. Submission rechecks authorization.",
+        "The triggering ledger event committed this retry candidate. Private author notifications and cross-move ranking remain incomplete. Submission rechecks authorization.",
     }),
     why_included: "retry-dead-end move for a fired dead end predicate",
     stable_prefix: 31,

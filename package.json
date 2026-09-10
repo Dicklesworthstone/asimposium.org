@@ -37,7 +37,7 @@
     "toolchain:integration": "bun scripts/suite/cli.ts --toolchain-integration",
     "test:integration:s2-real": "S2_RUN_REAL_BINDING_INTEGRATION=1 bun run --cwd apps/wire test:integration:s2-real",
     "toolchain:format": "biome check --write scripts package.json tsconfig.json tsconfig.base.json biome.json",
-    "test:seed": "node docs/seed/sp4d/check.test.mjs && node docs/seed/rungs-1-5/check.test.mjs && node docs/seed/sp4d/check.mjs --verify-links && bun docs/seed/rungs-1-5/check.mjs",
+    "test:seed": "bun test /dev/null --timeout=120000 docs/seed/sp4d/check.test.mjs docs/seed/rungs-1-5/check.test.mjs && bun docs/seed/sp4d/check.mjs --verify-links && bun docs/seed/rungs-1-5/check.mjs",
     "test:environment-e2e-interface": "bash scripts/e2e-environments.sh --self-test-remote-interface",
     "toolchain:test": "bun run test:seed && bun test /dev/null --timeout=120000 scripts/suite scripts/verify-cost-model.test.ts && bun run test:environment-e2e-interface"
   },

@@ -6,10 +6,16 @@ import {
   type RecordDeadEndRequest,
 } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
+import type { KraterAtomicSettlement } from "../krater/krater";
 import { normalizeClaimStatement, sha256Hex } from "../split/policy";
-import { readScientificDispositions } from "./scientific-disposition";
+import { scientificContentGuards } from "./scientific-checks";
+import {
+  foldScientificRows,
+  prepareScientificDispositions,
+  type ScientificRow,
+} from "./scientific-disposition";
 
 /**
  * W5.8a / Fable §6.1, §9.4, Rule P6, P11:
@@ -697,172 +703,188 @@ export interface FiredDeadEndTriggerRow {
   readonly author_fellow_id: string;
 }
 
-/**
- * Evaluates structured retry_when triggers against relevant ledger events.
- * Inserts fired triggers into dead_end_fired_triggers table.
- * Exactly-once firing is guaranteed by PRIMARY KEY (problem_id, dead_end_id).
- */
-export async function evaluateAndRecordDeadEndTriggers(
+/** Prepare retry projections in the originating event's transaction. Reads never
+ * fire triggers, and an already true condition is not a new ledger transition. */
+export async function prepareDeadEndTriggers(
   db: D1Database,
   problemId: string,
-  eventId: string,
-  eventType: string,
-  firedAt: string,
-  details?: {
-    claimId?: string;
-    targetDisposition?: string;
-    gapId?: string;
-  },
-): Promise<FiredDeadEndTrigger[]> {
+  settlement: KraterAtomicSettlement,
+): Promise<readonly D1PreparedStatement[]> {
+  const { event, eventId, sequence } = settlement;
+  if (!event) return [];
+  const kind =
+    event.type === "problem.statement-revised"
+      ? "statement-revised"
+      : event.type === "gap.closed-by"
+        ? "gap-closed"
+        : ["claim.revised", "review.created", "evidence.created", "object.retracted"].includes(
+              event.type,
+            )
+          ? "claim-reaches"
+          : undefined;
+  if (!kind) return [];
+  const payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+  const claimId =
+    event.type === "claim.revised"
+      ? event.objectId
+      : event.type === "review.created"
+        ? payload.target_claim_id
+        : event.type === "evidence.created" && payload.bears_on_kind === "claim"
+          ? payload.bears_on_id
+          : event.type === "object.retracted" && typeof payload.target_object === "string"
+            ? payload.target_object.split("@")[0]
+            : undefined;
+  if (kind === "claim-reaches" && typeof claimId !== "string") return [];
+
   const candidates = await db
     .prepare(
-      `SELECT d.dead_end_id, d.retry_when_json, d.approach, d.author_fellow_id
+      `SELECT d.dead_end_id, e.id AS source_event_id, e.payload_sha256, c.payload_json
        FROM dead_ends d
-       WHERE d.problem_id = ?
-         AND d.superseded_by IS NULL
-         AND d.retry_when_json IS NOT NULL
-         AND d.dead_end_id NOT IN (
-           SELECT dead_end_id FROM dead_end_fired_triggers WHERE problem_id = ?
-         )`,
+       JOIN events e ON e.problem_id = d.problem_id AND e.object_id = d.dead_end_id
+         AND e.type = 'dead_end.recorded'
+       JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+         AND c.redacted_at IS NULL
+       WHERE d.problem_id = ? AND d.superseded_by IS NULL AND e.seq < ?
+         AND json_extract(CASE WHEN json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END,
+           '$.retry_when.kind') = ?
+         AND (? IS NULL OR json_extract(
+           CASE WHEN json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END, ?) = ?)
+         AND NOT EXISTS (SELECT 1 FROM dead_end_fired_triggers t
+           WHERE t.problem_id = d.problem_id AND t.dead_end_id = d.dead_end_id)
+       ORDER BY e.seq`,
     )
-    .bind(problemId, problemId)
+    .bind(
+      problemId,
+      sequence,
+      kind,
+      kind === "statement-revised" ? null : kind,
+      kind === "claim-reaches" ? "$.retry_when.claim_id" : "$.retry_when.gap_id",
+      kind === "claim-reaches" ? claimId : event.objectId,
+    )
     .all<{
       dead_end_id: string;
-      retry_when_json: string;
-      approach: string;
-      author_fellow_id: string;
+      source_event_id: string;
+      payload_sha256: string;
+      payload_json: string;
     }>();
-
-  if (!candidates.results || candidates.results.length === 0) {
-    return [];
-  }
-
-  const fired: FiredDeadEndTrigger[] = [];
-
+  const eligible: { row: (typeof candidates.results)[number]; trigger: DeadEndRetryWhen }[] = [];
   for (const row of candidates.results) {
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(row.retry_when_json);
-    } catch {
-      continue;
-    }
-    const parsed = DeadEndRetryWhenSchema.safeParse(parsedJson);
+    if ((await sha256Hex(row.payload_json)) !== row.payload_sha256) continue;
+    const source = JSON.parse(row.payload_json) as Record<string, unknown>;
+    const parsed = DeadEndRetryWhenSchema.safeParse(source.retry_when);
     if (!parsed.success) continue;
-
     const trigger = parsed.data;
-    let didFire = false;
-    let reason = "";
-
-    if (trigger.kind === "statement-revised") {
-      if (eventType === "problem.statement-revised" || eventType === "problem.statement_revised") {
-        didFire = true;
-        reason = "Problem statement was revised.";
-      } else {
-        const prob = await db
-          .prepare("SELECT current_statement_version FROM problems WHERE id = ?")
-          .bind(problemId)
-          .first<{ current_statement_version: number }>();
-        if (prob && prob.current_statement_version > 1) {
-          didFire = true;
-          reason = `Problem statement was revised to version ${prob.current_statement_version}.`;
-        }
-      }
-    } else if (trigger.kind === "gap-closed") {
-      if (
-        (eventType === "gap.closed" && details?.gapId === trigger.gap_id) ||
-        details?.gapId === trigger.gap_id
-      ) {
-        didFire = true;
-        reason = `Proof gap '${trigger.gap_id}' was closed.`;
-      } else {
-        const gapRow = await db
-          .prepare("SELECT status FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
-          .bind(problemId, trigger.gap_id)
-          .first<{ status: string }>();
-        if (gapRow?.status === "closed") {
-          didFire = true;
-          reason = `Proof gap '${trigger.gap_id}' was closed.`;
-        }
-      }
-    } else if (trigger.kind === "claim-reaches") {
-      if (details?.claimId === trigger.claim_id && details.targetDisposition === trigger.reaches) {
-        didFire = true;
-        reason = `Claim '${trigger.claim_id}' reached disposition '${trigger.reaches}'.`;
-      } else {
-        try {
-          const dispositions = await readScientificDispositions(
-            db,
-            problemId,
-            Number.MAX_SAFE_INTEGER,
-            50,
-          );
-          const fold = dispositions.get(trigger.claim_id);
-          if (fold && fold.disposition === trigger.reaches) {
-            didFire = true;
-            reason = `Claim '${trigger.claim_id}' reached disposition '${trigger.reaches}'.`;
-          }
-        } catch {
-          // If claim disposition cannot be computed or claim has no timeline yet, do not fire
-        }
-      }
-    }
-
-    if (didFire) {
-      let recordEventId: string | null = eventId;
-      if (recordEventId.startsWith("pack-eval-")) {
-        if (trigger.kind === "statement-revised") {
-          const stmtEvent = await db
-            .prepare(
-              `SELECT id FROM events
-               WHERE problem_id = ? AND type IN ('problem.statement-revised', 'problem.statement_revised')
-               ORDER BY seq DESC LIMIT 1`,
-            )
-            .bind(problemId)
-            .first<{ id: string }>();
-          if (stmtEvent) recordEventId = stmtEvent.id;
-        } else if (trigger.kind === "gap-closed") {
-          const gapEvent = await db
-            .prepare(
-              `SELECT id FROM events
-               WHERE problem_id = ? AND object_id = ?
-               ORDER BY seq DESC LIMIT 1`,
-            )
-            .bind(problemId, trigger.gap_id)
-            .first<{ id: string }>();
-          if (gapEvent) recordEventId = gapEvent.id;
-        } else if (trigger.kind === "claim-reaches") {
-          const claimEvent = await db
-            .prepare(
-              `SELECT id FROM events
-               WHERE problem_id = ? AND object_id = ?
-               ORDER BY seq DESC LIMIT 1`,
-            )
-            .bind(problemId, trigger.claim_id)
-            .first<{ id: string }>();
-          if (claimEvent) recordEventId = claimEvent.id;
-        }
-      }
-
-      await db
-        .prepare(
-          `INSERT OR IGNORE INTO dead_end_fired_triggers
-             (problem_id, dead_end_id, trigger_kind, event_id, reason, fired_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(problemId, row.dead_end_id, trigger.kind, recordEventId, reason, firedAt)
-        .run();
-
-      fired.push({
-        dead_end_id: row.dead_end_id,
-        trigger_kind: trigger.kind,
-        reason,
-        event_id: recordEventId,
-        fired_at: firedAt,
-      });
-    }
+    if (trigger.kind === "claim-reaches" && trigger.claim_id !== claimId) continue;
+    if (trigger.kind === "gap-closed" && trigger.gap_id !== event.objectId) continue;
+    eligible.push({ row, trigger });
   }
+  if (eligible.length === 0) return [];
 
-  return fired;
+  const statements: D1PreparedStatement[] = [];
+  let transition: { before: string; after: string } | undefined;
+  if (kind === "claim-reaches" && typeof claimId === "string") {
+    const result = await prepareScientificDispositions(db, problemId, sequence - 1, 1, {
+      claimId,
+      version: Number.MAX_SAFE_INTEGER,
+    }).all<ScientificRow>();
+    const rows = result.results;
+    const head = rows
+      .filter((row) => row.object_id === claimId && row.type.startsWith("claim."))
+      .at(-1);
+    if (!head) return [];
+    const targetVersion =
+      event.type === "claim.revised"
+        ? event.objectVersion
+        : event.type === "review.created"
+          ? Number(payload.target_version)
+          : event.type === "evidence.created"
+            ? Number(payload.bears_on_version)
+            : Number(String(payload.target_object).split("@")[1] ?? head.object_version);
+    const next: ScientificRow = {
+      claim_id: claimId,
+      event_id: eventId,
+      seq: sequence,
+      type: event.type,
+      object_id: event.objectId,
+      object_version: event.objectVersion,
+      target_version: targetVersion,
+      payload_sha256: event.payloadSha256,
+      payload_json: event.payloadJson,
+      fellow_id: event.fellowId ?? "",
+      sponsor_id: event.sponsorId ?? "",
+      content_digest: event.contentDigest ?? null,
+      statement: event.type === "claim.revised" ? String(payload.statement) : null,
+      direction: typeof payload.direction === "string" ? payload.direction : null,
+      weighted_refutation:
+        (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce") &&
+        typeof payload.capable_of_failure === "string" &&
+        payload.capable_of_failure.trim().length > 0
+          ? 1
+          : 0,
+    };
+    const before = await foldScientificRows(rows);
+    const after = await foldScientificRows([...rows, next]);
+    transition = { before: before.disposition, after: after.disposition };
+    if (transition.before === transition.after) return [];
+    if (
+      !eligible.some(
+        ({ trigger }) => trigger.kind === "claim-reaches" && trigger.reaches === after.disposition,
+      )
+    )
+      return [];
+    // Keep the scientific inputs observed while planning live through commit.
+    statements.push(
+      ...scientificContentGuards(
+        db,
+        rows
+          .filter((row) => row.payload_json !== null)
+          .map((row) => ({
+            eventId: row.event_id,
+            payloadDigest: row.payload_sha256,
+          })),
+      ),
+    );
+  }
+  for (const { row, trigger } of eligible) {
+    if (trigger.kind === "claim-reaches" && transition?.after !== trigger.reaches) continue;
+    const reason =
+      trigger.kind === "statement-revised"
+        ? "Problem statement was revised."
+        : trigger.kind === "gap-closed"
+          ? `Proof gap '${trigger.gap_id}' was closed.`
+          : `Claim '${trigger.claim_id}' reached disposition '${trigger.reaches}'.`;
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO dead_end_fired_triggers
+           (problem_id, dead_end_id, trigger_kind, event_id, reason, fired_at)
+         SELECT ?, ?, ?, e.id, ?, e.created_at FROM events e
+         WHERE e.id = ? AND e.problem_id = ? AND e.seq = ? AND e.type = ?
+           AND e.payload_sha256 = ?
+           AND EXISTS (SELECT 1 FROM dead_ends d JOIN event_content c ON c.event_id = ?
+             WHERE d.problem_id = e.problem_id AND d.dead_end_id = ?
+               AND d.superseded_by IS NULL AND c.redacted_at IS NULL
+               AND c.payload_sha256 = ? AND c.payload_json = ?)
+         ON CONFLICT(problem_id, dead_end_id) DO NOTHING`,
+        )
+        .bind(
+          problemId,
+          row.dead_end_id,
+          trigger.kind,
+          reason,
+          eventId,
+          problemId,
+          sequence,
+          event.type,
+          event.payloadSha256,
+          row.source_event_id,
+          row.dead_end_id,
+          row.payload_sha256,
+          row.payload_json,
+        ),
+    );
+  }
+  return statements;
 }
 
 /**

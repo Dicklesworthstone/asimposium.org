@@ -125,11 +125,29 @@ export interface KraterWriteHooks {
 export interface KraterAtomicCompanion {
   readonly requestDigest?: string;
   readonly claimIdForSequence?: (sequence: number) => string;
-  readonly statementsAfterIdempotencySettlement: (settlement: {
-    readonly sequence: number;
-    readonly claimId: string;
-    readonly eventId: string;
-  }) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[];
+  readonly statementsAfterIdempotencySettlement: (
+    settlement: KraterAtomicSettlement,
+  ) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[];
+}
+
+export interface KraterAtomicSettlement {
+  readonly sequence: number;
+  readonly claimId: string;
+  readonly eventId: string;
+  readonly event?: KraterPendingEvent;
+}
+
+/** Exact prospective envelope for projections prepared inside a write's CAS loop. */
+export interface KraterPendingEvent {
+  readonly type: string;
+  readonly objectId: string;
+  readonly objectVersion: number;
+  readonly payloadJson: string;
+  readonly payloadSha256: string;
+  readonly createdAt: string;
+  readonly fellowId: string | null;
+  readonly sponsorId: string | null;
+  readonly contentDigest?: string;
 }
 
 export interface KraterEvent {
@@ -2101,6 +2119,17 @@ export async function writeClaimRevision(
         sequence: candidateSeq,
         claimId: input.claimId,
         eventId: input.eventId,
+        event: {
+          type: "claim.revised",
+          objectId: input.claimId,
+          objectVersion: input.newVersion,
+          payloadJson,
+          payloadSha256,
+          createdAt: input.createdAt,
+          fellowId: input.attribution?.fellowId ?? null,
+          sponsorId: input.attribution?.sponsorId ?? null,
+          contentDigest: input.contentDigest,
+        },
       })) ?? [];
     let results: D1Result<SequenceRow>[];
     try {
@@ -2675,6 +2704,16 @@ export async function writeLedgerEvent(
           sequence: candidateSeq,
           claimId: input.objectId,
           eventId: input.eventId,
+          event: {
+            type: input.eventType,
+            objectId: input.objectId,
+            objectVersion: input.objectVersion,
+            payloadJson: input.payloadJson,
+            payloadSha256,
+            createdAt: input.createdAt,
+            fellowId: input.attribution?.fellowId ?? null,
+            sponsorId: input.attribution?.sponsorId ?? null,
+          },
         })) ?? []),
         // A failed guarded transition must not retain an unresolved key. A
         // concurrent/same-key winner has event_id set and is never touched.
@@ -3019,6 +3058,16 @@ export async function writeGapEvent(
           sequence: candidateSeq,
           claimId: gapId,
           eventId: input.eventId,
+          event: {
+            type: `gap.${input.mode}`,
+            objectId: gapId,
+            objectVersion: 1,
+            payloadJson,
+            payloadSha256,
+            createdAt: input.createdAt,
+            fellowId: actorFellowId,
+            sponsorId: input.attribution?.sponsorId ?? null,
+          },
         })) ?? []),
       ]);
     } catch (error) {

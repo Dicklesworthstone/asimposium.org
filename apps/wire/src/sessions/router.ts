@@ -96,6 +96,7 @@ import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   canonicalJson,
+  type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
   KraterLedgerPreconditionError,
   KraterProblemNotFoundError,
@@ -110,8 +111,8 @@ import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 import { validateConflictSubstance } from "../ledger/conflicts";
 import {
-  evaluateAndRecordDeadEndTriggers,
   loadFiredDeadEndTriggers,
+  prepareDeadEndTriggers,
   validateDeadEndPreconditions,
 } from "../ledger/dead-ends";
 import { displayClaimDisposition } from "../ledger/dispositions";
@@ -528,6 +529,19 @@ function scientificRefusal(scope: "review" | "evidence", detail: string): Respon
 
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  // This nested app handles errors before the outer Worker. A failed atomic
+  // write must preserve JSON retry guidance without exposing the D1 exception.
+  app.onError(() =>
+    validatedProblem({
+      status: 500,
+      code: "INTERNAL_ERROR",
+      title: "The Worker failed to handle this request",
+      detail: "An unexpected error occurred. Its details are not disclosed on this face.",
+      fixHint:
+        "Retry the request with the same Idempotency-Key. If it persists, report the route and time.",
+      headers: { "cache-control": "private, no-store" },
+    }),
+  );
   const privateNoStore = (response: Response): Response => {
     const headers = new Headers(response.headers);
     headers.set("cache-control", "private, no-store");
@@ -1019,11 +1033,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   function atomicLedgerReplayCompanion<T>(input: AtomicCompanionInput<T>) {
     return {
       requestDigest: input.requestDigest,
-      statementsAfterIdempotencySettlement: async (settlement: {
-        readonly sequence: number;
-        readonly claimId: string;
-        readonly eventId: string;
-      }) => {
+      statementsAfterIdempotencySettlement: async (settlement: KraterAtomicSettlement) => {
         const value = input.responseFor({
           sequence: settlement.sequence,
           objectId: settlement.claimId,
@@ -1041,6 +1051,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
         return [
+          ...(await prepareDeadEndTriggers(input.db, input.session.problem_id, settlement)),
           ...(input.screening === undefined
             ? []
             : [
@@ -2547,13 +2558,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (recommendedReview) candidates.push(recommendedReview);
 
     if (profile === "working" || profile === "orient") {
-      await evaluateAndRecordDeadEndTriggers(
-        db,
-        session.problem_id,
-        `pack-eval-${cursor}`,
-        "pack.read",
-        new Date().toISOString(),
-      );
       const firedTriggers = await loadFiredDeadEndTriggers(db, session.problem_id, 3, cursor);
       for (const trigger of firedTriggers) {
         const retryMove = workingRetryDeadEndMove(trigger);
@@ -3458,14 +3462,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // error. Nothing before this line reaches it, so a refusal, a conflict and
       // a failed commit all leave the drainer untouched.
       scheduleCommittedPromotionNudge(c);
-      await evaluateAndRecordDeadEndTriggers(
-        db,
-        session.problem_id,
-        write.eventId,
-        "claim.promoted",
-        promotedAt,
-        { claimId: write.claimId, targetDisposition: "open" },
-      );
       const replay = await readReplayRecord(
         db,
         "promote",
@@ -4029,6 +4025,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
+              ...(await prepareDeadEndTriggers(db, session.problem_id, settlement)),
               ...scientificContentGuards(
                 db,
                 dependencyPins.map((pin) => ({
@@ -4995,14 +4992,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }),
       );
       scheduleCommittedPromotionNudge(c);
-      await evaluateAndRecordDeadEndTriggers(
-        db,
-        session.problem_id,
-        eventId,
-        "gap.closed",
-        new Date().toISOString(),
-        { gapId: parsed.data.gap_id },
-      );
       const replay = await readReplayRecord(
         db,
         "gaps",

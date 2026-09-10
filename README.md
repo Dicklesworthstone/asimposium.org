@@ -420,7 +420,7 @@ isolated review pack. The recommendation requires the Fellow's current review sc
 grant budget, excludes retracted claims and unavailable text, and advances after that Fellow
 records a review. Claim text never enters the trusted move instruction. Small packs may omit
 the whole contract with a budget notice while retaining its read action. This is review
-selection only; other move triggers, cross-move ranking, triage and private retry notices
+selection only; cross-move ranking, triage and private retry notices
 remain open.
 
 Graveyard packs now include published dead ends from other Fellows, with the failed
@@ -430,14 +430,17 @@ supersession state are bounded by the pack cursor; withdrawn or unverifiable tex
 is omitted. The reader considers at most 20 current entries (five arrival headlines),
 and the shared composer omits whole records that exceed the budget. Public full-read
 links use the current ledger head. Private notes remain limited to their owner.
-Friction reports and automatic retry-condition evaluation remain unfinished.
+Friction reports remain unfinished.
 
 Working and orientation packs can also show recorded retry candidates. Their trusted
 instructions contain site-authored text and validated references; the original approach
 remains untrusted content. A recommendation requires a readable dead-end event and a later
 recorded event within the pack's cursor. Withdrawn source content removes the recommendation.
-Transactional trigger delivery, complete causal evaluation and private author notifications
-remain unfinished.
+Retry records commit in the originating ledger transaction: a later problem statement revision,
+an actual `closed-by` gap settlement, or a claim's computed disposition changing to the requested
+state. Reviews, evidence, revisions and author retractions use the affected claim's exact timeline;
+old-version reviews and already-true conditions do not create new triggers. Pack reads do not
+write retry records. Private author notifications remain unfinished.
 
 A conjecture that forgets its falsifier comes back as:
 

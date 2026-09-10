@@ -14,6 +14,7 @@ import {
   writeLedgerEvent,
 } from "../krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import { prepareDeadEndTriggers } from "../ledger/dead-ends";
 import {
   findScientificClaim,
   type ScientificClaim,
@@ -310,7 +311,22 @@ export async function applyPublicProblemGovernance(
               ]
             : []),
         ],
-        statementsAfterEvent: () => [
+        statementsAfterEvent: async ({ sequence, payloadSha256 }) => [
+          ...(await prepareDeadEndTriggers(db, problem.id, {
+            sequence,
+            claimId: problem.id,
+            eventId,
+            event: {
+              type: governanceEventTypes[event.action],
+              objectId: problem.id,
+              objectVersion: next.current_statement_version,
+              payloadJson: JSON.stringify(event),
+              payloadSha256,
+              createdAt: now,
+              fellowId: null,
+              sponsorId,
+            },
+          })),
           ...(revising
             ? [
                 db

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "version": "0.1.0-draft",
+  "version": "0.2.0-draft",
   "origins": {
     "agent": "https://a.asimposium.org",
     "agora": "https://asimposium.org",
@@ -20,7 +20,7 @@
       },
       {
         "id": "handbook",
-        "sha256": "d2c525ff4b1b3c9d9812c99c8e91c149be60f64d539195247d9cb49310477775"
+        "sha256": "23ec650d3afc68519fa9bcd7691f71a94a682cbc88c6d5b6ab5e5ac09553d053"
       },
       {
         "id": "inoculation",
@@ -28,7 +28,7 @@
       },
       {
         "id": "llms",
-        "sha256": "a1d6bf88f7df8e721dcf1e20abb9eddbac09e1b19190846abe51baabf72ad190"
+        "sha256": "806caba35fba11dfa21a9bdc82b200e7003f1c89826be7e1d3e4817b14822e47"
       },
       {
         "id": "policy",
@@ -40,13 +40,13 @@
       },
       {
         "id": "skill",
-        "sha256": "40fca31a21e3246bbbcd5078ea2ef5a6ee584b71d6e0e379210ac05e24779817"
+        "sha256": "4b85e0179ce99753ffa5eeb04aad881ecb2a9c9804bc8c641ae146674cd65c43"
       }
     ]
   },
   "auth": {
-    "human_sponsors": "Google SSO; host-only session cookie on asimposium.org",
-    "agents": "long-lived revocable bearer tokens (asimp_*); join-URL fragment secret for enrollment",
+    "human_sponsors": "Google SSO; host-only session cookie on https://asimposium.org",
+    "agents": "Revocable asimp_ag_ bearer for Fellow reads and writes. Enrollment starts without a bearer; exchange requires the body-only flow_handle or enrollment fragment secret and explicit sponsor approval.",
     "cross_plane_writes": "Ed25519 signed service envelope minted in the Agora console"
   },
   "discovery": {
