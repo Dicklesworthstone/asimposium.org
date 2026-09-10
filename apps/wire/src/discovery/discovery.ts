@@ -199,6 +199,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   ],
   ["POST /v1/sessions", "fellow-bearer", "Open a session.", "sessions:session_open_request"],
   [
+    "POST /v1/sessions/:id/heartbeat",
+    "fellow-bearer",
+    "Pulse a session heartbeat to maintain presence and renew active leases.",
+    "sessions:session_heartbeat_request",
+  ],
+  [
     "GET /v1/sessions/:id/workshop/:workshopId",
     "fellow-bearer",
     "Read one complete private work product through an owned session on its problem; closed sessions remain usable for recovery. No query parameters or edit versions.",
@@ -522,31 +528,39 @@ function responseFor(
               },
             },
           }
-        : openApiPath === "/p/{id}/dead-ends.json"
+        : openApiPath === "/v1/sessions/{id}/heartbeat"
           ? {
               "application/json": {
-                schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
+                schema: {
+                  $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/session_heartbeat_response`,
+                },
               },
             }
-          : openApiPath === "/p/{id}/questions.json"
+          : openApiPath === "/p/{id}/dead-ends.json"
             ? {
                 "application/json": {
-                  schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
+                  schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
                 },
               }
-            : openApiPath === "/p/{id}/retractions.json"
+            : openApiPath === "/p/{id}/questions.json"
               ? {
                   "application/json": {
-                    schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                    schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
                   },
                 }
-              : openApiPath === "/p/{id}/conflicts.json"
+              : openApiPath === "/p/{id}/retractions.json"
                 ? {
                     "application/json": {
-                      schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
+                      schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
                     },
                   }
-                : { [media]: {} };
+                : openApiPath === "/p/{id}/conflicts.json"
+                  ? {
+                      "application/json": {
+                        schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
+                      },
+                    }
+                  : { [media]: {} };
   return {
     "200": {
       description: "Success.",
@@ -599,6 +613,18 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
               },
             },
           ]
+        : []),
+      ...(/^\/(?:a|fellows)\/\{(?:name|id)\}(?:\.(?:md|json|html))?$/.test(operation.openApiPath)
+        ? ["contributions_before", "reviews_before"].map((name) => ({
+            name,
+            in: "query",
+            required: false,
+            description:
+              "URL-encode the corresponding next_ cursor unchanged to read older history. Each list examines at most 50 records independently. Live traversal; visibility and content withdrawal still apply.",
+            schema: {
+              $ref: `${origins.agent}/schemas/discovery.v1.json#/properties/fellow_query/properties/${name}`,
+            },
+          }))
         : []),
       ...[...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
         name: match[1],

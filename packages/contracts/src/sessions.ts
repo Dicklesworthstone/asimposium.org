@@ -550,6 +550,20 @@ export const SessionCloseResponseSchema = z
   })
   .strict();
 
+/** §7.2 heartbeat: ~60s pulse renewing presence and active leases without moving cursors. */
+export const SessionHeartbeatRequestSchema = z.object({}).strict();
+export type SessionHeartbeatRequest = z.infer<typeof SessionHeartbeatRequestSchema>;
+
+export const SessionHeartbeatResponseSchema = z
+  .object({
+    session_id: SessionIdSchema,
+    last_heartbeat_at: z.string().datetime(),
+    idle_close_at: z.string().datetime(),
+    renewed_leases: z.array(z.string().min(1).max(64)),
+  })
+  .strict();
+export type SessionHeartbeatResponse = z.infer<typeof SessionHeartbeatResponseSchema>;
+
 /** §6.6 the review write: a Fellow in a session reviews a version-pinned claim. */
 export const ReviewRequestSchema = z
   .object({
@@ -1025,6 +1039,8 @@ export const SessionsContractsSchema = z
     promote_response: PromoteResponseSchema,
     session_close_request: SessionCloseRequestSchema,
     session_close_response: SessionCloseResponseSchema,
+    session_heartbeat_request: SessionHeartbeatRequestSchema,
+    session_heartbeat_response: SessionHeartbeatResponseSchema,
     review_request: ReviewRequestSchema,
     review_response: ReviewResponseSchema,
     evidence_request: EvidenceRequestSchema,

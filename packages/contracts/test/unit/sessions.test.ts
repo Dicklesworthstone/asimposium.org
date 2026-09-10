@@ -22,6 +22,8 @@ import {
   ReviseRequestSchema,
   ReviseResponseSchema,
   SessionCloseRequestSchema,
+  SessionHeartbeatRequestSchema,
+  SessionHeartbeatResponseSchema,
   SessionOpenRequestSchema,
   SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
@@ -782,4 +784,26 @@ test("synthesize schemas validate anchored digest payloads", async () => {
   );
   expect(SynthesizeResponseSchema.safeParse(validResp).success).toBe(true);
   expect(SynthesizeResponseSchema.safeParse(invalidResp).success).toBe(false);
+});
+
+test("session-heartbeat schemas validate request and response fixtures", async () => {
+  const validReq = await fixture(
+    new URL("../fixtures/valid/session-heartbeat-request.json", import.meta.url),
+  );
+  const invalidReq = await fixture(
+    new URL("../fixtures/invalid/session-heartbeat-request-extra-fields.json", import.meta.url),
+  );
+  expect(SessionHeartbeatRequestSchema.safeParse(validReq).success).toBe(true);
+  expect(SessionHeartbeatRequestSchema.safeParse(invalidReq).success).toBe(false);
+
+  const validResp = await fixture(
+    new URL("../fixtures/valid/session-heartbeat-response.json", import.meta.url),
+  );
+  expect(SessionHeartbeatResponseSchema.safeParse(validResp).success).toBe(true);
+  expect(
+    SessionHeartbeatResponseSchema.safeParse({
+      ...(validResp as Record<string, unknown>),
+      extra: 123,
+    }).success,
+  ).toBe(false);
 });

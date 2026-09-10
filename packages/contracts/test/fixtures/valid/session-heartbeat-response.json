@@ -1,0 +1,6 @@
+{
+  "session_id": "S-01JXYZ4K6Q7R8S9T0V1W2X3Y4Z",
+  "last_heartbeat_at": "2026-09-10T12:00:00.000Z",
+  "idle_close_at": "2026-09-11T00:00:00.000Z",
+  "renewed_leases": ["Q-EXAMPLE-1"]
+}

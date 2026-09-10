@@ -55,6 +55,8 @@ import {
   ScreeningPublicActionSchema,
   SessionCloseRequestSchema,
   SessionCloseResponseSchema,
+  SessionHeartbeatRequestSchema,
+  SessionHeartbeatResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
@@ -1723,6 +1725,122 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
   });
+
+  // --- POST /v1/sessions/:id/heartbeat -----------------------------------
+  app.post("/v1/sessions/:id/heartbeat", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+
+    const bodyBytes = await readBoundedRequestBody(c.req.raw, MAX_SESSION_REQUEST_BODY_BYTES);
+    if (!bodyBytes.ok) {
+      if (bodyBytes.reason === "too-large") return sessionBodyTooLargeProblem();
+      return validatedProblem({
+        status: 422,
+        code: "SESSION_HEARTBEAT_BODY_INVALID",
+        title: "The session-heartbeat body does not match the contract",
+        detail: "The JSON body does not match the session-heartbeat contract.",
+        fixHint: "Send {} or an empty body to renew session presence and active leases.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {},
+        },
+      });
+    }
+
+    let bodyJson: unknown = {};
+    if (bodyBytes.bytes.length > 0) {
+      try {
+        bodyJson = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes.bytes));
+      } catch {
+        return validatedProblem({
+          status: 422,
+          code: "SESSION_HEARTBEAT_BODY_INVALID",
+          title: "The session-heartbeat body does not match the contract",
+          detail: "The JSON body does not match the session-heartbeat contract.",
+          fixHint: "Send {} or an empty body to renew session presence and active leases.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {},
+          },
+        });
+      }
+    }
+
+    const parsed = SessionHeartbeatRequestSchema.safeParse(bodyJson);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "SESSION_HEARTBEAT_BODY_INVALID",
+        title: "The session-heartbeat body does not match the contract",
+        detail: "The JSON body does not match the session-heartbeat contract.",
+        fixHint: "Send {} or an empty body to renew session presence and active leases.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {},
+        },
+      });
+    }
+
+    const sessionId = c.req.param("id");
+    const db = c.env.DB;
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const now = new Date();
+    const lastHeartbeatAt = now.toISOString();
+    const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
+    const renewedLeaseUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+
+    const activeLeases = await db
+      .prepare(
+        `SELECT question_id FROM questions
+         WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)
+         ORDER BY question_id ASC`,
+      )
+      .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
+      .all<{ question_id: string }>();
+
+    const renewedLeases = (activeLeases.results ?? []).map((r) => r.question_id);
+
+    const statements = [
+      db
+        .prepare(
+          `UPDATE sessions
+           SET last_heartbeat_at = ?, idle_close_at = ?
+           WHERE session_id = ? AND closed_at IS NULL`,
+        )
+        .bind(lastHeartbeatAt, idleCloseAt, session.session_id),
+    ];
+
+    if (renewedLeases.length > 0) {
+      statements.push(
+        db
+          .prepare(
+            `UPDATE questions
+             SET leased_until = ?
+             WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)`,
+          )
+          .bind(renewedLeaseUntil, session.problem_id, auth.binding.fellowId, lastHeartbeatAt),
+      );
+    }
+
+    await db.batch(statements);
+
+    const responsePayload = SessionHeartbeatResponseSchema.parse({
+      session_id: session.session_id,
+      last_heartbeat_at: lastHeartbeatAt,
+      idle_close_at: idleCloseAt,
+      renewed_leases: renewedLeases,
+    });
+
+    return c.json(responsePayload, 200, {
+      "cache-control": "private, no-store",
+    });
+  });
+
   // --- POST /v1/sessions -------------------------------------------------
   app.post("/v1/sessions", async (c) => {
     const auth = await authenticate(c.req.raw);
