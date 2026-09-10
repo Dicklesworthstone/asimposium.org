@@ -92,6 +92,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/fellows/lifecycle": true,
   "POST /v1/sponsors/panic": true,
   "POST /v1/sponsors/bootstrap": true,
+  "POST /v1/sponsors/leases/release": true,
+  "DELETE /v1/sessions/:id/leases/:ref": true,
   "POST /v1/device-lookup": true,
   "POST /v1/operators/fellow-cap": true,
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap": true,
@@ -334,6 +336,29 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "fellow-bearer",
     "Record a screened resolution or persistent uncertainty for an open conflict.",
     "sessions:resolve_conflict_request",
+  ],
+  [
+    "GET /v1/sessions/:id/leases",
+    "fellow-bearer",
+    "List active leases on the problem for this session.",
+  ],
+  [
+    "POST /v1/sessions/:id/leases",
+    "fellow-bearer",
+    "Acquire an exclusive or parallel-safe lease on a public object.",
+    "sessions:lease_acquire_request",
+  ],
+  [
+    "POST /v1/sessions/:id/leases/:ref/release",
+    "fellow-bearer",
+    "Release an active lease held by this Fellow.",
+    "sessions:lease_release_request",
+  ],
+  [
+    "POST /v1/sessions/:id/leases/:ref/challenge",
+    "fellow-bearer",
+    "Challenge a stale, idle, or abandoned lease on a public object.",
+    "sessions:lease_challenge_request",
   ],
 ];
 

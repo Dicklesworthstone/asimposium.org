@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_NOT_FOUND",
+  "title": "Lease not found",
+  "status": 404,
+  "code": "LEASE_NOT_FOUND",
+  "detail": "No lease was found matching the specified reference.",
+  "fix_hint": "Verify the lease or object reference and session problem.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}

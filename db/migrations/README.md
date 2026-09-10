@@ -2,7 +2,7 @@
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence
 now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0055_dead_end_retry_triggers.sql`.
+schema through `0056_leases_and_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -95,6 +95,10 @@ and admits its sealed replay scopes.
 Migration `0055_dead_end_retry_triggers.sql` stores fired retry triggers by problem
 and dead end. The table alone does not establish transactional trigger delivery
 or private author notifications; those remain unfinished runtime work.
+
+Migration `0056_leases_and_replay_scope.sql` adds the `leases` table for coordination
+without ownership across claims, hypotheses, proof gaps, and questions (Fable §7.5),
+and admits its sealed replay scopes (`acquire_lease`, `release_lease`, `challenge_lease`).
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

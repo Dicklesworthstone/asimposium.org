@@ -5281,6 +5281,559 @@
         "resolved_at"
       ],
       "additionalProperties": false
+    },
+    "lease_acquire_request": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280
+        },
+        "deliverable": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280
+        },
+        "parallel_safe": {
+          "default": false,
+          "type": "boolean"
+        },
+        "ttl_seconds": {
+          "default": 7200,
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        }
+      },
+      "required": [
+        "object",
+        "objective",
+        "deliverable"
+      ],
+      "additionalProperties": false
+    },
+    "lease_acquire_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "lease": {
+          "type": "object",
+          "properties": {
+            "lease_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "problem_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "object": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "object_kind": {
+              "type": "string",
+              "enum": [
+                "claim",
+                "hypothesis",
+                "proof_gap",
+                "question"
+              ]
+            },
+            "object_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "sponsor_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 280
+            },
+            "deliverable": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 280
+            },
+            "parallel_safe": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "released",
+                "expired",
+                "challenged",
+                "abandoned"
+              ]
+            },
+            "leased_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "leased_until": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "released_at": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "released_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "challenge_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "challenged_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "challenged_at": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "lease_id",
+            "session_id",
+            "problem_id",
+            "object",
+            "object_kind",
+            "object_id",
+            "fellow_id",
+            "sponsor_id",
+            "objective",
+            "deliverable",
+            "parallel_safe",
+            "status",
+            "leased_at",
+            "leased_until"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ok",
+        "lease"
+      ],
+      "additionalProperties": false
+    },
+    "lease_release_request": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "maxLength": 280
+        }
+      },
+      "additionalProperties": false
+    },
+    "lease_release_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "lease_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "const": "released"
+        },
+        "released_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "released_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "ok",
+        "lease_id",
+        "object",
+        "status",
+        "released_at",
+        "released_by"
+      ],
+      "additionalProperties": false
+    },
+    "lease_challenge_request": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "lease_challenge_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "lease_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "const": "challenged"
+        },
+        "challenged_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "challenged_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "ok",
+        "lease_id",
+        "object",
+        "status",
+        "challenged_by",
+        "challenged_at",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "lease_list_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "leases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "lease_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "problem_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "object": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "object_kind": {
+                "type": "string",
+                "enum": [
+                  "claim",
+                  "hypothesis",
+                  "proof_gap",
+                  "question"
+                ]
+              },
+              "object_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "fellow_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "sponsor_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "objective": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 280
+              },
+              "deliverable": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 280
+              },
+              "parallel_safe": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "released",
+                  "expired",
+                  "challenged",
+                  "abandoned"
+                ]
+              },
+              "leased_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "leased_until": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "released_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "released_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "challenge_reason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "challenged_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "challenged_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "lease_id",
+              "session_id",
+              "problem_id",
+              "object",
+              "object_kind",
+              "object_id",
+              "fellow_id",
+              "sponsor_id",
+              "objective",
+              "deliverable",
+              "parallel_safe",
+              "status",
+              "leased_at",
+              "leased_until"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "leases"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_lease_release_request": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 280
+        }
+      },
+      "required": [
+        "problem_id",
+        "object"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_lease_release_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "lease_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "const": "released"
+        },
+        "released_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "released_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "ok",
+        "lease_id",
+        "object",
+        "status",
+        "released_at",
+        "released_by"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -5334,7 +5887,16 @@
     "normalize_conflict_request",
     "normalize_conflict_response",
     "resolve_conflict_request",
-    "resolve_conflict_response"
+    "resolve_conflict_response",
+    "lease_acquire_request",
+    "lease_acquire_response",
+    "lease_release_request",
+    "lease_release_response",
+    "lease_challenge_request",
+    "lease_challenge_response",
+    "lease_list_response",
+    "sponsor_lease_release_request",
+    "sponsor_lease_release_response"
   ],
   "additionalProperties": false,
   "examples": [

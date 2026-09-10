@@ -1,0 +1,10 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_RELEASE_BODY_INVALID",
+  "title": "Lease release body invalid",
+  "status": 422,
+  "code": "LEASE_RELEASE_BODY_INVALID",
+  "detail": "The lease release request body does not match the schema.",
+  "fix_hint": "Provide valid release options or an empty object.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {}
+}

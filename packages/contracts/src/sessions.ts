@@ -17,6 +17,32 @@ import {
 } from "./dead-ends.ts";
 import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
 import {
+  type LeaseAcquireRequest,
+  LeaseAcquireRequestSchema,
+  type LeaseAcquireResponse,
+  LeaseAcquireResponseSchema,
+  type LeaseChallengeRequest,
+  LeaseChallengeRequestSchema,
+  type LeaseChallengeResponse,
+  LeaseChallengeResponseSchema,
+  type LeaseItem,
+  LeaseItemSchema,
+  type LeaseListResponse,
+  LeaseListResponseSchema,
+  type LeaseObjectKind,
+  LeaseObjectKindSchema,
+  type LeaseReleaseRequest,
+  LeaseReleaseRequestSchema,
+  type LeaseReleaseResponse,
+  LeaseReleaseResponseSchema,
+  type LeaseStatus,
+  LeaseStatusSchema,
+  type SponsorLeaseReleaseRequest,
+  SponsorLeaseReleaseRequestSchema,
+  type SponsorLeaseReleaseResponse,
+  SponsorLeaseReleaseResponseSchema,
+} from "./leases.ts";
+import {
   AnswerQuestionRequestSchema,
   AnswerQuestionResponseSchema,
   AskQuestionRequestSchema,
@@ -36,6 +62,26 @@ import {
 } from "./scientific-provenance.ts";
 
 export {
+  type LeaseAcquireRequest,
+  LeaseAcquireRequestSchema,
+  type LeaseAcquireResponse,
+  LeaseAcquireResponseSchema,
+  type LeaseChallengeRequest,
+  LeaseChallengeRequestSchema,
+  type LeaseChallengeResponse,
+  LeaseChallengeResponseSchema,
+  type LeaseItem,
+  LeaseItemSchema,
+  type LeaseListResponse,
+  LeaseListResponseSchema,
+  type LeaseObjectKind,
+  LeaseObjectKindSchema,
+  type LeaseReleaseRequest,
+  LeaseReleaseRequestSchema,
+  type LeaseReleaseResponse,
+  LeaseReleaseResponseSchema,
+  type LeaseStatus,
+  LeaseStatusSchema,
   type NormalizeConflictRequest,
   NormalizeConflictRequestSchema,
   type NormalizeConflictResponse,
@@ -50,6 +96,10 @@ export {
   ResolveConflictRequestSchema,
   type ResolveConflictResponse,
   ResolveConflictResponseSchema,
+  type SponsorLeaseReleaseRequest,
+  SponsorLeaseReleaseRequestSchema,
+  type SponsorLeaseReleaseResponse,
+  SponsorLeaseReleaseResponseSchema,
 };
 
 /**
@@ -1076,6 +1126,15 @@ export const SessionsContractsSchema = z
     normalize_conflict_response: NormalizeConflictResponseSchema,
     resolve_conflict_request: ResolveConflictRequestSchema,
     resolve_conflict_response: ResolveConflictResponseSchema,
+    lease_acquire_request: LeaseAcquireRequestSchema,
+    lease_acquire_response: LeaseAcquireResponseSchema,
+    lease_release_request: LeaseReleaseRequestSchema,
+    lease_release_response: LeaseReleaseResponseSchema,
+    lease_challenge_request: LeaseChallengeRequestSchema,
+    lease_challenge_response: LeaseChallengeResponseSchema,
+    lease_list_response: LeaseListResponseSchema,
+    sponsor_lease_release_request: SponsorLeaseReleaseRequestSchema,
+    sponsor_lease_release_response: SponsorLeaseReleaseResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

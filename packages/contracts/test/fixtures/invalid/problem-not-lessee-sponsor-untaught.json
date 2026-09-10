@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/NOT_LESSEE_SPONSOR",
+  "title": "Not the lessee sponsor",
+  "status": 403,
+  "code": "NOT_LESSEE_SPONSOR",
+  "detail": "Only the sponsor of record for the lessee fellow has authority to release this lease.",
+  "fix_hint": "Authenticate as the lessee fellow sponsor.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}

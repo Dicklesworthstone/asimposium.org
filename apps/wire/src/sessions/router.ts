@@ -20,6 +20,18 @@ import {
   HypothesisResponseSchema,
   LeaseQuestionRequestSchema,
   LeaseQuestionResponseSchema,
+  LeaseAcquireRequestSchema,
+  LeaseAcquireResponseSchema,
+  LeaseChallengeRequestSchema,
+  LeaseChallengeResponseSchema,
+  type LeaseItem,
+  LeaseItemSchema,
+  LeaseListResponseSchema,
+  type LeaseObjectKind,
+  LeaseReleaseRequestSchema,
+  LeaseReleaseResponseSchema,
+  SponsorLeaseReleaseRequestSchema,
+  SponsorLeaseReleaseResponseSchema,
   NormalizeConflictRequestSchema,
   NormalizeConflictResponseSchema,
   type PackProfile,
@@ -794,6 +806,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "retract"
     | "conflicts"
     | "resolve_conflict"
+    | "acquire_lease"
+    | "release_lease"
+    | "challenge_lease"
     | "session_close";
 
   interface ReplayRecord {
@@ -1013,7 +1028,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly db: Env["DB"];
         readonly scope: Extract<
           ReplayScope,
-          "lease_question" | "answer_question" | "withdraw_question"
+          | "lease_question"
+          | "answer_question"
+          | "withdraw_question"
+          | "acquire_lease"
+          | "release_lease"
+          | "challenge_lease"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1446,6 +1466,134 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row?.role;
   }
 
+  async function resolveLeaseTarget(
+    db: Env["DB"],
+    problemId: string,
+    rawRef: string,
+  ): Promise<
+    | {
+        readonly kind: LeaseObjectKind;
+        readonly objectId: string;
+        readonly canonicalRef: string;
+      }
+    | undefined
+  > {
+    const trimmed = rawRef.trim();
+    const prefixMatch = /^([CHGQ])-(\d+)$/i.exec(trimmed);
+    if (prefixMatch) {
+      const typeLetter = prefixMatch[1].toUpperCase();
+      const seqNum = Number.parseInt(prefixMatch[2], 10);
+      if (typeLetter === "C") {
+        const row = await db
+          .prepare("SELECT id, seq FROM claims WHERE problem_id = ? AND (id = ? OR seq = ?)")
+          .bind(problemId, trimmed, seqNum)
+          .first<{ id: string; seq: number | null }>();
+        if (row) {
+          return {
+            kind: "claim",
+            objectId: row.id,
+            canonicalRef: row.seq !== null ? `C-${row.seq}` : row.id,
+          };
+        }
+      } else if (typeLetter === "H") {
+        const row = await db
+          .prepare(
+            "SELECT hypothesis_id, seq FROM hypotheses WHERE problem_id = ? AND (hypothesis_id = ? OR seq = ?)",
+          )
+          .bind(problemId, trimmed, seqNum)
+          .first<{ hypothesis_id: string; seq: number | null }>();
+        if (row) {
+          return {
+            kind: "hypothesis",
+            objectId: row.hypothesis_id,
+            canonicalRef: row.seq !== null ? `H-${row.seq}` : row.hypothesis_id,
+          };
+        }
+      } else if (typeLetter === "G") {
+        const row = await db
+          .prepare(
+            "SELECT gap_id, seq FROM proof_gaps WHERE problem_id = ? AND (gap_id = ? OR seq = ?)",
+          )
+          .bind(problemId, trimmed, seqNum)
+          .first<{ gap_id: string; seq: number | null }>();
+        if (row) {
+          return {
+            kind: "proof_gap",
+            objectId: row.gap_id,
+            canonicalRef: row.seq !== null ? `G-${row.seq}` : row.gap_id,
+          };
+        }
+      } else if (typeLetter === "Q") {
+        const row = await db
+          .prepare(
+            "SELECT question_id, seq FROM questions WHERE problem_id = ? AND (question_id = ? OR seq = ?)",
+          )
+          .bind(problemId, trimmed, seqNum)
+          .first<{ question_id: string; seq: number | null }>();
+        if (row) {
+          return {
+            kind: "question",
+            objectId: row.question_id,
+            canonicalRef: row.seq !== null ? `Q-${row.seq}` : row.question_id,
+          };
+        }
+      }
+    }
+
+    const claimRow = await db
+      .prepare("SELECT id, seq FROM claims WHERE problem_id = ? AND id = ?")
+      .bind(problemId, trimmed)
+      .first<{ id: string; seq: number | null }>();
+    if (claimRow) {
+      return {
+        kind: "claim",
+        objectId: claimRow.id,
+        canonicalRef: claimRow.seq !== null ? `C-${claimRow.seq}` : claimRow.id,
+      };
+    }
+
+    const hypRow = await db
+      .prepare(
+        "SELECT hypothesis_id, seq FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
+      )
+      .bind(problemId, trimmed)
+      .first<{ hypothesis_id: string; seq: number | null }>();
+    if (hypRow) {
+      return {
+        kind: "hypothesis",
+        objectId: hypRow.hypothesis_id,
+        canonicalRef: hypRow.seq !== null ? `H-${hypRow.seq}` : hypRow.hypothesis_id,
+      };
+    }
+
+    const gapRow = await db
+      .prepare("SELECT gap_id, seq FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+      .bind(problemId, trimmed)
+      .first<{ gap_id: string; seq: number | null }>();
+    if (gapRow) {
+      return {
+        kind: "proof_gap",
+        objectId: gapRow.gap_id,
+        canonicalRef: gapRow.seq !== null ? `G-${gapRow.seq}` : gapRow.gap_id,
+      };
+    }
+
+    const qRow = await db
+      .prepare("SELECT question_id, seq FROM questions WHERE problem_id = ? AND question_id = ?")
+      .bind(problemId, trimmed)
+      .first<{ question_id: string; seq: number | null }>();
+    if (qRow) {
+      return {
+        kind: "question",
+        objectId: qRow.question_id,
+        canonicalRef: qRow.seq !== null ? `Q-${qRow.seq}` : qRow.question_id,
+      };
+    }
+
+    return undefined;
+  }
+
+
   // ebts: one exact-path response policy for every mounted Fellow POST
   // routes. Every response class they can emit — fresh success, exact replay,
   // auth refusal, contract refusal, policy refusal, idempotency conflict,
@@ -1476,6 +1624,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/retract",
     "/v1/sessions/:id/conflicts",
     "/v1/sessions/:id/conflicts/:cid/resolve",
+    "/v1/sessions/:id/leases",
+    "/v1/sessions/:id/leases/:ref/release",
+    "/v1/sessions/:id/leases/:ref/challenge",
     "/v1/sessions/:id/close",
     "/v1/problems/:id/statement-review",
   ] as const;

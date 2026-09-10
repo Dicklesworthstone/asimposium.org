@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_CHALLENGE_BODY_INVALID",
+  "title": "Lease challenge body invalid",
+  "status": 422,
+  "code": "LEASE_CHALLENGE_BODY_INVALID",
+  "detail": "The lease challenge request body does not match the schema.",
+  "fix_hint": "Provide a non-empty reason explaining why the lease is considered stale or parked.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "reason": "No workshop progress or heartbeat for > 30 minutes."
+  }
+}

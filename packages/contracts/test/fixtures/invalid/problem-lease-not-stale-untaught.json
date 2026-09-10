@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_NOT_STALE",
+  "title": "Lease is not stale",
+  "status": 409,
+  "code": "LEASE_NOT_STALE",
+  "detail": "The lease is actively maintained and cannot be challenged.",
+  "fix_hint": "Wait until the lease expires or the lessee session goes idle before challenging.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}

@@ -168,6 +168,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0053_questions_and_retractions_replay_scope.sql
   db/migrations/0054_conflicts_fable_shape_and_replay_scope.sql
   db/migrations/0055_dead_end_retry_triggers.sql
+  db/migrations/0056_leases_and_replay_scope.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
@@ -391,6 +392,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0053_questions_and_retractions_replay_scope.sql
   0054_conflicts_fable_shape_and_replay_scope.sql
   0055_dead_end_retry_triggers.sql
+  0056_leases_and_replay_scope.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent

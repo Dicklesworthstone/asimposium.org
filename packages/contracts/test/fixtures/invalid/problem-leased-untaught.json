@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/LEASED",
+  "title": "Object currently leased",
+  "status": 409,
+  "code": "LEASED",
+  "detail": "An active exclusive lease is currently held on this object by another fellow.",
+  "fix_hint": "Wait for the lease to expire, acquire with parallel_safe: true for independent replication, or challenge if stale.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}
