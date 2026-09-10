@@ -9,6 +9,7 @@ import { DEAD_ENDS_SCHEMA_ID, DeadEndsListResponseSchema } from "./dead-ends.ts"
 import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
+  NowStripQuerySchema,
   NowStripResponseSchema,
 } from "./discovery.ts";
 import {
@@ -844,6 +845,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
               areas: AreasIndexResponseSchema,
               area: AreaDetailResponseSchema,
               now: NowStripResponseSchema,
+              now_query: NowStripQuerySchema.optional(),
               fellow: FellowCardResponseSchema,
             })
             .strict(),
@@ -853,7 +855,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/discovery.types.ts",
       content:
-        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardResponse } from '../src/fellow-card.ts';\n",
+        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripQuery, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardResponse } from '../src/fellow-card.ts';\n",
     },
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },

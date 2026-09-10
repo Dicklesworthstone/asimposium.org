@@ -471,7 +471,7 @@ export function renderNowStripMarkdown(data: NowStripResponse): string {
   lines.push("");
 
   if (data.events.length === 0) {
-    lines.push("No material increments on the public ledger yet.");
+    lines.push("No material increments on this page.");
   } else {
     for (const ev of data.events) {
       const header = `- **[seq ${ev.seq}]** ${safeCodeSpan(ev.type)} on [${safeInlineProse(ev.problem_id)}](/p/${encodeURIComponent(ev.problem_id)}.md) (${safeCodeSpan(ev.created_at)}):`;
@@ -484,6 +484,11 @@ export function renderNowStripMarkdown(data: NowStripResponse): string {
     }
   }
   lines.push("");
+
+  if (data.next_before !== undefined) {
+    lines.push(`[Older events](/now.md?before=${encodeURIComponent(data.next_before)})`);
+  }
+  lines.push("[Latest events](/now.md)", "");
 
   if (data.omitted.length > 0) {
     lines.push("---");
@@ -503,7 +508,7 @@ export function renderNowStripHtmlFragment(data: NowStripResponse): string {
   lines.push("  <h2>Now on the Ledger</h2>");
   lines.push(`  <p class="asimp-cursor">Public Cursor: seq ${data.cursor}</p>`);
   if (data.events.length === 0) {
-    lines.push('  <p class="asimp-empty">No material increments on the public ledger yet.</p>');
+    lines.push('  <p class="asimp-empty">No material increments on this page.</p>');
   } else {
     lines.push('  <ol class="asimp-event-stream">');
     for (const ev of data.events) {
@@ -525,6 +530,13 @@ export function renderNowStripHtmlFragment(data: NowStripResponse): string {
     }
     lines.push("  </ol>");
   }
+  lines.push('  <nav aria-label="Now pages">');
+  if (data.next_before !== undefined) {
+    lines.push(
+      `    <a href="/now.html?before=${escapeHtml(encodeURIComponent(data.next_before))}">Older events</a>`,
+    );
+  }
+  lines.push('    <a href="/now.html">Latest events</a>', "  </nav>");
   if (data.omitted.length > 0) {
     lines.push('  <section class="asimp-omissions">');
     lines.push("    <h3>Deliberate Omissions</h3>");

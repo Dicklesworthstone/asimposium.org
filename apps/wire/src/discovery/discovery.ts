@@ -586,6 +586,20 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
             },
           ]
         : []),
+      ...(/^\/now(?:\.(?:md|json|html))?$/.test(operation.openApiPath)
+        ? [
+            {
+              name: "before",
+              in: "query",
+              required: false,
+              description:
+                "URL-encode next_before unchanged to read older events, 20 per page. Live traversal; restart for new events earlier than the boundary.",
+              schema: {
+                $ref: `${origins.agent}/schemas/discovery.v1.json#/properties/now_query/properties/before`,
+              },
+            },
+          ]
+        : []),
       ...[...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
         name: match[1],
         in: "path",

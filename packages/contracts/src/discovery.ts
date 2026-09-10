@@ -230,10 +230,56 @@ export const MaterialEventItemSchema = z
 
 export type MaterialEventItem = z.infer<typeof MaterialEventItemSchema>;
 
+// A public ordering boundary, never an authorization token. JSON keeps all four
+// tie-breakers exact; clients carry this opaque string in an encoded query value.
+const NowPageKeySchema = z.tuple([
+  z.literal("n1"),
+  z.string().min(1).max(64),
+  PublicLedgerProblemIdSchema,
+  z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  z.string().min(1).max(128),
+]);
+
+export type NowPageKey = z.infer<typeof NowPageKeySchema>;
+
+export function parseNowPageCursor(value: unknown): NowPageKey | undefined {
+  if (typeof value !== "string" || value.length > 1024) return undefined;
+  try {
+    const parsed = NowPageKeySchema.safeParse(JSON.parse(value));
+    return parsed.success && JSON.stringify(parsed.data) === value ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function encodeNowPageCursor(
+  event: Pick<MaterialEventItem, "created_at" | "problem_id" | "seq" | "event_id">,
+): string {
+  return JSON.stringify(
+    NowPageKeySchema.parse(["n1", event.created_at, event.problem_id, event.seq, event.event_id]),
+  );
+}
+
+export const NowPageCursorSchema = z
+  .string()
+  .max(1024)
+  .regex(/^\["n1",/)
+  .describe(
+    "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset.",
+  )
+  .refine(
+    (value) => parseNowPageCursor(value) !== undefined,
+    "use an unchanged next_before cursor",
+  );
+
+export const NowStripQuerySchema = z.object({ before: NowPageCursorSchema.optional() }).strict();
+export type NowStripQuery = z.infer<typeof NowStripQuerySchema>;
+
 export const NowStripResponseSchema = z
   .object({
     events: z.array(MaterialEventItemSchema).max(50),
     cursor: z.number().int().min(0),
+    next_before: NowPageCursorSchema.optional(),
     omitted: z.array(z.string().min(1).max(200)),
   })
   .strict();

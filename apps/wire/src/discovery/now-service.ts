@@ -1,8 +1,11 @@
 import {
+  encodeNowPageCursor,
   type MaterialEventItem,
   type MaterialEventType,
+  type NowStripQuery,
   type NowStripResponse,
   NowStripResponseSchema,
+  parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
@@ -26,7 +29,12 @@ interface CursorRow {
  * Load the Now strip of material events (Fable §8.1 / §9.6 Materiality Rule).
  * Only object-level events are served; process/meta events are omitted.
  */
-export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
+export async function loadNowStrip(
+  db: D1Database,
+  query: NowStripQuery = {},
+): Promise<NowStripResponse> {
+  const boundary = query.before === undefined ? undefined : parseNowPageCursor(query.before);
+  if (query.before !== undefined && boundary === undefined) throw new Error("Invalid Now cursor");
   const cursorRow = await db
     .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
     .first<CursorRow>();
@@ -34,9 +42,8 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
   const cursor = cursorRow.cursor;
 
   const events: MaterialEventItem[] = [];
-  const eventRows = await db
-    .prepare(
-      `SELECT
+  let statement = db.prepare(
+    `SELECT
            e.id,
            e.problem_id,
            e.seq,
@@ -56,7 +63,19 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
          JOIN problems p ON p.id = e.problem_id
          LEFT JOIN enrollment_fellows f
            ON f.fellow_id = e.actor_fellow_id
-         WHERE p.status != 'private-draft' AND p.unlisted = 0 AND (e.type IN (
+         WHERE p.status != 'private-draft' AND p.unlisted = 0 AND e.seq <= p.public_seq
+         ${
+           boundary === undefined
+             ? ""
+             : `AND (
+           e.created_at < ?1 OR (e.created_at = ?1 AND (
+             e.problem_id > ?2 OR (e.problem_id = ?2 AND (
+               e.seq < ?3 OR (e.seq = ?3 AND e.id > ?4)
+             ))
+           ))
+         )`
+}
+         AND (e.type IN (
            'problem.admitted',
            'claim.created',
            'evidence.created',
@@ -68,11 +87,13 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
              AND json_extract(c.payload_json, '$.previous_status') = 'sharpening'
          )))
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
-         LIMIT 20`,
-    )
-    .all<EventRow>();
+         LIMIT 21`,
+  );
+  if (boundary !== undefined) statement = statement.bind(...boundary.slice(1));
+  const eventRows = await statement.all<EventRow>();
+  const rows = eventRows.results ?? [];
 
-  for (const row of eventRows.results ?? []) {
+  for (const row of rows.slice(0, 20)) {
     const summary = formatMaterialEventSummary(row);
     events.push({
       event_id: row.id,
@@ -88,12 +109,17 @@ export async function loadNowStrip(db: D1Database): Promise<NowStripResponse> {
     });
   }
 
+  const lastEvent = events.at(-1);
   return NowStripResponseSchema.parse({
     events,
     cursor,
+    ...(rows.length > 20 && lastEvent !== undefined
+      ? { next_before: encodeNowPageCursor(lastEvent) }
+      : {}),
     omitted: [
       "process and meta events excluded by the materiality rule (Fable §9.6)",
-      "latest 20 by event time, problem id, problem sequence and event id; problem sequences are not globally comparable",
+      "at most 20 per page by event time descending, problem id ascending, problem sequence descending and event id ascending; problem sequences are not globally comparable",
+      "live traversal, not a frozen snapshot; use next_before for older events and restart to discover newly inserted earlier entries; visibility is checked on every page",
       "material types classify ledger claim.created, review.created and evidence.created as promoted, published and filed",
     ],
   });

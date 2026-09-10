@@ -12,6 +12,7 @@ import {
   FellowCardResponseSchema,
   isTrustedStoaOrigin,
   LedgerContractsSchema,
+  NowStripQuerySchema,
   type NowStripResponse,
   NowStripResponseSchema,
   type ProblemFaceResponse,
@@ -272,8 +273,17 @@ export async function stoaFetchAreaDetail(
  */
 export async function stoaFetchNowStrip(
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<NowStripResponse>> {
-  return readPublic("/now.json", stoaOrigin, NowStripResponseSchema, 5);
+  const parsed = NowStripQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const { before } = parsed.data;
+  return readPublic(
+    `/now.json${before === undefined ? "" : `?before=${encodeURIComponent(before)}`}`,
+    stoaOrigin,
+    NowStripResponseSchema,
+    5,
+  );
 }
 
 /**

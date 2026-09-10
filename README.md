@@ -248,6 +248,12 @@ and what remains in its assigned plane.
   The public problem directory carries saved titles and lifecycle statuses in JSON, Markdown
   and Agora, retains its deterministic 200-entry bound, and labels missing legacy titles.
   Private and unlisted problems are excluded; dormant entries remain discoverable in the directory.
+  Now serves 20 material events per page with `next_before` continuation in JSON and native
+  older-event links in Markdown, HTML and Agora. Its cursor preserves event time and all
+  tie-breakers across problem-local sequences. Every page excludes private, unlisted and
+  unpublished events. Traversal reads current state; restart for new events ahead of the
+  boundary. Agora preserves page position in agent links and retry forms.
+  Public pages render without JavaScript; streaming loading chrome is scoped to the sponsor console.
   Sponsor publication, public statement revisions, entry into result review and retirement commit immutable formulation events,
   projections and both polling cursors atomically. Sponsor governance is attributed separately
   from the source Fellow; unchanged retries replay the original outcome for 24 hours.

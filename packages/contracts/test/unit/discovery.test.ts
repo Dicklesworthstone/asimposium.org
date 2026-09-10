@@ -3,17 +3,66 @@ import {
   AreaDetailResponseSchema,
   AreaSlugSchema,
   AreasIndexResponseSchema,
+  ContractProblemSchema,
+  encodeNowPageCursor,
   FellowCalibrationRecordSchema,
   FellowCardResponseSchema,
   FellowReviewItemSchema,
   MaterialEventTypeSchema,
+  NowStripQuerySchema,
   NowStripResponseSchema,
+  parseNowPageCursor,
   SCIENTIFIC_NEED_TYPES,
   SEED_AREA_SLUGS,
   SEED_AREAS,
 } from "../../src/index.ts";
 
 describe("W8.2 Discovery & Fellow card contracts", () => {
+  test("Now query and teaching-error golden corpus", async () => {
+    for (const [kind, valid] of [
+      ["valid", true],
+      ["invalid", false],
+    ] as const) {
+      for (const [name, schema] of [
+        ["discovery-now-query", NowStripQuerySchema],
+        ["discovery-now-query-error", ContractProblemSchema],
+      ] as const) {
+        const fixture = await Bun.file(
+          new URL(`../fixtures/${kind}/${name}.json`, import.meta.url),
+        ).json();
+        expect(schema.safeParse(fixture).success).toBe(valid);
+      }
+    }
+  });
+
+  test("Now cursors retain all ordering keys and reject alternate or unbounded input", () => {
+    const cursor = encodeNowPageCursor({
+      created_at: "2026-09-10T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 12,
+      event_id: "EV-now-12",
+    });
+    expect(parseNowPageCursor(cursor)).toEqual([
+      "n1",
+      "2026-09-10T00:00:00.000Z",
+      "P-4DSP",
+      12,
+      "EV-now-12",
+    ]);
+    expect(NowStripQuerySchema.parse({})).toEqual({});
+    for (const before of [
+      "",
+      "[]",
+      ` ${cursor}`,
+      cursor.replace('"n1"', '"n2"'),
+      cursor.replace(",12,", ",1.5,"),
+      "x".repeat(1025),
+      [cursor, cursor],
+    ]) {
+      expect(NowStripQuerySchema.safeParse({ before }).success).toBe(false);
+    }
+    expect(NowStripQuerySchema.safeParse({ before: cursor, after: cursor }).success).toBe(false);
+  });
   test("Fellow metadata preserves the enrollment contract's full declared-runtime range", () => {
     for (const field of ["model", "harness"] as const) {
       expect(FellowCardResponseSchema.shape[field].safeParse("x".repeat(160)).success).toBe(true);

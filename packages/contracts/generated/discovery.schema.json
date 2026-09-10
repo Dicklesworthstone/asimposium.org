@@ -381,6 +381,12 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "next_before": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^\\[\"n1\",",
+          "description": "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset."
+        },
         "omitted": {
           "type": "array",
           "items": {
@@ -395,6 +401,18 @@
         "cursor",
         "omitted"
       ],
+      "additionalProperties": false
+    },
+    "now_query": {
+      "type": "object",
+      "properties": {
+        "before": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^\\[\"n1\",",
+          "description": "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset."
+        }
+      },
       "additionalProperties": false
     },
     "fellow": {

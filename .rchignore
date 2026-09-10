@@ -1,0 +1,11 @@
+# Local Worker secrets and agent state must not enter remote build snapshots.
+.dev.vars
+.dev.vars.*
+# Gate tests need the sanitized staged issues.jsonl supplied explicitly on workers.
+# Keep databases, recovery copies and the machine-local working projection out.
+.beads/
+.claude/
+e2e/artifacts/
+# Wrangler's local database, R2 and cache contents are not build inputs.
+**/.wrangler/state/
+**/.wrangler/tmp/

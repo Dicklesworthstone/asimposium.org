@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { PRODUCTION_STOA_ORIGIN, SEED_AREAS, STAGING_STOA_ORIGIN } from "@asimposium/contracts";
+import {
+  encodeNowPageCursor,
+  PRODUCTION_STOA_ORIGIN,
+  SEED_AREAS,
+  STAGING_STOA_ORIGIN,
+} from "@asimposium/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PublicRead } from "../../lib/public-ledger.ts";
 
@@ -501,7 +506,7 @@ describe("public read failure boundaries and recovery", () => {
     const html = renderToStaticMarkup(await NowPage());
     expect(html).toContain(`${STAGING_STOA_ORIGIN}/now.json`);
     expect(html).not.toContain(PRODUCTION_STOA_ORIGIN);
-    expect(html).toContain("No material events recorded yet");
+    expect(html).toContain("No material events on this page");
     expect(html).toContain("<code>17</code>");
   });
 
@@ -519,6 +524,63 @@ describe("public read failure boundaries and recovery", () => {
       ]);
       for (const result of results) expect(result.state).toBe("unavailable");
     }
+  });
+
+  test("Now pages preserve opaque cursors across reads, human and agent links, and recovery", async () => {
+    process.env.STOA_ORIGIN = STAGING_STOA_ORIGIN;
+    const before = encodeNowPageCursor({
+      created_at: "2026-09-10T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 25,
+      event_id: "EV-25",
+    });
+    const next_before = encodeNowPageCursor({
+      created_at: "2026-09-09T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 5,
+      event_id: "EV-5",
+    });
+    let calls = 0;
+    let status = 200;
+    setMockFetch(async (input) => {
+      calls++;
+      expect(String(input)).toBe(
+        `${STAGING_STOA_ORIGIN}/now.json?before=${encodeURIComponent(before)}`,
+      );
+      return status === 200
+        ? Response.json({
+            events: [],
+            cursor: 80,
+            next_before,
+            omitted: ["live traversal, not a frozen snapshot"],
+          })
+        : new Response(null, { status });
+    });
+    const props = { searchParams: Promise.resolve({ before }) };
+    const html = renderToStaticMarkup(await NowPage(props));
+    expect(html).toContain(`href="/now?before=${encodeURIComponent(next_before)}"`);
+    expect(html).toContain(`href="/now"`);
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/now.md?before=${encodeURIComponent(before)}`);
+    expect(html).toContain("live traversal, not a frozen snapshot");
+    status = 503;
+    const unavailable = renderToStaticMarkup(await NowPage(props));
+    expect(unavailable).toContain("temporarily unavailable");
+    expect(unavailable).toContain('<form action="/now" method="GET">');
+    expect(unavailable).toContain(`name="before" value="${before.replaceAll('"', "&quot;")}"`);
+    expect(calls).toBe(2);
+    for (const query of [
+      { before: [before, before] },
+      { before: "invalid-secret-marker" },
+      { before, unknown: "x" },
+    ]) {
+      const rejected = renderToStaticMarkup(
+        await NowPage({ searchParams: Promise.resolve(query) }),
+      );
+      expect(rejected).toContain("Invalid Now query");
+      expect(rejected).not.toContain("invalid-secret-marker");
+      expect((await stoaFetchNowStrip(undefined, query)).state).toBe("unavailable");
+    }
+    expect(calls).toBe(2);
   });
 
   test("resource-specific 404s cannot be confused with another resource or an outage", async () => {
@@ -646,7 +708,7 @@ describe("public read failure boundaries and recovery", () => {
       expect(renderToStaticMarkup(await NowPage())).toContain("temporarily unavailable");
       mode = "empty";
       const html = renderToStaticMarkup(await NowPage());
-      expect(html).toContain("No material events recorded yet");
+      expect(html).toContain("No material events on this page");
       expect(html).toContain("<code>12</code>");
       expect(html).not.toContain("temporarily unavailable");
       mode = "redirect";

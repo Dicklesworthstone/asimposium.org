@@ -937,7 +937,17 @@
           }
         },
         "x-asimposium-auth": "public",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_before unchanged to read older events, 20 per page. Live traversal; restart for new events earlier than the boundary.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/discovery.v1.json#/properties/now_query/properties/before"
+            }
+          }
+        ],
         "security": []
       }
     },
@@ -966,7 +976,17 @@
           }
         },
         "x-asimposium-auth": "public",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_before unchanged to read older events, 20 per page. Live traversal; restart for new events earlier than the boundary.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/discovery.v1.json#/properties/now_query/properties/before"
+            }
+          }
+        ],
         "security": []
       }
     },
@@ -995,7 +1015,17 @@
           }
         },
         "x-asimposium-auth": "public",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_before unchanged to read older events, 20 per page. Live traversal; restart for new events earlier than the boundary.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/discovery.v1.json#/properties/now_query/properties/before"
+            }
+          }
+        ],
         "security": []
       }
     },
@@ -1024,7 +1054,17 @@
           }
         },
         "x-asimposium-auth": "public",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_before unchanged to read older events, 20 per page. Live traversal; restart for new events earlier than the boundary.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/discovery.v1.json#/properties/now_query/properties/before"
+            }
+          }
+        ],
         "security": []
       }
     },

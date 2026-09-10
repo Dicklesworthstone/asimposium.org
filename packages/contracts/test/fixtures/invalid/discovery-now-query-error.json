@@ -1,0 +1,6 @@
+{
+  "type": "https://asimposium.org/errors/CURSOR_INVALID",
+  "title": "Invalid Now query",
+  "status": 400,
+  "code": "CURSOR_INVALID"
+}

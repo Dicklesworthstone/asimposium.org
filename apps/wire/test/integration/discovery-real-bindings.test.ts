@@ -3,6 +3,7 @@ import { delimiter, resolve } from "node:path";
 
 test.each([
   "positive",
+  "now-pagination",
   "reject",
   "quarantine",
   "unavailable",
@@ -58,21 +59,23 @@ test.each([
         node,
         resolve(
           import.meta.dir,
-          screenMode === "working-review"
-            ? "working-review-real-bindings.mjs"
-            : screenMode === "workshop-read"
-              ? "workshop-read-real-bindings.mjs"
-              : screenMode === "credential-liveness"
-                ? "claim-credential-liveness-real-bindings.mjs"
-                : screenMode === "statement-review"
-                  ? "statement-review-real-bindings.mjs"
-                  : screenMode === "unlisted"
-                    ? "unlisted-real-bindings.mjs"
-                    : screenMode === "governance"
-                      ? "problem-lifecycle-ledger-real-bindings.mjs"
-                      : screenMode === "areas"
-                        ? "area-discovery-real-bindings.mjs"
-                        : "discovery-real-bindings.mjs",
+          screenMode === "now-pagination"
+            ? "now-pagination-real-bindings.mjs"
+            : screenMode === "working-review"
+              ? "working-review-real-bindings.mjs"
+              : screenMode === "workshop-read"
+                ? "workshop-read-real-bindings.mjs"
+                : screenMode === "credential-liveness"
+                  ? "claim-credential-liveness-real-bindings.mjs"
+                  : screenMode === "statement-review"
+                    ? "statement-review-real-bindings.mjs"
+                    : screenMode === "unlisted"
+                      ? "unlisted-real-bindings.mjs"
+                      : screenMode === "governance"
+                        ? "problem-lifecycle-ledger-real-bindings.mjs"
+                        : screenMode === "areas"
+                          ? "area-discovery-real-bindings.mjs"
+                          : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -106,29 +109,32 @@ test.each([
     for (const record of records) if (record !== null) console.info(JSON.stringify(record));
     if (exit !== 0) throw new Error(`Real binding lane failed (${exit}): ${stderr}`);
     const kind =
-      screenMode === "working-review"
-        ? "working-review-real-bindings"
-        : screenMode === "workshop-read"
-          ? "workshop-read-real-bindings"
-          : screenMode === "credential-liveness"
-            ? "claim-credential-liveness-real-bindings"
-            : screenMode === "statement-review"
-              ? "statement-review-real-bindings"
-              : screenMode === "unlisted"
-                ? "unlisted-real-bindings"
-                : screenMode === "governance"
-                  ? "problem-lifecycle-ledger"
-                  : screenMode === "areas"
-                    ? "area-discovery-real-bindings"
-                    : screenMode === "science"
-                      ? "scientific-journey-real-bindings"
-                      : screenMode === "positive"
-                        ? "discovery-real-bindings"
-                        : "discovery-screening-real-bindings";
+      screenMode === "now-pagination"
+        ? "now-pagination-real-bindings"
+        : screenMode === "working-review"
+          ? "working-review-real-bindings"
+          : screenMode === "workshop-read"
+            ? "workshop-read-real-bindings"
+            : screenMode === "credential-liveness"
+              ? "claim-credential-liveness-real-bindings"
+              : screenMode === "statement-review"
+                ? "statement-review-real-bindings"
+                : screenMode === "unlisted"
+                  ? "unlisted-real-bindings"
+                  : screenMode === "governance"
+                    ? "problem-lifecycle-ledger"
+                    : screenMode === "areas"
+                      ? "area-discovery-real-bindings"
+                      : screenMode === "science"
+                        ? "scientific-journey-real-bindings"
+                        : screenMode === "positive"
+                          ? "discovery-real-bindings"
+                          : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
     if (
+      screenMode === "now-pagination" ||
       screenMode === "areas" ||
       screenMode === "governance" ||
       screenMode === "unlisted" ||

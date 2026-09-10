@@ -1,4 +1,4 @@
-import { AreaSlugSchema } from "@asimposium/contracts";
+import { AreaSlugSchema, NowStripQuerySchema } from "@asimposium/contracts";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -178,7 +178,28 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
 
   // 3. Now strip (/now, /now.json, /now.md, /now.html)
   async function handleNow(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
-    const data = await loadNowStrip(c.env.DB);
+    const params = new URL(c.req.url).searchParams;
+    const query = NowStripQuerySchema.safeParse(Object.fromEntries(params));
+    if (!query.success || params.getAll("before").length > 1) {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid Now query",
+        detail:
+          "Now accepts only one optional before parameter containing an unchanged continuation cursor.",
+        fixHint:
+          "URL-encode next_before from the previous JSON page as ?before=<cursor>, or omit the query to restart.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/discovery.v1.json#/properties/now_query",
+          example: { method: "GET", path: "/now.json" },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    const data = await loadNowStrip(c.env.DB, query.data);
     const targetFace = resolveFace(c, forceFace);
 
     if (targetFace === "json") {

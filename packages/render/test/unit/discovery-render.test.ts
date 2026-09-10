@@ -5,6 +5,7 @@ import type {
   FellowCardResponse,
   NowStripResponse,
 } from "@asimposium/contracts";
+import { encodeNowPageCursor } from "@asimposium/contracts";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -267,6 +268,25 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(html).toContain('<section class="asimp-now-strip">');
       expect(html).toContain('<li id="event-P-4DSP-12" class="asimp-event-card">');
       expect(html).toContain("Promoted conjecture C-1: Every trisection has a twist.");
+    });
+
+    test("older-event links preserve the exact boundary on both faces", () => {
+      const event = sampleNow.events[0];
+      if (event === undefined) throw new Error("Missing Now fixture");
+      const next_before = encodeNowPageCursor(event);
+      const data = { ...sampleNow, next_before };
+      expect(renderNowStripMarkdown(data)).toContain(
+        `[Older events](/now.md?before=${encodeURIComponent(next_before)})`,
+      );
+      expect(renderNowStripHtmlFragment(data)).toContain(
+        `href="/now.html?before=${encodeURIComponent(next_before)}"`,
+      );
+      for (const render of [renderNowStripMarkdown, renderNowStripHtmlFragment]) {
+        const empty = render({ cursor: 30, events: [], omitted: [] });
+        expect(empty).toContain("No material increments on this page.");
+        expect(empty).not.toContain("Older events");
+        expect(empty).toContain("Latest events");
+      }
     });
 
     test("safely fences multiline or hostile event summaries", () => {
