@@ -137,7 +137,8 @@ readonly RESPONSE_BODY_TOO_LARGE_MARKER="__S1_RESPONSE_BODY_TOO_LARGE__"
 readonly EXIT_CLEANUP_ATTEMPTS=2
 readonly PORT_ALLOCATION_ATTEMPTS=40
 readonly EPHEMERAL_PORT_FLOOR=20000
-readonly EPHEMERAL_PORT_SPAN=20000
+readonly EPHEMERAL_PORT_SPAN=12000
+readonly PORT_RESERVATION_DIR="${TMPDIR:-/tmp}/asimposium-s1-ports"
 
 # Mutable lifecycle state, read by the traps. SERVER_PGID is the process group
 # *proven* to belong to the child at spawn time; it stays set after the leader
@@ -184,9 +185,13 @@ LOCAL_RETAINED_ROOTS=()
 # parent before the stopped supervisor is observed.
 readonly PRIVATE_SERVER_HANDOFF_FD=9
 PRIVATE_HANDOFF_PRELAUNCH_HELPER_OBSERVED=0
-# Resolved by `resolve_port` / `resolve_run_token`, which refuse in this shell
-# rather than inside a command substitution. See the comment on `allocate_port`.
+# Resolved by `resolve_port` / `resolve_inspector_port` / `resolve_run_token`, which
+# refuse in this shell rather than inside a command substitution. See the comment
+# on `allocate_port`.
 RESOLVED_PORT=""
+RESOLVED_INSPECTOR_PORT=""
+PORT_RESERVATION_FDS=()
+RESERVED_PORTS=()
 RUN_TOKEN=""
 # Non-secret per-run marker written into the client's retained evidence record,
 # and the cap the reader enforces before parsing it.
@@ -1289,6 +1294,7 @@ on_exit() {
     assert_local_replay_key_not_retained "exit"
     LOCAL_REPLAY_KEY=""
   fi
+  release_port_reservations
   if ((cleanup_proven == 1)); then
     if [[ -n "$INTERRUPT_TERMINAL_CODE" ]]; then
       log_phase "interrupted-cleanup-recovered" "code=$INTERRUPT_TERMINAL_CODE attempt=$attempt"
@@ -1340,11 +1346,113 @@ valid_port() {
   ((port >= 1024 && port <= 65535))
 }
 
+# Reads the Linux kernel ephemeral port floor from /proc if available, defaulting
+# to 32768 (standard Linux default). Any dynamically allocated port must stay
+# strictly below this floor so it never races with outbound client sockets.
+kernel_ephemeral_port_floor() {
+  if [[ -r /proc/sys/net/ipv4/ip_local_port_range ]]; then
+    local floor
+    floor="$(awk '{print $1}' /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || true)"
+    if [[ "$floor" =~ ^[0-9]+$ ]] && ((floor > 1024)); then
+      printf '%s' "$floor"
+      return 0
+    fi
+  fi
+  printf '32768'
+}
+
 # True when nothing is listening. Uses bash's own /dev/tcp so the check needs no
 # lsof, ss or nc, which differ across the platforms this runs on.
 port_is_free() {
   local port="$1"
   ! (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null
+}
+
+# Verifies that 127.0.0.1:$port can actually be bound by a local TCP server.
+# An empty connect check alone (/dev/tcp) is insufficient if the port is in
+# TIME_WAIT or occupied by an outbound socket without a listener.
+port_accepts_bind() {
+  local port="$1"
+  "$BUN_BIN" --eval '
+    const port = Number(process.argv[1]);
+    try {
+      const server = Bun.serve({ port, hostname: "127.0.0.1", fetch: () => new Response("probe") });
+      server.stop(true);
+      process.exit(0);
+    } catch {
+      process.exit(1);
+    }
+  ' "${port}" >/dev/null 2>&1
+}
+
+# Checks if a port is reserved by another concurrent harness run.
+port_is_reserved() {
+  local port="$1"
+  local lock_file="${PORT_RESERVATION_DIR}/${port}.lock"
+  [[ -e "$lock_file" ]] || return 1
+
+  if command -v flock >/dev/null 2>&1; then
+    if ! (flock -n 9) 9<"$lock_file" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  local owner_pid=""
+  IFS= read -r owner_pid <"$lock_file" 2>/dev/null || true
+  if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Claims an advisory reservation for a port across concurrent harness runs.
+# The open file descriptor is retained in PORT_RESERVATION_FDS for the lifetime
+# of the harness, guaranteeing mutual exclusion during the vulnerable migration
+# and startup window until workerd is bound and listening.
+claim_port_reservation() {
+  local port="$1"
+  mkdir -p "$PORT_RESERVATION_DIR" 2>/dev/null || return 1
+  local lock_file="${PORT_RESERVATION_DIR}/${port}.lock"
+
+  if port_is_reserved "$port"; then
+    return 1
+  fi
+
+  local fd
+  if ! exec {fd}>"$lock_file"; then
+    return 1
+  fi
+
+  if command -v flock >/dev/null 2>&1; then
+    if ! flock -n "$fd" 2>/dev/null; then
+      exec {fd}>&-
+      return 1
+    fi
+  fi
+
+  printf '%s\n' "$$" >&"$fd" 2>/dev/null || true
+  PORT_RESERVATION_FDS+=("$fd")
+  RESERVED_PORTS+=("$port")
+  return 0
+}
+
+# Releases all held port reservations by closing descriptors and clearing owners.
+release_port_reservations() {
+  local fd port
+  for fd in "${PORT_RESERVATION_FDS[@]}"; do
+    if [[ "$fd" =~ ^[0-9]+$ ]]; then
+      eval "exec ${fd}>&-"
+    fi
+  done
+  PORT_RESERVATION_FDS=()
+  for port in "${RESERVED_PORTS[@]}"; do
+    local lock_file="${PORT_RESERVATION_DIR}/${port}.lock"
+    if [[ -w "$lock_file" ]]; then
+      printf '0\n' >"$lock_file" 2>/dev/null || true
+    fi
+  done
+  RESERVED_PORTS=()
 }
 
 # Prints a free port, or returns non-zero when it cannot find one.
@@ -1355,10 +1463,14 @@ port_is_free() {
 # which runs in the script's own shell. The same rule applies to every helper
 # invoked as `$(...)` in this file.
 allocate_port() {
-  local excluded="${1:-}" attempt port
+  local excluded="${1:-}" attempt port ephem_floor
+  ephem_floor="$(kernel_ephemeral_port_floor)"
   for ((attempt = 0; attempt < PORT_ALLOCATION_ATTEMPTS; attempt += 1)); do
     port=$((EPHEMERAL_PORT_FLOOR + RANDOM % EPHEMERAL_PORT_SPAN))
-    if [[ "$port" != "$excluded" ]] && port_is_free "$port"; then
+    if ((port >= ephem_floor)); then
+      continue
+    fi
+    if [[ "$port" != "$excluded" ]] && ! port_is_reserved "$port" && port_is_free "$port" && port_accepts_bind "$port"; then
       printf '%s' "$port"
       return 0
     fi
@@ -1371,12 +1483,43 @@ resolve_port() {
   if [[ -n "${S1_LOCAL_PORT:-}" ]]; then
     valid_port "${S1_LOCAL_PORT}" || blocked "PINNED_PORT_INVALID"
     port_is_free "${S1_LOCAL_PORT}" || blocked "PINNED_PORT_BUSY"
+    port_accepts_bind "${S1_LOCAL_PORT}" || blocked "PINNED_PORT_BUSY"
+    claim_port_reservation "${S1_LOCAL_PORT}" || blocked "PINNED_PORT_BUSY"
     RESOLVED_PORT="${S1_LOCAL_PORT}"
     return 0
   fi
-  local port
-  port="$(allocate_port)" || blocked "LOCAL_PORT_UNAVAILABLE"
-  RESOLVED_PORT="$port"
+  local port attempt
+  for ((attempt = 0; attempt < PORT_ALLOCATION_ATTEMPTS; attempt += 1)); do
+    port="$(allocate_port)" || break
+    if claim_port_reservation "$port"; then
+      RESOLVED_PORT="$port"
+      return 0
+    fi
+  done
+  blocked "LOCAL_PORT_UNAVAILABLE"
+}
+
+# Sets RESOLVED_INSPECTOR_PORT. Runs in the script's shell so a refusal really refuses.
+resolve_inspector_port() {
+  local local_port="$1"
+  if [[ -n "${S1_INSPECTOR_PORT:-}" ]]; then
+    valid_port "${S1_INSPECTOR_PORT}" || blocked "PINNED_INSPECTOR_PORT_INVALID"
+    [[ "${S1_INSPECTOR_PORT}" != "$local_port" ]] || blocked "PINNED_INSPECTOR_PORT_BUSY"
+    port_is_free "${S1_INSPECTOR_PORT}" || blocked "PINNED_INSPECTOR_PORT_BUSY"
+    port_accepts_bind "${S1_INSPECTOR_PORT}" || blocked "PINNED_INSPECTOR_PORT_BUSY"
+    claim_port_reservation "${S1_INSPECTOR_PORT}" || blocked "PINNED_INSPECTOR_PORT_BUSY"
+    RESOLVED_INSPECTOR_PORT="${S1_INSPECTOR_PORT}"
+    return 0
+  fi
+  local port attempt
+  for ((attempt = 0; attempt < PORT_ALLOCATION_ATTEMPTS; attempt += 1)); do
+    port="$(allocate_port "$local_port")" || break
+    if claim_port_reservation "$port"; then
+      RESOLVED_INSPECTOR_PORT="$port"
+      return 0
+    fi
+  done
+  failed "LOCAL_INSPECTOR_PORT_UNAVAILABLE"
 }
 
 # Sets RUN_TOKEN: a per-run synthetic sponsor id. Deliberately not a secret, and
@@ -2730,6 +2873,21 @@ self_test() {
   for rejected_port in 0 80 1023 65536 70000 02000 "" "not-a-port" "80 80" "-1"; do
     if valid_port "$rejected_port"; then failed "SELF_TEST_PORT_VALIDATION_FAILED"; fi
   done
+  local allocated_test_port allocated_inspector_test_port ephem_floor
+  ephem_floor="$(kernel_ephemeral_port_floor)"
+  allocated_test_port="$(allocate_port)" || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  valid_port "$allocated_test_port" || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  ((allocated_test_port >= EPHEMERAL_PORT_FLOOR)) || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  ((allocated_test_port < ephem_floor)) || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  allocated_inspector_test_port="$(allocate_port "$allocated_test_port")" || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  valid_port "$allocated_inspector_test_port" || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  [[ "$allocated_inspector_test_port" != "$allocated_test_port" ]] || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+
+  claim_port_reservation "$allocated_test_port" || failed "SELF_TEST_PORT_RESERVATION_FAILED"
+  local avoid_reserved_port
+  avoid_reserved_port="$(allocate_port)" || failed "SELF_TEST_PORT_ALLOCATION_FAILED"
+  [[ "$avoid_reserved_port" != "$allocated_test_port" ]] || failed "SELF_TEST_PORT_RESERVATION_FAILED"
+  release_port_reservations
   resolve_run_token
   [[ "$RUN_TOKEN" =~ ^usr_s1_[0-9]+_[0-9]+$ ]] || failed "SELF_TEST_RUN_TOKEN_FAILED"
 
@@ -4255,6 +4413,8 @@ run_local_d1() {
   # ends the run here — before mktemp, before migrations, before any child.
   resolve_port
   local_port="$RESOLVED_PORT"
+  resolve_inspector_port "$local_port"
+  inspector_port="$RESOLVED_INSPECTOR_PORT"
   # Trailing X's are required by GNU mktemp; BSD mktemp accepts them too.
   STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-s1-enrollment.XXXXXXXX")"
   # The state directory is intentionally retained on every exit path. It holds
@@ -4267,8 +4427,7 @@ run_local_d1() {
   log_phase "state-retained" "dir=$STATE_DIR"
   log_phase "runtime-roots-ready" "scope=state-dir roots=home,tmp,xdg,wrangler,bun,cwd"
   log_phase "port-allocated" "port=$local_port pinned=$([[ -n "${S1_LOCAL_PORT:-}" ]] && printf 'yes' || printf 'no')"
-  inspector_port="$(allocate_port "$local_port")" || failed "LOCAL_INSPECTOR_PORT_UNAVAILABLE"
-  log_phase "inspector-port-allocated" "port=$inspector_port distinct=local-port"
+  log_phase "inspector-port-allocated" "port=$inspector_port distinct=local-port pinned=$([[ -n "${S1_INSPECTOR_PORT:-}" ]] && printf 'yes' || printf 'no')"
   resolve_run_token
   token="$RUN_TOKEN"
   resolve_local_replay_key

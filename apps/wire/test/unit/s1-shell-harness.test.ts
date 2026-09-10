@@ -2036,6 +2036,43 @@ describe("a pinned port is validated before anything is started", () => {
     }
   });
 
+  test("PLANTED: an invalid pinned inspector port is refused before supervisor launch", async () => {
+    const run = await runScript(["--local-d1"], {
+      S1_INSPECTOR_PORT: "not-a-port",
+    });
+    expect(run.exitCode).toBe(78);
+    expect(record(run).code).toBe("PINNED_INSPECTOR_PORT_INVALID");
+    expect(run.stderr).not.toContain("child-started");
+  });
+
+  test("PLANTED: a pinned inspector port that is already listening is refused, not served by the squatter", async () => {
+    const listener = occupyPort();
+    try {
+      const run = await runScript(["--local-d1"], {
+        S1_INSPECTOR_PORT: String(listener.port),
+      });
+      expect(run.exitCode).toBe(78);
+      expect(record(run).code).toBe("PINNED_INSPECTOR_PORT_BUSY");
+      expect(run.stderr).not.toContain("child-started");
+      const probe = await fetch(`http://127.0.0.1:${listener.port}/`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      expect(await probe.text()).toBe("busy");
+    } finally {
+      listener.stop();
+    }
+  });
+
+  test("PLANTED: a pinned inspector port colliding with the local port is refused", async () => {
+    const run = await runScript(["--local-d1"], {
+      S1_LOCAL_PORT: "28111",
+      S1_INSPECTOR_PORT: "28111",
+    });
+    expect(run.exitCode).toBe(78);
+    expect(record(run).code).toBe("PINNED_INSPECTOR_PORT_BUSY");
+    expect(run.stderr).not.toContain("child-started");
+  });
+
   test("PLANTED: ownership observation stays inside the live Workerd binding", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
     const start = source.indexOf("assert_port_ownership() {");
@@ -2120,6 +2157,8 @@ describe("a pinned port is validated before anything is started", () => {
     expect(port).toBeGreaterThanOrEqual(1024);
     expect(Number.isInteger(inspectorPort)).toBe(true);
     expect(inspectorPort).toBeGreaterThanOrEqual(1024);
+    expect(port).toBeLessThan(32768);
+    expect(inspectorPort).toBeLessThan(32768);
     expect(inspectorPort).not.toBe(port);
     expect(phaseValue(run.stderr, "port-allocated", "pinned")).toBe("no");
     // Readiness is tied to this run's own D1 state, not merely to "something answered".
@@ -3384,6 +3423,10 @@ describe("lifecycle: parallel runs and signal handling", () => {
     expect(firstInspectorPort).not.toBe(firstPort);
     expect(secondInspectorPort).not.toBe(secondPort);
     expect(firstInspectorPort).not.toBe(secondInspectorPort);
+    expect(Number(firstPort)).toBeLessThan(32768);
+    expect(Number(secondPort)).toBeLessThan(32768);
+    expect(Number(firstInspectorPort)).toBeLessThan(32768);
+    expect(Number(secondInspectorPort)).toBeLessThan(32768);
 
     const firstDir = phaseValue(first.stderr, "state-retained", "dir");
     const secondDir = phaseValue(second.stderr, "state-retained", "dir");
@@ -3392,6 +3435,45 @@ describe("lifecycle: parallel runs and signal handling", () => {
     expect(existsSync(firstDir as string)).toBe(true);
     expect(existsSync(secondDir as string)).toBe(true);
   }, 720_000);
+
+  test("PLANTED: dynamic inspector allocation avoids an occupied candidate port", async () => {
+    if (!existsSync(WRANGLER)) {
+      await assertWranglerBlocked();
+      return;
+    }
+    let occupiedPort = 24890;
+    let listener: { port: number; stop: () => void } | undefined;
+    for (let candidate = 24890; candidate < 25000; candidate++) {
+      try {
+        const s = Bun.serve({
+          port: candidate,
+          hostname: "127.0.0.1",
+          fetch: () => new Response("occupied-inspector"),
+        });
+        if (typeof s.port !== "number") continue;
+        occupiedPort = s.port;
+        listener = { port: occupiedPort, stop: () => s.stop(true) };
+        break;
+      } catch {
+        continue;
+      }
+    }
+    if (!listener) throw new Error("could not occupy port for test");
+    try {
+      const run = await runScript(["--local-d1"]);
+      expect(run.exitCode).toBe(0);
+      const inspectorPort = Number(phaseValue(run.stderr, "inspector-port-allocated", "port"));
+      expect(inspectorPort).not.toBe(occupiedPort);
+      expect(inspectorPort).toBeGreaterThanOrEqual(1024);
+      expect(inspectorPort).toBeLessThan(32768);
+      const probe = await fetch(`http://127.0.0.1:${occupiedPort}/`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      expect(await probe.text()).toBe("occupied-inspector");
+    } finally {
+      listener.stop();
+    }
+  }, 120_000);
 
   test("PLANTED: TERM terminates the whole child group and retains the state directory", async () => {
     if (!existsSync(WRANGLER)) {
