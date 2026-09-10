@@ -73,6 +73,7 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // teaching codes, never opaque: a malformed write body has a corrected shape
   // to hand back, unlike a policy refusal.
   "SESSION_OPEN_BODY_INVALID",
+  "SESSION_HEARTBEAT_BODY_INVALID",
   "WORKSHOP_PUSH_BODY_INVALID",
   "PROMOTE_BODY_INVALID",
   "SESSION_CLOSE_BODY_INVALID",
