@@ -1480,7 +1480,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   > {
     const trimmed = rawRef.trim();
     const prefixMatch = /^([CHGQ])-(\d+)$/i.exec(trimmed);
-    if (prefixMatch) {
+    if (prefixMatch && prefixMatch[1] && prefixMatch[2]) {
       const typeLetter = prefixMatch[1].toUpperCase();
       const seqNum = Number.parseInt(prefixMatch[2], 10);
       if (typeLetter === "C") {
@@ -1593,6 +1593,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return undefined;
   }
 
+  interface LeaseOpsRecord {
+    readonly record_type: "lease-transition";
+    readonly lease_id: string;
+    readonly problem_id: string;
+    readonly object_ref: string;
+    readonly object_id: string;
+    readonly session_id: string;
+    readonly fellow_id: string;
+    readonly sponsor_id: string;
+    readonly mode: "exclusive" | "parallel_safe";
+    readonly objective_digest: string;
+    readonly deliverable_digest: string;
+    readonly transition: "acquired" | "renewed" | "released" | "challenged" | "sponsor_released";
+    readonly expiry: string;
+    readonly clock_source: "server_clock";
+    readonly request_id?: string;
+    readonly event_id?: string;
+    readonly code?: string;
+    readonly latency_ms?: number;
+  }
+
+  function logLeaseOps(record: LeaseOpsRecord): void {
+    console.info(JSON.stringify(record));
+  }
 
   // ebts: one exact-path response policy for every mounted Fellow POST
   // routes. Every response class they can emit — fresh success, exact replay,
@@ -1625,6 +1649,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/conflicts",
     "/v1/sessions/:id/conflicts/:cid/resolve",
     "/v1/sessions/:id/leases",
+    "/v1/sessions/:id/leases/:ref",
     "/v1/sessions/:id/leases/:ref/release",
     "/v1/sessions/:id/leases/:ref/challenge",
     "/v1/sessions/:id/close",
@@ -1633,7 +1658,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   for (const path of FELLOW_WRITE_RECEIPT_PATHS) {
     app.use(path, async (c, next) => {
       await next();
-      if (c.req.method === "POST") {
+      if (c.req.method === "POST" || c.req.method === "DELETE") {
         c.res.headers.set("cache-control", "private, no-store");
       }
     });
@@ -1945,7 +1970,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
     const renewedLeaseUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
 
-    const activeLeases = await db
+    const activeQuestions = await db
       .prepare(
         `SELECT question_id FROM questions
          WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)
@@ -1954,7 +1979,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
       .all<{ question_id: string }>();
 
-    const renewedLeases = (activeLeases.results ?? []).map((r) => r.question_id);
+    const activeObjectLeases = await db
+      .prepare(
+        `SELECT lease_id, problem_id, object_ref, object_id, session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe, leased_until
+         FROM leases
+         WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ?
+         ORDER BY leased_at ASC`,
+      )
+      .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
+      .all<{
+        lease_id: string;
+        problem_id: string;
+        object_ref: string;
+        object_id: string;
+        session_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        objective: string;
+        deliverable: string;
+        parallel_safe: number;
+        leased_until: string;
+      }>();
+
+    const renewedLeases = Array.from(
+      new Set([
+        ...(activeQuestions.results ?? []).map((r) => r.question_id),
+        ...(activeObjectLeases.results ?? []).map((r) => r.object_ref),
+      ]),
+    ).sort();
 
     const statements = [
       db
@@ -1966,7 +2018,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(lastHeartbeatAt, idleCloseAt, session.session_id),
     ];
 
-    if (renewedLeases.length > 0) {
+    if ((activeQuestions.results ?? []).length > 0) {
       statements.push(
         db
           .prepare(
@@ -1978,7 +2030,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
+    if ((activeObjectLeases.results ?? []).length > 0) {
+      statements.push(
+        db
+          .prepare(
+            `UPDATE leases
+             SET leased_until = ?, updated_at = ?
+             WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ?`,
+          )
+          .bind(
+            renewedLeaseUntil,
+            lastHeartbeatAt,
+            session.problem_id,
+            auth.binding.fellowId,
+            lastHeartbeatAt,
+          ),
+      );
+    }
+
     await db.batch(statements);
+
+    for (const l of activeObjectLeases.results ?? []) {
+      void (async () => {
+        logLeaseOps({
+          record_type: "lease-transition",
+          lease_id: l.lease_id,
+          problem_id: l.problem_id,
+          object_ref: l.object_ref,
+          object_id: l.object_id,
+          session_id: l.session_id,
+          fellow_id: l.fellow_id,
+          sponsor_id: l.sponsor_id,
+          mode: l.parallel_safe ? "parallel_safe" : "exclusive",
+          objective_digest: await sha256Hex(l.objective),
+          deliverable_digest: await sha256Hex(l.deliverable),
+          transition: "renewed",
+          expiry: renewedLeaseUntil,
+          clock_source: "server_clock",
+        });
+      })();
+    }
 
     const responsePayload = SessionHeartbeatResponseSchema.parse({
       session_id: session.session_id,
@@ -2521,6 +2612,35 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           PACK_CLAIM_CANDIDATE_LIMIT,
         );
 
+        const activeLeases = await db
+          .prepare(
+            `SELECT object_ref, object_id, fellow_id, leased_until, parallel_safe
+             FROM leases
+             WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+             ORDER BY leased_at ASC`,
+          )
+          .bind(session.problem_id, new Date().toISOString())
+          .all<{
+            object_ref: string;
+            object_id: string;
+            fellow_id: string;
+            leased_until: string;
+            parallel_safe: number;
+          }>();
+        const leaseMap = new Map<
+          string,
+          { fellow_id: string; leased_until: string; parallel_safe: boolean }
+        >();
+        for (const row of activeLeases.results ?? []) {
+          const info = {
+            fellow_id: row.fellow_id,
+            leased_until: row.leased_until,
+            parallel_safe: Boolean(row.parallel_safe),
+          };
+          leaseMap.set(row.object_id, info);
+          leaseMap.set(row.object_ref, info);
+        }
+
         for (const [index, claim] of selectedClaims.entries()) {
           if (claim.statement === null) {
             claimContentUnavailable = true;
@@ -2528,9 +2648,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
           const fold = dispositions.get(claim.id);
           if (!fold) throw new Error("Public claim has no scientific ledger timeline");
+          const leaseInfo = leaseMap.get(claim.id);
+          const leaseTag = leaseInfo
+            ? ` · leased by ${leaseInfo.fellow_id}${leaseInfo.parallel_safe ? " (parallel-safe)" : ""}`
+            : "";
           const disposition =
             displayClaimDisposition(fold.disposition, fold.context) +
-            (fold.stale ? " · stale" : "");
+            (fold.stale ? " · stale" : "") +
+            leaseTag;
           candidates.push({
             kind: "claim",
             id: claim.id,
@@ -2545,6 +2670,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             why_included:
               "include a live public claim in ledger sequence order, with its computed disposition",
             stable_prefix: 100 + index,
+          });
+        }
+
+        if ((activeLeases.results ?? []).length > 0) {
+          candidates.push({
+            kind: "standing-context",
+            id: "SYS-active-leases",
+            scope: "ledger",
+            tokens: 1,
+            untrusted: false,
+            body: `Active leases on this problem:\n${(activeLeases.results ?? []).map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}`).join("\n")}`,
+            why_included: "display currently leased problem objects and their holders",
+            stable_prefix: 12,
           });
         }
       }
@@ -4066,6 +4204,45 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+
+    const nowIso = new Date().toISOString();
+    const activeExclusiveLease = await db
+      .prepare(
+        `SELECT lease_id, fellow_id, leased_until, object_ref, parallel_safe
+         FROM leases
+         WHERE problem_id = ? AND (object_id = ? OR object_ref = ?)
+           AND status = 'active' AND parallel_safe = 0 AND leased_until > ?`,
+      )
+      .bind(session.problem_id, parsed.data.claim_id, parsed.data.claim_id, nowIso)
+      .first<{
+        lease_id: string;
+        fellow_id: string;
+        leased_until: string;
+        object_ref: string;
+        parallel_safe: number;
+      }>();
+
+    if (activeExclusiveLease && activeExclusiveLease.fellow_id !== auth.binding.fellowId) {
+      return validatedProblem({
+        status: 409,
+        code: "LEASED",
+        title: "Object is leased by another Fellow",
+        detail: `Claim '${parsed.data.claim_id}' is currently under exclusive lease by fellow '${activeExclusiveLease.fellow_id}' until ${activeExclusiveLease.leased_until}.`,
+        fixHint:
+          "Wait for the lease to expire or be released, or coordinate with the lessee's sponsor, or challenge the lease if it has become stale.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: parsed.data.claim_id,
+            leased_by: activeExclusiveLease.fellow_id,
+            leased_until: activeExclusiveLease.leased_until,
+            parallel_safe: false,
+          },
+        },
+      });
+    }
+
     if (claimHead.author_fellow_id !== auth.binding.fellowId) {
       return validatedProblem({
         status: 403,
@@ -9932,6 +10109,934 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  // --- POST /v1/sessions/:id/leases (W4.4: acquire object lease) -----------
+  app.post("/v1/sessions/:id/leases", async (c) => {
+    const startTime = Date.now();
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+
+    const parsed = LeaseAcquireRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "LEASE_BODY_INVALID",
+        title: "Invalid lease request body",
+        detail: "The request body did not match the lease acquisition contract.",
+        fixHint:
+          "Provide object (e.g. C-1, H-1), objective (<=2000 chars), deliverable (<=2000 chars), and optional parallel_safe.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            object: "C-1",
+            objective: "Formalize invariant proof in Lean",
+            deliverable: "Machine-checked proof artifact",
+            parallel_safe: false,
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/leases`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "acquire_lease",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => LeaseAcquireResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const target = await resolveLeaseTarget(db, session.problem_id, parsed.data.object);
+    if (!target) {
+      return validatedProblem({
+        status: 404,
+        code: "LEASE_TARGET_NOT_FOUND",
+        title: "Lease target object not found",
+        detail: `No claim, hypothesis, proof gap, or question matching '${parsed.data.object}' was found on problem '${session.problem_id}'.`,
+        fixHint: "Check the object reference (e.g. C-1, H-1, G-1, Q-1) against your pack.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { object: parsed.data.object },
+        },
+      });
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    const activeLeases = await db
+      .prepare(
+        `SELECT lease_id, session_id, fellow_id, sponsor_id, leased_until, parallel_safe, status
+         FROM leases
+         WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status = 'active' AND leased_until > ?`,
+      )
+      .bind(session.problem_id, target.objectId, target.canonicalRef, nowIso)
+      .all<{
+        lease_id: string;
+        session_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        leased_until: string;
+        parallel_safe: number;
+        status: string;
+      }>();
+
+    const activeRows = activeLeases.results ?? [];
+    if (activeRows.length > 0) {
+      const alreadyHeldByCaller = activeRows.find((r) => r.fellow_id === auth.binding.fellowId);
+      if (alreadyHeldByCaller) {
+        return validatedProblem({
+          status: 409,
+          code: "LEASE_ALREADY_EXISTS",
+          title: "Lease already held by this Fellow",
+          detail: `You already hold an active lease (${alreadyHeldByCaller.lease_id}) on '${target.canonicalRef}' until ${alreadyHeldByCaller.leased_until}.`,
+          fixHint: "Renew your existing lease with heartbeat, or release it before re-acquiring.",
+          rule: "§7.5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { object_ref: target.canonicalRef },
+          },
+        });
+      }
+
+      const allParallelSafe =
+        parsed.data.parallel_safe && activeRows.every((r) => r.parallel_safe === 1);
+      if (!allParallelSafe && activeRows[0]) {
+        const conflicting = activeRows[0];
+        return validatedProblem({
+          status: 409,
+          code: "LEASED",
+          title: "Object is leased by another Fellow",
+          detail: `Object '${target.canonicalRef}' is currently leased by fellow '${conflicting.fellow_id}' until ${conflicting.leased_until}.`,
+          fixHint:
+            "Wait for the lease to expire or be released, or coordinate with the lessee's sponsor, or challenge the lease if it has become stale.",
+          rule: "§7.5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              object_ref: target.canonicalRef,
+              leased_by: conflicting.fellow_id,
+              parallel_safe: Boolean(conflicting.parallel_safe),
+            },
+          },
+        });
+      }
+    }
+
+    const leaseId = mintId("L");
+    const leasedAt = nowIso;
+    const leasedUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("acquire_lease", claimToken);
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "lease.acquired",
+          objectKind: target.kind,
+          objectId: target.objectId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            lease_id: leaseId,
+            problem_id: session.problem_id,
+            object_ref: target.canonicalRef,
+            object_kind: target.kind,
+            object_id: target.objectId,
+            objective: parsed.data.objective,
+            deliverable: parsed.data.deliverable,
+            parallel_safe: parsed.data.parallel_safe,
+            leased_at: leasedAt,
+            leased_until: leasedUntil,
+          }),
+          createdAt: leasedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE leases
+                 SET status = 'expired', updated_at = ?
+                 WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status = 'active' AND leased_until <= ?`,
+              )
+              .bind(leasedAt, session.problem_id, target.objectId, target.canonicalRef, leasedAt),
+            db
+              .prepare(
+                `INSERT INTO leases (
+                   lease_id, problem_id, object_ref, object_kind, object_id,
+                   session_id, fellow_id, sponsor_id,
+                   objective, deliverable, parallel_safe,
+                   status, leased_at, leased_until, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+              )
+              .bind(
+                leaseId,
+                session.problem_id,
+                target.canonicalRef,
+                target.kind,
+                target.objectId,
+                session.session_id,
+                auth.binding.fellowId,
+                auth.binding.sponsorId,
+                parsed.data.objective,
+                parsed.data.deliverable,
+                parsed.data.parallel_safe ? 1 : 0,
+                leasedAt,
+                leasedUntil,
+                leasedAt,
+                leasedAt,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "acquire_lease",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            LeaseAcquireResponseSchema.parse({
+              ok: true,
+              lease: {
+                lease_id: leaseId,
+                session_id: session.session_id,
+                problem_id: session.problem_id,
+                object: target.canonicalRef,
+                object_kind: target.kind,
+                object_id: target.objectId,
+                fellow_id: auth.binding.fellowId,
+                sponsor_id: auth.binding.sponsorId,
+                objective: parsed.data.objective,
+                deliverable: parsed.data.deliverable,
+                parallel_safe: parsed.data.parallel_safe,
+                status: "active",
+                leased_at: leasedAt,
+                leased_until: leasedUntil,
+              },
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "acquire_lease",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("acquire_lease committed without its atomic replay");
+
+      const latencyMs = Date.now() - startTime;
+      void (async () => {
+        logLeaseOps({
+          record_type: "lease-transition",
+          lease_id: leaseId,
+          problem_id: session.problem_id,
+          object_ref: target.canonicalRef,
+          object_id: target.objectId,
+          session_id: session.session_id,
+          fellow_id: auth.binding.fellowId,
+          sponsor_id: auth.binding.sponsorId,
+          mode: parsed.data.parallel_safe ? "parallel_safe" : "exclusive",
+          objective_digest: await sha256Hex(parsed.data.objective),
+          deliverable_digest: await sha256Hex(parsed.data.deliverable),
+          transition: "acquired",
+          expiry: leasedUntil,
+          clock_source: "server_clock",
+          request_id: c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? undefined,
+          event_id: eventId,
+          code: "OK",
+          latency_ms: latencyMs,
+        });
+      })();
+
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "acquire_lease",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
+  // --- GET /v1/sessions/:id/leases (W4.4: list active leases) ---------------
+  app.get("/v1/sessions/:id/leases", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const nowIso = new Date().toISOString();
+    const rows = await db
+      .prepare(
+        `SELECT lease_id, session_id, problem_id, object_ref, object_kind, object_id,
+                fellow_id, sponsor_id, objective, deliverable, parallel_safe,
+                status, leased_at, leased_until
+         FROM leases
+         WHERE problem_id = ? AND status = 'active' AND leased_until > ?
+         ORDER BY leased_at DESC`,
+      )
+      .bind(session.problem_id, nowIso)
+      .all<{
+        lease_id: string;
+        session_id: string;
+        problem_id: string;
+        object_ref: string;
+        object_kind: LeaseObjectKind;
+        object_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        objective: string;
+        deliverable: string;
+        parallel_safe: number;
+        status: "active";
+        leased_at: string;
+        leased_until: string;
+      }>();
+
+    const leases: LeaseItem[] = (rows.results ?? []).map((r) => ({
+      lease_id: r.lease_id,
+      session_id: r.session_id,
+      problem_id: r.problem_id,
+      object: r.object_ref,
+      object_kind: r.object_kind,
+      object_id: r.object_id,
+      fellow_id: r.fellow_id,
+      sponsor_id: r.sponsor_id,
+      objective: r.objective,
+      deliverable: r.deliverable,
+      parallel_safe: Boolean(r.parallel_safe),
+      status: r.status,
+      leased_at: r.leased_at,
+      leased_until: r.leased_until,
+    }));
+
+    return privateNoStore(c.json(LeaseListResponseSchema.parse({ ok: true, leases }), 200));
+  });
+
+  // --- Release lease handler (POST /v1/sessions/:id/leases/:ref/release and DELETE /v1/sessions/:id/leases/:ref) ---
+  const handleLeaseRelease = async (c: Context<{ Bindings: Env }>) => {
+    const startTime = Date.now();
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id") ?? "";
+    const ref = c.req.param("ref") ?? "";
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+
+    const parsed = LeaseReleaseRequestSchema.safeParse(rawBody ?? {});
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "LEASE_RELEASE_BODY_INVALID",
+        title: "Invalid lease release request body",
+        detail: "The request body did not match the lease release contract.",
+        fixHint: "Provide optional reason (<=2000 chars) or an empty body.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            reason: "Work completed and delivered in claim revision.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/leases/${ref}/release`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "release_lease",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => LeaseReleaseResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const lease = await db
+      .prepare(
+        `SELECT * FROM leases
+         WHERE problem_id = ? AND (lease_id = ? OR object_ref = ? OR object_id = ?)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(session.problem_id, ref, ref, ref)
+      .first<{
+        lease_id: string;
+        problem_id: string;
+        object_ref: string;
+        object_kind: LeaseObjectKind;
+        object_id: string;
+        session_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        objective: string;
+        deliverable: string;
+        parallel_safe: number;
+        status: string;
+        leased_at: string;
+        leased_until: string;
+      }>();
+
+    if (!lease) {
+      return validatedProblem({
+        status: 404,
+        code: "LEASE_NOT_FOUND",
+        title: "Lease not found",
+        detail: `No lease matching '${ref}' was found on problem '${session.problem_id}'.`,
+        fixHint: "Check the lease ID or object reference against active leases.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { lease_id: ref },
+        },
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    if (lease.status !== "active" || lease.leased_until <= nowIso) {
+      return validatedProblem({
+        status: 409,
+        code: "LEASE_NOT_ACTIVE",
+        title: "Lease is not active",
+        detail: `Lease '${lease.lease_id}' is '${lease.status}' and cannot be released.`,
+        fixHint: "Only active unexpired leases can be released.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { lease_id: lease.lease_id },
+        },
+      });
+    }
+
+    if (lease.fellow_id !== auth.binding.fellowId) {
+      return validatedProblem({
+        status: 403,
+        code: "LEASE_NOT_HOLDER",
+        title: "Not the lease holder",
+        detail: `Lease '${lease.lease_id}' is held by fellow '${lease.fellow_id}', not '${auth.binding.fellowId}'.`,
+        fixHint: "Release leases from the session and Fellow that acquired them, or challenge if stale.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { lease_id: lease.lease_id },
+        },
+      });
+    }
+
+    const releasedAt = nowIso;
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("release_lease", claimToken);
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "lease.released",
+          objectKind: lease.object_kind,
+          objectId: lease.object_id,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            lease_id: lease.lease_id,
+            problem_id: session.problem_id,
+            object_ref: lease.object_ref,
+            released_by: auth.binding.fellowId,
+            released_at: releasedAt,
+            reason: parsed.data.reason,
+          }),
+          createdAt: releasedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE leases
+                 SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
+                 WHERE lease_id = ?`,
+              )
+              .bind(auth.binding.fellowId, releasedAt, releasedAt, lease.lease_id),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "release_lease",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            LeaseReleaseResponseSchema.parse({
+              ok: true,
+              lease_id: lease.lease_id,
+              object: lease.object_ref,
+              status: "released",
+              released_at: releasedAt,
+              released_by: auth.binding.fellowId,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "release_lease",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("release_lease committed without its atomic replay");
+
+      const latencyMs = Date.now() - startTime;
+      void (async () => {
+        logLeaseOps({
+          record_type: "lease-transition",
+          lease_id: lease.lease_id,
+          problem_id: session.problem_id,
+          object_ref: lease.object_ref,
+          object_id: lease.object_id,
+          session_id: session.session_id,
+          fellow_id: auth.binding.fellowId,
+          sponsor_id: auth.binding.sponsorId,
+          mode: lease.parallel_safe ? "parallel_safe" : "exclusive",
+          objective_digest: await sha256Hex(lease.objective),
+          deliverable_digest: await sha256Hex(lease.deliverable),
+          transition: "released",
+          expiry: lease.leased_until,
+          clock_source: "server_clock",
+          request_id: c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? undefined,
+          event_id: eventId,
+          code: "OK",
+          latency_ms: latencyMs,
+        });
+      })();
+
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "release_lease",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  };
+
+  app.post("/v1/sessions/:id/leases/:ref/release", handleLeaseRelease);
+  app.delete("/v1/sessions/:id/leases/:ref", handleLeaseRelease);
+
+  // --- POST /v1/sessions/:id/leases/:ref/challenge (W4.4: challenge stale lease) ---
+  app.post("/v1/sessions/:id/leases/:ref/challenge", async (c) => {
+    const startTime = Date.now();
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const ref = c.req.param("ref");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+
+    const parsed = LeaseChallengeRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "LEASE_CHALLENGE_BODY_INVALID",
+        title: "Invalid lease challenge request body",
+        detail: "The request body did not match the lease challenge contract.",
+        fixHint: "Provide reason (<=2000 chars) explaining why the lease is stale.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            reason: "Holder session has been idle for over 45 minutes with no commits.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/leases/${ref}/challenge`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "challenge_lease",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => LeaseChallengeResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const lease = await db
+      .prepare(
+        `SELECT * FROM leases
+         WHERE problem_id = ? AND (lease_id = ? OR object_ref = ? OR object_id = ?)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(session.problem_id, ref, ref, ref)
+      .first<{
+        lease_id: string;
+        problem_id: string;
+        object_ref: string;
+        object_kind: LeaseObjectKind;
+        object_id: string;
+        session_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        objective: string;
+        deliverable: string;
+        parallel_safe: number;
+        status: string;
+        leased_at: string;
+        leased_until: string;
+      }>();
+
+    if (!lease) {
+      return validatedProblem({
+        status: 404,
+        code: "LEASE_NOT_FOUND",
+        title: "Lease not found",
+        detail: `No lease matching '${ref}' was found on problem '${session.problem_id}'.`,
+        fixHint: "Check the lease ID or object reference against active leases.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { lease_id: ref },
+        },
+      });
+    }
+
+    if (lease.status !== "active") {
+      return validatedProblem({
+        status: 409,
+        code: "LEASE_NOT_ACTIVE",
+        title: "Lease is not active",
+        detail: `Lease '${lease.lease_id}' is '${lease.status}' and cannot be challenged.`,
+        fixHint: "Only active unexpired leases can be challenged.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { lease_id: lease.lease_id },
+        },
+      });
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const isExpired = lease.leased_until <= nowIso;
+
+    const holderSession = await db
+      .prepare(
+        `SELECT closed_at, last_heartbeat_at, created_at FROM sessions WHERE session_id = ?`,
+      )
+      .bind(lease.session_id)
+      .first<{
+        closed_at: string | null;
+        last_heartbeat_at: string | null;
+        created_at: string;
+      }>();
+
+    const isClosed = holderSession ? holderSession.closed_at !== null : true;
+    const lastActiveTime = holderSession?.last_heartbeat_at
+      ? new Date(holderSession.last_heartbeat_at).getTime()
+      : holderSession?.created_at
+        ? new Date(holderSession.created_at).getTime()
+        : 0;
+    const isIdleOver30m = now.getTime() - lastActiveTime > 30 * 60 * 1000;
+
+    const isStale = isExpired || isClosed || isIdleOver30m;
+    if (!isStale) {
+      return validatedProblem({
+        status: 409,
+        code: "LEASE_NOT_STALE",
+        title: "Lease is not stale",
+        detail: `Lease '${lease.lease_id}' is active, unexpired, and held by an active session with recent heartbeats. Active leases cannot be challenged.`,
+        fixHint: "Wait until the lease expires or the holder session becomes idle for > 30 minutes.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            lease_id: lease.lease_id,
+            object_ref: lease.object_ref,
+            leased_until: lease.leased_until,
+          },
+        },
+      });
+    }
+
+    const challengedAt = nowIso;
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("challenge_lease", claimToken);
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "lease.challenged",
+          objectKind: lease.object_kind,
+          objectId: lease.object_id,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            lease_id: lease.lease_id,
+            problem_id: session.problem_id,
+            object_ref: lease.object_ref,
+            challenged_by: auth.binding.fellowId,
+            challenged_at: challengedAt,
+            reason: parsed.data.reason,
+          }),
+          createdAt: challengedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE leases
+                 SET status = 'challenged', challenge_reason = ?, challenged_by_fellow_id = ?, challenged_at = ?, updated_at = ?
+                 WHERE lease_id = ?`,
+              )
+              .bind(parsed.data.reason, auth.binding.fellowId, challengedAt, challengedAt, lease.lease_id),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "challenge_lease",
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          responseFor: () =>
+            LeaseChallengeResponseSchema.parse({
+              ok: true,
+              lease_id: lease.lease_id,
+              object: lease.object_ref,
+              status: "challenged",
+              challenged_by: auth.binding.fellowId,
+              challenged_at: challengedAt,
+              reason: parsed.data.reason,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "challenge_lease",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("challenge_lease committed without its atomic replay");
+
+      const latencyMs = Date.now() - startTime;
+      void (async () => {
+        logLeaseOps({
+          record_type: "lease-transition",
+          lease_id: lease.lease_id,
+          problem_id: session.problem_id,
+          object_ref: lease.object_ref,
+          object_id: lease.object_id,
+          session_id: session.session_id,
+          fellow_id: auth.binding.fellowId,
+          sponsor_id: auth.binding.sponsorId,
+          mode: lease.parallel_safe ? "parallel_safe" : "exclusive",
+          objective_digest: await sha256Hex(lease.objective),
+          deliverable_digest: await sha256Hex(lease.deliverable),
+          transition: "challenged",
+          expiry: lease.leased_until,
+          clock_source: "server_clock",
+          request_id: c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? undefined,
+          event_id: eventId,
+          code: "OK",
+          latency_ms: latencyMs,
+        });
+      })();
+
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "challenge_lease",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  });
+
   // --- POST /v1/sessions/:id/close ---------------------------------------
   app.post("/v1/sessions/:id/close", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -10105,6 +11210,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   digest,
                   claimToken,
                 ),
+              db
+                .prepare(
+                  `UPDATE leases
+                   SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
+                   WHERE session_id = ? AND status = 'active'`,
+                )
+                .bind(auth.binding.fellowId, closedAt, closedAt, session.session_id),
             ],
           };
         },
@@ -10288,6 +11400,227 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     } catch {
       // D1 diagnostics and malformed private rows never cross this response.
       return sponsorWorkshopUnavailable();
+    }
+  });
+
+  // --- POST /v1/sponsors/leases/release (W4.4: sponsor release lease) --------
+  app.post("/v1/sponsors/leases/release", async (c) => {
+    const startTime = Date.now();
+    if (options.verifiedSponsor === undefined) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorAuthUnavailable();
+    }
+    let verified: {
+      readonly sponsorId: string;
+      readonly rawBody: Uint8Array;
+    };
+    try {
+      const candidate = await options.verifiedSponsor(
+        c.req.raw,
+        "/v1/sponsors/leases/release",
+        "lease.release",
+      );
+      if (candidate instanceof Response) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return privateNoStore(candidate);
+      }
+      const snapshot = verifiedSponsorSnapshot(candidate);
+      if (snapshot === undefined) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return sponsorAuthUnavailable();
+      }
+      verified = snapshot;
+    } catch {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorAuthUnavailable();
+    }
+
+    cancelUnconsumedRequestBody(c.req.raw);
+    let requestBody: unknown;
+    try {
+      requestBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(verified.rawBody));
+    } catch {
+      requestBody = undefined;
+    }
+
+    const parsedRequest = SponsorLeaseReleaseRequestSchema.safeParse(requestBody);
+    if (!parsedRequest.success) {
+      return privateNoStore(
+        validatedProblem({
+          status: 422,
+          code: "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+          title: "Invalid sponsor lease release request body",
+          detail: "The request body did not match the sponsor lease release contract.",
+          fixHint: "Provide lease_id (string) and optional reason.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { lease_id: "L-01JXYZ" },
+          },
+        }),
+      );
+    }
+
+    const { problem_id: problemId, object: objectRef, reason } = parsedRequest.data;
+    const db = c.env.DB;
+    const lease = await db
+      .prepare(
+        `SELECT * FROM leases
+         WHERE problem_id = ? AND (lease_id = ? OR object_ref = ? OR object_id = ?)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .bind(problemId, objectRef, objectRef, objectRef)
+      .first<{
+        lease_id: string;
+        problem_id: string;
+        object_ref: string;
+        object_kind: LeaseObjectKind;
+        object_id: string;
+        session_id: string;
+        fellow_id: string;
+        sponsor_id: string;
+        objective: string;
+        deliverable: string;
+        parallel_safe: number;
+        status: string;
+        leased_at: string;
+        leased_until: string;
+      }>();
+
+    if (!lease) {
+      return privateNoStore(
+        validatedProblem({
+          status: 404,
+          code: "LEASE_NOT_FOUND",
+          title: "Lease not found",
+          detail: `No lease matching '${objectRef}' was found on problem '${problemId}'.`,
+          fixHint: "Check the lease ID or object reference against active leases.",
+          rule: "§7.5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { object: objectRef },
+          },
+        }),
+      );
+    }
+
+    if (lease.sponsor_id !== verified.sponsorId) {
+      return privateNoStore(
+        validatedProblem({
+          status: 403,
+          code: "NOT_LESSEE_SPONSOR",
+          title: "Not the lessee's sponsor",
+          detail: `Sponsor '${verified.sponsorId}' is not the sponsor of lessee fellow '${lease.fellow_id}' for lease '${lease.lease_id}'.`,
+          fixHint: "Only the lessee Fellow's sponsoring organization can release this lease on their behalf.",
+          rule: "§7.5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { lease_id: lease.lease_id },
+          },
+        }),
+      );
+    }
+
+    if (lease.status !== "active") {
+      return privateNoStore(
+        validatedProblem({
+          status: 409,
+          code: "LEASE_NOT_ACTIVE",
+          title: "Lease is not active",
+          detail: `Lease '${lease.lease_id}' is '${lease.status}' and cannot be released.`,
+          fixHint: "Only active unexpired leases can be released.",
+          rule: "§7.5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { lease_id: lease.lease_id },
+          },
+        }),
+      );
+    }
+
+    const releasedAt = new Date().toISOString();
+    const eventId = mintId("E");
+
+    try {
+      await writeLedgerEvent(
+        db,
+        {
+          problemId: lease.problem_id,
+          eventId,
+          idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,
+          requestDigest: await writeRequestDigest(c.req.path, parsedRequest.data),
+          eventType: "lease.released",
+          objectKind: lease.object_kind,
+          objectId: lease.object_id,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            lease_id: lease.lease_id,
+            object_ref: lease.object_ref,
+            released_by: verified.sponsorId,
+            released_at: releasedAt,
+            reason: parsedRequest.data.reason,
+            source: "sponsor",
+          }),
+          createdAt: releasedAt,
+          attribution: {
+            fellowId: lease.fellow_id,
+            sponsorId: verified.sponsorId,
+            sessionId: lease.session_id,
+            modelSelfDeclared: "sponsor-envelope",
+            harness: "sponsor-envelope",
+            credentialId: "sponsor",
+          },
+        },
+        {
+          statementsAfterEvent: () => [
+            db
+              .prepare(
+                `UPDATE leases
+                 SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
+                 WHERE lease_id = ?`,
+              )
+              .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id),
+          ],
+        },
+      );
+
+      const latencyMs = Date.now() - startTime;
+      void (async () => {
+        logLeaseOps({
+          record_type: "lease-transition",
+          lease_id: lease.lease_id,
+          problem_id: lease.problem_id,
+          object_ref: lease.object_ref,
+          object_id: lease.object_id,
+          session_id: lease.session_id,
+          fellow_id: lease.fellow_id,
+          sponsor_id: verified.sponsorId,
+          mode: lease.parallel_safe ? "parallel_safe" : "exclusive",
+          objective_digest: await sha256Hex(lease.objective),
+          deliverable_digest: await sha256Hex(lease.deliverable),
+          transition: "sponsor_released",
+          expiry: lease.leased_until,
+          clock_source: "server_clock",
+          event_id: eventId,
+          code: "OK",
+          latency_ms: latencyMs,
+        });
+      })();
+
+      const responsePayload = SponsorLeaseReleaseResponseSchema.parse({
+        ok: true,
+        lease_id: lease.lease_id,
+        object: lease.object_ref,
+        status: "released",
+        released_at: releasedAt,
+        released_by: verified.sponsorId,
+      });
+
+      return privateNoStore(c.json(responsePayload, 200));
+    } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      throw error;
     }
   });
 
