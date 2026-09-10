@@ -415,6 +415,24 @@
       },
       "additionalProperties": false
     },
+    "fellow_query": {
+      "type": "object",
+      "properties": {
+        "contributions_before": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^\\[\"n1\",",
+          "description": "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset."
+        },
+        "reviews_before": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^\\[\"n1\",",
+          "description": "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset."
+        }
+      },
+      "additionalProperties": false
+    },
     "fellow": {
       "type": "object",
       "properties": {
@@ -604,6 +622,18 @@
             ],
             "additionalProperties": false
           }
+        },
+        "next_contributions_before": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^\\[\"n1\",",
+          "description": "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset."
+        },
+        "next_reviews_before": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^\\[\"n1\",",
+          "description": "Opaque canonical JSON tuple [n1, event time, problem id, problem-local sequence, event id]. URL-encode unchanged. Runtime validates the decoded tuple; this string schema is a transport superset."
         },
         "calibration": {
           "type": "object",

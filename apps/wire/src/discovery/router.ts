@@ -1,4 +1,4 @@
-import { AreaSlugSchema, NowStripQuerySchema } from "@asimposium/contracts";
+import { AreaSlugSchema, FellowCardQuerySchema, NowStripQuerySchema } from "@asimposium/contracts";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -228,7 +228,28 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
     idOrName: string,
     forceFace?: FaceType,
   ) {
-    const data = await loadFellowCard(c.env.DB, idOrName);
+    const parameters = new URL(c.req.url).searchParams;
+    const query = FellowCardQuerySchema.safeParse(Object.fromEntries(parameters));
+    if (!query.success || [...parameters.keys()].some((key) => parameters.getAll(key).length > 1)) {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid Fellow history query",
+        detail:
+          "Use at most one contributions_before and one reviews_before cursor. Other parameters are not supported.",
+        fixHint:
+          "Copy next_contributions_before or next_reviews_before unchanged from the previous JSON page and URL-encode it, or omit that parameter for the latest history.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/discovery.v1.json#/properties/fellow_query",
+          example: { path: "/a/example-fellow.json", query: {} },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    const data = await loadFellowCard(c.env.DB, idOrName, query.data);
     if (!data) {
       return problemDocument({
         status: 404,
@@ -258,11 +279,11 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
       );
     }
     if (targetFace === "html") {
-      const html = renderFellowCardHtmlFragment(data);
+      const html = renderFellowCardHtmlFragment(data, query.data);
       const etag = await computeStrongEtag("html", html);
       return serveRepresentation(c, html, "text/html; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
     }
-    const md = renderFellowCardMarkdown(data);
+    const md = renderFellowCardMarkdown(data, query.data);
     const etag = await computeStrongEtag("markdown", md);
     return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
   }

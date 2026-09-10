@@ -16,6 +16,7 @@ export async function fellowCardHistory({
   userAgent,
 }) {
   const problem = "P-CARD-HISTORY";
+  const historicalBasis = "Historical publication basis. T3 is not established.";
   await fixtures.seedProblem(problem);
   const authorToken = await enroll("card-history-author", "usr_cardhistoryauthor");
   const reviewerToken = await enroll("card-history-reader", "usr_cardhistoryreader");
@@ -78,7 +79,7 @@ export async function fellowCardHistory({
         target_version: 1,
         tier: "T3",
         verdict: "inform",
-        basis: "Historical publication basis.",
+        basis: historicalBasis,
       }),
     ],
     [
@@ -144,7 +145,7 @@ export async function fellowCardHistory({
   assert.equal(card.reviews.length, 1);
   assert.equal(card.reviews[0].tier, "T1", "Legacy T3 cannot imply cross-family provenance");
   assert.equal(card.reviews[0].verdict, "inform", "The log wins over the retained projection");
-  assert.equal(card.reviews[0].basis, "Historical publication basis.");
+  assert.equal(card.reviews[0].basis, historicalBasis);
   assert.ok(card.omitted.some((item) => item.includes("1 legacy reviews")));
   assert.ok(card.omitted.some((item) => item.includes("version-pin verification")));
   assert.equal(card.calibration.reviews_verified_survival, null);
@@ -187,9 +188,21 @@ export async function fellowCardHistory({
     ]) {
       assert.ok(!text.includes(privateValue));
     }
-    assert.ok(text.includes("Historical publication basis."));
-    assert.ok(text.includes("T1"));
-    assert.ok(!text.includes("T3"));
+    assert.ok(text.includes(historicalBasis));
+    // T3 may appear as quoted work or in a random identifier. Assert the
+    // published review tiers, not a whole-document substring ban. The basis
+    // deliberately mentions T3 so the distinction is exercised every run.
+    const tiers =
+      suffix === "json"
+        ? FellowCardResponseSchema.parse(JSON.parse(text)).reviews.map((review) => review.tier)
+        : [
+            ...text.matchAll(
+              suffix === "md"
+                ? /^- \*\*Review [^\n]+\(tier (T[0-3]),/gm
+                : /<h4>[^\n]+\(tier (T[0-3])\)<\/h4>/g,
+            ),
+          ].map((match) => match[1]);
+    assert.deepEqual(tiers, ["T1"]);
     const cache = "public, max-age=0, must-revalidate";
     assert.equal(response.headers.get("cache-control"), cache);
     const etag = response.headers.get("etag");
@@ -213,7 +226,7 @@ export async function fellowCardHistory({
     assert.equal(response.status, 200, "Withdrawal invalidates the cached representation");
     assert.notEqual(response.headers.get("etag"), etags.get(suffix));
     const body = await response.text();
-    assert.ok(!body.includes("Historical publication basis."));
+    assert.ok(!body.includes(historicalBasis));
     assert.ok(!body.includes("WRONG_PROJECTION_BASIS"));
     if (suffix === "json")
       assert.deepEqual(FellowCardResponseSchema.parse(JSON.parse(body)).reviews, []);

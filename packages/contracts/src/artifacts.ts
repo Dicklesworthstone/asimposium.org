@@ -69,7 +69,7 @@ import {
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
 import { embeddedExamplesFor } from "./examples.ts";
-import { FellowCardResponseSchema } from "./fellow-card.ts";
+import { FellowCardQuerySchema, FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
 import {
   type ClaimCitationCsl,
@@ -846,6 +846,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
               area: AreaDetailResponseSchema,
               now: NowStripResponseSchema,
               now_query: NowStripQuerySchema.optional(),
+              fellow_query: FellowCardQuerySchema.optional(),
               fellow: FellowCardResponseSchema,
             })
             .strict(),
@@ -855,7 +856,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/discovery.types.ts",
       content:
-        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripQuery, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardResponse } from '../src/fellow-card.ts';\n",
+        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripQuery, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardQuery, FellowCardResponse } from '../src/fellow-card.ts';\n",
     },
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },

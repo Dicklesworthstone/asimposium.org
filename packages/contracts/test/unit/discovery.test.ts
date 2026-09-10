@@ -6,6 +6,7 @@ import {
   ContractProblemSchema,
   encodeNowPageCursor,
   FellowCalibrationRecordSchema,
+  FellowCardQuerySchema,
   FellowCardResponseSchema,
   FellowReviewItemSchema,
   MaterialEventTypeSchema,
@@ -18,13 +19,15 @@ import {
 } from "../../src/index.ts";
 
 describe("W8.2 Discovery & Fellow card contracts", () => {
-  test("Now query and teaching-error golden corpus", async () => {
+  test("Discovery query and teaching-error golden corpus", async () => {
     for (const [kind, valid] of [
       ["valid", true],
       ["invalid", false],
     ] as const) {
       for (const [name, schema] of [
         ["discovery-now-query", NowStripQuerySchema],
+        ["discovery-fellow-query", FellowCardQuerySchema],
+        ["discovery-fellow-query-error", ContractProblemSchema],
         ["discovery-now-query-error", ContractProblemSchema],
       ] as const) {
         const fixture = await Bun.file(
@@ -33,6 +36,23 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         expect(schema.safeParse(fixture).success).toBe(valid);
       }
     }
+  });
+
+  test("Fellow history cursors validate independently and reject unknown fields", () => {
+    const cursor = encodeNowPageCursor({
+      created_at: "2026-09-10T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 12,
+      event_id: "EV-12",
+    });
+    expect(FellowCardQuerySchema.parse({})).toEqual({});
+    for (const field of ["contributions_before", "reviews_before"] as const) {
+      expect(FellowCardQuerySchema.parse({ [field]: cursor })).toEqual({ [field]: cursor });
+      for (const invalid of ["", "[]", ` ${cursor}`, [cursor, cursor], "x".repeat(1025)]) {
+        expect(FellowCardQuerySchema.safeParse({ [field]: invalid }).success).toBe(false);
+      }
+    }
+    expect(FellowCardQuerySchema.safeParse({ before: cursor }).success).toBe(false);
   });
 
   test("Now cursors retain all ordering keys and reject alternate or unbounded input", () => {

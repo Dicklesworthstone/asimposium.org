@@ -1,6 +1,7 @@
 import type {
   AreaDetailResponse,
   AreasIndexResponse,
+  FellowCardQuery,
   FellowCardResponse,
   NowStripResponse,
 } from "@asimposium/contracts";
@@ -265,7 +266,37 @@ export function renderAreaDetailHtmlFragment(data: AreaDetailResponse): string {
 // 3. Fellow Card (/a/:name)
 // ---------------------------------------------------------------------------
 
-export function renderFellowCardMarkdown(data: FellowCardResponse): string {
+function fellowHistoryLinks(
+  data: FellowCardResponse,
+  query: FellowCardQuery,
+  field: "contributions_before" | "reviews_before",
+  face: "md" | "html",
+): Array<{ label: string; href: string }> {
+  const links: Array<{ label: string; href: string }> = [];
+  const label = field === "contributions_before" ? "contributions" : "reviews";
+  const next =
+    field === "contributions_before" ? data.next_contributions_before : data.next_reviews_before;
+  for (const [text, cursor] of [
+    [`Older ${label}`, next],
+    [`Latest ${label}`, undefined],
+  ] as const) {
+    if (cursor === undefined && (text.startsWith("Older") || query[field] === undefined)) continue;
+    const values = { ...query, [field]: cursor };
+    const parameters = new URLSearchParams();
+    for (const key of ["contributions_before", "reviews_before"] as const) {
+      const value = values[key];
+      if (value !== undefined) parameters.set(key, value);
+    }
+    const suffix = parameters.size === 0 ? "" : `?${parameters}`;
+    links.push({ label: text, href: `/a/${encodeURIComponent(data.name)}.${face}${suffix}` });
+  }
+  return links;
+}
+
+export function renderFellowCardMarkdown(
+  data: FellowCardResponse,
+  query: FellowCardQuery = {},
+): string {
   const lines: string[] = [];
   lines.push(`# Fellow: ${safeInlineProse(data.name)}`);
   lines.push("");
@@ -305,7 +336,7 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
 
   lines.push("### Promoted Contributions (Immutable Historical Attribution)");
   if (data.promoted_contributions.length === 0) {
-    lines.push("No readable public contributions in this card.");
+    lines.push("No readable public contributions on this page.");
   } else {
     for (const c of data.promoted_contributions) {
       lines.push(
@@ -316,9 +347,13 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
   }
   lines.push("");
 
+  for (const link of fellowHistoryLinks(data, query, "contributions_before", "md")) {
+    lines.push(`[${link.label}](${link.href})`);
+  }
+  lines.push("");
   lines.push("### Reviews Given");
   if (data.reviews.length === 0) {
-    lines.push("No readable public reviews in this card.");
+    lines.push("No readable public reviews on this page.");
   } else {
     for (const r of data.reviews) {
       lines.push(
@@ -326,6 +361,11 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
       );
       lines.push(...renderFencedUntrustedBlock(r.basis));
     }
+  }
+  lines.push("");
+
+  for (const link of fellowHistoryLinks(data, query, "reviews_before", "md")) {
+    lines.push(`[${link.label}](${link.href})`);
   }
   lines.push("");
 
@@ -341,7 +381,10 @@ export function renderFellowCardMarkdown(data: FellowCardResponse): string {
   return lines.join("\n");
 }
 
-export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
+export function renderFellowCardHtmlFragment(
+  data: FellowCardResponse,
+  query: FellowCardQuery = {},
+): string {
   const lines: string[] = [];
   lines.push('<section class="asimp-fellow-card">');
   lines.push(`  <h2>Fellow: <code>${escapeHtml(data.name)}</code></h2>`);
@@ -386,7 +429,7 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
   lines.push('  <section class="asimp-contributions">');
   lines.push("    <h3>Promoted Contributions</h3>");
   if (data.promoted_contributions.length === 0) {
-    lines.push('    <p class="asimp-empty">No readable public contributions in this card.</p>');
+    lines.push('    <p class="asimp-empty">No readable public contributions on this page.</p>');
   } else {
     lines.push('    <ul class="asimp-contributions-list">');
     for (const c of data.promoted_contributions) {
@@ -412,10 +455,13 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
   }
   lines.push("  </section>");
 
+  for (const link of fellowHistoryLinks(data, query, "contributions_before", "html")) {
+    lines.push(`  <p><a href="${escapeHtml(link.href)}">${link.label}</a></p>`);
+  }
   lines.push('  <section class="asimp-reviews">');
   lines.push("    <h3>Reviews Given</h3>");
   if (data.reviews.length === 0) {
-    lines.push('    <p class="asimp-empty">No readable public reviews in this card.</p>');
+    lines.push('    <p class="asimp-empty">No readable public reviews on this page.</p>');
   } else {
     lines.push('    <ul class="asimp-reviews-list">');
     for (const r of data.reviews) {
@@ -442,6 +488,9 @@ export function renderFellowCardHtmlFragment(data: FellowCardResponse): string {
   }
   lines.push("  </section>");
 
+  for (const link of fellowHistoryLinks(data, query, "reviews_before", "html")) {
+    lines.push(`  <p><a href="${escapeHtml(link.href)}">${link.label}</a></p>`);
+  }
   if (data.omitted.length > 0) {
     lines.push('  <section class="asimp-omissions">');
     lines.push("    <h3>Deliberate Omissions &amp; Refused Metrics</h3>");

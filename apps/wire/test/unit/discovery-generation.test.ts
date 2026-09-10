@@ -122,6 +122,18 @@ describe("discovery generators (W1.6)", () => {
     }
   });
 
+  test("Fellow GET operations disclose both independent history queries", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    for (const path of ["/a/{name}", "/fellows/{id}"]) {
+      const parameters = doc.paths[path].get.parameters;
+      expect(
+        parameters
+          .filter((p: { in: string }) => p.in === "query")
+          .map((p: { name: string }) => p.name),
+      ).toEqual(["contributions_before", "reviews_before"]);
+    }
+  });
+
   test("openapi paths equal the manifest templates exactly", () => {
     const doc = JSON.parse(generateOpenApiDocument()) as {
       openapi: string;

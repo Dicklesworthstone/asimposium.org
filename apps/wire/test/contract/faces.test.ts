@@ -585,6 +585,7 @@ describe("face wire format", () => {
           "synthesize",
           "dead-ends",
           "close",
+          "heartbeat",
           "revise",
           "review",
           "evidence",

@@ -8,6 +8,7 @@ import {
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
+  FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   isTrustedStoaOrigin,
@@ -293,9 +294,23 @@ export async function stoaFetchNowStrip(
 export async function stoaFetchFellowCard(
   nameOrId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<FellowCardResponse>> {
+  const parsed = FellowCardQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(parsed.data)) {
+    if (value !== undefined) parameters.set(key, value);
+  }
   const path = nameOrId.startsWith("F-")
     ? `/fellows/${encodeURIComponent(nameOrId)}.json`
     : `/a/${encodeURIComponent(nameOrId)}.json`;
-  return readPublic(path, stoaOrigin, FellowCardResponseSchema, 0, "FELLOW_NOT_FOUND");
+  const suffix = parameters.size === 0 ? "" : `?${parameters}`;
+  return readPublic(
+    `${path}${suffix}`,
+    stoaOrigin,
+    FellowCardResponseSchema,
+    0,
+    "FELLOW_NOT_FOUND",
+  );
 }

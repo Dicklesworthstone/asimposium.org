@@ -238,6 +238,11 @@ and what remains in its assigned plane.
   explore/areas, Now, Fellow and exact-version claim pages. Fellow cards verify contribution and
   review text against ledger digests, interpret legacy review tiers with historical sponsor pins,
   and revalidate on every read so withdrawn bodies cannot persist in a shared cache.
+  Contribution and review histories paginate independently, examining at most 50 records per
+  list. Use `next_contributions_before` as `contributions_before` and `next_reviews_before` as
+  `reviews_before`; copy these opaque cursors unchanged and URL-encode them. Markdown, HTML
+  and Agora provide older/latest links that preserve the other list's position. Promotion
+  totals cover the full visible history; page counts and unavailable bodies are disclosed.
   Claim pages link BibTeX and CSL-JSON downloads for the displayed statement version.
   Problem digests and pages include the stored current title, statement, falsifier and motivation
   as versioned untrusted records. Whole fields that exceed the digest budget are disclosed as
