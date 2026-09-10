@@ -41,7 +41,7 @@ export async function claimsJourney({
     const session = await call("/v1/sessions", { problem_id: problem, intent }, token, 201);
     const draft = await call(
       `/v1/sessions/${session.session_id}/workshop`,
-      { type: "draft", title: `${name} draft`, body_md: privateCanary, relates_to: [] },
+      { type: "claim-draft", title: `${name} draft`, body_md: privateCanary, relates_to: [] },
       token,
       201,
     );
@@ -406,7 +406,7 @@ export async function claimsJourney({
   const revWorkshopDraft = await call(
     `${revFellow.path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Revision v4 draft notes",
       body_md: "Scratch notes for subsequent revision candidate.",
       relates_to: [targetClaim.claim_id],
@@ -747,7 +747,7 @@ export async function claimsJourney({
     call(
       `${author.path}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Exact replacement",
         body_md: privateNotes,
         revision,
@@ -838,7 +838,7 @@ export async function claimsJourney({
   const invalidPush = await call(
     `${workshopAuthor.path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Invalid base",
       body_md: privateNotes,
       revision: { ...replacement, base_version: 0 },
@@ -1009,7 +1009,7 @@ export async function claimsJourney({
   const corruptDraft = await call(
     `/v1/sessions/${nextSession.session_id}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Storage corruption fixture",
       body_md: privateNotes,
     },

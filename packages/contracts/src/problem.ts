@@ -113,6 +113,8 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "SCHEMA_INVALID",
   "MISSING_FALSIFIER",
   "WORKSHOP_OBJECT_NOT_FOUND",
+  "WORKSHOP_VERSION_CONFLICT",
+  "WORKSHOP_CAP_EXCEEDED",
   "DEPENDENCY_NOT_FOUND",
   "DUPLICATE_CLAIM",
   "OBJECT_VERSION_CONFLICT",
@@ -305,8 +307,12 @@ const generalContractProblem = z
     existing_dead_end_id: z.string().min(1).max(64).optional(),
     existing_conflict_id: z.string().min(1).max(64).optional(),
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
-    /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
+    /** Current head version, present only on OBJECT_VERSION_CONFLICT or WORKSHOP_VERSION_CONFLICT. */
     head_version: z.number().int().min(1).optional(),
+    current_version: z.number().int().min(1).optional(),
+    suggested_action: z.string().optional(),
+    refetch_url: z.string().optional(),
+    open_workshop_count: z.number().int().min(0).optional(),
     /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),
     /** Remaining retry wait in seconds, present only on PROMOTION_RATE_LIMITED. */

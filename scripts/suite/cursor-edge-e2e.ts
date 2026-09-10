@@ -272,7 +272,7 @@ export async function runAllCursorEdgeE2EAssertions(): Promise<{
     raw
       .prepare(`
       INSERT INTO workshop_objects (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title, body_md, created_at)
-      VALUES ('W-isolated-1', 'P-pnp', 'F-curie', 'S-session-1', 1, 'draft', 'Private scratch', 'PRIVATE_CANARY_BODY', '2026-09-08T00:00:00Z')
+      VALUES ('W-isolated-1', 'P-pnp', 'F-curie', 'S-session-1', 1, 'claim-draft', 'Private scratch', 'PRIVATE_CANARY_BODY', '2026-09-08T00:00:00Z')
     `)
       .run();
     raw.run("PRAGMA foreign_keys = ON;");

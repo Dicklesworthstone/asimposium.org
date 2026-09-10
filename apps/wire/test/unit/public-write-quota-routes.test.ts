@@ -395,7 +395,7 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "sponsor-pack-draft" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Continue privately",
         body_md: "A work product.",
       }),
@@ -435,7 +435,7 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `draft-${i}` },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title: `Draft ${i}`,
           body_md: `Content ${i}`,
           relates_to: [],
@@ -465,7 +465,7 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "draft-21" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Draft 21",
         body_md: "Content 21",
         relates_to: [],
@@ -515,7 +515,12 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
       const draftRes = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `slot-draft-${i}` },
-        body: JSON.stringify({ type: "draft", title: `D ${i}`, body_md: `B ${i}`, relates_to: [] }),
+        body: JSON.stringify({
+          type: "claim-draft",
+          title: `D ${i}`,
+          body_md: `B ${i}`,
+          relates_to: [],
+        }),
       });
       const { workshop_id } = (await draftRes.json()) as { workshop_id: string };
 
@@ -532,12 +537,12 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     const d1Res = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "race-draft-1" },
-      body: JSON.stringify({ type: "draft", title: "R1", body_md: "B1", relates_to: [] }),
+      body: JSON.stringify({ type: "claim-draft", title: "R1", body_md: "B1", relates_to: [] }),
     });
     const d2Res = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "race-draft-2" },
-      body: JSON.stringify({ type: "draft", title: "R2", body_md: "B2", relates_to: [] }),
+      body: JSON.stringify({ type: "claim-draft", title: "R2", body_md: "B2", relates_to: [] }),
     });
     const w1 = ((await d1Res.json()) as { workshop_id: string }).workshop_id;
     const w2 = ((await d2Res.json()) as { workshop_id: string }).workshop_id;
@@ -596,12 +601,12 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     const dARes = await fellowA.call(`/v1/sessions/${sesA.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "da" },
-      body: JSON.stringify({ type: "draft", title: "DA", body_md: "BA", relates_to: [] }),
+      body: JSON.stringify({ type: "claim-draft", title: "DA", body_md: "BA", relates_to: [] }),
     });
     const dBRes = await fellowB.call(`/v1/sessions/${sesB.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "db" },
-      body: JSON.stringify({ type: "draft", title: "DB", body_md: "BB", relates_to: [] }),
+      body: JSON.stringify({ type: "claim-draft", title: "DB", body_md: "BB", relates_to: [] }),
     });
     const wA = ((await dARes.json()) as { workshop_id: string }).workshop_id;
     const wB = ((await dBRes.json()) as { workshop_id: string }).workshop_id;
@@ -648,7 +653,7 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     const draftRes = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "draft-replay" },
-      body: JSON.stringify({ type: "draft", title: "DR", body_md: "BR", relates_to: [] }),
+      body: JSON.stringify({ type: "claim-draft", title: "DR", body_md: "BR", relates_to: [] }),
     });
     const { workshop_id } = (await draftRes.json()) as { workshop_id: string };
 
@@ -697,7 +702,7 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     const draftRes = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "draft-rej" },
-      body: JSON.stringify({ type: "draft", title: "DRJ", body_md: "BRJ", relates_to: [] }),
+      body: JSON.stringify({ type: "claim-draft", title: "DRJ", body_md: "BRJ", relates_to: [] }),
     });
     const { workshop_id } = (await draftRes.json()) as { workshop_id: string };
 
@@ -746,7 +751,12 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
       const dRes = await fellow.call(`/v1/sessions/${session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `d-${i}` },
-        body: JSON.stringify({ type: "draft", title: `D${i}`, body_md: `B${i}`, relates_to: [] }),
+        body: JSON.stringify({
+          type: "claim-draft",
+          title: `D${i}`,
+          body_md: `B${i}`,
+          relates_to: [],
+        }),
       });
       const { workshop_id } = (await dRes.json()) as { workshop_id: string };
       await fellow.call(`/v1/sessions/${session_id}/promote`, {

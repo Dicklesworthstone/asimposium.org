@@ -2339,6 +2339,10 @@
                 "maxLength": 64
               }
             },
+            "force_note": {
+              "type": "boolean",
+              "const": true
+            },
             "revision": {
               "type": "object",
               "properties": {

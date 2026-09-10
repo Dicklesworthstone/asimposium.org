@@ -90,7 +90,7 @@ await runLocalWorkerJourney(async (context) => {
   const workshop1 = await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Draft 1: Upper Bound",
       body_md: "Analysis supporting upper bound.",
       relates_to: [],
@@ -115,7 +115,7 @@ await runLocalWorkerJourney(async (context) => {
   const workshop2 = await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Draft 2: Lower Bound",
       body_md: "Analysis supporting lower bound.",
       relates_to: [],

@@ -92,7 +92,7 @@ await runLocalWorkerJourney(async (context) => {
   const workshopA = await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Initial Draft",
       body_md: "Preliminary analysis of 2-adic valuations.",
       relates_to: [],
@@ -304,7 +304,7 @@ await runLocalWorkerJourney(async (context) => {
   await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "dead-end",
+      type: "dead-end-draft",
       title: "Private unpublished route",
       body_md: "PRIVATE-GRAVEYARD-A-CANARY stays in the author workshop.",
       relates_to: [],
@@ -319,7 +319,7 @@ await runLocalWorkerJourney(async (context) => {
   await call(
     `/v1/sessions/${otherSession.session_id}/workshop`,
     {
-      type: "dead-end",
+      type: "dead-end-draft",
       title: "Another problem private route",
       body_md: "FOREIGN-PROBLEM-WORKSHOP-CANARY belongs only to the other problem.",
       relates_to: [],
@@ -964,7 +964,7 @@ await runLocalWorkerJourney(async (context) => {
       const workshop = await call(
         `${longLedgerPath}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: `Consecutive product of length ${length}`,
           body_md: `Consider the product of ${length} consecutive integers and its factorial divisor.`,
           relates_to: [],

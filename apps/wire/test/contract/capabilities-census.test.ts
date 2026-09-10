@@ -131,6 +131,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane bootstrap write; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/workshop":
       "signed sponsor console workshop preview; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/leases/release":
+      "signed sponsor-plane lease release; summarized by sponsor_surface, never enumerated",
+    "DELETE /v1/sessions/<id>/leases/<ref>":
+      "legacy lease release verb; canonical agent disclosure uses POST /v1/sessions/{id}/leases/{ref}/release",
     "GET /v1/operators/sponsors/<sponsorId>/fellow-cap":
       "operator-plane read behind the service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/operators/sponsors/<sponsorId>/fellow-cap/history":

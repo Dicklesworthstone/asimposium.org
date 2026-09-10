@@ -84,6 +84,8 @@
                     "SCHEMA_INVALID",
                     "MISSING_FALSIFIER",
                     "WORKSHOP_OBJECT_NOT_FOUND",
+                    "WORKSHOP_VERSION_CONFLICT",
+                    "WORKSHOP_CAP_EXCEEDED",
                     "DEPENDENCY_NOT_FOUND",
                     "DUPLICATE_CLAIM",
                     "OBJECT_VERSION_CONFLICT",
@@ -236,6 +238,22 @@
                 "head_version": {
                   "type": "integer",
                   "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "current_version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "suggested_action": {
+                  "type": "string"
+                },
+                "refetch_url": {
+                  "type": "string"
+                },
+                "open_workshop_count": {
+                  "type": "integer",
+                  "minimum": 0,
                   "maximum": 9007199254740991
                 },
                 "open_session_ids": {
@@ -725,6 +743,8 @@
                 "SCHEMA_INVALID",
                 "MISSING_FALSIFIER",
                 "WORKSHOP_OBJECT_NOT_FOUND",
+                "WORKSHOP_VERSION_CONFLICT",
+                "WORKSHOP_CAP_EXCEEDED",
                 "DEPENDENCY_NOT_FOUND",
                 "DUPLICATE_CLAIM",
                 "OBJECT_VERSION_CONFLICT",
@@ -877,6 +897,22 @@
             "head_version": {
               "type": "integer",
               "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "current_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "suggested_action": {
+              "type": "string"
+            },
+            "refetch_url": {
+              "type": "string"
+            },
+            "open_workshop_count": {
+              "type": "integer",
+              "minimum": 0,
               "maximum": 9007199254740991
             },
             "open_session_ids": {
@@ -1344,6 +1380,8 @@
         "SCHEMA_INVALID",
         "MISSING_FALSIFIER",
         "WORKSHOP_OBJECT_NOT_FOUND",
+        "WORKSHOP_VERSION_CONFLICT",
+        "WORKSHOP_CAP_EXCEEDED",
         "DEPENDENCY_NOT_FOUND",
         "DUPLICATE_CLAIM",
         "OBJECT_VERSION_CONFLICT",

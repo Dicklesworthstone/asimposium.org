@@ -61,7 +61,7 @@ await runLocalWorkerJourney(
     ]) {
       const workshop = await call(
         `${ap}/workshop`,
-        { type: "draft", title: "Private calculation", body_md: privateCanary },
+        { type: "claim-draft", title: "Private calculation", body_md: privateCanary },
         author,
         201,
       );

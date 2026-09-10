@@ -458,7 +458,7 @@ export async function runAllIntentClassifierE2EAssertions(): Promise<{
         method: "POST",
         headers: authHeaders("e2e-intent-draft-1"),
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title: "Draft for promotion",
           body_md: extractedSuggestedStatement,
           relates_to: [],

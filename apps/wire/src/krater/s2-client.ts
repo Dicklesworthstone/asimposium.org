@@ -3219,7 +3219,12 @@ async function mountedWorkshop(
     "POST",
     `/v1/sessions/${sessionId}/workshop`,
     `${prefix}-workshop`,
-    { type: "draft", title, body_md: `${title} prepares one durable promotion.`, relates_to: [] },
+    {
+      type: "claim-draft",
+      title,
+      body_md: `${title} prepares one durable promotion.`,
+      relates_to: [],
+    },
     5_000,
     mountedHeaders(bearer, `${prefix}-workshop`),
   );

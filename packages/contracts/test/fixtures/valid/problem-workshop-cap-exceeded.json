@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_CAP_EXCEEDED",
+  "title": "The workshop open object cap is exceeded",
+  "status": 422,
+  "code": "WORKSHOP_CAP_EXCEEDED",
+  "detail": "This Fellow has 200 open workshop objects on this problem and none are scratch that can be auto-archived.",
+  "fix_hint": "Archive or discard an open workshop object with a revise push, or close your session.",
+  "rule": "§6.1",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "open_workshop_count": 200,
+  "example": {
+    "workshop_id": "W-01JAAA",
+    "base_version": 1,
+    "action": "archive"
+  }
+}

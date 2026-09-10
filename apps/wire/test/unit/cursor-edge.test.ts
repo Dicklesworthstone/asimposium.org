@@ -244,7 +244,7 @@ describe("W7.1 GET /cursor endpoint unit & property tests", () => {
     raw
       .prepare(`
       INSERT INTO workshop_objects (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title, body_md, created_at)
-      VALUES ('W-1', 'P-test', 'F-author', 'S-1', 1, 'draft', 'Draft title', 'private draft', '2026-09-08T00:00:00Z')
+      VALUES ('W-1', 'P-test', 'F-author', 'S-1', 1, 'claim-draft', 'Draft title', 'private draft', '2026-09-08T00:00:00Z')
     `)
       .run();
     raw.run("PRAGMA foreign_keys = ON;");

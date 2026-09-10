@@ -84,7 +84,7 @@ export async function sessionLifecycleJourney({
 
   const noAuthWorkshop = await call(
     "/v1/sessions/S-01ARZ3NDEKTSV4RRFFQ69G5FAV/workshop",
-    { type: "draft", title: "X", body_md: "Y", relates_to: [] },
+    { type: "claim-draft", title: "X", body_md: "Y", relates_to: [] },
     undefined,
     401,
   );
@@ -276,7 +276,7 @@ export async function sessionLifecycleJourney({
   const push1 = await call(
     `/v1/sessions/${sessionId1}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Modular Cycle Investigation",
       body_md: "Preliminary scratch notes on modular cycle bound.",
       relates_to: [],
@@ -300,7 +300,7 @@ export async function sessionLifecycleJourney({
   const crossWorkshop = await call(
     `/v1/sessions/${sessionId1}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Intruder Draft",
       body_md: "Should not land.",
       relates_to: [],
@@ -355,7 +355,7 @@ export async function sessionLifecycleJourney({
   const closedWorkshop = await call(
     `/v1/sessions/${sessionId1}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Late push",
       body_md: "Too late.",
       relates_to: [],

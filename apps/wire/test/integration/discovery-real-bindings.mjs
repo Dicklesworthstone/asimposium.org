@@ -175,7 +175,11 @@ async function runDiscovery() {
     const path = `/v1/sessions/${authorSession.session_id}`;
     const draft = await call(
       `${path}/workshop`,
-      { type: "draft", title: "Public answer candidate", body_md: "PRIVATE-QUESTION-DISCOVERY" },
+      {
+        type: "claim-draft",
+        title: "Public answer candidate",
+        body_md: "PRIVATE-QUESTION-DISCOVERY",
+      },
       token,
       201,
     );
@@ -213,7 +217,7 @@ async function runDiscovery() {
       const work = await call(
         `${path}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: "Finite arithmetic comparison",
           body_md: "PRIVATE-QUESTION-DISCOVERY",
         },
@@ -539,7 +543,7 @@ async function runDiscovery() {
     await statusRead("invalid", 401);
     const draft = await call(
       `${path}/workshop`,
-      { type: "draft", title: "Local synthetic draft", body_md: privateBody, relates_to: [] },
+      { type: "claim-draft", title: "Local synthetic draft", body_md: privateBody, relates_to: [] },
       author,
       201,
     );
@@ -872,7 +876,7 @@ async function runDiscovery() {
   );
   const policyDraft = await call(
     `${policyPath}/workshop`,
-    { type: "draft", title: "Policy fixture", body_md: privateBody, relates_to: [] },
+    { type: "claim-draft", title: "Policy fixture", body_md: privateBody, relates_to: [] },
     author,
     201,
   );
@@ -928,7 +932,7 @@ async function runDiscovery() {
   );
   const draft = await call(
     `${policyPath}/workshop`,
-    { type: "draft", title: "Held candidate", body_md: privateBody, relates_to: [] },
+    { type: "claim-draft", title: "Held candidate", body_md: privateBody, relates_to: [] },
     author,
     201,
   );
@@ -1068,7 +1072,7 @@ async function runDiscovery() {
     latestPrivateDeadEnd = await call(
       `${policyPath}/workshop`,
       {
-        type: "dead-end",
+        type: "dead-end-draft",
         title: `Private examined route ${i}`,
         body_md: i === 10 ? privateDeadEndBody : "A checked local obstruction.",
         relates_to: [],
@@ -1699,7 +1703,7 @@ async function runDiscovery() {
         const statement = `Dependency fixture fact number ${index}.`;
         const draft = await call(
           `${path}/workshop`,
-          { type: "draft", title: statement, body_md: statement },
+          { type: "claim-draft", title: statement, body_md: statement },
           token,
           201,
         );
@@ -2257,7 +2261,7 @@ async function runDiscovery() {
             const draft = await call(
               `/v1/sessions/${actor.sessionId}/workshop`,
               {
-                type: "draft",
+                type: "claim-draft",
                 title: "Quota contender",
                 body_md: "Synthetic quota work product.",
                 relates_to: [],
@@ -2496,7 +2500,7 @@ async function runDiscovery() {
       const refillDraft = await call(
         `/v1/sessions/${refillSession.session_id}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: "Refill after restart",
           body_md: "Synthetic historical attempts.",
           relates_to: [],
@@ -2584,7 +2588,7 @@ async function runDiscovery() {
       const sameKeyDraft = await call(
         `/v1/sessions/${sameKeySession.session_id}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: "Same caller key",
           body_md: "Synthetic concurrent admission.",
           relates_to: [],
@@ -2676,7 +2680,7 @@ async function runDiscovery() {
       const draft = await call(
         `/v1/sessions/${session.session_id}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: "Quota storage outage",
           body_md: "Synthetic failure case.",
           relates_to: [],
@@ -2721,7 +2725,7 @@ async function runDiscovery() {
       await call(
         `/v1/sessions/${session.session_id}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: "Continue during outage",
           body_md: "Private work remains available.",
           relates_to: [],

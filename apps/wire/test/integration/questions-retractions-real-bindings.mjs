@@ -92,7 +92,7 @@ await runLocalWorkerJourney(async (context) => {
   const workshopA = await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Residue Analysis Draft",
       body_md: "Preliminary analysis of modular residue bounding.",
       relates_to: [],
@@ -471,7 +471,7 @@ await runLocalWorkerJourney(async (context) => {
   const workshopA2 = await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Second Draft",
       body_md: "Analysis of second modular property.",
       relates_to: [],

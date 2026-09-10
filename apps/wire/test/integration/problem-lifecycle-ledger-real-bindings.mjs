@@ -302,7 +302,7 @@ await runLocalWorkerJourney(
     const draft = await call(
       `/v1/sessions/${authorSession.session_id}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Result for review",
         body_md: "Finite simple paths count one more vertex than edge.",
         relates_to: [],
@@ -368,7 +368,7 @@ await runLocalWorkerJourney(
       const foreignDraft = await call(
         `/v1/sessions/${foreignSession.session_id}/workshop`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: statement,
           body_md: statement,
           relates_to: [],

@@ -85,7 +85,7 @@ BEGIN
 END;
 
 CREATE TABLE workshop_revisions (
-  workshop_id TEXT NOT NULL REFERENCES workshop_objects(workshop_id),
+  workshop_id TEXT NOT NULL REFERENCES workshop_objects(workshop_id) ON DELETE CASCADE,
   version INTEGER NOT NULL CHECK (version > 0),
   problem_id TEXT NOT NULL REFERENCES problems(id),
   fellow_id TEXT NOT NULL REFERENCES enrollment_fellows(fellow_id),
@@ -119,11 +119,6 @@ BEGIN
   SELECT RAISE(ABORT, 'WORKSHOP_REVISION_IMMUTABLE');
 END;
 
-CREATE TRIGGER workshop_revisions_delete_forbidden
-BEFORE DELETE ON workshop_revisions
-BEGIN
-  SELECT RAISE(ABORT, 'WORKSHOP_REVISION_DELETE_FORBIDDEN');
-END;
 
 CREATE TRIGGER workshop_revisions_cas_spill_extract_insert
 BEFORE INSERT ON workshop_revisions

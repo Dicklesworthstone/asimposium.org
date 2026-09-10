@@ -153,6 +153,8 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ],
   ["problem-promotion-rate-limited.json", "PROMOTION_RATE_LIMITED", 429, "contract"],
   ["problem-reviewer-already-reviewed.json", "REVIEWER_ALREADY_REVIEWED", 409, "contract"],
+  ["problem-workshop-version-conflict.json", "WORKSHOP_VERSION_CONFLICT", 409, "contract"],
+  ["problem-workshop-cap-exceeded.json", "WORKSHOP_CAP_EXCEEDED", 422, "contract"],
 ] as const;
 
 async function fixture(url: URL): Promise<unknown> {
@@ -573,7 +575,7 @@ test("mounted session-write body errors are teaching contract refusals with the 
       "problem-workshop-push-body-invalid.json",
       "WORKSHOP_PUSH_BODY_INVALID",
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Orbit count under toggles",
         body_md: "Burnside average over the eight toggles…",
         relates_to: ["C-12"],

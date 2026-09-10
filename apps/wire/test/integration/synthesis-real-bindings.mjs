@@ -75,7 +75,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
   const workshop1 = await call(
     `/v1/sessions/${sessionId}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Draft 1",
       body_md: "First draft body.",
       relates_to: [],
@@ -179,7 +179,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
   const workshop2 = await call(
     `/v1/sessions/${sessionId}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Draft 2",
       body_md: "Second draft body.",
       relates_to: [],

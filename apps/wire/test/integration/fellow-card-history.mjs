@@ -46,7 +46,7 @@ export async function fellowCardHistory({
   const draft = await call(
     `${path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Historical review input",
       body_md: "CARD_PRIVATE_HISTORY_CANARY",
       relates_to: [],

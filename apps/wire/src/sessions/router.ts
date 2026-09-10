@@ -1705,6 +1705,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       revision_json: string | null;
       workshop_seq: number;
       created_at: string;
+      version?: number;
+      current_version?: number;
+      state?: string;
+      ledger_intent_json?: string | null;
     },
   ) {
     let bodyMd = row.body_md;
@@ -1735,6 +1739,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       relates_to: JSON.parse(row.relates_to_json),
       workshop_seq: row.workshop_seq,
       created_at: row.created_at,
+      version: row.version ?? row.current_version ?? 1,
+      current_version: row.current_version ?? 1,
+      state: (row.state as "open" | "archived" | "discarded") ?? "open",
+      ...(row.ledger_intent_json ? { ledger_intent: JSON.parse(row.ledger_intent_json) } : {}),
       ...(row.revision_json === null
         ? {}
         : { revision: ClaimRevisionSchema.parse(JSON.parse(row.revision_json)) }),
@@ -1762,25 +1770,51 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   app.get("/v1/sessions/:id/workshop/:workshopId", async (c) => {
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return privateNoStore(auth.response);
-    if (new URL(c.req.url).searchParams.size !== 0)
-      return privateNoStore(
-        validatedProblem({
-          status: 400,
-          code: "SCHEMA_INVALID",
-          title: "Workshop object reads take no query parameters",
-          detail:
-            "This route reads one stored work product. Workshop edit versions are not available.",
-          fixHint: "GET the exact workshop URL from your working pack without query parameters.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: {
-              method: "GET",
-              path: "/v1/sessions/S-00000000000000000000000001/workshop/W-00000000000000000000000001",
+    const searchParams = new URL(c.req.url).searchParams;
+    let requestedVersion: number | undefined = undefined;
+    if (searchParams.size > 0) {
+      if (searchParams.size > 1 || !searchParams.has("version")) {
+        return privateNoStore(
+          validatedProblem({
+            status: 400,
+            code: "SCHEMA_INVALID",
+            title: "Workshop object reads take only optional version parameter",
+            detail:
+              "This route reads one stored work product revision. Unknown query parameters are refused.",
+            fixHint: "Omit query parameters or specify ?version=N.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                method: "GET",
+                path: `/v1/sessions/${c.req.param("id")}/workshop/${c.req.param("workshopId")}?version=1`,
+              },
             },
-          },
-        }),
-      );
+          }),
+        );
+      }
+      const rawVersion = searchParams.get("version");
+      if (rawVersion === null || !/^[1-9]\d*$/.test(rawVersion)) {
+        return privateNoStore(
+          validatedProblem({
+            status: 400,
+            code: "SCHEMA_INVALID",
+            title: "Invalid version parameter",
+            detail: "The version query parameter must be a positive integer.",
+            fixHint: "Specify ?version=N with a positive integer such as ?version=1.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                method: "GET",
+                path: `/v1/sessions/${c.req.param("id")}/workshop/${c.req.param("workshopId")}?version=1`,
+              },
+            },
+          }),
+        );
+      }
+      requestedVersion = Number.parseInt(rawVersion, 10);
+    }
     try {
       // Closed sessions remain valid recovery contexts. Scope ownership before
       // selecting any private row or reaching R2; a session never grants access
@@ -1792,15 +1826,85 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .first<{ problem_id: string }>();
       if (session === null) return workshopNotFound();
       await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding);
-      const row = await c.env.DB.prepare(
+      const head = await c.env.DB.prepare(
         `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json,
-          workshop_seq, created_at, revision_json FROM workshop_objects
+          workshop_seq, created_at, revision_json, current_version, state, ledger_intent_json
+         FROM workshop_objects
          WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
       )
         .bind(c.req.param("workshopId"), session.problem_id, auth.binding.fellowId)
-        .first<Parameters<typeof materializeWorkshopObject>[1]>();
-      if (row === null) return workshopNotFound();
-      const object = await materializeWorkshopObject(c.env, row);
+        .first<{
+          workshop_id: string;
+          type: string;
+          title: string;
+          body_md: string;
+          cas_hash: string | null;
+          relates_to_json: string;
+          revision_json: string | null;
+          workshop_seq: number;
+          created_at: string;
+          current_version: number;
+          state: string;
+          ledger_intent_json: string | null;
+        }>();
+      if (head === null) return workshopNotFound();
+
+      let target = {
+        workshop_id: head.workshop_id,
+        type: head.type,
+        title: head.title,
+        body_md: head.body_md,
+        cas_hash: head.cas_hash,
+        relates_to_json: head.relates_to_json,
+        revision_json: head.revision_json,
+        workshop_seq: head.workshop_seq,
+        created_at: head.created_at,
+        version: head.current_version,
+        current_version: head.current_version,
+        state: head.state,
+        ledger_intent_json: head.ledger_intent_json,
+      };
+
+      if (requestedVersion !== undefined) {
+        const rev = await c.env.DB.prepare(
+          `SELECT workshop_id, version, type, title, body_md, cas_hash, relates_to_json,
+            revision_json, ledger_intent_json, revise_action, created_at
+           FROM workshop_revisions
+           WHERE workshop_id = ? AND version = ?`,
+        )
+          .bind(head.workshop_id, requestedVersion)
+          .first<{
+            workshop_id: string;
+            version: number;
+            type: string;
+            title: string;
+            body_md: string;
+            cas_hash: string | null;
+            relates_to_json: string;
+            revision_json: string | null;
+            ledger_intent_json: string | null;
+            revise_action: string;
+            created_at: string;
+          }>();
+        if (rev === null) return workshopNotFound();
+        target = {
+          workshop_id: head.workshop_id,
+          type: rev.type,
+          title: rev.title,
+          body_md: rev.body_md,
+          cas_hash: rev.cas_hash,
+          relates_to_json: rev.relates_to_json,
+          revision_json: rev.revision_json,
+          workshop_seq: head.workshop_seq,
+          created_at: rev.created_at,
+          version: rev.version,
+          current_version: head.current_version,
+          state: head.state,
+          ledger_intent_json: rev.ledger_intent_json,
+        };
+      }
+
+      const object = await materializeWorkshopObject(c.env, target);
       const body = JSON.stringify(
         WorkshopObjectResponseSchema.parse({
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -2827,7 +2931,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const deadEnds = await db
         .prepare(
           `SELECT workshop_id, title, body_md, cas_hash, workshop_seq, created_at FROM workshop_objects
-           WHERE problem_id = ? AND fellow_id = ? AND type = 'dead-end'
+           WHERE problem_id = ? AND fellow_id = ? AND type IN ('dead-end-draft', 'dead-end')
            ORDER BY workshop_seq DESC LIMIT 11`,
         )
         .bind(session.problem_id, auth.binding.fellowId)
@@ -3163,12 +3267,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "The workshop push does not match the contract",
         detail: "The JSON body does not match the workshop-push contract.",
         fixHint:
-          "Send {type, title, body_md, relates_to?, revision?}; revision is an exact claim replacement for later publication.",
+          "Send {type, title, body_md, relates_to?, revision?} or revise with {workshop_id, base_version, ...}.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
-            type: "draft",
+            type: "claim-draft",
             title: "Orbit count under toggles",
             body_md: "Burnside average over the eight toggles…",
             relates_to: ["C-12"],
@@ -3177,28 +3281,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/workshop`, parsed.data);
-    // The §7.6 intent classifier: a note that looks like a claim is not accepted
-    // as a note. Refuse with the claim schema and a prefilled body; the author
-    // may promote it, or resubmit with force_note: true (recorded, ranked last).
-    if (parsed.data.type === "note" && parsed.data.force_note !== true) {
-      const assessment = assessNoteIntent(parsed.data.body_md, parsed.data.relates_to.length > 0);
-      if (assessment.looksLikeClaim) {
-        return validatedProblem({
-          status: 422,
-          code: "LOOKS_LIKE_CLAIM",
-          title: "This note looks like a claim",
-          detail:
-            "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
-          fixHint:
-            "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
-          rule: "§7.6",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: suggestedClaimFromNote(parsed.data.body_md),
-          },
-        });
+    if (!("workshop_id" in parsed.data)) {
+      // The §7.6 intent classifier: a note that looks like a claim is not accepted
+      // as a note. Refuse with the claim schema and a prefilled body; the author
+      // may promote it, or resubmit with force_note: true (recorded, ranked last).
+      if (parsed.data.type === "note" && parsed.data.force_note !== true) {
+        const assessment = assessNoteIntent(parsed.data.body_md, parsed.data.relates_to.length > 0);
+        if (assessment.looksLikeClaim) {
+          return validatedProblem({
+            status: 422,
+            code: "LOOKS_LIKE_CLAIM",
+            title: "This note looks like a claim",
+            detail:
+              "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
+            fixHint:
+              "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
+            rule: "§7.6",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: suggestedClaimFromNote(parsed.data.body_md),
+            },
+          });
+        }
       }
     }
+
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -3215,6 +3322,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
+
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
@@ -3235,12 +3343,330 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       now: Date.now(),
     });
     if (decision.decision !== "allow") return writeRefusedProblem();
-    // W2.7: a body over the CAS spill threshold lives in the CAS; the row
-    // carries the 280-char extract + the content hash. The CAS write completes
-    // before the D1 commit so the transaction references durable bytes.
-    const bodyStorage = await storeWorkshopBody(c.env.ARTIFACTS, parsed.data.body_md, {
+
+    if ("workshop_id" in parsed.data) {
+      const reviseData = parsed.data;
+      const head = await db
+        .prepare(
+          `SELECT workshop_id, problem_id, fellow_id, workshop_seq, type, title,
+            body_md, cas_hash, relates_to_json, revision_json, current_version,
+            state, ledger_intent_json, created_at
+           FROM workshop_objects
+           WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
+        )
+        .bind(reviseData.workshop_id, session.problem_id, auth.binding.fellowId)
+        .first<{
+          workshop_id: string;
+          problem_id: string;
+          fellow_id: string;
+          workshop_seq: number;
+          type: string;
+          title: string;
+          body_md: string;
+          cas_hash: string | null;
+          relates_to_json: string;
+          revision_json: string | null;
+          current_version: number;
+          state: string;
+          ledger_intent_json: string | null;
+          created_at: string;
+        }>();
+      if (head === null) return workshopNotFound();
+
+      if (head.current_version !== reviseData.base_version) {
+        return validatedProblem({
+          status: 409,
+          code: "WORKSHOP_VERSION_CONFLICT",
+          title: "The workshop object base version is stale",
+          detail: `Workshop object ${head.workshop_id} is at version ${head.current_version}; the revision was based on ${reviseData.base_version}.`,
+          fixHint:
+            "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            current_version: head.current_version,
+            suggested_action: "refetch_and_reapply",
+            refetch_url: `/v1/sessions/${session.session_id}/workshop/${head.workshop_id}`,
+            example: {
+              workshop_id: head.workshop_id,
+              base_version: head.current_version,
+              type: head.type,
+              title: head.title,
+              body_md: "<new text>",
+            },
+          },
+        });
+      }
+
+      const effectiveType = reviseData.type ?? head.type;
+      if (
+        effectiveType === "note" &&
+        reviseData.body_md !== undefined &&
+        reviseData.force_note !== true
+      ) {
+        const relatesToCount = (reviseData.relates_to ?? JSON.parse(head.relates_to_json)).length;
+        const assessment = assessNoteIntent(reviseData.body_md, relatesToCount > 0);
+        if (assessment.looksLikeClaim) {
+          return validatedProblem({
+            status: 422,
+            code: "LOOKS_LIKE_CLAIM",
+            title: "This note looks like a claim",
+            detail:
+              "The body is claim-shaped (proposition markers, or long and unanchored). A claim belongs on the public ledger, not the private workshop.",
+            fixHint:
+              "Promote it with the claim schema (a falsifier is required for conjecture-class claims), or resubmit with force_note: true to keep it as a note (recorded, ranked last, visible to the sponsor).",
+            rule: "§7.6",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: suggestedClaimFromNote(reviseData.body_md),
+            },
+          });
+        }
+      }
+
+      let newBodyMd = head.body_md;
+      let newCasHash = head.cas_hash;
+      if (reviseData.body_md !== undefined) {
+        const bodyStorage = await storeWorkshopBody(c.env.ARTIFACTS, reviseData.body_md, {
+          sha256Hex: sha256Text,
+        });
+        newBodyMd = bodyStorage.bodyMd;
+        newCasHash = bodyStorage.casHash;
+      }
+
+      const newVersion = head.current_version + 1;
+      const newTitle = reviseData.title ?? head.title;
+      const newRelatesToJson =
+        reviseData.relates_to !== undefined
+          ? JSON.stringify(reviseData.relates_to)
+          : head.relates_to_json;
+      const newLedgerIntentJson =
+        reviseData.ledger_intent !== undefined
+          ? reviseData.ledger_intent === null
+            ? null
+            : JSON.stringify(reviseData.ledger_intent)
+          : head.ledger_intent_json;
+      const newRevisionJson =
+        reviseData.revision !== undefined
+          ? JSON.stringify(reviseData.revision)
+          : head.revision_json;
+      const workshopObjectsRevisionJson =
+        head.revision_json !== null ? head.revision_json : newRevisionJson;
+
+      let newState = head.state;
+      const action = reviseData.action ?? "edit";
+      if (action === "archive") {
+        newState = "archived";
+      } else if (action === "discard") {
+        newState = "discarded";
+      } else if (action === "keep" || action === "edit") {
+        newState = "open";
+      }
+
+      try {
+        const result = await replayOrCommit(
+          db,
+          "workshop_push",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+          (raw) => WorkshopPushResponseSchema.parse(JSON.parse(raw)),
+          async () => {
+            const maxSeq = await db
+              .prepare(
+                `SELECT COALESCE(MAX(workshop_seq), 0) AS workshop_seq
+                 FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?`,
+              )
+              .bind(session.problem_id, auth.binding.fellowId)
+              .first<{ workshop_seq: number }>();
+            const priorSequence = maxSeq?.workshop_seq ?? 0;
+            if (
+              !Number.isSafeInteger(priorSequence) ||
+              priorSequence < 0 ||
+              priorSequence >= Number.MAX_SAFE_INTEGER
+            ) {
+              throw new Error("workshop sequence is not a safe nonnegative integer");
+            }
+            const workshopSequence = priorSequence + 1;
+            const updatedAt = new Date().toISOString();
+            const value = WorkshopPushResponseSchema.parse({
+              workshop_id: head.workshop_id,
+              workshop_seq: workshopSequence,
+              version: newVersion,
+            });
+            return {
+              value,
+              statements: (sealed, claimToken) => [
+                db
+                  .prepare(
+                    `INSERT INTO session_write_replays
+                       (scope, principal_scope, idempotency_key, request_digest,
+                        response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                     SELECT 'workshop_push', ?, ?, ?, ?, ?, ?, ?
+                     WHERE EXISTS (
+                       SELECT 1 FROM sessions
+                       WHERE session_id = ? AND fellow_id = ? AND problem_id = ?
+                         AND closed_at IS NULL
+                     )
+                       AND EXISTS (
+                         SELECT 1 FROM fellow_tokens
+                         WHERE credential_id = ? AND revoked_at IS NULL
+                       )
+                     ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                  )
+                  .bind(
+                    auth.binding.fellowId,
+                    key,
+                    digest,
+                    sealed.ciphertext,
+                    sealed.initializationVector,
+                    Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                    claimToken,
+                    session.session_id,
+                    auth.binding.fellowId,
+                    session.problem_id,
+                    auth.binding.credentialId,
+                  ),
+                db
+                  .prepare(
+                    `UPDATE workshop_objects
+                     SET workshop_seq = ?,
+                         type = ?,
+                         title = ?,
+                         body_md = ?,
+                         cas_hash = ?,
+                         relates_to_json = ?,
+                         revision_json = ?,
+                         current_version = ?,
+                         state = ?,
+                         ledger_intent_json = ?,
+                         updated_at = ?
+                     WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ? AND current_version = ?
+                       AND EXISTS (
+                         SELECT 1 FROM session_write_replays
+                         WHERE scope = 'workshop_push' AND principal_scope = ?
+                           AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                       )`,
+                  )
+                  .bind(
+                    workshopSequence,
+                    effectiveType,
+                    newTitle,
+                    newBodyMd,
+                    newCasHash,
+                    newRelatesToJson,
+                    workshopObjectsRevisionJson,
+                    newVersion,
+                    newState,
+                    newLedgerIntentJson,
+                    updatedAt,
+                    head.workshop_id,
+                    session.problem_id,
+                    auth.binding.fellowId,
+                    head.current_version,
+                    auth.binding.fellowId,
+                    key,
+                    digest,
+                    claimToken,
+                  ),
+                db
+                  .prepare(
+                    `INSERT INTO workshop_revisions
+                       (workshop_id, version, problem_id, fellow_id, session_id,
+                        type, title, body_md, cas_hash, relates_to_json,
+                        ledger_intent_json, revision_json, revise_action, created_at)
+                     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                     FROM session_write_replays
+                     WHERE scope = 'workshop_push' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
+                  )
+                  .bind(
+                    head.workshop_id,
+                    newVersion,
+                    session.problem_id,
+                    auth.binding.fellowId,
+                    session.session_id,
+                    effectiveType,
+                    newTitle,
+                    newBodyMd,
+                    newCasHash,
+                    newRelatesToJson,
+                    newLedgerIntentJson,
+                    newRevisionJson,
+                    action,
+                    updatedAt,
+                    auth.binding.fellowId,
+                    key,
+                    digest,
+                    claimToken,
+                  ),
+              ],
+            };
+          },
+          isWorkshopSequenceConflict,
+        );
+        return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
+      } catch (error) {
+        if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+        if (error instanceof ReplayClaimNotCommittedError) {
+          const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
+          if (current instanceof Response) return current;
+          return writeRefusedProblem();
+        }
+        throw error;
+      }
+    }
+
+    // --- Create flow ---
+    const createData = parsed.data;
+    const openCountRow = await db
+      .prepare(
+        `SELECT COUNT(*) AS open_count FROM workshop_objects
+         WHERE problem_id = ? AND fellow_id = ? AND state = 'open'`,
+      )
+      .bind(session.problem_id, auth.binding.fellowId)
+      .first<{ open_count: number }>();
+    const openCount = openCountRow?.open_count ?? 0;
+    let autoArchiveWorkshopId: string | null = null;
+    if (openCount >= 200) {
+      const oldestScratch = await db
+        .prepare(
+          `SELECT workshop_id FROM workshop_objects
+           WHERE problem_id = ? AND fellow_id = ? AND type = 'scratch' AND state = 'open'
+           ORDER BY workshop_seq ASC LIMIT 1`,
+        )
+        .bind(session.problem_id, auth.binding.fellowId)
+        .first<{ workshop_id: string }>();
+      if (oldestScratch === null) {
+        return validatedProblem({
+          status: 422,
+          code: "WORKSHOP_CAP_EXCEEDED",
+          title: "The workshop open object cap is exceeded",
+          detail:
+            "This Fellow has 200 open workshop objects on this problem and none are scratch that can be auto-archived.",
+          fixHint:
+            "Archive or discard an open workshop object with a revise push, or close your session.",
+          rule: "§6.1",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            open_workshop_count: openCount,
+            example: {
+              workshop_id: "W-01JAAA",
+              base_version: 1,
+              action: "archive",
+            },
+          },
+        });
+      }
+      autoArchiveWorkshopId = oldestScratch.workshop_id;
+    }
+
+    // CAS spill
+    const bodyStorage = await storeWorkshopBody(c.env.ARTIFACTS, createData.body_md, {
       sha256Hex: sha256Text,
     });
+
     try {
       const result = await replayOrCommit(
         db,
@@ -3272,7 +3698,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const value = WorkshopPushResponseSchema.parse({
             workshop_id: workshopId,
             workshop_seq: workshopSequence,
+            version: 1,
           });
+          const ledgerIntentJson =
+            createData.ledger_intent !== undefined
+              ? JSON.stringify(createData.ledger_intent)
+              : null;
+          const revisionJson =
+            createData.revision !== undefined ? JSON.stringify(createData.revision) : null;
           return {
             value,
             statements: (sealed, claimToken) => [
@@ -3306,12 +3739,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   session.problem_id,
                   auth.binding.credentialId,
                 ),
+              ...(autoArchiveWorkshopId === null
+                ? []
+                : [
+                    db
+                      .prepare(
+                        `UPDATE workshop_objects
+                         SET state = 'archived', updated_at = ?
+                         WHERE workshop_id = ?
+                           AND EXISTS (
+                             SELECT 1 FROM session_write_replays
+                             WHERE scope = 'workshop_push' AND principal_scope = ?
+                               AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                           )`,
+                      )
+                      .bind(
+                        createdAt,
+                        autoArchiveWorkshopId,
+                        auth.binding.fellowId,
+                        key,
+                        digest,
+                        claimToken,
+                      ),
+                  ]),
               db
                 .prepare(
                   `INSERT INTO workshop_objects
                      (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title,
-                      body_md, cas_hash, relates_to_json, force_note, created_at, revision_json)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                      body_md, cas_hash, relates_to_json, force_note, created_at, revision_json,
+                      current_version, state, ledger_intent_json)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'open', ?
                    FROM session_write_replays
                    WHERE scope = 'workshop_push' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -3322,14 +3779,44 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   auth.binding.fellowId,
                   session.session_id,
                   workshopSequence,
-                  parsed.data.type,
-                  parsed.data.title,
+                  createData.type,
+                  createData.title,
                   bodyStorage.bodyMd,
                   bodyStorage.casHash,
-                  JSON.stringify(parsed.data.relates_to),
-                  parsed.data.force_note === true ? 1 : 0,
+                  JSON.stringify(createData.relates_to),
+                  createData.force_note === true ? 1 : 0,
                   createdAt,
-                  parsed.data.revision === undefined ? null : JSON.stringify(parsed.data.revision),
+                  revisionJson,
+                  ledgerIntentJson,
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                ),
+              db
+                .prepare(
+                  `INSERT INTO workshop_revisions
+                     (workshop_id, version, problem_id, fellow_id, session_id,
+                      type, title, body_md, cas_hash, relates_to_json,
+                      ledger_intent_json, revision_json, revise_action, created_at)
+                   SELECT ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'create', ?
+                   FROM session_write_replays
+                   WHERE scope = 'workshop_push' AND principal_scope = ?
+                     AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
+                )
+                .bind(
+                  workshopId,
+                  session.problem_id,
+                  auth.binding.fellowId,
+                  session.session_id,
+                  createData.type,
+                  createData.title,
+                  bodyStorage.bodyMd,
+                  bodyStorage.casHash,
+                  JSON.stringify(createData.relates_to),
+                  ledgerIntentJson,
+                  revisionJson,
+                  createdAt,
                   auth.binding.fellowId,
                   key,
                   digest,
@@ -11374,7 +11861,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // before this query ever runs.
       const beforeWorkshopSeq = parsedRequest.data.before_workshop_seq;
       const objects = await c.env.DB.prepare(
-        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at, revision_json
+        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at, revision_json, current_version, state, ledger_intent_json
            FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
              AND (? IS NULL OR workshop_seq < ?)
            ORDER BY workshop_seq DESC LIMIT ${SPONSOR_WORKSHOP_PAGE_LIMIT + 1}`,
@@ -11390,6 +11877,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           revision_json: string | null;
           workshop_seq: number;
           created_at: string;
+          current_version: number;
+          state: string;
+          ledger_intent_json: string | null;
         }>();
       const rows = objects.results ?? [];
       const hasMore = rows.length > SPONSOR_WORKSHOP_PAGE_LIMIT;

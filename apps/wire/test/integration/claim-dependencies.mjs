@@ -28,7 +28,7 @@ export async function claimDependencies({
   const privateCanary = "DEPENDENCY_PRIVATE_SCRATCH_DO_NOT_PUBLISH";
   const draft = await call(
     `${path}/workshop`,
-    { type: "draft", title: "Premise work", body_md: privateCanary, relates_to: [] },
+    { type: "claim-draft", title: "Premise work", body_md: privateCanary, relates_to: [] },
     token,
     201,
   );
@@ -279,7 +279,7 @@ export async function claimDependencies({
   const otherPath = `/v1/sessions/${otherSession.session_id}`;
   const otherDraft = await call(
     `${otherPath}/workshop`,
-    { type: "draft", title: "Other premises", body_md: privateCanary, relates_to: [] },
+    { type: "claim-draft", title: "Other premises", body_md: privateCanary, relates_to: [] },
     token,
     201,
   );
@@ -362,7 +362,7 @@ export async function claimDependencies({
   const manyPath = `/v1/sessions/${manySession.session_id}`;
   const manyDraft = await call(
     `${manyPath}/workshop`,
-    { type: "draft", title: "Sixteen premises", body_md: privateCanary, relates_to: [] },
+    { type: "claim-draft", title: "Sixteen premises", body_md: privateCanary, relates_to: [] },
     manyToken,
     201,
   );

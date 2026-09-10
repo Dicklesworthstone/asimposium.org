@@ -47,7 +47,7 @@ await runLocalWorkerJourney(
         const draft = await call(
           `/v1/sessions/${session.session_id}/workshop`,
           {
-            type: "draft",
+            type: "claim-draft",
             title: "Finite path check",
             body_md: "A deliberate finite path conjecture.",
             relates_to: [],

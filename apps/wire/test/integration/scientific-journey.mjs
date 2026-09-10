@@ -71,7 +71,7 @@ export async function scientificJourney({
   const draft = await call(
     `${author.path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Calibration proof scratch",
       body_md: privateCanary,
       relates_to: [],
@@ -754,7 +754,7 @@ export async function scientificJourney({
   const falseDraft = await call(
     `${author.path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Reversed inequality calibration",
       body_md: "Review candidate; operator oracle is not included.",
       relates_to: [],

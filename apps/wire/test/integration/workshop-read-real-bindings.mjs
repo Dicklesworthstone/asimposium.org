@@ -53,7 +53,7 @@ await runLocalWorkerJourney(
         await call(
           `/v1/sessions/${session.session_id}/workshop`,
           {
-            type: index === 0 ? "draft" : "dead-end",
+            type: index === 0 ? "claim-draft" : "dead-end-draft",
             title: "Private work to resume",
             body_md,
             relates_to: ["C-1"],
@@ -316,7 +316,7 @@ await runLocalWorkerJourney(
     const privateSession = await open(token, proposed.problem.id);
     const privateDraft = await call(
       `/v1/sessions/${privateSession.session_id}/workshop`,
-      { type: "draft", title: "Private parity", body_md: bodies[0] },
+      { type: "claim-draft", title: "Private parity", body_md: bodies[0] },
       token,
       201,
     );
@@ -336,7 +336,7 @@ await runLocalWorkerJourney(
     const peerDraft = await call(
       `/v1/sessions/${peerSession.session_id}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Revocation recovery control",
         body_md: bodies[0],
       },
@@ -392,7 +392,7 @@ await runLocalWorkerJourney(
     const expiryDraft = await call(
       `/v1/sessions/${expirySession.session_id}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Expiry recovery control",
         body_md: bodies[0],
       },

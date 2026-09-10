@@ -33,7 +33,7 @@ export async function seedFellowPagination({ call, enroll, fixtures, env }) {
   const draft = await call(
     `${sessionPath}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Finite parity claim",
       body_md: "FELLOW_PAGES_WORKSHOP_CANARY",
       relates_to: [],

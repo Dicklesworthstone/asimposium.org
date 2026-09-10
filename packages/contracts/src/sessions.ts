@@ -473,6 +473,7 @@ export const WorkshopReviseRequestSchema = z
       .max(64 * 1024)
       .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).optional(),
+    force_note: z.literal(true).optional(),
     revision: ClaimRevisionSchema.optional(),
     ledger_intent: LedgerIntentSchema.optional(),
     action: WorkshopReviseActionSchema.optional(),

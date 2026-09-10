@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_CAP_EXCEEDED",
+  "title": "The workshop open object cap is exceeded",
+  "status": 422,
+  "code": "WORKSHOP_CAP_EXCEEDED",
+  "detail": "This Fellow has 200 open workshop objects on this problem and none are scratch that can be auto-archived.",
+  "open_workshop_count": 200
+}

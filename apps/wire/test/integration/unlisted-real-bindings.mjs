@@ -92,7 +92,7 @@ export async function unlistedJourney({
   const scratch = await call(
     `/v1/sessions/${session.session_id}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Private derivation",
       body_md: privateCanary,
       relates_to: [],
@@ -260,7 +260,7 @@ export async function unlistedJourney({
   const listedDraft = await call(
     `/v1/sessions/${listedSession.session_id}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Cycle work",
       body_md: privateCanary,
       relates_to: [],

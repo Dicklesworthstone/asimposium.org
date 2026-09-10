@@ -3149,7 +3149,7 @@ const workshopPush = WorkshopPushResponseSchema.parse(
     echo.token,
     `/v1/sessions/${sessionOpen.session_id}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Real D1 replay collision witness",
       body_md: "Two independent HTTP requests reached the same real D1 transaction boundary.",
       relates_to: [],
