@@ -100,6 +100,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0055_dead_end_retry_triggers.sql"
   "0056_leases_and_replay_scope.sql"
   "0057_workshop_revisions_and_archival.sql"
+  "0058_heartbeat_replay_scope.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
