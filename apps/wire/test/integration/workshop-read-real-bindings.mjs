@@ -217,6 +217,7 @@ await runLocalWorkerJourney(
     assert.equal(latest.data.body_sha256, sha(editedBody));
     assert.equal(latest.data.object.current_version, 2);
     assert.equal(latest.data.object.version, 2);
+    await read(`${pathFor(drafts[0])}?version=999`, token, 404);
     await read(`${pathFor(drafts[0], peerSession)}?version=1`, peer, 404);
 
     const discovery = await call("/openapi.json");
@@ -446,7 +447,7 @@ await runLocalWorkerJourney(
       (await env.ARTIFACTS.list()).objects.map((entry) => entry.key),
     );
     assert.deepEqual(await call("/cursor"), before);
-    if (cliMode) assert.deepEqual(cliStatuses, { 200: 13, 400: 1, 401: 3, 404: 6, 500: 1 });
+    if (cliMode) assert.deepEqual(cliStatuses, { 200: 13, 400: 1, 401: 3, 404: 7, 500: 1 });
     console.log(
       JSON.stringify({
         kind: "workshop-read-real-bindings",

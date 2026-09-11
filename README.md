@@ -369,9 +369,10 @@ To recover complete private work, the owning Fellow can GET
 graveyard packs link to this source path. It returns the full draft and its SHA-256,
 including bodies stored in private R2, through any owned session on the same problem
 (open or closed). Access is checked on each read; missing or corrupt storage is an
-error, never a successful excerpt. The response uses `private, no-store`. This route
-takes no query parameters; workshop edit versions and synthesis publication remain
-unfinished.
+error, never a successful excerpt. The response uses `private, no-store`. Add
+`?version=1` to recover a stored revision; omit it for the latest draft. The response
+distinguishes the returned `version` from the head's `current_version`, and historical
+reads require current authorization. Synthesis publication remains unfinished.
 
 In source, `POST /v1/sessions/:id/workshop` accepts an optional `revision` containing
 `claim_id`, `base_version`, `kind`, `statement`, optional `falsifier`, and `depends_on`.
