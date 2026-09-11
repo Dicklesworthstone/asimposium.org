@@ -9,7 +9,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
-export async function sessionPresenceJourney({ call, enroll, sponsorCall }) {
+export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, fixtures }) {
   const sponsorA = "usr_presence_sponsor_a";
   const sponsorB = "usr_presence_sponsor_b";
 
@@ -159,9 +159,42 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall }) {
   );
   assert.equal(leaseRes.ok, true);
   assert.equal(leaseRes.question_id, questionId);
+  await call(
+    `/v1/sessions/${sessionIdA}/leases`,
+    {
+      object: questionId,
+      objective: "Check the boundary case",
+      deliverable: "A scoped review",
+      ttl_seconds: 1800,
+    },
+    fellowAToken,
+    201,
+  );
+
+  const snapshot = async (sessionId, problem) => {
+    const [session, questions, leases, cursor] = await env.DB.batch([
+      env.DB.prepare(
+        "SELECT last_heartbeat_at, idle_close_at FROM sessions WHERE session_id = ?",
+      ).bind(sessionId),
+      env.DB.prepare(
+        "SELECT question_id, leased_until FROM questions WHERE problem_id = ? ORDER BY question_id",
+      ).bind(problem),
+      env.DB.prepare(
+        "SELECT lease_id, leased_until FROM leases WHERE session_id = ? ORDER BY lease_id",
+      ).bind(sessionId),
+      env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problem),
+    ]);
+    return [session.results, questions.results, leases.results, cursor.results];
+  };
 
   // Fellow A pulses heartbeat -> active lease should be renewed
-  const hb2 = await call(`/v1/sessions/${sessionIdA}/heartbeat`, {}, fellowAToken, 200);
+  const hb2 = await call(
+    `/v1/sessions/${sessionIdA}/heartbeat`,
+    {},
+    fellowAToken,
+    200,
+    "presence-pulse-2",
+  );
   const parsedHb2 = SessionHeartbeatResponseSchema.parse(hb2);
   assert.equal(parsedHb2.session_id, sessionIdA);
   assert.deepEqual(parsedHb2.renewed_leases, [questionId]);
@@ -169,6 +202,14 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall }) {
     new Date(parsedHb2.last_heartbeat_at).getTime() >=
       new Date(parsedHb1.last_heartbeat_at).getTime(),
   );
+  const afterPulse = await snapshot(sessionIdA, problemId);
+  const duplicates = await Promise.all(
+    Array.from({ length: 3 }, () =>
+      call(`/v1/sessions/${sessionIdA}/heartbeat`, {}, fellowAToken, 200, "presence-pulse-2"),
+    ),
+  );
+  for (const duplicate of duplicates) assert.deepEqual(duplicate, hb2);
+  assert.deepEqual(await snapshot(sessionIdA, problemId), afterPulse);
 
   // 10. Close session and verify subsequent heartbeat rejection (409 SESSION_CLOSED)
   const closeRes = await call(
@@ -187,10 +228,70 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall }) {
 
   const closedHeartbeat = await call(`/v1/sessions/${sessionIdA}/heartbeat`, {}, fellowAToken, 409);
   assert.equal(closedHeartbeat.code, "SESSION_CLOSED");
+  const afterClose = await snapshot(sessionIdA, problemId);
+  assert.deepEqual(
+    await call(`/v1/sessions/${sessionIdA}/heartbeat`, {}, fellowAToken, 200, "presence-pulse-2"),
+    hb2,
+  );
+  assert.deepEqual(await snapshot(sessionIdA, problemId), afterClose);
+
+  for (const mutation of ["close", "revoke", "pause"]) {
+    const sponsor = `usr_heartbeat_race_${mutation}`;
+    const token = await enroll(`heartbeat-race-${mutation}`, sponsor);
+    const problem = `P-HB-${mutation.toUpperCase()}`;
+    await fixtures.seedProblem(problem, sponsor);
+    const session = await call(
+      "/v1/sessions",
+      { problem_id: problem, intent: "explore" },
+      token,
+      201,
+    );
+    const id = session.session_id;
+    const question = await call(
+      `/v1/sessions/${id}/questions`,
+      {
+        body_md: "Does this boundary case need an independent check?",
+        target_refs: [],
+      },
+      token,
+      201,
+    );
+    await call(
+      `/v1/sessions/${id}/questions/${question.question_id}/lease`,
+      { ttl_seconds: 1800 },
+      token,
+      200,
+    );
+    await call(
+      `/v1/sessions/${id}/leases`,
+      {
+        object: question.question_id,
+        objective: "Check the boundary",
+        deliverable: "A scoped review",
+        ttl_seconds: 1800,
+      },
+      token,
+      201,
+    );
+    const before = await snapshot(id, problem);
+    const key = `presence-race-${mutation}`;
+    const result = await fixtures.heartbeatAfterPrecheck(token, id, key, mutation);
+    assert.equal(result.changed, true, "race must occur after route reads and before its batch");
+    assert.equal(result.status, mutation === "close" ? 409 : 403);
+    assert.deepEqual(await snapshot(id, problem), before, "losing pulse must renew nothing");
+    const replay = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'session_heartbeat' AND idempotency_key = ?",
+    )
+      .bind(key)
+      .first();
+    assert.equal(replay.n, 0, "refused pulse must not retain a successful replay");
+  }
 
   return {
     kind: "session-presence-journey",
     status: "pass",
+    exact_replays: 4,
+    atomic_races: ["close", "revoke", "pause"],
     session_id: sessionIdA,
     problem_id: problemId,
     question_id: questionId,
