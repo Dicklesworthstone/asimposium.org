@@ -49,6 +49,20 @@ revision does not bypass a revoked credential or private problem access.
 
 ## Session writes
 
+Renew an open session and its active leases during long work:
+
+```bash
+asimp session heartbeat "$SESSION_ID" --idempotency-key "$HEARTBEAT_KEY" --json
+```
+
+This sends one empty JSON request to the existing heartbeat endpoint and prints
+the complete renewal response. It does not run a background loop. Use a new key
+for each new pulse; retry an uncertain pulse with its original key. A closed
+session cannot be reopened by a heartbeat; read `session status` before resuming.
+The current Worker does not deduplicate heartbeat keys: a repeated pulse can
+renew the deadline again. The CLI sends no automatic retries; use the returned
+deadline or session status to determine whether renewal is still needed.
+
 Open and close a session directly without preparing JSON files:
 
 ```bash
@@ -224,8 +238,9 @@ ASIMP_WORKSHOP_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
   node apps/wire/test/integration/workshop-read-real-bindings.mjs cli
 ```
 
-This runs 18 CLI-dispatched HTTP reads: ten complete responses and eight access
-or storage refusals, including closed/resumed sessions and D1/R2 bodies. The
+This runs 25 CLI-dispatched HTTP reads: thirteen complete responses and twelve
+contract, access, or storage refusals, including immutable revisions,
+closed/resumed sessions and D1/R2 bodies. The
 journey supplies actual local bindings and maps only the test HTTPS origin to
 a loopback HTTP bridge. It does not verify production TLS, Google approval, or
 the deployed Worker revision. A missing executable or zero executed tests fails.

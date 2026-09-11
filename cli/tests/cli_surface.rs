@@ -107,6 +107,7 @@ fn authenticated_read_help_describes_the_existing_session_surface() {
     for args in [
         vec!["hello", "--help"],
         vec!["session", "status", "--help"],
+        vec!["session", "heartbeat", "--help"],
         vec!["pack", "--help"],
         vec!["workshop", "get", "--help"],
     ] {
@@ -130,6 +131,13 @@ fn authenticated_read_help_describes_the_existing_session_surface() {
 #[test]
 fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
     for args in [
+        vec![
+            "session",
+            "heartbeat",
+            "S-1",
+            "--idempotency-key",
+            "pulse-1",
+        ],
         vec!["hello"],
         vec!["session", "status", "S-1"],
         vec!["pack", "S-1"],

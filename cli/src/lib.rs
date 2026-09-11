@@ -169,6 +169,12 @@ pub enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SessionCommand {
+    /// Renew an open session and its active leases once (ASIMP_TOKEN required).
+    Heartbeat {
+        id: String,
+        #[command(flatten)]
+        options: WriteOptions,
+    },
     /// Open/resume a problem session, or send a complete SessionOpenRequest JSON file.
     Open {
         /// Existing public problem ID; validated by the Worker.
@@ -285,6 +291,7 @@ pub enum GapCommand {
 
 enum WriteBody<'a> {
     File(&'a std::path::Path),
+    Heartbeat,
     Promote {
         workshop: &'a str,
         kind: &'a str,
@@ -336,6 +343,15 @@ impl Command {
 
     fn write_request(&self) -> Option<WriteRequest<'_>> {
         match self {
+            Self::Session {
+                command: SessionCommand::Heartbeat { id, options },
+            } => Some(WriteRequest {
+                session: Some(id),
+                action: "heartbeat",
+                hypothesis_to_kill: None,
+                options,
+                body: WriteBody::Heartbeat,
+            }),
             Self::Review { session, request }
             | Self::Evidence { session, request }
             | Self::Revise { session, request }
@@ -536,6 +552,7 @@ impl WriteBody<'_> {
     ) -> Result<String, String> {
         let value = match self {
             Self::File(path) => return read(path).map_err(str::to_owned),
+            Self::Heartbeat => serde_json::json!({}),
             Self::Promote {
                 workshop,
                 kind,
@@ -1043,12 +1060,13 @@ pub fn run_cli_with_fetch(
             (format!("/v1/sessions/{id}"), "session status".to_string())
         }
         Command::Workshop {
-            command: WorkshopCommand::Get {
-                session,
-                workshop,
-                version,
-                ..
-            },
+            command:
+                WorkshopCommand::Get {
+                    session,
+                    workshop,
+                    version,
+                    ..
+                },
         } => {
             if !safe_session_segment(session) {
                 return invalid_session_id();
@@ -1693,6 +1711,58 @@ mod tests {
         assert!(result.stdout.is_empty());
         assert!(result.stderr.contains("Encoded request exceeds 512 KiB"));
         assert!(!result.stderr.contains("canary"));
+    }
+
+    #[test]
+    fn heartbeat_sends_empty_json_once_and_retains_the_retry_key() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "session",
+            "heartbeat",
+            "S-123",
+            "--idempotency-key",
+            "pulse-1",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.command.requires_token());
+        let response = include_str!(
+            "../../packages/contracts/test/fixtures/valid/session-heartbeat-response.json"
+        );
+        for _ in 0..2 {
+            let mut calls = 0;
+            let output = run_cli_write(
+                &cli,
+                |_| panic!("heartbeat must not read a file"),
+                |url, key, body| {
+                    calls += 1;
+                    assert_eq!(url, "https://example.test/v1/sessions/S-123/heartbeat");
+                    assert_eq!(key, "pulse-1");
+                    assert_eq!(body, "{}");
+                    Ok(Fetched {
+                        status: 200,
+                        body: response.to_owned(),
+                    })
+                },
+            );
+            assert_eq!(calls, 1);
+            assert_eq!(output.exit_code, 0);
+            assert_eq!(output.stdout, response);
+            assert!(output.stderr.is_empty());
+        }
+        for status in [400, 401, 404, 409, 429, 500] {
+            let output = run_cli_write(
+                &cli,
+                |_| panic!("heartbeat must not read a file"),
+                |_, _, _| Err(FetchError::Status(status)),
+            );
+            assert_ne!(output.exit_code, 0);
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.contains("S-123"));
+            assert!(!output.stderr.contains("pulse-1"));
+        }
     }
 
     #[test]
@@ -2490,7 +2560,12 @@ mod tests {
         );
         let fixture: serde_json::Value = serde_json::from_str(body).unwrap();
         let id = fixture["object"]["workshop_id"].as_str().unwrap();
-        for (json, version) in [(false, None), (true, None), (false, Some("1")), (true, Some("2"))] {
+        for (json, version) in [
+            (false, None),
+            (true, None),
+            (false, Some("1")),
+            (true, Some("2")),
+        ] {
             let mut args = vec![
                 "asimp",
                 "--origin",
@@ -2514,7 +2589,9 @@ mod tests {
                     url,
                     format!(
                         "https://example.test/v1/sessions/S-123/workshop/{id}{}",
-                        version.map(|version| format!("?version={version}")).unwrap_or_default()
+                        version
+                            .map(|version| format!("?version={version}"))
+                            .unwrap_or_default()
                     )
                 );
                 Ok(Fetched {
@@ -2569,17 +2646,34 @@ mod tests {
 
     #[test]
     fn workshop_version_is_one_encoded_parameter_and_refusals_do_not_echo_it() {
-        for version in ["0", "-1", "1.5", "", "version-secret&other=1#fragment", "1/../../other"] {
+        for version in [
+            "0",
+            "-1",
+            "1.5",
+            "",
+            "version-secret&other=1#fragment",
+            "1/../../other",
+        ] {
             let version_argument = format!("--version={version}");
             let cli = Cli::try_parse_from([
-                "asimp", "--origin", "https://example.test", "workshop", "get",
-                "S-123", "W-123", &version_argument,
-            ]).unwrap();
+                "asimp",
+                "--origin",
+                "https://example.test",
+                "workshop",
+                "get",
+                "S-123",
+                "W-123",
+                &version_argument,
+            ])
+            .unwrap();
             let output = run_cli_with_fetch(&cli, |url| {
                 let url = Url::parse(url).unwrap();
                 assert_eq!(url.path(), "/v1/sessions/S-123/workshop/W-123");
                 assert!(url.fragment().is_none());
-                assert_eq!(url.query_pairs().collect::<Vec<_>>(), vec![("version".into(), version.into())]);
+                assert_eq!(
+                    url.query_pairs().collect::<Vec<_>>(),
+                    vec![("version".into(), version.into())]
+                );
                 Err(FetchError::Status(400))
             });
             assert_eq!(output.exit_code, 1);
@@ -2626,10 +2720,16 @@ mod tests {
                 "https://workshop.example"
             );
             assert_eq!(
-                target.query_pairs().find(|(key, _)| key == "version").map(|(_, value)| value.into_owned()),
+                target
+                    .query_pairs()
+                    .find(|(key, _)| key == "version")
+                    .map(|(_, value)| value.into_owned()),
                 input["version"].as_str().map(str::to_owned)
             );
-            let query = target.query().map(|query| format!("?{query}")).unwrap_or_default();
+            let query = target
+                .query()
+                .map(|query| format!("?{query}"))
+                .unwrap_or_default();
             fetch_text_authenticated(
                 &format!("{}{}{query}", field("origin"), target.path()),
                 token.as_deref(),
