@@ -364,6 +364,54 @@ async function createTestFixture() {
 }
 
 describe("W4.7 Session heartbeat and presence", () => {
+  test("heartbeat migration preserves existing sealed responses and uniqueness", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    try {
+      for (const file of readdirSync(MIGRATIONS)
+        .filter((name) => name.endsWith(".sql") && name < "0058_")
+        .sort()) {
+        sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
+      }
+      sqlite.run(
+        "INSERT INTO session_write_replays VALUES ('session_close','F-existing','same-key','digest','ciphertext','nonce',9000000000,'R-existing')",
+      );
+      const before = sqlite.query("SELECT * FROM session_write_replays").all();
+      sqlite.run(readFileSync(join(MIGRATIONS, "0058_heartbeat_replay_scope.sql"), "utf8"));
+      expect(sqlite.query("SELECT * FROM session_write_replays").all()).toEqual(before);
+      sqlite.run(
+        "INSERT INTO session_write_replays VALUES ('session_heartbeat','F-existing','same-key','digest','other-ciphertext','other-nonce',9000000000,'R-heartbeat')",
+      );
+      expect(() =>
+        sqlite.run(
+          "INSERT INTO session_write_replays VALUES ('session_heartbeat','F-existing','same-key','digest','x','y',9000000000,'R-another')",
+        ),
+      ).toThrow();
+      expect(() =>
+        sqlite.run(
+          "INSERT INTO session_write_replays VALUES ('session_heartbeat','F-existing','other-key','digest','x','y',9000000000,'R-heartbeat')",
+        ),
+      ).toThrow();
+    } finally {
+      sqlite.close();
+    }
+  });
+  test("heartbeat requires a valid retained key before reading its body", async () => {
+    const f = await createTestFixture();
+    for (const key of ["", "bad key", "x".repeat(161)]) {
+      const response = await f.call(
+        f.token1,
+        "/v1/sessions/S-01JXYZ4K6Q7R8S9T0V1W2X3Y4Z/heartbeat",
+        {
+          method: "POST",
+          headers: { "idempotency-key": key },
+          body: "not-json",
+        },
+      );
+      expect(response.status).toBe(400);
+      const problem = ContractProblemSchema.parse(await response.json());
+      expect(problem.code).toBe("IDEMPOTENCY_KEY_INVALID");
+    }
+  });
   test("heartbeat requires authentication", async () => {
     const f = await createTestFixture();
     const res = await f.call("", "/v1/sessions/S-01JXYZ4K6Q7R8S9T0V1W2X3Y4Z/heartbeat", {
@@ -471,7 +519,7 @@ describe("W4.7 Session heartbeat and presence", () => {
     const f = await createTestFixture();
     const openedAt = new Date(Date.now() - 120_000).toISOString();
     const oldHeartbeat = openedAt;
-    const oldIdle = new Date(Date.now() - 60_000).toISOString();
+    const oldIdle = new Date(Date.now() + 60_000).toISOString();
     await f.db
       .prepare(
         `INSERT INTO sessions
@@ -526,6 +574,38 @@ describe("W4.7 Session heartbeat and presence", () => {
       .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
       .first<{ public_seq: number }>();
     expect(problem?.public_seq).toBe(0);
+  });
+
+  test("heartbeat cannot revive an idle-expired session before the close sweep", async () => {
+    const f = await createTestFixture();
+    const openedAt = new Date(Date.now() - 13 * 3600_000).toISOString();
+    const expiredAt = new Date(Date.now() - 60_000).toISOString();
+    const sessionId = "S-01JXYZ4K6Q7R8S9T0V1W2X3Y4Z";
+    await f.db
+      .prepare(
+        `INSERT INTO sessions
+       (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at, closed_at)
+       VALUES (?, ?, 'P-4DSP', 'prove', ?, ?, ?, NULL)`,
+      )
+      .bind(sessionId, f.binding1.fellowId, openedAt, openedAt, expiredAt)
+      .run();
+    const res = await f.call(f.token1, `/v1/sessions/${sessionId}/heartbeat`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe("WRITE_REFUSED");
+    const session = await f.db
+      .prepare("SELECT last_heartbeat_at, idle_close_at FROM sessions WHERE session_id = ?")
+      .bind(sessionId)
+      .first();
+    expect(session).toEqual({ last_heartbeat_at: openedAt, idle_close_at: expiredAt });
+    const replay = await f.db
+      .prepare(
+        "SELECT count(*) AS count FROM session_write_replays WHERE scope = 'session_heartbeat'",
+      )
+      .first<{ count: number }>();
+    expect(replay?.count).toBe(0);
   });
 
   test("heartbeat renews active leases for this fellow on this problem and ignores expired or foreign leases", async () => {

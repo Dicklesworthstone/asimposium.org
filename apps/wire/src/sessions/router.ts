@@ -2131,7 +2131,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
           const activeQuestions = await db
             .prepare(
-                `SELECT question_id, leased_until FROM questions
+              `SELECT question_id, leased_until FROM questions
          WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)
          ORDER BY question_id ASC`,
             )
@@ -2241,11 +2241,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     lastHeartbeatAt,
                     session.problem_id,
                     auth.binding.fellowId,
-                    JSON.stringify((activeQuestions.results ?? []).map((q) => [q.question_id, q.leased_until])),
+                    JSON.stringify(
+                      (activeQuestions.results ?? []).map((q) => [q.question_id, q.leased_until]),
+                    ),
                     session.problem_id,
                     auth.binding.fellowId,
                     sessionId,
-                    JSON.stringify((activeObjectLeases.results ?? []).map((l) => [l.lease_id, l.leased_until])),
+                    JSON.stringify(
+                      (activeObjectLeases.results ?? []).map((l) => [l.lease_id, l.leased_until]),
+                    ),
                   ),
                 db
                   .prepare(

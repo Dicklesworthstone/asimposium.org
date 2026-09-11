@@ -159,7 +159,7 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   assert.equal(leaseRes.ok, true);
   assert.equal(leaseRes.question_id, questionId);
-  await call(
+  const objectLease = await call(
     `/v1/sessions/${sessionIdA}/leases`,
     {
       object: questionId,
@@ -197,7 +197,7 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   const parsedHb2 = SessionHeartbeatResponseSchema.parse(hb2);
   assert.equal(parsedHb2.session_id, sessionIdA);
-  assert.deepEqual(parsedHb2.renewed_leases, [questionId]);
+  assert.deepEqual(parsedHb2.renewed_leases, [questionId, objectLease.lease.object].sort());
   assert.ok(
     new Date(parsedHb2.last_heartbeat_at).getTime() >=
       new Date(parsedHb1.last_heartbeat_at).getTime(),
@@ -210,6 +210,26 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   for (const duplicate of duplicates) assert.deepEqual(duplicate, hb2);
   assert.deepEqual(await snapshot(sessionIdA, problemId), afterPulse);
+  const concurrent = await Promise.all(
+    Array.from({ length: 3 }, () =>
+      call(
+        `/v1/sessions/${sessionIdA}/heartbeat`,
+        {},
+        fellowAToken,
+        200,
+        "presence-concurrent-pulse",
+      ),
+    ),
+  );
+  for (const response of concurrent) assert.deepEqual(response, concurrent[0]);
+  const afterConcurrent = await snapshot(sessionIdA, problemId);
+  assert.deepEqual(afterConcurrent[0], [
+    {
+      last_heartbeat_at: concurrent[0].last_heartbeat_at,
+      idle_close_at: concurrent[0].idle_close_at,
+    },
+  ]);
+  assert.deepEqual(afterConcurrent[3], afterPulse[3]);
 
   // 10. Close session and verify subsequent heartbeat rejection (409 SESSION_CLOSED)
   const closeRes = await call(
@@ -235,7 +255,7 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   assert.deepEqual(await snapshot(sessionIdA, problemId), afterClose);
 
-  for (const mutation of ["close", "revoke", "pause"]) {
+  for (const mutation of ["close", "revoke", "pause", "release"]) {
     const sponsor = `usr_heartbeat_race_${mutation}`;
     const token = await enroll(`heartbeat-race-${mutation}`, sponsor);
     const problem = `P-HB-${mutation.toUpperCase()}`;
@@ -277,7 +297,11 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     const key = `presence-race-${mutation}`;
     const result = await fixtures.heartbeatAfterPrecheck(token, id, key, mutation);
     assert.equal(result.changed, true, "race must occur after route reads and before its batch");
-    assert.equal(result.status, mutation === "close" ? 409 : 403);
+    assert.equal(
+      result.status,
+      mutation === "close" ? 409 : 403,
+      JSON.stringify({ mutation, diagnosis: result.body }),
+    );
     assert.deepEqual(await snapshot(id, problem), before, "losing pulse must renew nothing");
     const replay = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'session_heartbeat' AND idempotency_key = ?",
@@ -291,7 +315,8 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     kind: "session-presence-journey",
     status: "pass",
     exact_replays: 4,
-    atomic_races: ["close", "revoke", "pause"],
+    concurrent_same_key_requests: 3,
+    atomic_races: ["close", "revoke", "pause", "release"],
     session_id: sessionIdA,
     problem_id: problemId,
     question_id: questionId,

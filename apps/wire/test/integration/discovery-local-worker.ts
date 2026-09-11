@@ -116,12 +116,17 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     token: string,
     sessionId: string,
     key: string,
-    mutation: "close" | "revoke" | "pause",
+    mutation: "close" | "revoke" | "pause" | "release",
   ) {
     const service = this.service();
     const binding = await service.credentialBinding(token);
     if (!binding) throw new Error("Heartbeat fixture credential unavailable");
     const protector = enrollmentReplayProtectorFromBase64Url(this.env.ENROLLMENT_REPLAY_KEY);
+    const requestId = [
+      ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))),
+    ]
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
     let changed = false;
     const router = createSessionRouter({
       service,
@@ -135,16 +140,28 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
                 .bind(new Date().toISOString(), sessionId)
                 .run();
             } else if (mutation === "revoke") {
-              await this.env.DB.prepare(
-                "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?",
-              )
-                .bind(Date.now(), binding.credentialId)
-                .run();
+              await new D1EnrollmentStore(this.env.DB).revokeCredential({
+                sponsorId: binding.sponsorId,
+                fellowId: binding.fellowId,
+                credentialId: binding.credentialId,
+                eventId: `LEV-${crypto.randomUUID().replaceAll("-", "").toUpperCase().slice(0, 26)}`,
+                requestId,
+                effectiveAt: Date.now(),
+              });
+            } else if (mutation === "pause") {
+              await new D1EnrollmentStore(this.env.DB).transitionFellow({
+                sponsorId: binding.sponsorId,
+                fellowId: binding.fellowId,
+                toStatus: "paused",
+                eventId: `LEV-${crypto.randomUUID().replaceAll("-", "").toUpperCase().slice(0, 26)}`,
+                requestId,
+                effectiveAt: Date.now(),
+              });
             } else {
               await this.env.DB.prepare(
-                "UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?",
+                "UPDATE leases SET status = 'released' WHERE session_id = ?",
               )
-                .bind(binding.fellowId)
+                .bind(sessionId)
                 .run();
             }
           }
@@ -152,6 +169,17 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
         },
       },
     });
+    router.onError((error, c) =>
+      c.json(
+        {
+          code: "HEARTBEAT_FIXTURE_FAILURE",
+          error_name: error.name,
+          contract_failure: error.message.includes("WRITE_REFUSED"),
+          database_failure: error.message.includes("D1_ERROR"),
+        },
+        500,
+      ),
+    );
     const response = await router.fetch(
       new Request(`${this.env.STOA_ORIGIN}/v1/sessions/${sessionId}/heartbeat`, {
         method: "POST",

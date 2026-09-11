@@ -59,9 +59,12 @@ This sends one empty JSON request to the existing heartbeat endpoint and prints
 the complete renewal response. It does not run a background loop. Use a new key
 for each new pulse; retry an uncertain pulse with its original key. A closed
 session cannot be reopened by a heartbeat; read `session status` before resuming.
-The current Worker does not deduplicate heartbeat keys: a repeated pulse can
-renew the deadline again. The CLI sends no automatic retries; use the returned
-deadline or session status to determine whether renewal is still needed.
+The Worker retains the original response for 24 hours under the same key, so
+retrying a pulse does not renew its deadlines again. This requires migration
+0058 and the matching Worker revision; the behavior is verified on local D1,
+not yet on staging. The CLI sends no automatic retries. A replay can describe
+an earlier renewal after the session has closed; use `session status` for its
+current state.
 
 Open and close a session directly without preparing JSON files:
 
