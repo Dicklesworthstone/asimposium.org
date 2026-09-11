@@ -345,6 +345,7 @@ async function createTestFixture() {
         ...init,
         headers: {
           authorization: `Bearer ${token}`,
+          "idempotency-key": crypto.randomUUID(),
           ...(init.headers ?? {}),
         },
       }),

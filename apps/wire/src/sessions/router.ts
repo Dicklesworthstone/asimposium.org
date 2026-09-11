@@ -808,6 +808,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "acquire_lease"
     | "release_lease"
     | "challenge_lease"
+    | "session_heartbeat"
     | "session_close";
 
   interface ReplayRecord {
@@ -1771,7 +1772,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return privateNoStore(auth.response);
     const searchParams = new URL(c.req.url).searchParams;
-    let requestedVersion: number | undefined = undefined;
+    let requestedVersion: number | undefined;
     if (searchParams.size > 0) {
       if (searchParams.size > 1 || !searchParams.has("version")) {
         return privateNoStore(
@@ -2040,6 +2041,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   app.post("/v1/sessions/:id/heartbeat", async (c) => {
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
 
     const bodyBytes = await readBoundedRequestBody(c.req.raw, MAX_SESSION_REQUEST_BODY_BYTES);
     if (!bodyBytes.ok) {
@@ -2096,125 +2099,203 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const sessionId = c.req.param("id");
     const db = c.env.DB;
-    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
-    if (session instanceof Response) return session;
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const owned = await db
+        .prepare("SELECT problem_id FROM sessions WHERE session_id = ? AND fellow_id = ?")
+        .bind(sessionId, auth.binding.fellowId)
+        .first<{ problem_id: string }>();
+      if (!owned) {
+        const missing = await openSessionOf(db, sessionId, auth.binding.fellowId);
+        if (missing instanceof Response) return missing;
+        return writeRefusedProblem();
+      }
+      await requireSessionProblemAccess(db, owned.problem_id, auth.binding);
+      let logRenewals = async () => {};
+      const result = await replayOrCommit(
+        db,
+        "session_heartbeat",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => SessionHeartbeatResponseSchema.parse(JSON.parse(raw)),
+        async () => {
+          const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+          if (session instanceof Response) throw new SessionRouteRefusalError(session);
 
-    const now = new Date();
-    const lastHeartbeatAt = now.toISOString();
-    const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
-    const renewedLeaseUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+          const now = new Date();
+          const lastHeartbeatAt = now.toISOString();
+          const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
+          const renewedLeaseUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
 
-    const activeQuestions = await db
-      .prepare(
-        `SELECT question_id FROM questions
+          const activeQuestions = await db
+            .prepare(
+              `SELECT question_id FROM questions
          WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)
          ORDER BY question_id ASC`,
-      )
-      .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
-      .all<{ question_id: string }>();
+            )
+            .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
+            .all<{ question_id: string }>();
 
-    const activeObjectLeases = await db
-      .prepare(
-        `SELECT lease_id, problem_id, object_ref, object_id, session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe, leased_until
+          const activeObjectLeases = await db
+            .prepare(
+              `SELECT lease_id, problem_id, object_ref, object_id, session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe, leased_until
          FROM leases
          WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ?
          ORDER BY leased_at ASC`,
-      )
-      .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
-      .all<{
-        lease_id: string;
-        problem_id: string;
-        object_ref: string;
-        object_id: string;
-        session_id: string;
-        fellow_id: string;
-        sponsor_id: string;
-        objective: string;
-        deliverable: string;
-        parallel_safe: number;
-        leased_until: string;
-      }>();
+            )
+            .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
+            .all<{
+              lease_id: string;
+              problem_id: string;
+              object_ref: string;
+              object_id: string;
+              session_id: string;
+              fellow_id: string;
+              sponsor_id: string;
+              objective: string;
+              deliverable: string;
+              parallel_safe: number;
+              leased_until: string;
+            }>();
 
-    const renewedLeases = Array.from(
-      new Set([
-        ...(activeQuestions.results ?? []).map((r) => r.question_id),
-        ...(activeObjectLeases.results ?? []).map((r) => r.object_ref),
-      ]),
-    ).sort();
+          const renewedLeases = Array.from(
+            new Set([
+              ...(activeQuestions.results ?? []).map((r) => r.question_id),
+              ...(activeObjectLeases.results ?? []).map((r) => r.object_ref),
+            ]),
+          ).sort();
 
-    const statements = [
-      db
-        .prepare(
-          `UPDATE sessions
+          const responsePayload = SessionHeartbeatResponseSchema.parse({
+            session_id: session.session_id,
+            last_heartbeat_at: lastHeartbeatAt,
+            idle_close_at: idleCloseAt,
+            renewed_leases: renewedLeases,
+          });
+          logRenewals = async () => {
+            for (const l of activeObjectLeases.results ?? []) {
+              logLeaseOps({
+                record_type: "lease-transition",
+                lease_id: l.lease_id,
+                problem_id: l.problem_id,
+                object_ref: l.object_ref,
+                object_id: l.object_id,
+                session_id: l.session_id,
+                fellow_id: l.fellow_id,
+                sponsor_id: l.sponsor_id,
+                mode: l.parallel_safe ? "parallel_safe" : "exclusive",
+                objective_digest: await sha256Hex(l.objective),
+                deliverable_digest: await sha256Hex(l.deliverable),
+                transition: "renewed",
+                expiry: renewedLeaseUntil,
+                clock_source: "server_clock",
+              });
+            }
+          };
+          return {
+            value: responsePayload,
+            statements: (sealed, claimToken) => {
+              const owns = `EXISTS (SELECT 1 FROM session_write_replays
+      WHERE scope = 'session_heartbeat' AND principal_scope = ? AND idempotency_key = ?
+        AND request_digest = ? AND claim_token = ?)`;
+              const owner = [auth.binding.fellowId, key, digest, claimToken];
+              const statements = [
+                db
+                  .prepare(`INSERT INTO session_write_replays
+        (scope, principal_scope, idempotency_key, request_digest, response_ciphertext,
+         response_initialization_vector, expires_at, claim_token)
+        SELECT 'session_heartbeat', ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+          AND EXISTS (SELECT 1 FROM sessions s JOIN problems p ON p.id = s.problem_id
+            JOIN fellow_tokens t ON t.credential_id = ?
+            WHERE s.session_id = ? AND s.fellow_id = t.fellow_id AND t.sponsor_id = ?
+              AND s.last_heartbeat_at <= ?
+              AND s.closed_at IS NULL AND s.idle_close_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              AND (json_extract(t.granted_resources_json, '$.problemBinding') IS NULL
+                OR json_extract(t.granted_resources_json, '$.problemBinding') = p.id)
+              AND (p.status <> 'private-draft' OR (p.sponsor_id = t.sponsor_id
+                AND (p.created_by_fellow_id = t.fellow_id
+                  OR json_extract(t.granted_resources_json, '$.problemBinding') = p.id))))
+        ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`)
+                  .bind(
+                    auth.binding.fellowId,
+                    key,
+                    digest,
+                    sealed.ciphertext,
+                    sealed.initializationVector,
+                    Math.floor(Date.now() / 1000) + Math.floor(REPLAY_TTL_MS / 1000),
+                    claimToken,
+                    auth.binding.credentialId,
+                    auth.binding.credentialId,
+                    sessionId,
+                    auth.binding.sponsorId,
+                    lastHeartbeatAt,
+                  ),
+                db
+                  .prepare(
+                    `UPDATE sessions
            SET last_heartbeat_at = ?, idle_close_at = ?
-           WHERE session_id = ? AND closed_at IS NULL`,
-        )
-        .bind(lastHeartbeatAt, idleCloseAt, session.session_id),
-    ];
+           WHERE session_id = ? AND closed_at IS NULL AND ${owns}`,
+                  )
+                  .bind(lastHeartbeatAt, idleCloseAt, session.session_id, ...owner),
+              ];
 
-    if ((activeQuestions.results ?? []).length > 0) {
-      statements.push(
-        db
-          .prepare(
-            `UPDATE questions
+              if ((activeQuestions.results ?? []).length > 0) {
+                statements.push(
+                  db
+                    .prepare(
+                      `UPDATE questions
              SET leased_until = ?
-             WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)`,
-          )
-          .bind(renewedLeaseUntil, session.problem_id, auth.binding.fellowId, lastHeartbeatAt),
-      );
-    }
+             WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?) AND ${owns}`,
+                    )
+                    .bind(
+                      renewedLeaseUntil,
+                      session.problem_id,
+                      auth.binding.fellowId,
+                      lastHeartbeatAt,
+                      ...owner,
+                    ),
+                );
+              }
 
-    if ((activeObjectLeases.results ?? []).length > 0) {
-      statements.push(
-        db
-          .prepare(
-            `UPDATE leases
+              if ((activeObjectLeases.results ?? []).length > 0) {
+                statements.push(
+                  db
+                    .prepare(
+                      `UPDATE leases
              SET leased_until = ?, updated_at = ?
-             WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ?`,
-          )
-          .bind(
-            renewedLeaseUntil,
-            lastHeartbeatAt,
-            session.problem_id,
-            auth.binding.fellowId,
-            lastHeartbeatAt,
-          ),
+             WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ? AND ${owns}`,
+                    )
+                    .bind(
+                      renewedLeaseUntil,
+                      lastHeartbeatAt,
+                      session.problem_id,
+                      auth.binding.fellowId,
+                      lastHeartbeatAt,
+                      ...owner,
+                    ),
+                );
+              }
+
+              return statements;
+            },
+          };
+        },
       );
+      if (!result.replayed) void logRenewals();
+      return privateNoStore(c.json(result.value, 200));
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      if (error instanceof SessionRouteRefusalError) return error.response;
+      if (error instanceof SessionProblemMissingError) return writeRefusedProblem();
+      if (error instanceof ReplayClaimNotCommittedError) {
+        const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
+        if (current instanceof Response) return current;
+        return writeRefusedProblem();
+      }
+      throw error;
     }
-
-    await db.batch(statements);
-
-    for (const l of activeObjectLeases.results ?? []) {
-      void (async () => {
-        logLeaseOps({
-          record_type: "lease-transition",
-          lease_id: l.lease_id,
-          problem_id: l.problem_id,
-          object_ref: l.object_ref,
-          object_id: l.object_id,
-          session_id: l.session_id,
-          fellow_id: l.fellow_id,
-          sponsor_id: l.sponsor_id,
-          mode: l.parallel_safe ? "parallel_safe" : "exclusive",
-          objective_digest: await sha256Hex(l.objective),
-          deliverable_digest: await sha256Hex(l.deliverable),
-          transition: "renewed",
-          expiry: renewedLeaseUntil,
-          clock_source: "server_clock",
-        });
-      })();
-    }
-
-    const responsePayload = SessionHeartbeatResponseSchema.parse({
-      session_id: session.session_id,
-      last_heartbeat_at: lastHeartbeatAt,
-      idle_close_at: idleCloseAt,
-      renewed_leases: renewedLeases,
-    });
-
-    return c.json(responsePayload, 200, {
-      "cache-control": "private, no-store",
-    });
   });
 
   // --- POST /v1/sessions -------------------------------------------------

@@ -19,6 +19,7 @@ import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
+import { createSessionRouter } from "../../src/sessions/router.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
@@ -110,6 +111,62 @@ const app = createApp({
 });
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  // Deterministic interleaving after the actual route's reads, before its D1 batch.
+  async heartbeatAfterPrecheck(
+    token: string,
+    sessionId: string,
+    key: string,
+    mutation: "close" | "revoke" | "pause",
+  ) {
+    const service = this.service();
+    const binding = await service.credentialBinding(token);
+    if (!binding) throw new Error("Heartbeat fixture credential unavailable");
+    const protector = enrollmentReplayProtectorFromBase64Url(this.env.ENROLLMENT_REPLAY_KEY);
+    let changed = false;
+    const router = createSessionRouter({
+      service,
+      replayProtector: {
+        open: (sealed, context) => protector.open(sealed, context),
+        seal: async (plaintext, context) => {
+          if (!changed) {
+            changed = true;
+            if (mutation === "close") {
+              await this.env.DB.prepare("UPDATE sessions SET closed_at = ? WHERE session_id = ?")
+                .bind(new Date().toISOString(), sessionId)
+                .run();
+            } else if (mutation === "revoke") {
+              await this.env.DB.prepare(
+                "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?",
+              )
+                .bind(Date.now(), binding.credentialId)
+                .run();
+            } else {
+              await this.env.DB.prepare(
+                "UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?",
+              )
+                .bind(binding.fellowId)
+                .run();
+            }
+          }
+          return protector.seal(plaintext, context);
+        },
+      },
+    });
+    const response = await router.fetch(
+      new Request(`${this.env.STOA_ORIGIN}/v1/sessions/${sessionId}/heartbeat`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "idempotency-key": key,
+          "content-type": "application/json",
+          "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        },
+        body: "{}",
+      }),
+      this.env,
+    );
+    return { status: response.status, changed, body: await response.json() };
+  }
   async retryTriggersAt(problemId: string, cursor: number) {
     return JSON.stringify(await loadFiredDeadEndTriggers(this.env.DB, problemId, 3, cursor));
   }
