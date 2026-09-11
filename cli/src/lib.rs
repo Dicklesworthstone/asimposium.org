@@ -198,6 +198,9 @@ pub enum WorkshopCommand {
         session: String,
         /// Workshop object ID returned by a push or your working pack.
         workshop: String,
+        /// Stored revision to read; omit for the latest. Validated by the Worker.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
         /// Explicit JSON output; always preserves the complete Worker response and digest.
         #[arg(long)]
         json: bool,
@@ -211,7 +214,7 @@ pub enum WorkshopCommand {
         /// UTF-8 Markdown draft; preserved exactly inside the JSON request.
         #[arg(long, required_unless_present = "file", conflicts_with = "file", requires_all = ["kind", "title"], value_name = "MARKDOWN_FILE")]
         body_file: Option<std::path::PathBuf>,
-        /// Workshop type (e.g. draft, note, computation); validated by the Worker.
+        /// Workshop type: scratch, claim-draft, evidence-draft, dead-end-draft, note; validated by the Worker.
         #[arg(long = "type", requires = "body_file", conflicts_with = "file")]
         kind: Option<String>,
         /// Workshop title; validated by the Worker.
@@ -1041,7 +1044,10 @@ pub fn run_cli_with_fetch(
         }
         Command::Workshop {
             command: WorkshopCommand::Get {
-                session, workshop, ..
+                session,
+                workshop,
+                version,
+                ..
             },
         } => {
             if !safe_session_segment(session) {
@@ -1052,10 +1058,14 @@ pub fn run_cli_with_fetch(
                     "Workshop ID must be one origin-relative path component, not a URL.",
                 );
             }
-            (
-                format!("/v1/sessions/{session}/workshop/{workshop}"),
-                "workshop get".to_string(),
-            )
+            let mut path = format!("/v1/sessions/{session}/workshop/{workshop}");
+            if let Some(version) = version {
+                let mut parameters = url::form_urlencoded::Serializer::new(String::new());
+                parameters.append_pair("version", version);
+                path.push('?');
+                path.push_str(&parameters.finish());
+            }
+            (path, "workshop get".to_string())
         }
         Command::Pack {
             session,
@@ -2480,7 +2490,7 @@ mod tests {
         );
         let fixture: serde_json::Value = serde_json::from_str(body).unwrap();
         let id = fixture["object"]["workshop_id"].as_str().unwrap();
-        for json in [false, true] {
+        for (json, version) in [(false, None), (true, None), (false, Some("1")), (true, Some("2"))] {
             let mut args = vec![
                 "asimp",
                 "--origin",
@@ -2493,13 +2503,19 @@ mod tests {
             if json {
                 args.push("--json");
             }
+            if let Some(version) = version {
+                args.extend(["--version", version]);
+            }
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(cli.command.requires_token());
             assert!(cli.command.write_request().is_none());
             let output = run_cli_with_fetch(&cli, |url| {
                 assert_eq!(
                     url,
-                    format!("https://example.test/v1/sessions/S-123/workshop/{id}")
+                    format!(
+                        "https://example.test/v1/sessions/S-123/workshop/{id}{}",
+                        version.map(|version| format!("?version={version}")).unwrap_or_default()
+                    )
                 );
                 Ok(Fetched {
                     status: 200,
@@ -2522,9 +2538,12 @@ mod tests {
             "get",
             "S-private-canary",
             "W-private-canary",
+            "--version",
+            "2",
         ])
         .unwrap();
         for error in [
+            FetchError::Status(400),
             FetchError::Status(401),
             FetchError::Status(403),
             FetchError::Status(404),
@@ -2548,6 +2567,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workshop_version_is_one_encoded_parameter_and_refusals_do_not_echo_it() {
+        for version in ["0", "-1", "1.5", "", "version-secret&other=1#fragment", "1/../../other"] {
+            let version_argument = format!("--version={version}");
+            let cli = Cli::try_parse_from([
+                "asimp", "--origin", "https://example.test", "workshop", "get",
+                "S-123", "W-123", &version_argument,
+            ]).unwrap();
+            let output = run_cli_with_fetch(&cli, |url| {
+                let url = Url::parse(url).unwrap();
+                assert_eq!(url.path(), "/v1/sessions/S-123/workshop/W-123");
+                assert!(url.fragment().is_none());
+                assert_eq!(url.query_pairs().collect::<Vec<_>>(), vec![("version".into(), version.into())]);
+                Err(FetchError::Status(400))
+            });
+            assert_eq!(output.exit_code, 1);
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.contains("HTTP 400"));
+            assert!(!output.stderr.contains("version-secret"));
+        }
+    }
+
     // Invoked explicitly by the existing real Workerd/D1/R2 journey in CLI mode.
     // The command/credential/HTTP paths are real; only the HTTPS origin is mapped
     // to its loopback bridge. This is not a production TLS or live OAuth proof.
@@ -2562,7 +2603,7 @@ mod tests {
         let local = Url::parse(field("origin")).expect("local HTTP origin");
         assert_eq!(local.scheme(), "http");
         assert_eq!(local.host_str(), Some("127.0.0.1"));
-        let cli = Cli::try_parse_from([
+        let mut args = vec![
             "asimp",
             "--origin",
             "https://workshop.example",
@@ -2571,8 +2612,11 @@ mod tests {
             field("session"),
             field("workshop"),
             "--json",
-        ])
-        .expect("valid CLI arguments");
+        ];
+        if let Some(version) = input["version"].as_str() {
+            args.extend(["--version", version]);
+        }
+        let cli = Cli::try_parse_from(args).expect("valid CLI arguments");
         let token = token_for_command(&cli.command, || Ok(field("token").to_owned()))
             .expect("valid real credential");
         let output = run_cli_with_fetch(&cli, |url| {
@@ -2581,9 +2625,13 @@ mod tests {
                 target.origin().ascii_serialization(),
                 "https://workshop.example"
             );
-            assert!(target.query().is_none());
+            assert_eq!(
+                target.query_pairs().find(|(key, _)| key == "version").map(|(_, value)| value.into_owned()),
+                input["version"].as_str().map(str::to_owned)
+            );
+            let query = target.query().map(|query| format!("?{query}")).unwrap_or_default();
             fetch_text_authenticated(
-                &format!("{}{}", field("origin"), target.path()),
+                &format!("{}{}{query}", field("origin"), target.path()),
                 token.as_deref(),
             )
         });
@@ -2627,6 +2675,7 @@ mod tests {
             vec!["session", "status", "S-1"],
             vec!["pack", "S-1"],
             vec!["workshop", "get", "S-1", "W-1"],
+            vec!["workshop", "get", "S-1", "W-1", "--version", "2"],
         ] {
             let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
             assert_eq!(

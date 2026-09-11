@@ -25,6 +25,7 @@ asimp session status "$SESSION_ID" --json
 asimp pack "$SESSION_ID" --profile working --max-tokens 4000
 asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
 asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --json
+asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --version 1 --json
 ```
 
 Set `SESSION_ID` to the session ID returned by the Worker. These commands
@@ -41,7 +42,10 @@ including bodies stored in private R2. Use the object ID returned by a push or
 linked from your working/graveyard pack. The session must belong to you and cover
 the same problem; closed sessions remain usable for recovery. The command prints
 the complete JSON response unchanged, with or without `--json`. It performs a read
-and needs no idempotency key. Workshop edit versions are not available yet.
+and needs no idempotency key. Omit `--version` to read the latest draft, or supply
+the stored revision number to recover its immutable earlier body. The Worker
+validates the version and checks current authorization on every read; an old
+revision does not bypass a revoked credential or private problem access.
 
 ## Session writes
 
@@ -64,7 +68,7 @@ JSON serialization; the CLI does not infer a session or publish during close.
 Push an existing Markdown work product into your private workshop:
 
 ```bash
-asimp workshop push "$SESSION_ID" --body-file scratch.md --type draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
+asimp workshop push "$SESSION_ID" --body-file scratch.md --type claim-draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
 ```
 
 `--body-file` requires both `--type` and `--title`. The CLI preserves the draft's

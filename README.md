@@ -496,6 +496,7 @@ authenticated identity and session context:
 asimp hello --json
 asimp session status "$SESSION_ID" --json
 asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
+asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --version 1 --json
 ```
 
 Set `SESSION_ID` to the Worker-issued session ID. These commands preserve the complete JSON
@@ -511,7 +512,7 @@ Handbacks are bounded like the Worker; use a JSON file to keep private text out 
 Push a Markdown draft privately with metadata:
 
 ```bash
-asimp workshop push "$SESSION_ID" --body-file scratch.md --type draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
+asimp workshop push "$SESSION_ID" --body-file scratch.md --type claim-draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
 ```
 
 The draft text is preserved inside `body_md`. Repeat `--relates-to` for multiple references;
