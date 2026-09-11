@@ -2131,21 +2131,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
           const activeQuestions = await db
             .prepare(
-              `SELECT question_id FROM questions
+                `SELECT question_id, leased_until FROM questions
          WHERE problem_id = ? AND leased_by = ? AND status = 'leased' AND (leased_until IS NULL OR leased_until > ?)
          ORDER BY question_id ASC`,
             )
             .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
-            .all<{ question_id: string }>();
+            .all<{ question_id: string; leased_until: string | null }>();
 
           const activeObjectLeases = await db
             .prepare(
               `SELECT lease_id, problem_id, object_ref, object_id, session_id, fellow_id, sponsor_id, objective, deliverable, parallel_safe, leased_until
          FROM leases
-         WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ?
-         ORDER BY leased_at ASC`,
+         WHERE problem_id = ? AND fellow_id = ? AND session_id = ? AND status = 'active' AND leased_until > ?
+         ORDER BY lease_id ASC`,
             )
-            .bind(session.problem_id, auth.binding.fellowId, lastHeartbeatAt)
+            .bind(session.problem_id, auth.binding.fellowId, sessionId, lastHeartbeatAt)
             .all<{
               lease_id: string;
               problem_id: string;
@@ -2217,6 +2217,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               AND (p.status <> 'private-draft' OR (p.sponsor_id = t.sponsor_id
                 AND (p.created_by_fellow_id = t.fellow_id
                   OR json_extract(t.granted_resources_json, '$.problemBinding') = p.id))))
+          AND (SELECT json_group_array(json_array(question_id, leased_until)) FROM
+            (SELECT question_id, leased_until FROM questions WHERE problem_id = ? AND leased_by = ?
+              AND status = 'leased' AND (leased_until IS NULL OR leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+              ORDER BY question_id)) = ?
+          AND (SELECT json_group_array(json_array(lease_id, leased_until)) FROM
+            (SELECT lease_id, leased_until FROM leases WHERE problem_id = ? AND fellow_id = ? AND session_id = ?
+              AND status = 'active' AND leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              ORDER BY lease_id)) = ?
         ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`)
                   .bind(
                     auth.binding.fellowId,
@@ -2231,6 +2239,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     sessionId,
                     auth.binding.sponsorId,
                     lastHeartbeatAt,
+                    session.problem_id,
+                    auth.binding.fellowId,
+                    JSON.stringify((activeQuestions.results ?? []).map((q) => [q.question_id, q.leased_until])),
+                    session.problem_id,
+                    auth.binding.fellowId,
+                    sessionId,
+                    JSON.stringify((activeObjectLeases.results ?? []).map((l) => [l.lease_id, l.leased_until])),
                   ),
                 db
                   .prepare(
@@ -2265,13 +2280,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     .prepare(
                       `UPDATE leases
              SET leased_until = ?, updated_at = ?
-             WHERE problem_id = ? AND fellow_id = ? AND status = 'active' AND leased_until > ? AND ${owns}`,
+             WHERE problem_id = ? AND fellow_id = ? AND session_id = ? AND status = 'active' AND leased_until > ? AND ${owns}`,
                     )
                     .bind(
                       renewedLeaseUntil,
                       lastHeartbeatAt,
                       session.problem_id,
                       auth.binding.fellowId,
+                      sessionId,
                       lastHeartbeatAt,
                       ...owner,
                     ),
