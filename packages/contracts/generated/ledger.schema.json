@@ -1231,8 +1231,7 @@
           "maximum": 50
         },
         "cursor": {
-          "type": "string",
-          "maxLength": 128
+          "not": {}
         }
       },
       "required": [
