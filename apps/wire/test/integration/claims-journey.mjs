@@ -83,6 +83,101 @@ export async function claimsJourney({
     return response;
   };
 
+  // Dormancy is public state: refused attempts and historical replays cannot
+  // reactivate it. Only a newly committed promotion may do so (A6).
+  const dormantFellow = await createFellow("claims-dormant-author", "usr_claims_dormant");
+  const dormantAt = "2026-01-01T00:00:00.000Z";
+  const setDormant = () =>
+    env.DB.prepare("UPDATE problems SET status = 'dormant', updated_at = ? WHERE id = ?")
+      .bind(dormantAt, problem)
+      .run();
+  const dormantState = async () => ({
+    problem: await env.DB.prepare(
+      "SELECT status, updated_at, public_seq, chain_digest FROM problems WHERE id = ?",
+    )
+      .bind(problem)
+      .first(),
+    events: await countEvents(),
+    cursor: await getPublicCursor(),
+  });
+  const dormantPayload = {
+    workshop_id: dormantFellow.draft.workshop_id,
+    kind: "definition",
+    statement: "Dormancy resumes only when this definition is recorded in the ledger.",
+  };
+  await setDormant();
+  const beforeDormant = await dormantState();
+  const beforeDormantScreens = await fixtures.screeningCalls();
+  const missingDraft = await call(
+    `${dormantFellow.path}/promote`,
+    { ...dormantPayload, workshop_id: kindsFellow.draft.workshop_id },
+    dormantFellow.token,
+    404,
+  );
+  assert.equal(missingDraft.code, "WORKSHOP_OBJECT_NOT_FOUND");
+  assert.deepEqual(await dormantState(), beforeDormant, "Missing draft must preserve dormancy");
+  assert.equal(await fixtures.screeningCalls(), beforeDormantScreens);
+
+  await fixtures.setScreenMode("reject");
+  try {
+    const refused = await call(
+      `${dormantFellow.path}/promote`,
+      dormantPayload,
+      dormantFellow.token,
+      403,
+    );
+    assert.equal(refused.code, "POLICY_DENIED");
+    assert.deepEqual(await dormantState(), beforeDormant, "Screen refusal must preserve dormancy");
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
+
+  // The trigger fails after the companion's activation statement, proving
+  // actual D1 rollback rather than merely a pre-write refusal.
+  const abortedStatement = "Dormancy activation must roll back with this planted version failure.";
+  await env.DB.prepare(
+    `CREATE TRIGGER dormant_promotion_abort BEFORE INSERT ON claim_versions
+     WHEN NEW.statement = '${abortedStatement}'
+     BEGIN SELECT RAISE(ABORT, 'planted dormant promotion failure'); END`,
+  ).run();
+  await call(
+    `${dormantFellow.path}/promote`,
+    { ...dormantPayload, statement: abortedStatement },
+    dormantFellow.token,
+    500,
+  );
+  assert.deepEqual(await dormantState(), beforeDormant, "Failed batch must roll activation back");
+
+  const dormantKey = "dormant-promotion-exact-replay";
+  const activated = await call(
+    `${dormantFellow.path}/promote`,
+    dormantPayload,
+    dormantFellow.token,
+    201,
+    dormantKey,
+  );
+  const afterDormant = await dormantState();
+  assert.equal(afterDormant.problem.status, "active");
+  assert.notEqual(afterDormant.problem.updated_at, dormantAt);
+  assert.equal(afterDormant.problem.public_seq, beforeDormant.problem.public_seq + 1);
+  assert.equal(afterDormant.events, beforeDormant.events + 1);
+  assert.equal(afterDormant.cursor, beforeDormant.cursor + 1);
+
+  await setDormant();
+  const dormantAgain = await dormantState();
+  const duplicate = await call(`${dormantFellow.path}/promote`, dormantPayload, dormantFellow.token, 409);
+  assert.equal(duplicate.code, "DUPLICATE_CLAIM");
+  assert.deepEqual(await dormantState(), dormantAgain, "Duplicate must preserve dormancy");
+  const replayed = await call(
+    `${dormantFellow.path}/promote`,
+    dormantPayload,
+    dormantFellow.token,
+    200,
+    dormantKey,
+  );
+  assert.deepEqual({ ...replayed, _status: 201 }, activated);
+  assert.deepEqual(await dormantState(), dormantAgain, "Historical replay must not reactivate");
+
   // --- Requirement 1: P3 Missing Falsifier on Conjecture Class ---
   const initialEvents = await countEvents();
   const p3Refusal = await call(
@@ -1054,6 +1149,7 @@ export async function claimsJourney({
     ],
     typed_workshop_revision:
       "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
+    dormant_promotion: "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
     kinds_tested: allKinds,
     rules_verified: ["P3", "P9", "P10", "P11"],
     boundary: {
