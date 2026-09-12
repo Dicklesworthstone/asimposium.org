@@ -48,14 +48,21 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
 
     if (!parseResult.success) {
       const issue = parseResult.error.issues[0];
-      const detail = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid search query";
+      const detail =
+        rawCursor !== null
+          ? "Search continuation is not supported."
+          : issue
+            ? `${issue.path.join(".")}: ${issue.message}`
+            : "Invalid search query";
       const response = problemDocument({
         status: 400,
         code: "SCHEMA_INVALID",
         title: "Search query is invalid",
         detail,
         fixHint:
-          "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
+          rawCursor !== null
+            ? "Remove cursor and refine q, kind or limit. Search returns a bounded result set without pagination."
+            : "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
         rule: "A5",
         headers: { "cache-control": "no-store" },
         extensions: {

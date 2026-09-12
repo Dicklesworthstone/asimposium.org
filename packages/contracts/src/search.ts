@@ -64,7 +64,8 @@ export const SearchQueryRequestSchema = z
       .max(SEARCH_LIMIT_MAX)
       .optional()
       .default(SEARCH_LIMIT_DEFAULT),
-    cursor: z.string().max(128).optional(),
+    // Continuation is not implemented; never silently replay the first page.
+    cursor: z.never().optional(),
   })
   .strict();
 export type SearchQueryRequest = z.infer<typeof SearchQueryRequestSchema>;

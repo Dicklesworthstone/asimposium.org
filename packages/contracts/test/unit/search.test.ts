@@ -19,10 +19,16 @@ describe("W6.8 Search contracts", () => {
       ["invalid/search-unscoped-claim.json", false],
       ["valid/search-versioned-claim.json", true],
       ["invalid/search-unscoped-version.json", false],
+      ["invalid/search-unsupported-cursor.json", false],
     ] as const) {
       const query = await Bun.file(new URL(`../fixtures/${path}`, import.meta.url)).json();
       expect(SearchQueryRequestSchema.safeParse(query).success).toBe(valid);
       expect(validate(query)).toBe(valid);
+    }
+    for (const cursor of ["", "next-page", null, 1]) {
+      const query = { q: "bounded counterexample", cursor };
+      expect(SearchQueryRequestSchema.safeParse(query).success).toBe(false);
+      expect(validate(query)).toBe(false);
     }
   });
   describe("escapeFts5Query", () => {

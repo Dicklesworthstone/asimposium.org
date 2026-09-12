@@ -321,6 +321,46 @@ describe("W6.8 Public Search Routes", () => {
     }
   });
 
+  test("unsupported continuation teaches without reading data or reflecting inputs", async () => {
+    let reads = 0;
+    const db = {
+      prepare() {
+        reads += 1;
+        throw new Error("Unsupported search continuation must not read data");
+      },
+    } as unknown as Env["DB"];
+    for (const suffix of ["", ".json", ".md"]) {
+      for (const method of ["GET", "HEAD"]) {
+        for (const cursor of ["", "private-cursor-canary"]) {
+          const params = new URLSearchParams({ q: "private-query-canary", cursor });
+          const response = await createApp().request(
+            `https://a.asimposium.org/search${suffix}?${params}`,
+            { method, headers: { "if-none-match": "*" } },
+            mockEnv(db),
+          );
+          expect(response.status).toBe(400);
+          expect(response.headers.get("etag")).toBeNull();
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          const text = await response.text();
+          expect(text).not.toContain("private-cursor-canary");
+          expect(text).not.toContain("private-query-canary");
+          if (method === "HEAD") expect(text).toBe("");
+          else {
+            expect(JSON.parse(text)).toMatchObject({
+              code: "SCHEMA_INVALID",
+              rule: "A5",
+              detail: "Search continuation is not supported.",
+              fix_hint: expect.stringContaining("Remove cursor"),
+              schema: expect.stringContaining("ledger.v1.json"),
+              example: { path: expect.stringContaining("/search?q=") },
+            });
+          }
+        }
+      }
+    }
+    expect(reads).toBe(0);
+  });
+
   test.each([null, -1, 0.5, 9_007_199_254_740_992, "unknown"])(
     "a missing or invalid cursor %s is unavailable, never zero",
     async (cursor) => {
