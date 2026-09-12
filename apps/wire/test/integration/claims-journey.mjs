@@ -165,7 +165,12 @@ export async function claimsJourney({
 
   await setDormant();
   const dormantAgain = await dormantState();
-  const duplicate = await call(`${dormantFellow.path}/promote`, dormantPayload, dormantFellow.token, 409);
+  const duplicate = await call(
+    `${dormantFellow.path}/promote`,
+    dormantPayload,
+    dormantFellow.token,
+    409,
+  );
   assert.equal(duplicate.code, "DUPLICATE_CLAIM");
   assert.deepEqual(await dormantState(), dormantAgain, "Duplicate must preserve dormancy");
   const replayed = await call(
@@ -1149,12 +1154,13 @@ export async function claimsJourney({
     ],
     typed_workshop_revision:
       "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
-    dormant_promotion: "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
+    dormant_promotion:
+      "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
     kinds_tested: allKinds,
     rules_verified: ["P3", "P9", "P10", "P11"],
     boundary: {
       runtime: "workerd",
-      database: "Cloudflare D1 (local migrated, migrations 0001-0046)",
+      database: "Cloudflare D1 (local; repository migrations applied by Wrangler)",
       cas: "Cloudflare R2 CAS",
       durable_objects: "KraterOutboxDrainer (sqlite storage)",
       routes: "production wire routes",

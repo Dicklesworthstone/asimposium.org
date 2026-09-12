@@ -4134,14 +4134,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (problemRow.status === "dormant") {
-      const nowIso = new Date().toISOString();
-      await db
-        .prepare("UPDATE problems SET status = 'active', updated_at = ? WHERE id = ?")
-        .bind(nowIso, session.problem_id)
-        .run();
-    }
-
     // The workshop object must belong to this session and this Fellow —
     // promotion of another's draft is a contract violation, not a validator
     // outcome.
@@ -4426,6 +4418,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   settlement.eventId,
                   settlement.sequence,
                 ),
+              // A6: only this newly committed event may reactivate dormancy.
+              // Krater updates updated_at in this same batch; refusals and
+              // historical replays must leave both lifecycle fields alone.
+              db
+                .prepare(
+                  `UPDATE problems SET status = 'active'
+                   WHERE id = ? AND status = 'dormant' AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'promote' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(session.problem_id, auth.binding.fellowId, key, digest, claimToken),
               // W5.3 (Rule A6): the v1 content version commits in the same
               // batch as the claim row. kind/falsifier/statement/digest become
               // durable facts a review can pin — never request-scoped bytes.
