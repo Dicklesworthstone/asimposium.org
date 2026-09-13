@@ -1281,6 +1281,39 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row !== null && row !== undefined;
   }
 
+  async function claimsBoardChangedAtCommit(
+    db: Env["DB"],
+    problemId: string,
+    effect: "promote" | "revise",
+  ): Promise<Response | undefined> {
+    const problem = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{ status: string }>();
+    if (
+      !problem ||
+      !(
+        problem.status === "resolved" ||
+        problem.status === "retired" ||
+        (effect === "promote" &&
+          (problem.status === "private-draft" || problem.status === "sharpening"))
+      )
+    )
+      return undefined;
+    return validatedProblem({
+      status: 422,
+      code: "CLAIMS_BOARD_LOCKED",
+      title: "The claims board closed before the write committed",
+      detail: "The problem no longer accepts this claim write. This write was not committed.",
+      fixHint: "Check the problem's current state before retrying, or explore an active problem.",
+      rule: "P3",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        example: { method: "GET", path: "/problems.json" },
+      },
+    });
+  }
+
   async function requireSessionProblemAccess(
     db: Env["DB"],
     problemId: string,
@@ -4329,7 +4362,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
               // If this event won Krater's idempotency row but the session
-              // closed meanwhile, request_digest becomes NULL and 0018's
+              // or claims board closed meanwhile, request_digest becomes NULL and 0018's
               // NOT NULL constraint aborts the whole event/projection batch.
               // A same-caller-key loser cannot overwrite the winner's replay;
               // the ownership guard below then aborts its separate event.
@@ -4356,7 +4389,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    SELECT 'promote', ?, ?,
                      CASE WHEN EXISTS (
                        SELECT 1 FROM sessions
+                       JOIN problems ON problems.id = sessions.problem_id
                        WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                         AND problems.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
                      ) THEN ? ELSE NULL END,
                      ?, ?, ?, ?
                    FROM idempotency
@@ -4585,6 +4620,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // while an absent/revoked row receives the shared policy face.
         return writeRefusedProblem();
       }
+      // Screening runs outside the transaction. A lifecycle transition can
+      // therefore invalidate the preflight; the replay guard rolls back every
+      // public effect before we return the existing teaching refusal.
+      const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
+      if (lifecycleRefusal) return lifecycleRefusal;
       throw error;
     }
   });
@@ -5118,7 +5158,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    SELECT 'revise', ?, ?,
                      CASE WHEN EXISTS (
                        SELECT 1 FROM sessions
+                       JOIN problems ON problems.id = sessions.problem_id
                        WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                         AND problems.status NOT IN ('resolved', 'retired')
                      ) THEN ? ELSE NULL END,
                      ?, ?, ?, ?
                    FROM idempotency
@@ -5309,6 +5351,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       ) {
         return writeRefusedProblem();
       }
+      const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
+      if (lifecycleRefusal) return lifecycleRefusal;
       throw error;
     }
   });

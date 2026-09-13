@@ -190,19 +190,33 @@ export async function claimsJourney({
 
   // Change lifecycle state only after the request enters the delayed classifier.
   // These are synthetic fixture transitions on real D1, not governance E2E.
-  for (const status of ["resolved", "retired", "sharpening", "private-draft"]) {
+  const lifecycleCases = [
+    ...["resolved", "retired", "sharpening", "private-draft"].map((status) => ({
+      operation: "promote",
+      status,
+    })),
+    ...["resolved", "retired"].map((status) => ({ operation: "revise", status })),
+  ];
+  for (const { operation, status } of lifecycleCases) {
+    console.log(JSON.stringify({ stage: "claim-lifecycle-start", operation, status }));
     await env.DB.prepare("UPDATE problems SET status = 'active' WHERE id = ?").bind(problem).run();
     const screens = await fixtures.screeningCalls();
     await fixtures.pauseScreening(2000);
     const pending = call(
-      `${dormantFellow.path}/promote`,
+      `${dormantFellow.path}/${operation}`,
       {
-        ...dormantPayload,
+        ...(operation === "promote"
+          ? dormantPayload
+          : {
+              claim_id: activated.claim_id,
+              base_version: 1,
+              kind: "definition",
+            }),
         statement: `Lifecycle race for ${status} must not publish this definition.`,
       },
       dormantFellow.token,
       null,
-      `lifecycle-race-${status}`,
+      `lifecycle-race-${operation}-${status}`,
     );
     try {
       for (
@@ -217,8 +231,21 @@ export async function claimsJourney({
         .bind(status, problem)
         .run();
       const beforeCommit = await dormantState();
+      const readClaim = () =>
+        env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
+          .bind(problem, activated.claim_id)
+          .first();
+      const beforeClaim = await readClaim();
       const result = await pending;
-      assert.equal(result._status, 422, `${status} during screening must refuse promotion`);
+      console.log(
+        JSON.stringify({
+          stage: "claim-lifecycle-response",
+          operation,
+          status,
+          http_status: result._status,
+        }),
+      );
+      assert.equal(result._status, 422, `${status} during screening must refuse ${operation}`);
       assert.equal(result.code, "CLAIMS_BOARD_LOCKED");
       assert.ok(result.fix_hint);
       assert.deepEqual(
@@ -227,11 +254,16 @@ export async function claimsJourney({
         "Lifecycle refusal must roll back public state",
       );
       const replay = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'promote' AND idempotency_key = ?",
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = ? AND idempotency_key = ?",
       )
-        .bind(`lifecycle-race-${status}`)
+        .bind(operation, `lifecycle-race-${operation}-${status}`)
         .first();
       assert.equal(replay.n, 0, "Refused promotion must leave its replay key unused");
+      assert.deepEqual(
+        await readClaim(),
+        beforeClaim,
+        "Refused write must preserve the claim projection",
+      );
       const historical = await call(
         `${dormantFellow.path}/promote`,
         dormantPayload,
@@ -250,6 +282,7 @@ export async function claimsJourney({
       await pending;
       await fixtures.resumeScreening();
     }
+    console.log(JSON.stringify({ stage: "claim-lifecycle-verified", operation, status }));
   }
   await setDormant();
 
@@ -1228,6 +1261,8 @@ export async function claimsJourney({
       "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
     promotion_lifecycle:
       "resolved, retired, sharpening and private-draft during screening: atomic refusal and historical replay",
+    revision_lifecycle:
+      "resolved and retired during screening: atomic refusal without minting or changing the claim",
     kinds_tested: allKinds,
     rules_verified: ["P3", "P9", "P10", "P11"],
     boundary: {
