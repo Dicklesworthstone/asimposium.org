@@ -606,6 +606,8 @@ export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
 export const PromoteRequestSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
+    /** Refuse a stale caller view before screening; the observed head is also guarded at commit. */
+    expected_workshop_version: z.number().int().positive().optional(),
     scientific_provenance: ClaimScientificProvenanceSchema.optional(),
     kind: ClaimKindSchema,
     statement: z

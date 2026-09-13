@@ -188,6 +188,131 @@ export async function claimsJourney({
   assert.deepEqual({ ...replayed, _status: 201 }, activated);
   assert.deepEqual(await dormantState(), dormantAgain, "Historical replay must not reactivate");
 
+  // The actual workshop edit route advances a private immutable head while a
+  // promotion is screening. Both implicit and explicit pins must refuse it.
+  console.log(JSON.stringify({ stage: "workshop-promotion-version-start" }));
+  const versionFellow = await createFellow("claims-workshop-version", "usr_claims_version");
+  const versionPayload = {
+    workshop_id: versionFellow.draft.workshop_id,
+    kind: "definition",
+    statement: "This definition is promoted only after reviewing the current workshop head.",
+  };
+  const invalidPinScreens = await fixtures.screeningCalls();
+  const invalidPin = await call(
+    `${versionFellow.path}/promote`,
+    {
+      ...versionPayload,
+      expected_workshop_version: 0,
+    },
+    versionFellow.token,
+    422,
+  );
+  assert.equal(invalidPin.code, "PROMOTE_BODY_INVALID");
+  assert.ok(invalidPin.fix_hint);
+  assert.equal(await fixtures.screeningCalls(), invalidPinScreens);
+  for (const baseVersion of [1, 2]) {
+    const screens = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    const pending = call(
+      `${versionFellow.path}/promote`,
+      {
+        ...versionPayload,
+        ...(baseVersion === 2 ? { expected_workshop_version: 2 } : {}),
+      },
+      versionFellow.token,
+      null,
+      `workshop-version-race-${baseVersion}`,
+    );
+    try {
+      for (let i = 0; i < 100 && (await fixtures.screeningCalls()) === screens; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(await fixtures.screeningCalls(), screens + 1);
+      await call(
+        `${versionFellow.path}/workshop`,
+        {
+          workshop_id: versionPayload.workshop_id,
+          base_version: baseVersion,
+          title: `Private draft version ${baseVersion + 1}`,
+        },
+        versionFellow.token,
+        201,
+      );
+      const before = await dormantState();
+      const result = await pending;
+      assert.equal(result._status, 409, "An edit during screening must refuse stale promotion");
+      assert.equal(result.code, "WORKSHOP_VERSION_CONFLICT");
+      assert.equal(result.current_version, baseVersion + 1);
+      assert.ok(result.fix_hint);
+      assert.deepEqual(await dormantState(), before);
+      const replayCount = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'promote' AND idempotency_key = ?",
+      )
+        .bind(`workshop-version-race-${baseVersion}`)
+        .first();
+      assert.equal(replayCount.n, 0, "A stale workshop must not consume the promotion key");
+      console.log(
+        JSON.stringify({ stage: "workshop-promotion-race-verified", base_version: baseVersion }),
+      );
+    } finally {
+      try {
+        await pending;
+      } finally {
+        await fixtures.resumeScreening();
+      }
+    }
+  }
+  const beforeStale = await dormantState();
+  const staleScreens = await fixtures.screeningCalls();
+  const stale = await call(
+    `${versionFellow.path}/promote`,
+    {
+      ...versionPayload,
+      expected_workshop_version: 1,
+    },
+    versionFellow.token,
+    409,
+  );
+  assert.equal(stale.code, "WORKSHOP_VERSION_CONFLICT");
+  assert.equal(stale.current_version, 3);
+  assert.equal(
+    await fixtures.screeningCalls(),
+    staleScreens,
+    "Stale pins must not spend screening",
+  );
+  assert.deepEqual(await dormantState(), beforeStale);
+  const freshPayload = { ...versionPayload, expected_workshop_version: 3 };
+  const fresh = await call(
+    `${versionFellow.path}/promote`,
+    freshPayload,
+    versionFellow.token,
+    201,
+    "workshop-version-race-1",
+  );
+  await call(
+    `${versionFellow.path}/workshop`,
+    {
+      workshop_id: versionPayload.workshop_id,
+      base_version: 3,
+      title: "Private draft version 4",
+    },
+    versionFellow.token,
+    201,
+  );
+  const beforeVersionReplay = await dormantState();
+  const replayScreens = await fixtures.screeningCalls();
+  const versionReplay = await call(
+    `${versionFellow.path}/promote`,
+    freshPayload,
+    versionFellow.token,
+    200,
+    "workshop-version-race-1",
+  );
+  assert.deepEqual({ ...versionReplay, _status: 201 }, fresh);
+  assert.deepEqual(await dormantState(), beforeVersionReplay);
+  assert.equal(await fixtures.screeningCalls(), replayScreens);
+  console.log(JSON.stringify({ stage: "workshop-promotion-version-complete" }));
+
   // Change lifecycle state only after the request enters the delayed classifier.
   // These are synthetic fixture transitions on real D1, not governance E2E.
   const lifecycleCases = [
@@ -1259,6 +1384,8 @@ export async function claimsJourney({
       "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
     dormant_promotion:
       "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
+    workshop_promotion_version:
+      "implicit/explicit edit races, stale preflight without screening, fresh retry and historical replay",
     promotion_lifecycle:
       "resolved, retired, sharpening and private-draft during screening: atomic refusal and historical replay",
     revision_lifecycle:

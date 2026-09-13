@@ -4018,7 +4018,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "PROMOTE_BODY_INVALID",
         title: "The promotion does not match the contract",
         detail: "The JSON body does not match the promote contract.",
-        fixHint: "Send {workshop_id, kind, statement, falsifier?, relates_to?}.",
+        fixHint:
+          "Send {workshop_id, kind, statement, falsifier?, relates_to?}. If supplied, expected_workshop_version must be a positive integer.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -4172,10 +4173,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // outcome.
     const ownedWorkshop = await db
       .prepare(
-        "SELECT workshop_id FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+        "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
       )
       .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
-      .first<{ workshop_id: string }>();
+      .first<{ workshop_id: string; current_version: number }>();
     if (ownedWorkshop === null || ownedWorkshop === undefined) {
       return validatedProblem({
         status: 404,
@@ -4195,6 +4196,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+
+    const workshopVersionConflict = (currentVersion: number) =>
+      validatedProblem({
+        status: 409,
+        code: "WORKSHOP_VERSION_CONFLICT",
+        title: "The workshop object changed before promotion",
+        detail: "This promotion was not committed because its workshop version is stale.",
+        fixHint:
+          "Refetch the workshop object, review the current draft, and retry with its expected_workshop_version.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          current_version: currentVersion,
+          suggested_action: "refetch_and_reapply",
+          refetch_url: `/v1/sessions/${session.session_id}/workshop/${ownedWorkshop.workshop_id}`,
+          example: {
+            workshop_id: ownedWorkshop.workshop_id,
+            expected_workshop_version: currentVersion,
+            kind: "definition",
+            statement: "<reviewed claim statement>",
+          },
+        },
+      });
+    if (
+      parsed.data.expected_workshop_version !== undefined &&
+      parsed.data.expected_workshop_version !== ownedWorkshop.current_version
+    )
+      return workshopVersionConflict(ownedWorkshop.current_version);
 
     // P11: the norm-hash near-duplicate gate. The stored norm_hash column
     // turns this into one indexed equality lookup, and the unique index on
@@ -4361,8 +4390,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
-              // If this event won Krater's idempotency row but the session
-              // or claims board closed meanwhile, request_digest becomes NULL and 0018's
+              // If this event won Krater's idempotency row but the session or
+              // claims board closed, or the workshop head changed meanwhile,
+              // request_digest becomes NULL and 0018's
               // NOT NULL constraint aborts the whole event/projection batch.
               // A same-caller-key loser cannot overwrite the winner's replay;
               // the ownership guard below then aborts its separate event.
@@ -4392,6 +4422,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                        JOIN problems ON problems.id = sessions.problem_id
                        WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
                          AND problems.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
+                         AND EXISTS (
+                           SELECT 1 FROM workshop_objects w
+                           WHERE w.workshop_id = ? AND w.session_id = sessions.session_id
+                             AND w.fellow_id = sessions.fellow_id AND w.current_version = ?
+                         )
                      ) THEN ? ELSE NULL END,
                      ?, ?, ?, ?
                    FROM idempotency
@@ -4405,6 +4440,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   key,
                   session.session_id,
                   auth.binding.fellowId,
+                  ownedWorkshop.workshop_id,
+                  ownedWorkshop.current_version,
                   digest,
                   sealed.ciphertext,
                   sealed.initializationVector,
@@ -4625,6 +4662,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // public effect before we return the existing teaching refusal.
       const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
       if (lifecycleRefusal) return lifecycleRefusal;
+      const currentWorkshop = await db
+        .prepare(
+          "SELECT current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+        )
+        .bind(ownedWorkshop.workshop_id, session.session_id, auth.binding.fellowId)
+        .first<{ current_version: number }>();
+      if (currentWorkshop && currentWorkshop.current_version !== ownedWorkshop.current_version) {
+        return workshopVersionConflict(currentWorkshop.current_version);
+      }
       throw error;
     }
   });

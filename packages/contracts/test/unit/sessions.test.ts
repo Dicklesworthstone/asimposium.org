@@ -64,6 +64,30 @@ const INVALID_PROMOTE_KIND = new URL(
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
 
+test("promotion workshop version pins agree in Zod and generated JSON Schema", async () => {
+  const valid = (await fixture(
+    new URL("../fixtures/valid/promote-workshop-version.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/promote-workshop-version.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/promote_request" });
+  const { expected_workshop_version: _pin, ...unpinned } = valid;
+  for (const input of [valid, unpinned]) {
+    expect(PromoteRequestSchema.safeParse(input).success).toBe(true);
+    expect(validate(input)).toBe(true);
+  }
+  for (const input of [
+    invalid,
+    ...[-1, 1.5, "1", null].map((pin) => ({ ...valid, expected_workshop_version: pin })),
+  ]) {
+    expect(PromoteRequestSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
+
 test("pack target query pins an exact local version in Zod and generated schema", async () => {
   const valid = await fixture(new URL("../fixtures/valid/pack-target-query.json", import.meta.url));
   const invalid = await fixture(
