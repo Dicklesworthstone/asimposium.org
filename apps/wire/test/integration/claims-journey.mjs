@@ -99,6 +99,11 @@ export async function claimsJourney({
       .first(),
     events: await countEvents(),
     cursor: await getPublicCursor(),
+    projections: await env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM claims) AS claims,
+      (SELECT COUNT(*) FROM claim_versions) AS versions,
+      (SELECT COUNT(*) FROM outbox) AS outbox,
+      (SELECT COUNT(*) FROM screening_publications) AS screening`).first(),
   });
   const dormantPayload = {
     workshop_id: dormantFellow.draft.workshop_id,
@@ -182,6 +187,71 @@ export async function claimsJourney({
   );
   assert.deepEqual({ ...replayed, _status: 201 }, activated);
   assert.deepEqual(await dormantState(), dormantAgain, "Historical replay must not reactivate");
+
+  // Change lifecycle state only after the request enters the delayed classifier.
+  // These are synthetic fixture transitions on real D1, not governance E2E.
+  for (const status of ["resolved", "retired", "sharpening", "private-draft"]) {
+    await env.DB.prepare("UPDATE problems SET status = 'active' WHERE id = ?").bind(problem).run();
+    const screens = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    const pending = call(
+      `${dormantFellow.path}/promote`,
+      {
+        ...dormantPayload,
+        statement: `Lifecycle race for ${status} must not publish this definition.`,
+      },
+      dormantFellow.token,
+      null,
+      `lifecycle-race-${status}`,
+    );
+    try {
+      for (
+        let attempt = 0;
+        attempt < 100 && (await fixtures.screeningCalls()) === screens;
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(await fixtures.screeningCalls(), screens + 1);
+      await env.DB.prepare("UPDATE problems SET status = ? WHERE id = ?")
+        .bind(status, problem)
+        .run();
+      const beforeCommit = await dormantState();
+      const result = await pending;
+      assert.equal(result._status, 422, `${status} during screening must refuse promotion`);
+      assert.equal(result.code, "CLAIMS_BOARD_LOCKED");
+      assert.ok(result.fix_hint);
+      assert.deepEqual(
+        await dormantState(),
+        beforeCommit,
+        "Lifecycle refusal must roll back public state",
+      );
+      const replay = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'promote' AND idempotency_key = ?",
+      )
+        .bind(`lifecycle-race-${status}`)
+        .first();
+      assert.equal(replay.n, 0, "Refused promotion must leave its replay key unused");
+      const historical = await call(
+        `${dormantFellow.path}/promote`,
+        dormantPayload,
+        dormantFellow.token,
+        200,
+        dormantKey,
+      );
+      assert.deepEqual({ ...historical, _status: 201 }, activated);
+      assert.deepEqual(await dormantState(), beforeCommit);
+      assert.equal(
+        await fixtures.screeningCalls(),
+        screens + 1,
+        "Historical replay must not screen again",
+      );
+    } finally {
+      await pending;
+      await fixtures.resumeScreening();
+    }
+  }
+  await setDormant();
 
   // --- Requirement 1: P3 Missing Falsifier on Conjecture Class ---
   const initialEvents = await countEvents();
@@ -1156,6 +1226,8 @@ export async function claimsJourney({
       "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
     dormant_promotion:
       "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
+    promotion_lifecycle:
+      "resolved, retired, sharpening and private-draft during screening: atomic refusal and historical replay",
     kinds_tested: allKinds,
     rules_verified: ["P3", "P9", "P10", "P11"],
     boundary: {
