@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0057_workshop_revisions_and_archival.sql`.
+schema through `0058_heartbeat_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -104,6 +104,10 @@ with Fable §290 (`scratch`, `claim-draft`, `evidence-draft`, `dead-end-draft`, 
 adds `current_version`, `state` ('open', 'archived', 'discarded'), and `ledger_intent_json`
 to `workshop_objects`, and creates the immutable `workshop_revisions` table for private
 version history and compare-and-swap recovery.
+
+Migration `0058_heartbeat_replay_scope.sql` widens the `session_write_replays`
+CHECK constraint to include `session_heartbeat`, enabling encrypted responses
+for heartbeat idempotency.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
