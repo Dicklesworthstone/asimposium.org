@@ -102,6 +102,13 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/events.json": true,
   "GET /p/:id/*": true,
+  // W4.6 direct appends (convenience surface, implicit session).
+  "POST /v1/p/:id/claims": true,
+  "POST /v1/p/:id/hypotheses": true,
+  "POST /v1/p/:id/evidence": true,
+  "POST /v1/p/:id/review": true,
+  "POST /v1/p/:id/reviews": true,
+  "POST /v1/p/:id/dead-ends": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */

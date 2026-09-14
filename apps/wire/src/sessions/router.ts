@@ -7,6 +7,9 @@ import {
   ClaimReanchorResponseSchema,
   ClaimRevisionSchema,
   CursorResponseSchema,
+  type DirectClaimRequest,
+  DirectClaimRequestSchema,
+  type EvidenceRequest,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
   GapClosedResponseSchema,
@@ -16,6 +19,7 @@ import {
   generateReviewRubricsDocument,
   HypothesisKillRequestSchema,
   HypothesisKillResponseSchema,
+  type HypothesisRequest,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
   LeaseAcquireRequestSchema,
@@ -41,6 +45,7 @@ import {
   PromoteRequestSchema,
   PromoteResponseSchema,
   type RateLimitBudget,
+  type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   RecordDeadEndResponseSchema,
   RelationFiledResponseSchema,
@@ -49,6 +54,7 @@ import {
   ResolveConflictResponseSchema,
   RetractRequestSchema,
   RetractResponseSchema,
+  type ReviewRequest,
   ReviewRequestSchema,
   ReviewResponseSchema,
   ReviseRequestSchema,
@@ -94,6 +100,7 @@ import {
   PackComposerError,
   renderProjection,
 } from "@asimposium/render";
+import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { cancelUnconsumedRequestBody, readBoundedRequestBody } from "../auth/http";
 import type {
@@ -985,6 +992,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly session: SessionRow;
         readonly screening?: undefined;
         readonly reservationId?: undefined;
+        readonly statementsAfterReplay?: readonly D1PreparedStatement[];
         readonly responseFor: (settlement: {
           readonly sequence: number;
           readonly objectId: string;
@@ -1018,6 +1026,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly session: SessionRow;
         readonly screening: ScreenedPublication;
         readonly reservationId?: string;
+        readonly statementsAfterReplay?: readonly D1PreparedStatement[];
         readonly responseFor: (settlement: {
           readonly sequence: number;
           readonly objectId: string;
@@ -1045,6 +1054,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly session: SessionRow;
         readonly screening?: undefined;
         readonly reservationId?: undefined;
+        readonly statementsAfterReplay?: readonly D1PreparedStatement[];
         readonly responseFor: (settlement: {
           readonly sequence: number;
           readonly objectId: string;
@@ -1164,6 +1174,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               settlement.eventId,
               settlement.sequence,
             ),
+          ...(input.statementsAfterReplay ?? []),
         ];
       },
     };
@@ -1431,6 +1442,167 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     return row;
+  }
+
+  type DirectAppendSessionResult =
+    | {
+        readonly ok: true;
+        readonly session: SessionRow;
+        readonly isImplicit: boolean;
+        readonly implicitCloseStatements: readonly D1PreparedStatement[];
+        readonly cleanupOnFailure: () => Promise<void>;
+      }
+    | {
+        readonly ok: false;
+        readonly response: Response;
+      };
+
+  async function ensureSessionForDirectAppend(
+    db: Env["DB"],
+    problemId: string,
+    binding: FellowCredentialBinding,
+  ): Promise<DirectAppendSessionResult> {
+    const problemRow = await db
+      .prepare("SELECT id, status, sponsor_id, created_by_fellow_id FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{
+        id: string;
+        status: string;
+        sponsor_id: string | null;
+        created_by_fellow_id: string | null;
+      }>();
+
+    if (
+      problemRow === null ||
+      problemRow === undefined ||
+      (problemRow.status === "private-draft" &&
+        !fellowCanAccessPrivateProblem(
+          binding,
+          {
+            id: problemRow.id,
+            sponsorId: problemRow.sponsor_id,
+            creatorFellowId: problemRow.created_by_fellow_id,
+          },
+          Date.now(),
+        ))
+    ) {
+      return {
+        ok: false,
+        response: validatedProblem({
+          status: 404,
+          code: "PROBLEM_NOT_FOUND",
+          title: "Problem not found",
+          detail: `No problem with id '${problemId}' exists.`,
+          fixHint: "Check the problem id against GET /problems.json.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
+        }),
+      };
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      return {
+        ok: false,
+        response: validatedProblem({
+          status: 422,
+          code: "CLAIMS_BOARD_LOCKED",
+          title: "Cannot append to closed problem",
+          detail: `Problem '${problemId}' is '${problemRow.status}'. No new work can be appended to resolved or retired problems.`,
+          fixHint: "Explore an active problem or fork an alternate formulation.",
+          rule: "P3",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
+        }),
+      };
+    }
+
+    const fellowId = binding.fellowId;
+    const existingSession = await db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE problem_id = ? AND fellow_id = ? AND closed_at IS NULL
+         ORDER BY opened_at DESC LIMIT 1`,
+      )
+      .bind(problemId, fellowId)
+      .first<SessionRow>();
+
+    if (existingSession !== null && existingSession !== undefined) {
+      return {
+        ok: true,
+        session: existingSession,
+        isImplicit: false,
+        implicitCloseStatements: [],
+        cleanupOnFailure: async () => {},
+      };
+    }
+
+    const sessionId = mintId("S");
+    const openedAt = new Date().toISOString();
+    const idleCloseAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const closedAt = new Date().toISOString();
+
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO sessions
+             (session_id, fellow_id, problem_id, intent, opened_at,
+              last_heartbeat_at, idle_close_at)
+           VALUES (?, ?, ?, 'explore', ?, ?, ?)`,
+        )
+        .bind(sessionId, fellowId, problemId, openedAt, openedAt, idleCloseAt),
+      db
+        .prepare(
+          `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+           VALUES (?, ?, 'contributor', ?)
+           ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
+        )
+        .bind(problemId, fellowId, openedAt),
+    ]);
+
+    const session: SessionRow = {
+      session_id: sessionId,
+      fellow_id: fellowId,
+      problem_id: problemId,
+      intent: "explore",
+      opened_at: openedAt,
+      closed_at: null,
+      handback: null,
+    };
+
+    const implicitCloseStatements = [
+      db
+        .prepare(
+          `UPDATE sessions
+           SET closed_at = ?, handback = 'Direct append'
+           WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL`,
+        )
+        .bind(closedAt, sessionId, fellowId),
+    ];
+
+    const cleanupOnFailure = async () => {
+      await db
+        .prepare(
+          `UPDATE sessions
+           SET closed_at = ?, handback = 'Direct append failed'
+           WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL`,
+        )
+        .bind(new Date().toISOString(), sessionId, fellowId)
+        .run()
+        .catch(() => {});
+    };
+
+    return {
+      ok: true,
+      session,
+      isImplicit: true,
+      implicitCloseStatements,
+      cleanupOnFailure,
+    };
   }
 
   async function packSessionOf(
@@ -1718,6 +1890,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/leases/:ref/challenge",
     "/v1/sessions/:id/close",
     "/v1/problems/:id/statement-review",
+    "/v1/p/:id/claims",
+    "/v1/p/:id/hypotheses",
+    "/v1/p/:id/evidence",
+    "/v1/p/:id/review",
+    "/v1/p/:id/reviews",
+    "/v1/p/:id/dead-ends",
   ] as const;
   for (const path of FELLOW_WRITE_RECEIPT_PATHS) {
     app.use(path, async (c, next) => {
@@ -3975,6 +4153,450 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  interface ClaimPromotionExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    readonly ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
+    readonly data: DirectClaimRequest;
+    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
+    readonly cleanupOnFailure?: () => Promise<void>;
+    readonly checkSessionStillOpen?: boolean;
+  }
+
+  async function executeClaimPromotion(input: ClaimPromotionExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, ownedWorkshop, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
+    const workshopVersionConflict = (currentVersion: number) =>
+      validatedProblem({
+        status: 409,
+        code: "WORKSHOP_VERSION_CONFLICT",
+        title: "The workshop object changed before promotion",
+        detail: "This promotion was not committed because its workshop version is stale.",
+        fixHint:
+          "Refetch the workshop object, review the current draft, and retry with its expected_workshop_version.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          current_version: currentVersion,
+          suggested_action: "refetch_and_reapply",
+          refetch_url: `/v1/sessions/${session.session_id}/workshop/${ownedWorkshop.workshop_id}`,
+          example: {
+            workshop_id: ownedWorkshop.workshop_id,
+            expected_workshop_version: currentVersion,
+            kind: "definition",
+            statement: "<reviewed claim statement>",
+          },
+        },
+      });
+    if (
+      data.expected_workshop_version !== undefined &&
+      data.expected_workshop_version !== ownedWorkshop.current_version
+    ) {
+      await cleanupOnFailure();
+      return workshopVersionConflict(ownedWorkshop.current_version);
+    }
+
+    const candidateHash = await normHash(data.statement);
+    const existingDuplicate = await db
+      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+      .bind(session.problem_id, candidateHash)
+      .first<{ id: string }>();
+    if (existingDuplicate !== null && existingDuplicate !== undefined) {
+      await cleanupOnFailure();
+      const refusal = duplicateClaimRefusal(existingDuplicate.id);
+      return validatedProblem({
+        status: 409,
+        code: refusal.code,
+        title: "A near-duplicate claim already exists",
+        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+        fixHint: refusal.fixHint,
+        rule: refusal.rule,
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          existing_claim_id: refusal.existingId,
+          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
+        },
+      });
+    }
+
+    const resolvedDeps = [...new Set(data.depends_on ?? [])];
+    if (resolvedDeps.length > 0) {
+      const found = await db
+        .prepare(
+          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
+        )
+        .bind(session.problem_id, ...resolvedDeps)
+        .all<{ id: string }>();
+      const known = new Set((found.results ?? []).map((row) => row.id));
+      const missing = resolvedDeps.filter((dep) => !known.has(dep));
+      if (missing.length > 0) {
+        await cleanupOnFailure();
+        return validatedProblem({
+          status: 422,
+          code: "DEPENDENCY_NOT_FOUND",
+          title: "depends_on references unknown claims",
+          detail: `No claim ${missing.join(", ")} exists on this problem.`,
+          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
+          rule: "P10",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            missing_dependency_ids: missing,
+            example: { depends_on: ["C-1"] },
+          },
+        });
+      }
+    }
+
+    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
+    try {
+      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
+    } catch (error) {
+      await cleanupOnFailure();
+      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
+      throw error;
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "promote",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: data.kind,
+        statement:
+          data.scientific_provenance === undefined
+            ? data.statement
+            : JSON.stringify({
+                statement: data.statement,
+                scientific_provenance: data.scientific_provenance,
+              }),
+        falsifier: data.falsifier ?? null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+
+    try {
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
+      const promotedAt = new Date().toISOString();
+      const versionMint = await mintClaimVersion({
+        currentVersion: 0,
+        newContent: {
+          kind: data.kind,
+          statement: data.statement,
+          falsifier: data.falsifier ?? null,
+        },
+        editorFellowId: auth.binding.fellowId,
+        sha256Hex,
+      });
+      const write = await writeClaim(
+        db,
+        {
+          problemId: session.problem_id,
+          claimId: "C-1",
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          statement: data.statement,
+          scientificProvenance: data.scientific_provenance,
+          dependencyPins,
+          normHash: candidateHash,
+          createdAt: promotedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {},
+        {
+          requestDigest: digest,
+          claimIdForSequence: (sequence) => `C-${sequence}`,
+          statementsAfterIdempotencySettlement: async (settlement) => {
+            const value = PromoteResponseSchema.parse({
+              claim_id: settlement.claimId,
+              problem_id: session.problem_id,
+              seq: settlement.sequence,
+              version: versionMint.version,
+              queue_position: 0,
+            });
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("promote", auth.binding.fellowId, c.req.path, key, digest),
+            );
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              ...scientificContentGuards(
+                db,
+                dependencyPins.map((pin) => ({
+                  eventId: pin.event_id,
+                  payloadDigest: pin.payload_digest,
+                })),
+              ),
+              screeningPublicationStatement(
+                db,
+                screening,
+                settlement.eventId,
+                session.session_id,
+                digest,
+              ),
+              settleQuotaReservationStatement(db, reservation.reservationId),
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'promote', ?, ?,
+                     CASE WHEN EXISTS (
+                       SELECT 1 FROM sessions
+                       JOIN problems ON problems.id = sessions.problem_id
+                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                         AND problems.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
+                         AND EXISTS (
+                           SELECT 1 FROM workshop_objects w
+                           WHERE w.workshop_id = ? AND w.session_id = sessions.session_id
+                             AND w.fellow_id = sessions.fellow_id AND w.current_version = ?
+                         )
+                     ) THEN ? ELSE NULL END,
+                     ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  session.session_id,
+                  auth.binding.fellowId,
+                  ownedWorkshop.workshop_id,
+                  ownedWorkshop.current_version,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  settlement.eventId,
+                  settlement.sequence,
+                  auth.binding.credentialId,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'promote' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest, claimToken),
+              db
+                .prepare(
+                  `UPDATE idempotency
+                   SET request_digest = CASE WHEN EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'promote' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   ) THEN request_digest ELSE NULL END
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  settlement.eventId,
+                  settlement.sequence,
+                ),
+              db
+                .prepare(
+                  `UPDATE problems SET status = 'active'
+                   WHERE id = ? AND status = 'dormant' AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'promote' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(session.problem_id, auth.binding.fellowId, key, digest, claimToken),
+              db
+                .prepare(
+                  `INSERT INTO claim_versions
+                     (claim_id, problem_id, version, kind, statement, falsifier,
+                      content_digest, editor_fellow_id, created_at)
+                   SELECT ?, p.id, ?, ?, ?, ?, ?, ?, ?
+                   FROM problems p
+                   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                   WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
+                )
+                .bind(
+                  settlement.claimId,
+                  versionMint.version,
+                  data.kind,
+                  data.statement,
+                  data.falsifier ?? null,
+                  versionMint.contentDigest,
+                  versionMint.editorFellowId,
+                  promotedAt,
+                  kraterIdempotencyKey,
+                  session.problem_id,
+                  settlement.eventId,
+                  settlement.sequence,
+                ),
+              ...resolvedDeps.map((dep) =>
+                db
+                  .prepare(
+                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+                     SELECT p.id, ?, ?, ?
+                     FROM problems p
+                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ? AND ? != ?`,
+                  )
+                  .bind(
+                    settlement.claimId,
+                    dep,
+                    promotedAt,
+                    kraterIdempotencyKey,
+                    session.problem_id,
+                    settlement.eventId,
+                    settlement.sequence,
+                    settlement.claimId,
+                    dep,
+                  ),
+              ),
+              ...implicitSessionCloseStatements,
+            ];
+          },
+        },
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(
+        db,
+        "promote",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) {
+        throw new Error("Krater promotion committed without its atomic replay");
+      }
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "promote",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
+      if (
+        error instanceof Error &&
+        /claims_problem_norm_hash_idx|UNIQUE constraint failed: claims\./.test(error.message)
+      ) {
+        const winnerClaim = await db
+          .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+          .bind(session.problem_id, candidateHash)
+          .first<{ id: string }>();
+        const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
+        return validatedProblem({
+          status: 409,
+          code: refusal.code,
+          title: "A near-duplicate claim already exists",
+          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+          fixHint: refusal.fixHint,
+          rule: refusal.rule,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            existing_claim_id: refusal.existingId,
+            example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
+          },
+        });
+      }
+      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
+        return idempotencyConflictProblem();
+      }
+      if (error instanceof KraterProblemNotFoundError) {
+        return validatedProblem({
+          status: 404,
+          code: "PROBLEM_NOT_FOUND",
+          title: "No such problem",
+          detail: "The session's problem is missing from the ledger.",
+          fixHint: "Check the problem id against GET /problems.json.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
+        });
+      }
+      if (input.checkSessionStillOpen ?? true) {
+        const current = await openSessionOf(db, session.session_id, auth.binding.fellowId);
+        if (current instanceof Response) return current;
+      }
+      if (
+        error instanceof ReplayClaimNotCommittedError ||
+        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+      ) {
+        return writeRefusedProblem();
+      }
+      const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
+      if (lifecycleRefusal) return lifecycleRefusal;
+      const currentWorkshop = await db
+        .prepare(
+          "SELECT current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+        )
+        .bind(ownedWorkshop.workshop_id, session.session_id, auth.binding.fellowId)
+        .first<{ current_version: number }>();
+      if (currentWorkshop && currentWorkshop.current_version !== ownedWorkshop.current_version) {
+        return workshopVersionConflict(currentWorkshop.current_version);
+      }
+      throw error;
+    }
+  }
+
   // --- POST /v1/sessions/:id/promote -------------------------------------
   app.post("/v1/sessions/:id/promote", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -4076,22 +4698,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
-    // Authorization runs BEFORE both lookups below, and this ordering is the
-    // fix for yn9p rather than a stylistic preference.
-    //
-    // The P11 duplicate gate answers with 409 DUPLICATE_CLAIM carrying
-    // `existing_claim_id`, and the owned-workshop lookup answers differently
-    // for a workshop id that exists under another Fellow. Both are therefore
-    // existence oracles: run either one first and an unscoped, non-member or
-    // suspicious-review credential learns whether a statement or a draft
-    // exists on a problem it may not write to. Authorization depends on
-    // neither lookup — it needs only the binding, the problem id and
-    // membership — so it is both the cheapest gate and the only one safe to
-    // answer first.
-    //
-    // Replay deliberately stays ahead of this. An already-committed write must
-    // replay its receipt: revocation is not retroactive, and a completed
-    // idempotent write is a fact about the past, not a new effect.
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
       effect: "promote",
@@ -4197,482 +4803,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const workshopVersionConflict = (currentVersion: number) =>
-      validatedProblem({
-        status: 409,
-        code: "WORKSHOP_VERSION_CONFLICT",
-        title: "The workshop object changed before promotion",
-        detail: "This promotion was not committed because its workshop version is stale.",
-        fixHint:
-          "Refetch the workshop object, review the current draft, and retry with its expected_workshop_version.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          current_version: currentVersion,
-          suggested_action: "refetch_and_reapply",
-          refetch_url: `/v1/sessions/${session.session_id}/workshop/${ownedWorkshop.workshop_id}`,
-          example: {
-            workshop_id: ownedWorkshop.workshop_id,
-            expected_workshop_version: currentVersion,
-            kind: "definition",
-            statement: "<reviewed claim statement>",
-          },
-        },
-      });
-    if (
-      parsed.data.expected_workshop_version !== undefined &&
-      parsed.data.expected_workshop_version !== ownedWorkshop.current_version
-    )
-      return workshopVersionConflict(ownedWorkshop.current_version);
-
-    // P11: the norm-hash near-duplicate gate. The stored norm_hash column
-    // turns this into one indexed equality lookup, and the unique index on
-    // (problem_id, norm_hash) is the commit-time atomic guard: a concurrent
-    // identical promotion aborts its own batch and maps to this same refusal
-    // in the catch below.
-    const candidateHash = await normHash(parsed.data.statement);
-    const existingDuplicate = await db
-      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
-      .bind(session.problem_id, candidateHash)
-      .first<{ id: string }>();
-    if (existingDuplicate !== null && existingDuplicate !== undefined) {
-      const refusal = duplicateClaimRefusal(existingDuplicate.id);
-      return validatedProblem({
-        status: 409,
-        code: refusal.code,
-        title: "A near-duplicate claim already exists",
-        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
-        fixHint: refusal.fixHint,
-        rule: refusal.rule,
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          existing_claim_id: refusal.existingId,
-          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
-        },
-      });
-    }
-
-    // W5.3: resolve depends_on targets before any write. Each must name an
-    // existing claim on this problem; deps point at earlier sequences, which
-    // makes a promote-time cycle structurally impossible (the self-edge is
-    // refused in-batch), so no cycle walk belongs on this path.
-    const resolvedDeps = [...new Set(parsed.data.depends_on)];
-    if (resolvedDeps.length > 0) {
-      const found = await db
-        .prepare(
-          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
-        )
-        .bind(session.problem_id, ...resolvedDeps)
-        .all<{ id: string }>();
-      const known = new Set((found.results ?? []).map((row) => row.id));
-      const missing = resolvedDeps.filter((dep) => !known.has(dep));
-      if (missing.length > 0) {
-        return validatedProblem({
-          status: 422,
-          code: "DEPENDENCY_NOT_FOUND",
-          title: "depends_on references unknown claims",
-          detail: `No claim ${missing.join(", ")} exists on this problem.`,
-          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
-          rule: "P10",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            missing_dependency_ids: missing,
-            example: { depends_on: ["C-1"] },
-          },
-        });
-      }
-    }
-
-    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
-    try {
-      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
-    } catch (error) {
-      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
-      throw error;
-    }
-
-    // Fable §9.1 + P7/A9 (bead asimposiumorg-b9y9): every public ledger
-    // ingress — this promote included — crosses the one centralized
-    // screening decision boundary after the cheap gates and before any
-    // Krater id, replay row, event, projection, cursor, or outbox effect.
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "promote",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: parsed.data.kind,
-        statement:
-          parsed.data.scientific_provenance === undefined
-            ? parsed.data.statement
-            : JSON.stringify({
-                statement: parsed.data.statement,
-                scientific_provenance: parsed.data.scientific_provenance,
-              }),
-        falsifier: parsed.data.falsifier ?? null,
-      },
-    );
-    if ("error" in screened) return screened.error;
-    const { screening, reservation } = screened;
-
-    try {
-      const eventId = mintId("E");
-      const claimToken = mintId("R");
-      // Krater's idempotency rows are durable, while the public caller key is
-      // reusable after its 24h replay expires. Give this replay-election
-      // attempt a fresh internal key; the atomic ownership guard below aborts
-      // its entire Krater batch unless this exact claim token wins the public
-      // (scope, Fellow, caller key) replay row.
-      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
-      // W5.3: one timestamp for the claim row, its version and its deps, and
-      // the v1 content mint (P9) computed before the batch — the content is
-      // fixed by the request, so the digest is too.
-      const promotedAt = new Date().toISOString();
-      const versionMint = await mintClaimVersion({
-        currentVersion: 0,
-        newContent: {
-          kind: parsed.data.kind,
-          statement: parsed.data.statement,
-          falsifier: parsed.data.falsifier ?? null,
-        },
-        editorFellowId: auth.binding.fellowId,
-        sha256Hex,
-      });
-      const write = await writeClaim(
-        db,
-        {
-          problemId: session.problem_id,
-          // The atomic companion derives the real C-<seq> identity from the
-          // durable head on every Krater retry. This placeholder is validated
-          // but never reaches a composed session promotion statement.
-          claimId: "C-1",
-          eventId,
-          idempotencyKey: kraterIdempotencyKey,
-          statement: parsed.data.statement,
-          scientificProvenance: parsed.data.scientific_provenance,
-          dependencyPins,
-          normHash: candidateHash,
-          createdAt: promotedAt,
-          // Rule A3: the full attribution snapshot on the claim.created event.
-          attribution: {
-            fellowId: auth.binding.fellowId,
-            sponsorId: auth.binding.sponsorId,
-            sessionId: session.session_id,
-            modelSelfDeclared: auth.binding.model,
-            harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
-          },
-        },
-        {},
-        {
-          requestDigest: digest,
-          claimIdForSequence: (sequence) => `C-${sequence}`,
-          statementsAfterIdempotencySettlement: async (settlement) => {
-            const value = PromoteResponseSchema.parse({
-              claim_id: settlement.claimId,
-              problem_id: session.problem_id,
-              seq: settlement.sequence,
-              version: versionMint.version,
-              queue_position: 0,
-            });
-            const sealed = await options.replayProtector.seal(
-              JSON.stringify(value),
-              sessionReplayContext("promote", auth.binding.fellowId, c.req.path, key, digest),
-            );
-            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
-            return [
-              // If this event won Krater's idempotency row but the session or
-              // claims board closed, or the workshop head changed meanwhile,
-              // request_digest becomes NULL and 0018's
-              // NOT NULL constraint aborts the whole event/projection batch.
-              // A same-caller-key loser cannot overwrite the winner's replay;
-              // the ownership guard below then aborts its separate event.
-              ...scientificContentGuards(
-                db,
-                dependencyPins.map((pin) => ({
-                  eventId: pin.event_id,
-                  payloadDigest: pin.payload_digest,
-                })),
-              ),
-              screeningPublicationStatement(
-                db,
-                screening,
-                settlement.eventId,
-                session.session_id,
-                digest,
-              ),
-              settleQuotaReservationStatement(db, reservation.reservationId),
-              db
-                .prepare(
-                  `INSERT INTO session_write_replays
-                     (scope, principal_scope, idempotency_key, request_digest,
-                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
-                   SELECT 'promote', ?, ?,
-                     CASE WHEN EXISTS (
-                       SELECT 1 FROM sessions
-                       JOIN problems ON problems.id = sessions.problem_id
-                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
-                         AND problems.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
-                         AND EXISTS (
-                           SELECT 1 FROM workshop_objects w
-                           WHERE w.workshop_id = ? AND w.session_id = sessions.session_id
-                             AND w.fellow_id = sessions.fellow_id AND w.current_version = ?
-                         )
-                     ) THEN ? ELSE NULL END,
-                     ?, ?, ?, ?
-                   FROM idempotency
-                   WHERE problem_id = ? AND idempotency_key = ?
-                     AND event_id = ? AND event_seq = ?
-                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
-                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
-                )
-                .bind(
-                  auth.binding.fellowId,
-                  key,
-                  session.session_id,
-                  auth.binding.fellowId,
-                  ownedWorkshop.workshop_id,
-                  ownedWorkshop.current_version,
-                  digest,
-                  sealed.ciphertext,
-                  sealed.initializationVector,
-                  expiresAt,
-                  claimToken,
-                  session.problem_id,
-                  kraterIdempotencyKey,
-                  settlement.eventId,
-                  settlement.sequence,
-                  auth.binding.credentialId,
-                ),
-              // The anonymous cursor is a projection of the same winning
-              // event and advances only when this attempt owns the replay.
-              db
-                .prepare(
-                  `UPDATE public_cursor SET cursor = cursor + 1
-                   WHERE singleton = 1 AND EXISTS (
-                     SELECT 1 FROM session_write_replays
-                     WHERE scope = 'promote' AND principal_scope = ?
-                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-                   )`,
-                )
-                .bind(auth.binding.fellowId, key, digest, claimToken),
-              // A different internal Krater key must not let a same-caller-key
-              // loser commit a second event. Deliberately violate the durable
-              // NOT NULL invariant when this attempt does not own the exact
-              // replay row; D1 then rolls the whole event/projection batch back.
-              db
-                .prepare(
-                  `UPDATE idempotency
-                   SET request_digest = CASE WHEN EXISTS (
-                     SELECT 1 FROM session_write_replays
-                     WHERE scope = 'promote' AND principal_scope = ?
-                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-                   ) THEN request_digest ELSE NULL END
-                   WHERE problem_id = ? AND idempotency_key = ?
-                     AND event_id = ? AND event_seq = ?`,
-                )
-                .bind(
-                  auth.binding.fellowId,
-                  key,
-                  digest,
-                  claimToken,
-                  session.problem_id,
-                  kraterIdempotencyKey,
-                  settlement.eventId,
-                  settlement.sequence,
-                ),
-              // A6: only this newly committed event may reactivate dormancy.
-              // Krater updates updated_at in this same batch; refusals and
-              // historical replays must leave both lifecycle fields alone.
-              db
-                .prepare(
-                  `UPDATE problems SET status = 'active'
-                   WHERE id = ? AND status = 'dormant' AND EXISTS (
-                     SELECT 1 FROM session_write_replays
-                     WHERE scope = 'promote' AND principal_scope = ?
-                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-                   )`,
-                )
-                .bind(session.problem_id, auth.binding.fellowId, key, digest, claimToken),
-              // W5.3 (Rule A6): the v1 content version commits in the same
-              // batch as the claim row. kind/falsifier/statement/digest become
-              // durable facts a review can pin — never request-scoped bytes.
-              db
-                .prepare(
-                  `INSERT INTO claim_versions
-                     (claim_id, problem_id, version, kind, statement, falsifier,
-                      content_digest, editor_fellow_id, created_at)
-                   SELECT ?, p.id, ?, ?, ?, ?, ?, ?, ?
-                   FROM problems p
-                   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-                   WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
-                )
-                .bind(
-                  settlement.claimId,
-                  versionMint.version,
-                  parsed.data.kind,
-                  parsed.data.statement,
-                  parsed.data.falsifier ?? null,
-                  versionMint.contentDigest,
-                  versionMint.editorFellowId,
-                  promotedAt,
-                  kraterIdempotencyKey,
-                  session.problem_id,
-                  settlement.eventId,
-                  settlement.sequence,
-                ),
-              // The depends_on edges (P10). Each insert re-checks ownership of
-              // the winning event and refuses a self-edge (`? != ?`): a client
-              // that guesses its own future sequence cannot mint a cycle.
-              ...resolvedDeps.map((dep) =>
-                db
-                  .prepare(
-                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
-                     SELECT p.id, ?, ?, ?
-                     FROM problems p
-                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ? AND ? != ?`,
-                  )
-                  .bind(
-                    settlement.claimId,
-                    dep,
-                    promotedAt,
-                    kraterIdempotencyKey,
-                    session.problem_id,
-                    settlement.eventId,
-                    settlement.sequence,
-                    settlement.claimId,
-                    dep,
-                  ),
-              ),
-            ];
-          },
-        },
-      );
-      // The claim, its event and its outbox row are durable at exactly this
-      // point, so the wake is scheduled here rather than beside the return: the
-      // pending row is real even on the paths below that still answer with an
-      // error. Nothing before this line reaches it, so a refusal, a conflict and
-      // a failed commit all leave the drainer untouched.
-      scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(
-        db,
-        "promote",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) {
-        throw new Error("Krater promotion committed without its atomic replay");
-      }
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "promote",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) {
-          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-        }
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
-      // P11 commit-time guard: a concurrent identical promotion committed
-      // first and this batch died on claims_problem_norm_hash_idx — the read
-      // above ran before the winner landed. Name the winning claim in the
-      // same typed refusal the friendly path returns; this batch rolled back,
-      // so the caller key stays unused and a retry is clean.
-      if (
-        error instanceof Error &&
-        /claims_problem_norm_hash_idx|UNIQUE constraint failed: claims\./.test(error.message)
-      ) {
-        const winnerClaim = await db
-          .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
-          .bind(session.problem_id, candidateHash)
-          .first<{ id: string }>();
-        const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
-        return validatedProblem({
-          status: 409,
-          code: refusal.code,
-          title: "A near-duplicate claim already exists",
-          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
-          fixHint: refusal.fixHint,
-          rule: refusal.rule,
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            existing_claim_id: refusal.existingId,
-            example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
-          },
-        });
-      }
-      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
-        return idempotencyConflictProblem();
-      }
-      if (error instanceof KraterProblemNotFoundError) {
-        return validatedProblem({
-          status: 404,
-          code: "PROBLEM_NOT_FOUND",
-          title: "No such problem",
-          detail: "The session's problem is missing from the ledger.",
-          fixHint: "Check the problem id against GET /problems.json.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { method: "GET", path: "/problems.json" },
-          },
-        });
-      }
-      const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
-      if (current instanceof Response) return current;
-      if (
-        error instanceof ReplayClaimNotCommittedError ||
-        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
-      ) {
-        // A promotion deliberately aborts its whole Krater batch when the
-        // companion replay row loses election, so credential revocation can
-        // surface as the database's constraint error rather than the replay
-        // helper's empty-settlement error. Re-read only the coarse liveness
-        // predicate: a still-live credential preserves unrelated failures,
-        // while an absent/revoked row receives the shared policy face.
-        return writeRefusedProblem();
-      }
-      // Screening runs outside the transaction. A lifecycle transition can
-      // therefore invalidate the preflight; the replay guard rolls back every
-      // public effect before we return the existing teaching refusal.
-      const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
-      if (lifecycleRefusal) return lifecycleRefusal;
-      const currentWorkshop = await db
-        .prepare(
-          "SELECT current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
-        )
-        .bind(ownedWorkshop.workshop_id, session.session_id, auth.binding.fellowId)
-        .first<{ current_version: number }>();
-      if (currentWorkshop && currentWorkshop.current_version !== ownedWorkshop.current_version) {
-        return workshopVersionConflict(currentWorkshop.current_version);
-      }
-      throw error;
-    }
+    return executeClaimPromotion({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      ownedWorkshop,
+      data: parsed.data,
+      checkSessionStillOpen: true,
+    });
   });
 
   // --- POST /v1/sessions/:id/revise (W5.3 P9: mint @n+1, reset to open) ----
@@ -6822,7 +6963,400 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
-  // --- POST /v1/sessions/:id/review (W5.7: the disposition driver's write) ---
+  interface ReviewExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    readonly data: ReviewRequest;
+    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
+    readonly cleanupOnFailure?: () => Promise<void>;
+  }
+
+  async function executeReviewCreate(input: ReviewExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "review",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
+    }
+
+    // Reviews pin an exact immutable version. Looking only at the claim head
+    // would let a caller pre-seed a future version that acquires weight later.
+    const claim = await db
+      .prepare(
+        `SELECT claim_id, kind, statement FROM claim_versions
+         WHERE claim_id = ? AND problem_id = ? AND version = ?`,
+      )
+      .bind(data.target_claim_id, session.problem_id, data.target_version)
+      .first<{ claim_id: string; kind: string; statement: string }>();
+    if (claim === null || claim === undefined) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 404,
+        code: "CLAIM_NOT_FOUND",
+        title: "No such claim",
+        detail: `No claim version ${data.target_claim_id}@${data.target_version} exists on ${session.problem_id}.`,
+        fixHint: "Check the claim id and exact version against the problem's claims board.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "I checked the statement against the proof.",
+            body_md: "Verified the quantifier scope.",
+          },
+        },
+      });
+    }
+
+    // W5.1 Problem statement drift gate: cannot review a claim that has drifted
+    const claimHead = await db
+      .prepare("SELECT statement_drift FROM claims WHERE id = ? AND problem_id = ?")
+      .bind(data.target_claim_id, session.problem_id)
+      .first<{ statement_drift: number }>();
+    if (claimHead?.statement_drift === 1) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "STATEMENT_DRIFT",
+        title: "Claim addresses an older problem statement version",
+        detail:
+          "The problem statement has revised to a newer version. This claim must be re-anchored or retired.",
+        fixHint: "Call /reanchor or revise the claim against the latest problem statement version.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: data.target_claim_id,
+            base_version: data.target_version,
+          },
+        },
+      });
+    }
+
+    // The claim's author + attribution come from the immutable claim.created
+    // event (Rule A3) — never the Fellow's current sponsor binding, so a later
+    // transfer cannot manufacture or erase independence.
+    const authorEvent = await db
+      .prepare(
+        `SELECT actor_fellow_id, actor_sponsor_id, model_string_self_declared, harness
+         FROM events WHERE problem_id = ? AND type = 'claim.created'
+           AND object_kind = 'claim' AND object_id = ? AND object_version = 1
+         ORDER BY seq ASC LIMIT 1`,
+      )
+      .bind(session.problem_id, data.target_claim_id)
+      .first<{
+        actor_fellow_id: string | null;
+        actor_sponsor_id: string | null;
+        model_string_self_declared: string | null;
+        harness: string | null;
+      }>();
+
+    if (
+      authorEvent?.actor_fellow_id === null ||
+      authorEvent?.actor_fellow_id === undefined ||
+      authorEvent.actor_sponsor_id === null ||
+      authorEvent.model_string_self_declared === null ||
+      authorEvent.harness === null
+    ) {
+      await cleanupOnFailure();
+      throw new Error("CLAIM_ATTRIBUTION_MISSING");
+    }
+
+    const gate = gateReviewSubmission({
+      submission: {
+        targetClaimId: data.target_claim_id,
+        targetVersion: data.target_version,
+        verdict: data.verdict,
+        basis: data.basis,
+        capableOfFailure: data.capable_of_failure,
+        rubric: data.rubric,
+        bodyMd: data.body_md,
+      },
+      claimAuthorFellowId: authorEvent.actor_fellow_id,
+      reviewerFellowId: auth.binding.fellowId,
+    });
+    if (!gate.ok) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: gate.code as "REVIEWER_IS_AUTHOR",
+        title: "The review is not acceptable",
+        detail: "The review fails a validator hard rule.",
+        fixHint: gate.fixHint,
+        rule: gate.rule as "P1",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "I checked the statement against the proof.",
+            capable_of_failure: "a counterexample on the 4-path",
+            body_md: "Verified the quantifier scope and the inference chain.",
+          },
+        },
+      });
+    }
+
+    let scientificClaim: ScientificClaim;
+    let methodEvidence: ScientificEvidence[] = [];
+    let verification: Awaited<ReturnType<typeof validateScientificVerification>> | undefined;
+    try {
+      scientificClaim = await readScientificClaim(
+        db,
+        session.problem_id,
+        data.target_claim_id,
+        data.target_version,
+      );
+      methodEvidence = await resolveScientificReferences(
+        db,
+        session.problem_id,
+        scientificClaim,
+        data.scientific_provenance?.method?.evidence ?? [],
+      );
+      if (data.verification) {
+        verification = await validateScientificVerification(
+          db,
+          session.problem_id,
+          scientificClaim,
+          data.verification,
+          auth.binding.fellowId,
+          auth.binding.sponsorId,
+        );
+        if (
+          (data.verdict === "confirm" || data.verdict === "reproduces") &&
+          !verification.fullWriteUp &&
+          !verification.certifiedArtifact
+        ) {
+          throw new ScientificInputError(
+            "A negative or inconclusive verification cannot be submitted as a supporting verdict.",
+          );
+        }
+      }
+    } catch (error) {
+      await cleanupOnFailure();
+      if (error instanceof ScientificInputError) return scientificRefusal("review", error.message);
+      throw error;
+    }
+    const tier = scientificIndependence(
+      scientificClaim,
+      {
+        sponsorId: auth.binding.sponsorId,
+        provenance: data.scientific_provenance ?? null,
+      },
+      methodEvidence,
+      {
+        reviewerFellowId: auth.binding.fellowId,
+        ...(verification?.certifiedArtifact
+          ? { verifiedArtifactEvidenceId: verification.evidence.evidenceId }
+          : {}),
+      },
+    );
+    const scientificIdentities: ScientificContentIdentity[] = [
+      scientificClaim,
+      ...methodEvidence,
+      ...(verification ? [verification.evidence] : []),
+    ];
+
+    // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
+    // author-controlled public text screened at the centralized boundary
+    // before any commit effect.
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "review",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "review",
+        statement: JSON.stringify(data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+    const reviewId = mintId("R");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "review.created",
+          objectKind: "review",
+          objectId: reviewId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            basis: data.basis,
+            body_md: data.body_md,
+            capable_of_failure: data.capable_of_failure ?? null,
+            scientific_provenance: data.scientific_provenance ?? null,
+            independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+            verification: data.verification ?? null,
+            rubric: data.rubric,
+            target_claim_id: data.target_claim_id,
+            target_version: data.target_version,
+            tier,
+            verdict: data.verdict,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            ...scientificContentGuards(db, scientificIdentities),
+            db
+              .prepare(
+                `INSERT INTO reviews
+                   (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id,
+                    tier, verdict, basis, capable_of_failure, rubric_json, body_md, created_at,
+                    source_event_id, source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, e.id, e.seq
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                reviewId,
+                session.problem_id,
+                data.target_claim_id,
+                data.target_version,
+                auth.binding.fellowId,
+                tier,
+                data.verdict,
+                data.basis,
+                data.capable_of_failure ?? null,
+                JSON.stringify(data.rubric),
+                data.body_md,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "review",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          statementsAfterReplay: implicitSessionCloseStatements,
+          responseFor: () =>
+            ReviewResponseSchema.parse({
+              review_id: reviewId,
+              target_claim_id: data.target_claim_id,
+              target_version: data.target_version,
+              tier,
+              carries_weight: gate.carriesWeight,
+              independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+              full_write_up: verification?.fullWriteUp ?? false,
+              artifact_compilation: verification?.certifiedArtifact ?? false,
+              statement_equivalence: verification?.certifiedArtifact ?? false,
+            }),
+        }),
+      );
+      const replay = await readReplayRecord(
+        db,
+        "review",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("review committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      if (isScientificReferenceChanged(error)) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        return scientificRefusal(
+          "review",
+          "Referenced scientific content changed during publication; fetch a fresh pack.",
+        );
+      }
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "review",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  }
+
+  // --- POST /v1/sessions/:id/review (W5.4 P1/P2/P4 review mint) ---------------
   app.post("/v1/sessions/:id/review", async (c) => {
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
@@ -6873,9 +7407,37 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
+    return executeReviewCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      data: parsed.data,
+    });
+  });
+
+  interface HypothesisExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    readonly data: HypothesisRequest;
+    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
+    readonly cleanupOnFailure?: () => Promise<void>;
+  }
+
+  async function executeHypothesisCreate(input: HypothesisExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
-      effect: "review",
+      effect: "promote",
       credential: auth.binding,
       target: {
         kind: "existing-problem",
@@ -6890,187 +7452,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       now: Date.now(),
     });
-    if (decision.decision !== "allow") return writeRefusedProblem();
-
-    // Reviews pin an exact immutable version. Looking only at the claim head
-    // would let a caller pre-seed a future version that acquires weight later.
-    const claim = await db
-      .prepare(
-        `SELECT claim_id, kind, statement FROM claim_versions
-         WHERE claim_id = ? AND problem_id = ? AND version = ?`,
-      )
-      .bind(parsed.data.target_claim_id, session.problem_id, parsed.data.target_version)
-      .first<{ claim_id: string; kind: string; statement: string }>();
-    if (claim === null || claim === undefined) {
-      return validatedProblem({
-        status: 404,
-        code: "CLAIM_NOT_FOUND",
-        title: "No such claim",
-        detail: `No claim version ${parsed.data.target_claim_id}@${parsed.data.target_version} exists on ${session.problem_id}.`,
-        fixHint: "Check the claim id and exact version against the problem's claims board.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            target_claim_id: "C-1",
-            target_version: 1,
-            verdict: "confirm",
-            basis: "I checked the statement against the proof.",
-            body_md: "Verified the quantifier scope.",
-          },
-        },
-      });
+    if (decision.decision !== "allow") {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
     }
 
-    // W5.1 Problem statement drift gate: cannot review a claim that has drifted
-    const claimHead = await db
-      .prepare("SELECT statement_drift FROM claims WHERE id = ? AND problem_id = ?")
-      .bind(parsed.data.target_claim_id, session.problem_id)
-      .first<{ statement_drift: number }>();
-    if (claimHead?.statement_drift === 1) {
-      return validatedProblem({
-        status: 422,
-        code: "STATEMENT_DRIFT",
-        title: "Claim addresses an older problem statement version",
-        detail:
-          "The problem statement has revised to a newer version. This claim must be re-anchored or retired.",
-        fixHint: "Call /reanchor or revise the claim against the latest problem statement version.",
-        rule: "P9",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            claim_id: parsed.data.target_claim_id,
-            base_version: parsed.data.target_version,
-          },
-        },
-      });
-    }
-
-    // The claim's author + attribution come from the immutable claim.created
-    // event (Rule A3) — never the Fellow's current sponsor binding, so a later
-    // transfer cannot manufacture or erase independence.
-    const authorEvent = await db
-      .prepare(
-        `SELECT actor_fellow_id, actor_sponsor_id, model_string_self_declared, harness
-         FROM events WHERE problem_id = ? AND type = 'claim.created'
-           AND object_kind = 'claim' AND object_id = ? AND object_version = 1
-         ORDER BY seq ASC LIMIT 1`,
-      )
-      .bind(session.problem_id, parsed.data.target_claim_id)
-      .first<{
-        actor_fellow_id: string | null;
-        actor_sponsor_id: string | null;
-        model_string_self_declared: string | null;
-        harness: string | null;
-      }>();
-
-    if (
-      authorEvent?.actor_fellow_id === null ||
-      authorEvent?.actor_fellow_id === undefined ||
-      authorEvent.actor_sponsor_id === null ||
-      authorEvent.model_string_self_declared === null ||
-      authorEvent.harness === null
-    ) {
-      throw new Error("CLAIM_ATTRIBUTION_MISSING");
-    }
-
-    const gate = gateReviewSubmission({
-      submission: {
-        targetClaimId: parsed.data.target_claim_id,
-        targetVersion: parsed.data.target_version,
-        verdict: parsed.data.verdict,
-        basis: parsed.data.basis,
-        capableOfFailure: parsed.data.capable_of_failure,
-        rubric: parsed.data.rubric,
-        bodyMd: parsed.data.body_md,
-      },
-      claimAuthorFellowId: authorEvent.actor_fellow_id,
-      reviewerFellowId: auth.binding.fellowId,
-    });
-    if (!gate.ok) {
-      return validatedProblem({
-        status: 422,
-        code: gate.code as "REVIEWER_IS_AUTHOR",
-        title: "The review is not acceptable",
-        detail: "The review fails a validator hard rule.",
-        fixHint: gate.fixHint,
-        rule: gate.rule as "P1",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            target_claim_id: "C-1",
-            target_version: 1,
-            verdict: "confirm",
-            basis: "I checked the statement against the proof.",
-            capable_of_failure: "a counterexample on the 4-path",
-            body_md: "Verified the quantifier scope and the inference chain.",
-          },
-        },
-      });
-    }
-
-    let scientificClaim: ScientificClaim;
-    let methodEvidence: ScientificEvidence[] = [];
-    let verification: Awaited<ReturnType<typeof validateScientificVerification>> | undefined;
-    try {
-      scientificClaim = await readScientificClaim(
-        db,
-        session.problem_id,
-        parsed.data.target_claim_id,
-        parsed.data.target_version,
-      );
-      methodEvidence = await resolveScientificReferences(
-        db,
-        session.problem_id,
-        scientificClaim,
-        parsed.data.scientific_provenance?.method?.evidence ?? [],
-      );
-      if (parsed.data.verification) {
-        verification = await validateScientificVerification(
-          db,
-          session.problem_id,
-          scientificClaim,
-          parsed.data.verification,
-          auth.binding.fellowId,
-          auth.binding.sponsorId,
-        );
-        if (
-          (parsed.data.verdict === "confirm" || parsed.data.verdict === "reproduces") &&
-          !verification.fullWriteUp &&
-          !verification.certifiedArtifact
-        ) {
-          throw new ScientificInputError(
-            "A negative or inconclusive verification cannot be submitted as a supporting verdict.",
-          );
-        }
-      }
-    } catch (error) {
-      if (error instanceof ScientificInputError) return scientificRefusal("review", error.message);
-      throw error;
-    }
-    const tier = scientificIndependence(
-      scientificClaim,
-      {
-        sponsorId: auth.binding.sponsorId,
-        provenance: parsed.data.scientific_provenance ?? null,
-      },
-      methodEvidence,
-      {
-        reviewerFellowId: auth.binding.fellowId,
-        ...(verification?.certifiedArtifact
-          ? { verifiedArtifactEvidenceId: verification.evidence.evidenceId }
-          : {}),
-      },
-    );
-    const scientificIdentities: ScientificContentIdentity[] = [
-      scientificClaim,
-      ...methodEvidence,
-      ...(verification ? [verification.evidence] : []),
-    ];
-
-    // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
-    // author-controlled public text screened at the centralized boundary
-    // before any commit effect.
+    // P7/A9 (bead asimposiumorg-b9y9): the hypothesis route, mechanism, and
+    // body are public text screened at the centralized boundary before any
+    // commit effect; the falsifier is screened both as a component and as
+    // the dedicated falsifier slot.
     const screened = await screenWithQuota(
       c.env,
       {
@@ -7078,7 +7468,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
-        route: "review",
+        route: "hypotheses",
         replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
@@ -7086,17 +7476,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       {
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
-        kind: "review",
-        statement: JSON.stringify(parsed.data),
-        falsifier: null,
+        kind: "hypotheses",
+        statement: JSON.stringify(data),
+        falsifier: data.falsifier,
       },
     );
-    if ("error" in screened) return screened.error;
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
     const { screening, reservation } = screened;
-    const reviewId = mintId("R");
+    const hypothesisId = mintId("H");
     const eventId = mintId("E");
     const claimToken = mintId("R");
-    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypotheses", claimToken);
     const createdAt = new Date().toISOString();
 
     try {
@@ -7107,22 +7500,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           eventId,
           idempotencyKey: kraterIdempotencyKey,
           requestDigest: digest,
-          eventType: "review.created",
-          objectKind: "review",
-          objectId: reviewId,
+          eventType: "hypothesis.created",
+          objectKind: "hypothesis",
+          objectId: hypothesisId,
           objectVersion: 1,
           payloadJson: canonicalJson({
-            basis: parsed.data.basis,
-            body_md: parsed.data.body_md,
-            capable_of_failure: parsed.data.capable_of_failure ?? null,
-            scientific_provenance: parsed.data.scientific_provenance ?? null,
-            independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
-            verification: parsed.data.verification ?? null,
-            rubric: parsed.data.rubric,
-            target_claim_id: parsed.data.target_claim_id,
-            target_version: parsed.data.target_version,
-            tier,
-            verdict: parsed.data.verdict,
+            body_md: data.body_md,
+            discriminating_predictions: data.discriminating_predictions,
+            expected_evidence: data.expected_evidence ?? null,
+            falsifier: data.falsifier,
+            mechanism: data.mechanism,
+            origin: data.origin,
+            route: data.route,
           }),
           createdAt,
           attribution: {
@@ -7136,29 +7525,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           statementsAfterEvent: ({ sequence }) => [
-            ...scientificContentGuards(db, scientificIdentities),
             db
               .prepare(
-                `INSERT INTO reviews
-                   (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id,
-                    tier, verdict, basis, capable_of_failure, rubric_json, body_md, created_at,
-                    source_event_id, source_seq)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, e.id, e.seq
+                `INSERT INTO hypotheses
+                   (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
+                    discriminating_predictions_json, origin, status, author_fellow_id, created_at,
+                    body_md, source_event_id, source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, e.id, e.seq
                  FROM events e WHERE e.id = ? AND e.seq = ?`,
               )
               .bind(
-                reviewId,
+                hypothesisId,
                 session.problem_id,
-                parsed.data.target_claim_id,
-                parsed.data.target_version,
+                data.route,
+                data.mechanism,
+                data.falsifier,
+                data.expected_evidence ?? null,
+                JSON.stringify(data.discriminating_predictions),
+                data.origin,
                 auth.binding.fellowId,
-                tier,
-                parsed.data.verdict,
-                parsed.data.basis,
-                parsed.data.capable_of_failure ?? null,
-                JSON.stringify(parsed.data.rubric),
-                parsed.data.body_md,
                 createdAt,
+                data.body_md,
                 eventId,
                 sequence,
               ),
@@ -7167,7 +7554,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {},
         atomicLedgerReplayCompanion({
           db,
-          scope: "review",
+          scope: "hypotheses",
           screening,
           principal: auth.binding.fellowId,
           target: c.req.path,
@@ -7178,44 +7565,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
+          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: () =>
-            ReviewResponseSchema.parse({
-              review_id: reviewId,
-              target_claim_id: parsed.data.target_claim_id,
-              target_version: parsed.data.target_version,
-              tier,
-              carries_weight: gate.carriesWeight,
-              independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
-              full_write_up: verification?.fullWriteUp ?? false,
-              artifact_compilation: verification?.certifiedArtifact ?? false,
-              statement_equivalence: verification?.certifiedArtifact ?? false,
-            }),
+            HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
         }),
       );
       const replay = await readReplayRecord(
         db,
-        "review",
+        "hypotheses",
         auth.binding.fellowId,
         key,
         digest,
         c.req.path,
       );
-      if (replay === undefined) throw new Error("review committed without its atomic replay");
+      if (replay === undefined) throw new Error("hypothesis committed without its atomic replay");
       return privateNoStore(
         c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
       );
     } catch (error) {
-      if (isScientificReferenceChanged(error)) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        return scientificRefusal(
-          "review",
-          "Referenced scientific content changed during publication; fetch a fresh pack.",
-        );
-      }
+      await cleanupOnFailure();
       try {
         const winner = await readReplayRecord(
           db,
-          "review",
+          "hypotheses",
           auth.binding.fellowId,
           key,
           digest,
@@ -7234,7 +7606,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return writeRefusedProblem();
       throw error;
     }
-  });
+  }
 
   // --- POST /v1/sessions/:id/hypotheses (W5.6: propose an attack route) ------
   app.post("/v1/sessions/:id/hypotheses", async (c) => {
@@ -7287,169 +7659,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
-    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const decision = authorizeFellowWrite({
-      effect: "promote",
-      credential: auth.binding,
-      target: {
-        kind: "existing-problem",
-        problemId: session.problem_id,
-        publication: "published",
-        unlisted: false,
-        membershipRole,
-      },
-      usage: {
-        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
-        artifactBytesRecorded: 0,
-      },
-      now: Date.now(),
+    return executeHypothesisCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      data: parsed.data,
     });
-    if (decision.decision !== "allow") return writeRefusedProblem();
-
-    // P7/A9 (bead asimposiumorg-b9y9): the hypothesis route, mechanism, and
-    // body are public text screened at the centralized boundary before any
-    // commit effect; the falsifier is screened both as a component and as
-    // the dedicated falsifier slot.
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "hypotheses",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "hypotheses",
-        statement: JSON.stringify(parsed.data),
-        falsifier: parsed.data.falsifier,
-      },
-    );
-    if ("error" in screened) return screened.error;
-    const { screening, reservation } = screened;
-    const hypothesisId = mintId("H");
-    const eventId = mintId("E");
-    const claimToken = mintId("R");
-    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypotheses", claimToken);
-    const createdAt = new Date().toISOString();
-
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
-          problemId: session.problem_id,
-          eventId,
-          idempotencyKey: kraterIdempotencyKey,
-          requestDigest: digest,
-          eventType: "hypothesis.created",
-          objectKind: "hypothesis",
-          objectId: hypothesisId,
-          objectVersion: 1,
-          payloadJson: canonicalJson({
-            body_md: parsed.data.body_md,
-            discriminating_predictions: parsed.data.discriminating_predictions,
-            expected_evidence: parsed.data.expected_evidence ?? null,
-            falsifier: parsed.data.falsifier,
-            mechanism: parsed.data.mechanism,
-            origin: parsed.data.origin,
-            route: parsed.data.route,
-          }),
-          createdAt,
-          attribution: {
-            fellowId: auth.binding.fellowId,
-            sponsorId: auth.binding.sponsorId,
-            sessionId: session.session_id,
-            modelSelfDeclared: auth.binding.model,
-            harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
-          },
-        },
-        {
-          statementsAfterEvent: ({ sequence }) => [
-            db
-              .prepare(
-                `INSERT INTO hypotheses
-                   (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
-                    discriminating_predictions_json, origin, status, author_fellow_id, created_at,
-                    body_md, source_event_id, source_seq)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, e.id, e.seq
-                 FROM events e WHERE e.id = ? AND e.seq = ?`,
-              )
-              .bind(
-                hypothesisId,
-                session.problem_id,
-                parsed.data.route,
-                parsed.data.mechanism,
-                parsed.data.falsifier,
-                parsed.data.expected_evidence ?? null,
-                JSON.stringify(parsed.data.discriminating_predictions),
-                parsed.data.origin,
-                auth.binding.fellowId,
-                createdAt,
-                parsed.data.body_md,
-                eventId,
-                sequence,
-              ),
-          ],
-        },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "hypotheses",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: () =>
-            HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
-        }),
-      );
-      const replay = await readReplayRecord(
-        db,
-        "hypotheses",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("hypothesis committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "hypotheses",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
   });
 
   // --- POST /v1/sessions/:id/hypotheses/:hid/kill (W5.6: a route dies, P6) ---
@@ -7773,6 +7991,368 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  interface EvidenceExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    readonly data: EvidenceRequest;
+    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
+    readonly cleanupOnFailure?: () => Promise<void>;
+  }
+
+  async function executeEvidenceCreate(input: EvidenceExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision =  authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
+    }
+
+    const targetExists =
+      data.bears_on_kind === "claim"
+        ? await db
+            .prepare(
+              `SELECT claim_id AS id FROM claim_versions
+               WHERE problem_id = ? AND claim_id = ? AND version = ?`,
+            )
+            .bind(
+              session.problem_id,
+              data.bears_on_id,
+              // Required by the contract refinement on the claim branch.
+              data.bears_on_version,
+            )
+            .first<{ id: string }>()
+        : await db
+            .prepare(
+              `SELECT hypothesis_id AS id FROM hypotheses
+               WHERE problem_id = ? AND hypothesis_id = ?`,
+            )
+            .bind(session.problem_id, data.bears_on_id)
+            .first<{ id: string }>();
+    if (targetExists === null || targetExists === undefined) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "EVIDENCE_BODY_INVALID",
+        title: "The evidence target does not exist",
+        detail:
+          data.bears_on_kind === "claim"
+            ? `No exact claim version ${data.bears_on_id}@${data.bears_on_version} exists on this problem.`
+            : `No hypothesis ${data.bears_on_id} exists on this problem.`,
+        fixHint: "Pin an exact target shown in the current problem pack.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: 1,
+            direction: "supports",
+            kind: "citation",
+            source: { kind: "locator", locator: "https://example.org/source" },
+            mode: "confirmatory",
+            body_md: "The source bears on this exact claim version.",
+          },
+        },
+      });
+    }
+    if (data.selected_hypothesis_id !== undefined) {
+      const selected = await db
+        .prepare(
+          `SELECT hypothesis_id FROM hypotheses
+           WHERE problem_id = ? AND hypothesis_id = ?`,
+        )
+        .bind(session.problem_id, data.selected_hypothesis_id)
+        .first<{ hypothesis_id: string }>();
+      if (selected === null || selected === undefined) {
+        await cleanupOnFailure();
+        return validatedProblem({
+          status: 422,
+          code: "EVIDENCE_BODY_INVALID",
+          title: "The selected hypothesis does not exist",
+          detail: "selected_hypothesis_id must name a hypothesis on this problem.",
+          fixHint: "Use a hypothesis id shown in the current problem pack, or omit the field.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              bears_on_kind: "hypothesis",
+              bears_on_id: "H-1",
+              direction: "informs",
+              kind: "argument",
+              source: { kind: "model_memory" },
+              mode: "exploratory",
+              selected_hypothesis_id: "H-1",
+              body_md: "This observation selected the route for follow-up.",
+            },
+          },
+        });
+      }
+    }
+
+    const scientificIdentities: ScientificContentIdentity[] = [];
+    let formalArtifactDigest: string | null = null;
+    try {
+      if (data.falsification_check || data.formal_artifact) {
+        if (data.bears_on_kind !== "claim") {
+          throw new ScientificInputError(
+            "Scientific checks and formal artifacts require an exact claim version.",
+          );
+        }
+        const claim = await readScientificClaim(
+          db,
+          session.problem_id,
+          data.bears_on_id,
+          data.bears_on_version,
+        );
+        scientificIdentities.push(claim);
+        if (data.falsification_check)
+          scientificIdentities.push(
+            ...(await validateFalsificationCheck(
+              db,
+              session.problem_id,
+              claim,
+              data.falsification_check,
+              data.direction,
+            )),
+          );
+        if (data.formal_artifact) {
+          formalArtifactDigest = await inspectFormalArtifact(data.formal_artifact);
+          if (data.kind !== "certificate" || formalArtifactDigest === null) {
+            throw new ScientificInputError(
+              "A formal artifact requires certificate evidence with an identified declaration, axiom report and source without proof holes.",
+            );
+          }
+        }
+      }
+    } catch (error) {
+      await cleanupOnFailure();
+      if (error instanceof ScientificInputError)
+        return scientificRefusal("evidence", error.message);
+      throw error;
+    }
+
+    // The class is COMPUTED from the evidence's shape, never author-asserted.
+    const assessment = assessEvidenceClass({
+      source: {
+        kind: data.source.kind,
+        locator: data.source.locator,
+        excerpt: data.source.excerpt,
+      },
+      computation:
+        data.kind === "computation"
+          ? { domainOrFloor: data.computation_domain_or_floor }
+          : undefined,
+      certifiedArtifact:
+        data.kind === "certificate"
+          ? { shapeCheckDigest: formalArtifactDigest ?? undefined }
+          : undefined,
+      selectedHypothesis: data.selected_hypothesis_id !== undefined,
+      mode: data.mode,
+    });
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "evidence",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "evidence",
+        statement: JSON.stringify(data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+    const evidenceId = mintId("E");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "evidence.created",
+          objectKind: "evidence",
+          objectId: evidenceId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            bears_on_id: data.bears_on_id,
+            bears_on_kind: data.bears_on_kind,
+            bears_on_version: data.bears_on_version ?? null,
+            body_md: data.body_md,
+            coercion_flags: assessment.flags,
+            computation_domain_or_floor: data.computation_domain_or_floor ?? null,
+            computed_class: assessment.class,
+            direction: data.direction,
+            falsification_check: data.falsification_check ?? null,
+            formal_artifact: data.formal_artifact ?? null,
+            kind: data.kind,
+            mode: data.mode,
+            reproduction: data.reproduction ?? null,
+            selected_hypothesis_id: data.selected_hypothesis_id ?? null,
+            source: data.source,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            ...scientificContentGuards(db, scientificIdentities),
+            db
+              .prepare(
+                `INSERT INTO evidence
+                   (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
+                    direction, kind, source_kind, locator, excerpt, computation_domain_or_floor,
+                    reproduction_json, mode, selected_hypothesis_id, computed_class,
+                    coercion_flags_json, author_fellow_id, body_md, created_at,
+                    source_event_id, source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, e.id, e.seq
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                evidenceId,
+                session.problem_id,
+                data.bears_on_kind,
+                data.bears_on_id,
+                data.bears_on_version ?? null,
+                data.direction,
+                data.kind,
+                data.source.kind,
+                data.source.locator ?? null,
+                data.source.excerpt ?? null,
+                data.computation_domain_or_floor ?? null,
+                data.reproduction === undefined
+                  ? null
+                  : JSON.stringify(data.reproduction),
+                data.mode,
+                data.selected_hypothesis_id ?? null,
+                assessment.class,
+                JSON.stringify(assessment.flags),
+                auth.binding.fellowId,
+                data.body_md,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "evidence",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          statementsAfterReplay: implicitSessionCloseStatements,
+          responseFor: () =>
+            EvidenceResponseSchema.parse({
+              evidence_id: evidenceId,
+              computed_class: assessment.class,
+              coercion_flags: [...assessment.flags],
+              drives_promotion: canDrivePromotion(assessment, data.mode),
+            }),
+        }),
+      );
+      const replay = await readReplayRecord(
+        db,
+        "evidence",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("evidence committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      if (isScientificReferenceChanged(error)) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        return scientificRefusal(
+          "evidence",
+          "Referenced scientific content changed during publication; fetch a fresh pack.",
+        );
+      }
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "evidence",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  }
+
   // --- POST /v1/sessions/:id/evidence (W5.6: the computed-class write) ------
   app.post("/v1/sessions/:id/evidence", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -7830,338 +8410,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
-    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const decision = authorizeFellowWrite({
-      effect: "promote",
-      credential: auth.binding,
-      target: {
-        kind: "existing-problem",
-        problemId: session.problem_id,
-        publication: "published",
-        unlisted: false,
-        membershipRole,
-      },
-      usage: {
-        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
-        artifactBytesRecorded: 0,
-      },
-      now: Date.now(),
+    return executeEvidenceCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      data: parsed.data,
     });
-    if (decision.decision !== "allow") return writeRefusedProblem();
-
-    const targetExists =
-      parsed.data.bears_on_kind === "claim"
-        ? await db
-            .prepare(
-              `SELECT claim_id AS id FROM claim_versions
-               WHERE problem_id = ? AND claim_id = ? AND version = ?`,
-            )
-            .bind(
-              session.problem_id,
-              parsed.data.bears_on_id,
-              // Required by the contract refinement on the claim branch.
-              parsed.data.bears_on_version,
-            )
-            .first<{ id: string }>()
-        : await db
-            .prepare(
-              `SELECT hypothesis_id AS id FROM hypotheses
-               WHERE problem_id = ? AND hypothesis_id = ?`,
-            )
-            .bind(session.problem_id, parsed.data.bears_on_id)
-            .first<{ id: string }>();
-    if (targetExists === null || targetExists === undefined) {
-      return validatedProblem({
-        status: 422,
-        code: "EVIDENCE_BODY_INVALID",
-        title: "The evidence target does not exist",
-        detail:
-          parsed.data.bears_on_kind === "claim"
-            ? `No exact claim version ${parsed.data.bears_on_id}@${parsed.data.bears_on_version} exists on this problem.`
-            : `No hypothesis ${parsed.data.bears_on_id} exists on this problem.`,
-        fixHint: "Pin an exact target shown in the current problem pack.",
-        rule: "P9",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            bears_on_kind: "claim",
-            bears_on_id: "C-1",
-            bears_on_version: 1,
-            direction: "supports",
-            kind: "citation",
-            source: { kind: "locator", locator: "https://example.org/source" },
-            mode: "confirmatory",
-            body_md: "The source bears on this exact claim version.",
-          },
-        },
-      });
-    }
-    if (parsed.data.selected_hypothesis_id !== undefined) {
-      const selected = await db
-        .prepare(
-          `SELECT hypothesis_id FROM hypotheses
-           WHERE problem_id = ? AND hypothesis_id = ?`,
-        )
-        .bind(session.problem_id, parsed.data.selected_hypothesis_id)
-        .first<{ hypothesis_id: string }>();
-      if (selected === null || selected === undefined) {
-        return validatedProblem({
-          status: 422,
-          code: "EVIDENCE_BODY_INVALID",
-          title: "The selected hypothesis does not exist",
-          detail: "selected_hypothesis_id must name a hypothesis on this problem.",
-          fixHint: "Use a hypothesis id shown in the current problem pack, or omit the field.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: {
-              bears_on_kind: "hypothesis",
-              bears_on_id: "H-1",
-              direction: "informs",
-              kind: "argument",
-              source: { kind: "model_memory" },
-              mode: "exploratory",
-              selected_hypothesis_id: "H-1",
-              body_md: "This observation selected the route for follow-up.",
-            },
-          },
-        });
-      }
-    }
-
-    const scientificIdentities: ScientificContentIdentity[] = [];
-    let formalArtifactDigest: string | null = null;
-    try {
-      if (parsed.data.falsification_check || parsed.data.formal_artifact) {
-        if (parsed.data.bears_on_kind !== "claim") {
-          throw new ScientificInputError(
-            "Scientific checks and formal artifacts require an exact claim version.",
-          );
-        }
-        const claim = await readScientificClaim(
-          db,
-          session.problem_id,
-          parsed.data.bears_on_id,
-          parsed.data.bears_on_version,
-        );
-        scientificIdentities.push(claim);
-        if (parsed.data.falsification_check)
-          scientificIdentities.push(
-            ...(await validateFalsificationCheck(
-              db,
-              session.problem_id,
-              claim,
-              parsed.data.falsification_check,
-              parsed.data.direction,
-            )),
-          );
-        if (parsed.data.formal_artifact) {
-          formalArtifactDigest = await inspectFormalArtifact(parsed.data.formal_artifact);
-          if (parsed.data.kind !== "certificate" || formalArtifactDigest === null) {
-            throw new ScientificInputError(
-              "A formal artifact requires certificate evidence with an identified declaration, axiom report and source without proof holes.",
-            );
-          }
-        }
-      }
-    } catch (error) {
-      if (error instanceof ScientificInputError)
-        return scientificRefusal("evidence", error.message);
-      throw error;
-    }
-
-    // The class is COMPUTED from the evidence's shape, never author-asserted.
-    const assessment = assessEvidenceClass({
-      source: {
-        kind: parsed.data.source.kind,
-        locator: parsed.data.source.locator,
-        excerpt: parsed.data.source.excerpt,
-      },
-      computation:
-        parsed.data.kind === "computation"
-          ? { domainOrFloor: parsed.data.computation_domain_or_floor }
-          : undefined,
-      certifiedArtifact:
-        parsed.data.kind === "certificate"
-          ? { shapeCheckDigest: formalArtifactDigest ?? undefined }
-          : undefined,
-      selectedHypothesis: parsed.data.selected_hypothesis_id !== undefined,
-      mode: parsed.data.mode,
-    });
-
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "evidence",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "evidence",
-        statement: JSON.stringify(parsed.data),
-        falsifier: null,
-      },
-    );
-    if ("error" in screened) return screened.error;
-    const { screening, reservation } = screened;
-    const evidenceId = mintId("E");
-    const eventId = mintId("E");
-    const claimToken = mintId("R");
-    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
-    const createdAt = new Date().toISOString();
-
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
-          problemId: session.problem_id,
-          eventId,
-          idempotencyKey: kraterIdempotencyKey,
-          requestDigest: digest,
-          eventType: "evidence.created",
-          objectKind: "evidence",
-          objectId: evidenceId,
-          objectVersion: 1,
-          payloadJson: canonicalJson({
-            bears_on_id: parsed.data.bears_on_id,
-            bears_on_kind: parsed.data.bears_on_kind,
-            bears_on_version: parsed.data.bears_on_version ?? null,
-            body_md: parsed.data.body_md,
-            coercion_flags: assessment.flags,
-            computation_domain_or_floor: parsed.data.computation_domain_or_floor ?? null,
-            computed_class: assessment.class,
-            direction: parsed.data.direction,
-            falsification_check: parsed.data.falsification_check ?? null,
-            formal_artifact: parsed.data.formal_artifact ?? null,
-            kind: parsed.data.kind,
-            mode: parsed.data.mode,
-            reproduction: parsed.data.reproduction ?? null,
-            selected_hypothesis_id: parsed.data.selected_hypothesis_id ?? null,
-            source: parsed.data.source,
-          }),
-          createdAt,
-          attribution: {
-            fellowId: auth.binding.fellowId,
-            sponsorId: auth.binding.sponsorId,
-            sessionId: session.session_id,
-            modelSelfDeclared: auth.binding.model,
-            harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
-          },
-        },
-        {
-          statementsAfterEvent: ({ sequence }) => [
-            ...scientificContentGuards(db, scientificIdentities),
-            db
-              .prepare(
-                `INSERT INTO evidence
-                   (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
-                    direction, kind, source_kind, locator, excerpt, computation_domain_or_floor,
-                    reproduction_json, mode, selected_hypothesis_id, computed_class,
-                    coercion_flags_json, author_fellow_id, body_md, created_at,
-                    source_event_id, source_seq)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, e.id, e.seq
-                 FROM events e WHERE e.id = ? AND e.seq = ?`,
-              )
-              .bind(
-                evidenceId,
-                session.problem_id,
-                parsed.data.bears_on_kind,
-                parsed.data.bears_on_id,
-                parsed.data.bears_on_version ?? null,
-                parsed.data.direction,
-                parsed.data.kind,
-                parsed.data.source.kind,
-                parsed.data.source.locator ?? null,
-                parsed.data.source.excerpt ?? null,
-                parsed.data.computation_domain_or_floor ?? null,
-                parsed.data.reproduction === undefined
-                  ? null
-                  : JSON.stringify(parsed.data.reproduction),
-                parsed.data.mode,
-                parsed.data.selected_hypothesis_id ?? null,
-                assessment.class,
-                JSON.stringify(assessment.flags),
-                auth.binding.fellowId,
-                parsed.data.body_md,
-                createdAt,
-                eventId,
-                sequence,
-              ),
-          ],
-        },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "evidence",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: () =>
-            EvidenceResponseSchema.parse({
-              evidence_id: evidenceId,
-              computed_class: assessment.class,
-              coercion_flags: [...assessment.flags],
-              drives_promotion: canDrivePromotion(assessment, parsed.data.mode),
-            }),
-        }),
-      );
-      const replay = await readReplayRecord(
-        db,
-        "evidence",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("evidence committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      if (isScientificReferenceChanged(error)) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        return scientificRefusal(
-          "evidence",
-          "Referenced scientific content changed during publication; fetch a fresh pack.",
-        );
-      }
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "evidence",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
   });
 
   // --- POST /v1/sessions/:id/synthesize (W5.8b: Synthesis lifecycle & P13 anchor validation) ---
@@ -8461,7 +8718,255 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
-  // --- POST /v1/sessions/:id/dead-ends (W5.8a: Dead ends & P6 negative knowledge) ---
+  interface DeadEndExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    readonly data: RecordDeadEndRequest;
+    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
+    readonly cleanupOnFailure?: () => Promise<void>;
+  }
+
+  async function executeDeadEndCreate(input: DeadEndExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
+    }
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot record dead-end on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Dead ends cannot be recorded on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+      });
+    }
+
+    const preconditions = await validateDeadEndPreconditions(
+      db,
+      session.problem_id,
+      auth.binding.fellowId,
+      data,
+    );
+    if (preconditions instanceof Response) {
+      await cleanupOnFailure();
+      return preconditions;
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "dead-ends",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "dead-end",
+        statement: JSON.stringify(data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+
+    const deadEndId = mintId("DE");
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("dead_end", claimToken);
+    const createdAt = new Date().toISOString();
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "dead_end.recorded",
+          objectKind: "dead_end",
+          objectId: deadEndId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            dead_end_id: deadEndId,
+            approach: data.approach,
+            why_it_fails: data.why_it_fails,
+            retry_predicate: data.retry_predicate,
+            what_was_examined: data.what_was_examined ?? null,
+            scope_detection_floor: data.scope_detection_floor ?? null,
+            retry_when: data.retry_when ?? null,
+            norm_hash: preconditions.normHash,
+            supersedes_dead_end_id: data.supersedes_dead_end_id ?? null,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO dead_ends
+                   (dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate,
+                    what_was_examined, scope_detection_floor, retry_when_json, norm_hash,
+                    author_fellow_id, declared_model, supersedes_dead_end_id, superseded_by, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                deadEndId,
+                session.problem_id,
+                sequence,
+                data.approach,
+                data.why_it_fails,
+                data.retry_predicate,
+                data.what_was_examined ?? null,
+                data.scope_detection_floor ?? null,
+                data.retry_when ? JSON.stringify(data.retry_when) : null,
+                preconditions.normHash,
+                auth.binding.fellowId,
+                auth.binding.model,
+                data.supersedes_dead_end_id ?? null,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+            ...(data.supersedes_dead_end_id
+              ? [
+                  db
+                    .prepare(
+                      `UPDATE dead_ends
+                       SET superseded_by = ?
+                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL`,
+                    )
+                    .bind(deadEndId, session.problem_id, data.supersedes_dead_end_id),
+                ]
+              : []),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "dead_end",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          statementsAfterReplay: implicitSessionCloseStatements,
+          responseFor: ({ sequence }) =>
+            RecordDeadEndResponseSchema.parse({
+              recorded: true,
+              dead_end_id: deadEndId,
+              problem_id: session.problem_id,
+              seq: sequence,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "dead_end",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("dead_end committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "dead_end",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  }
+
+  // --- POST /v1/sessions/:id/dead-ends (W5.8c: dead ends with norm_hash & supersession) ---
   app.post("/v1/sessions/:id/dead-ends", async (c) => {
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
@@ -8512,222 +9017,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
-    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const decision = authorizeFellowWrite({
-      effect: "promote",
-      credential: auth.binding,
-      target: {
-        kind: "existing-problem",
-        problemId: session.problem_id,
-        publication: "published",
-        unlisted: false,
-        membershipRole,
-      },
-      usage: {
-        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
-        artifactBytesRecorded: 0,
-      },
-      now: Date.now(),
-    });
-    if (decision.decision !== "allow") return writeRefusedProblem();
-
-    const problemRow = await db
-      .prepare("SELECT status FROM problems WHERE id = ?")
-      .bind(session.problem_id)
-      .first<{ status: string }>();
-
-    if (!problemRow) {
-      return validatedProblem({
-        status: 404,
-        code: "PROBLEM_NOT_FOUND",
-        title: "Problem not found",
-        detail: `No problem with id '${session.problem_id}' exists.`,
-        fixHint: "Check the problem id against GET /problems.json.",
-      });
-    }
-
-    if (problemRow.status === "resolved" || problemRow.status === "retired") {
-      return validatedProblem({
-        status: 422,
-        code: "CLAIMS_BOARD_LOCKED",
-        title: "Cannot record dead-end on closed problem",
-        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Dead ends cannot be recorded on resolved or retired problems.`,
-        fixHint: "Explore an active problem or fork an alternate formulation.",
-        rule: "P3",
-      });
-    }
-
-    const preconditions = await validateDeadEndPreconditions(
+    return executeDeadEndCreate({
+      c,
+      auth,
       db,
-      session.problem_id,
-      auth.binding.fellowId,
-      parsed.data,
-    );
-    if (preconditions instanceof Response) return preconditions;
-
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "dead-ends",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "dead-end",
-        statement: JSON.stringify(parsed.data),
-        falsifier: null,
-      },
-    );
-    if ("error" in screened) return screened.error;
-    const { screening, reservation } = screened;
-
-    const deadEndId = mintId("DE");
-    const eventId = mintId("E");
-    const claimToken = mintId("R");
-    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("dead_end", claimToken);
-    const createdAt = new Date().toISOString();
-
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
-          problemId: session.problem_id,
-          eventId,
-          idempotencyKey: kraterIdempotencyKey,
-          requestDigest: digest,
-          eventType: "dead_end.recorded",
-          objectKind: "dead_end",
-          objectId: deadEndId,
-          objectVersion: 1,
-          payloadJson: canonicalJson({
-            dead_end_id: deadEndId,
-            approach: parsed.data.approach,
-            why_it_fails: parsed.data.why_it_fails,
-            retry_predicate: parsed.data.retry_predicate,
-            what_was_examined: parsed.data.what_was_examined ?? null,
-            scope_detection_floor: parsed.data.scope_detection_floor ?? null,
-            retry_when: parsed.data.retry_when ?? null,
-            norm_hash: preconditions.normHash,
-            supersedes_dead_end_id: parsed.data.supersedes_dead_end_id ?? null,
-          }),
-          createdAt,
-          attribution: {
-            fellowId: auth.binding.fellowId,
-            sponsorId: auth.binding.sponsorId,
-            sessionId: session.session_id,
-            modelSelfDeclared: auth.binding.model,
-            harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
-          },
-        },
-        {
-          statementsAfterEvent: ({ sequence }) => [
-            db
-              .prepare(
-                `INSERT INTO dead_ends
-                   (dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate,
-                    what_was_examined, scope_detection_floor, retry_when_json, norm_hash,
-                    author_fellow_id, declared_model, supersedes_dead_end_id, superseded_by, created_at)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
-                 FROM events e WHERE e.id = ? AND e.seq = ?`,
-              )
-              .bind(
-                deadEndId,
-                session.problem_id,
-                sequence,
-                parsed.data.approach,
-                parsed.data.why_it_fails,
-                parsed.data.retry_predicate,
-                parsed.data.what_was_examined ?? null,
-                parsed.data.scope_detection_floor ?? null,
-                parsed.data.retry_when ? JSON.stringify(parsed.data.retry_when) : null,
-                preconditions.normHash,
-                auth.binding.fellowId,
-                auth.binding.model,
-                parsed.data.supersedes_dead_end_id ?? null,
-                createdAt,
-                eventId,
-                sequence,
-              ),
-            ...(parsed.data.supersedes_dead_end_id
-              ? [
-                  db
-                    .prepare(
-                      `UPDATE dead_ends
-                       SET superseded_by = ?
-                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL`,
-                    )
-                    .bind(deadEndId, session.problem_id, parsed.data.supersedes_dead_end_id),
-                ]
-              : []),
-          ],
-        },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "dead_end",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: ({ sequence }) =>
-            RecordDeadEndResponseSchema.parse({
-              recorded: true,
-              dead_end_id: deadEndId,
-              problem_id: session.problem_id,
-              seq: sequence,
-            }),
-        }),
-      );
-
-      const replay = await readReplayRecord(
-        db,
-        "dead_end",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("dead_end committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "dead_end",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
+      key,
+      digest,
+      session,
+      data: parsed.data,
+    });
   });
 
   // --- POST /v1/sessions/:id/questions (W5.8d: Questions & leasable help requests) ---
@@ -12342,6 +12640,484 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       throw error;
     }
+  });
+
+  // --- Direct collection appends (W4.6: POST /v1/p/:id/{claims,hypotheses,evidence,reviews,dead-ends}) ---
+
+  // POST /v1/p/:id/claims
+  app.post("/v1/p/:id/claims", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+
+    if (rawBody !== undefined && typeof rawBody === "object" && rawBody !== null) {
+      const authoritative = rejectAuthoritativeFields(rawBody as Record<string, unknown>);
+      if (authoritative !== null) {
+        return validatedProblem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "Authoritative fields are not author-writable",
+          detail:
+            "The promotion carried a disposition, proof, confidence, certification, or status-upgrade field.",
+          fixHint: authoritative.fixHint,
+          rule: "P2/P4",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              kind: "conjecture",
+              statement: "<claim text>",
+              falsifier: "<refutation observation or test>",
+            },
+          },
+        });
+      }
+    }
+
+    const parsed = DirectClaimRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "PROMOTE_BODY_INVALID",
+        title: "The promotion does not match the contract",
+        detail: "The JSON body does not match the claim promotion contract.",
+        fixHint:
+          "Send {kind, statement, falsifier?, relates_to?, depends_on?}. If supplied, workshop_id and expected_workshop_version must match your workshop draft.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: "conjecture",
+            statement: "The orbit count is invariant under all eight toggles.",
+            falsifier: "A toggle sequence that changes the orbit count.",
+          },
+        },
+      });
+    }
+
+    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
+      return validatedProblem({
+        status: 422,
+        code: "PROMOTE_BODY_INVALID",
+        title: "Conjecture-class claims require a falsifier",
+        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
+        fixHint:
+          "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: parsed.data.kind,
+            statement: parsed.data.statement,
+            falsifier: "<what would refute this>",
+            relates_to: parsed.data.relates_to,
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "promote",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => PromoteResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const problemId = c.req.param("id");
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    if (!sessionResult.ok) return sessionResult.response;
+    const { session, implicitCloseStatements } = sessionResult;
+
+    let ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
+    let cleanupWorkshop: (() => Promise<void>) | undefined;
+
+    if (parsed.data.workshop_id !== undefined) {
+      const row = await db
+        .prepare(
+          "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+        )
+        .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
+        .first<{ workshop_id: string; current_version: number }>();
+      if (!row) {
+        await sessionResult.cleanupOnFailure();
+        return validatedProblem({
+          status: 404,
+          code: "WORKSHOP_OBJECT_NOT_FOUND",
+          title: "No such workshop object in this session",
+          detail: "The workshop id is not one this session and Fellow own.",
+          fixHint: "Promote an id from your own workshop (see your pack's workshop-heads).",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              workshop_id: "W-4DSP-01JXYZ",
+              kind: "conjecture",
+              statement: "The orbit count is invariant under all eight toggles.",
+              falsifier: "A toggle sequence that changes the orbit count.",
+            },
+          },
+        });
+      }
+      ownedWorkshop = row;
+    } else {
+      const workshopId = mintId("W");
+      const seqRow = await db
+        .prepare(
+          "SELECT COALESCE(MAX(workshop_seq), 0) + 1 AS next_seq FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",
+        )
+        .bind(problemId, auth.binding.fellowId)
+        .first<{ next_seq: number }>();
+      const workshopSeq = seqRow?.next_seq ?? 1;
+      const createdAt = new Date().toISOString();
+      const title = parsed.data.statement.slice(0, 200);
+
+      await db
+        .prepare(
+          `INSERT INTO workshop_objects
+             (workshop_id, problem_id, fellow_id, session_id, workshop_seq,
+              type, title, body_md, relates_to_json, current_version, state, created_at)
+           VALUES (?, ?, ?, ?, ?, 'claim-draft', ?, ?, '[]', 1, 'open', ?)`,
+        )
+        .bind(
+          workshopId,
+          problemId,
+          auth.binding.fellowId,
+          session.session_id,
+          workshopSeq,
+          title,
+          parsed.data.statement,
+          createdAt,
+        )
+        .run();
+
+      ownedWorkshop = { workshop_id: workshopId, current_version: 1 };
+      cleanupWorkshop = async () => {
+        await db
+          .prepare(
+            "UPDATE workshop_objects SET state = 'discarded' WHERE workshop_id = ? AND fellow_id = ?",
+          )
+          .bind(workshopId, auth.binding.fellowId)
+          .run()
+          .catch(() => {});
+      };
+    }
+
+    const cleanupOnFailure = async () => {
+      if (cleanupWorkshop) await cleanupWorkshop();
+      await sessionResult.cleanupOnFailure();
+    };
+
+    return executeClaimPromotion({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      ownedWorkshop,
+      data: parsed.data,
+      implicitSessionCloseStatements: implicitCloseStatements,
+      cleanupOnFailure,
+      checkSessionStillOpen: false,
+    });
+  });
+
+  // POST /v1/p/:id/hypotheses
+  app.post("/v1/p/:id/hypotheses", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = HypothesisRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "HYPOTHESIS_BODY_INVALID",
+        title: "The hypothesis does not match the contract",
+        detail: "The JSON body does not match the hypothesis contract.",
+        fixHint:
+          "Send {route, mechanism, falsifier, expected_evidence?, discriminating_predictions?, origin, body_md}. The falsifier is mandatory (P3 for hypotheses).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            route: "induction on the path length",
+            mechanism: "the toggle preserves the count, so induction on length closes it",
+            falsifier: "a path where the toggle changes the count",
+            origin: "proposed",
+            body_md: "Proposing induction on the path length.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "hypotheses",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => HypothesisResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const problemId = c.req.param("id");
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    if (!sessionResult.ok) return sessionResult.response;
+
+    return executeHypothesisCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session: sessionResult.session,
+      data: parsed.data,
+      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+      cleanupOnFailure: sessionResult.cleanupOnFailure,
+    });
+  });
+
+  // POST /v1/p/:id/evidence
+  app.post("/v1/p/:id/evidence", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = EvidenceRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "EVIDENCE_BODY_INVALID",
+        title: "The evidence does not match the contract",
+        detail: "The JSON body does not match the evidence contract.",
+        fixHint: "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            bears_on_kind: "claim",
+            bears_on_id: "C-1",
+            bears_on_version: 1,
+            direction: "supports",
+            kind: "citation",
+            source: {
+              kind: "locator",
+              locator: "https://arxiv.org/abs/…",
+              excerpt: "…the result…",
+            },
+            mode: "confirmatory",
+            body_md: "The cited result establishes the bound.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "evidence",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => EvidenceResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const problemId = c.req.param("id");
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    if (!sessionResult.ok) return sessionResult.response;
+
+    return executeEvidenceCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session: sessionResult.session,
+      data: parsed.data,
+      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+      cleanupOnFailure: sessionResult.cleanupOnFailure,
+    });
+  });
+
+  // POST /v1/p/:id/review & POST /v1/p/:id/reviews
+  const handleDirectReview = async (c: Context<{ Bindings: Env }>) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = ReviewRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "REVIEW_BODY_INVALID",
+        title: "The review does not match the contract",
+        detail: "The JSON body does not match the review contract.",
+        fixHint:
+          "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_claim_id: "C-1",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "I checked the statement against the proof.",
+            body_md: "Verified the quantifier scope.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "review",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => ReviewResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const problemId = c.req.param("id");
+    if (!problemId) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: "No problem id was provided.",
+        fixHint: "Check the problem id against GET /problems.json.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
+      });
+    }
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    if (!sessionResult.ok) return sessionResult.response;
+
+    return executeReviewCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session: sessionResult.session,
+      data: parsed.data,
+      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+      cleanupOnFailure: sessionResult.cleanupOnFailure,
+    });
+  };
+  app.post("/v1/p/:id/review", handleDirectReview);
+  app.post("/v1/p/:id/reviews", handleDirectReview);
+
+  // POST /v1/p/:id/dead-ends
+  app.post("/v1/p/:id/dead-ends", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = RecordDeadEndRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "DEAD_END_BODY_INVALID",
+        title: "Invalid dead-end request body",
+        detail: "The request body did not match the session dead-end record contract.",
+        fixHint:
+          "Provide approach, why_it_fails, and retry_predicate with optional what_was_examined, scope_detection_floor, and retry_when.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            approach: "Exhaustive branching valuation search along odd multipliers.",
+            why_it_fails: "The valuation branches diverge exponentially beyond depth 16.",
+            retry_predicate: "Worth retrying if non-archimedean metrics bound branch width.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "dead_end",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => RecordDeadEndResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const problemId = c.req.param("id");
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    if (!sessionResult.ok) return sessionResult.response;
+
+    return executeDeadEndCreate({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session: sessionResult.session,
+      data: parsed.data,
+      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+      cleanupOnFailure: sessionResult.cleanupOnFailure,
+    });
   });
 
   // --- GET /cursor ---------------------------------------------------------

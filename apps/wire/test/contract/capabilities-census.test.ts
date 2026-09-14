@@ -147,6 +147,18 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "Fellow roster read exists behind the bearer but discovery omits it until its public face contract lands",
     "GET /v1/fellows/after/<cursor>":
       "Fellow roster cursor page exists behind the bearer but discovery omits it until its public face contract lands",
+    "POST /v1/p/<id>/claims":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/promote)",
+    "POST /v1/p/<id>/hypotheses":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/hypotheses)",
+    "POST /v1/p/<id>/evidence":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/evidence)",
+    "POST /v1/p/<id>/review":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/review)",
+    "POST /v1/p/<id>/reviews":
+      "convenience direct collection append alias; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/review)",
+    "POST /v1/p/<id>/dead-ends":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/dead-ends)",
   };
 
   function mountedCensus(): {

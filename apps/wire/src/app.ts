@@ -704,14 +704,22 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
         headers: { [ROUTER_MISS_HEADER]: "1" },
       }),
   );
+  const sessionRouter = createSessionRouter({
+    service,
+    replayProtector,
+    verifiedSponsor,
+    screenPromotion: options.screenPromotion,
+  });
+  sessionRouter.notFound(
+    () =>
+      new Response(null, {
+        status: 404,
+        headers: { [ROUTER_MISS_HEADER]: "1" },
+      }),
+  );
   const stack: EnrollmentStack = {
     router,
-    sessionRouter: createSessionRouter({
-      service,
-      replayProtector,
-      verifiedSponsor,
-      screenPromotion: options.screenPromotion,
-    }),
+    sessionRouter,
     problemRouter,
   };
   cached = {
@@ -906,6 +914,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (
       pathname !== "/cursor" &&
       !pathname.startsWith("/v1/sessions") &&
+      !pathname.startsWith("/v1/p/") &&
       !/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname) &&
       pathname !== "/v1/sponsors/workshop" &&
       pathname !== "/v1/sponsors/leases/release"

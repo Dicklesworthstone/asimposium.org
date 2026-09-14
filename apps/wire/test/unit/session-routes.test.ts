@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   ContractProblemSchema,
+  EvidenceResponseSchema,
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
   HypothesisResponseSchema,
@@ -15,7 +16,9 @@ import {
   PackResponseSchema,
   ProblemDocumentSchema,
   PromoteResponseSchema,
+  RecordDeadEndResponseSchema,
   RelationFiledResponseSchema,
+  ReviewResponseSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
   ScreeningPublicationProvenanceSchema,
@@ -11148,6 +11151,385 @@ describe("committed promotion outbox nudge", () => {
       const claimDetail = pack.items.find((item) => item.id === "C-1@1" || item.id === "C-1");
       expect(claimDetail).toBeDefined();
       expect(claimDetail?.body).toContain(`leased by ${f.binding.fellowId}`);
+    });
+  });
+
+  describe("W4.6 Direct appends: POST /v1/p/:id/{claims,hypotheses,evidence,reviews,dead-ends}", () => {
+    test("direct claim promotion creates implicit session, closes it atomically, and returns claim", async () => {
+      const f = await fixture();
+      const payload = {
+        kind: "conjecture",
+        statement: "Every natural number is equal to itself.",
+        falsifier: "A natural number not equal to itself.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-1" },
+        body: JSON.stringify(payload),
+      });
+
+      expect(res.status).toBe(201);
+      const body = PromoteResponseSchema.parse(await res.json());
+      expect(body.claim_id).toBeDefined();
+      expect(body.version).toBe(1);
+
+      // Verify that no session remains open
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Verify the implicit session was closed with handback = 'Direct append'
+      const closedSession = await f.db
+        .prepare("SELECT * FROM sessions WHERE handback = 'Direct append' AND problem_id = 'P-4DSP'")
+        .first<{ session_id: string; handback: string; closed_at: string }>();
+      expect(closedSession).not.toBeNull();
+      expect(closedSession?.closed_at).not.toBeNull();
+      expect(closedSession?.handback).toBe("Direct append");
+
+      // Verify idempotency replay returns 200 without creating new sessions
+      const replay = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = PromoteResponseSchema.parse(await replay.json());
+      expect(replayBody.claim_id).toBe(body.claim_id);
+
+      const sessionCount = await f.db
+        .prepare("SELECT count(*) as count FROM sessions")
+        .first<{ count: number }>();
+      expect(sessionCount?.count).toBe(1);
+    });
+
+    test("direct claim enforces P3 falsifier requirement for conjecture-class claims", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-no-falsifier" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "P is not equal to NP because polynomial hierarchy does not collapse.",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string; rule: string };
+      expect(body.code).toBe("PROMOTE_BODY_INVALID");
+      expect(body.rule).toBe("P3");
+
+      // Verify no open session leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct claim rejects authoritative fields with 422 SCHEMA_INVALID (P2/P4)", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-auth-field" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Some statement",
+          falsifier: "Some falsifier",
+          disposition: "proved",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string; rule: string };
+      expect(body.code).toBe("SCHEMA_INVALID");
+      expect(body.rule).toBe("P2/P4");
+
+      // Verify no open session leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct claim rejects duplicate statement with 409 CLAIM_STATEMENT_EXISTS", async () => {
+      const f = await fixture();
+      const payload = {
+        kind: "conjecture",
+        statement: "The set of prime numbers is infinite.",
+        falsifier: "A finite list containing all primes.",
+      };
+
+      const res1 = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-dup-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(res1.status).toBe(201);
+
+      const res2 = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-dup-2" },
+        body: JSON.stringify(payload),
+      });
+      expect(res2.status).toBe(409);
+      const body = (await res2.json()) as { code: string };
+      expect(body.code).toBe("DUPLICATE_CLAIM");
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct hypothesis creates implicit session, closes it, and responds with 201", async () => {
+      const f = await fixture();
+      const payload = {
+        route: "direct induction route",
+        mechanism: "direct induction mechanism preserves invariants",
+        falsifier: "counterexample to invariant preservation",
+        origin: "proposed",
+        body_md: "Proposed induction path.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/hypotheses", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-hypo-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(201);
+      const body = HypothesisResponseSchema.parse(await res.json());
+      expect(body.status).toBe("open");
+      expect(body.hypothesis_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Replay returns 200
+      const replay = await f.call("/v1/p/P-4DSP/hypotheses", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-hypo-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = HypothesisResponseSchema.parse(await replay.json());
+      expect(replayBody.hypothesis_id).toBe(body.hypothesis_id);
+    });
+
+    test("direct evidence creates implicit session and closes it atomically", async () => {
+      const f = await fixture();
+      // First create a claim to bear on
+      const claimRes = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-for-evidence" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Evidence target statement.",
+          falsifier: "Evidence target falsifier.",
+        }),
+      });
+      expect(claimRes.status).toBe(201);
+      const claimBody = PromoteResponseSchema.parse(await claimRes.json());
+
+      const evidencePayload = {
+        bears_on_kind: "claim",
+        bears_on_id: claimBody.claim_id,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "citation",
+        source: {
+          kind: "locator",
+          locator: "https://example.org/proof",
+          excerpt: "Excerpt establishing statement.",
+        },
+        mode: "confirmatory",
+        body_md: "This citation supports the claim.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/evidence", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-evid-1" },
+        body: JSON.stringify(evidencePayload),
+      });
+      expect(res.status).toBe(201);
+      const body = EvidenceResponseSchema.parse(await res.json());
+      expect(body.evidence_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Replay returns 200
+      const replay = await f.call("/v1/p/P-4DSP/evidence", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-evid-1" },
+        body: JSON.stringify(evidencePayload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = EvidenceResponseSchema.parse(await replay.json());
+      expect(replayBody.evidence_id).toBe(body.evidence_id);
+    });
+
+    test("direct review and reviews routes create implicit session and close it atomically", async () => {
+      const f = await fixture();
+      // First create a claim
+      const claimRes = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-for-review" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Review target statement.",
+          falsifier: "Review target falsifier.",
+        }),
+      });
+      expect(claimRes.status).toBe(201);
+      const claimBody = PromoteResponseSchema.parse(await claimRes.json());
+
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "reviewer-fellow",
+        scopes: ["promote", "review"],
+        model: "reviewer-model",
+        harness: "reviewer-harness",
+      });
+
+      const reviewPayload = {
+        target_claim_id: claimBody.claim_id,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked line-by-line against axioms.",
+        capable_of_failure: "Any counterexample satisfying the premise.",
+        rubric: ["soundness-of-inference"],
+        body_md: "All steps verified successfully.",
+      };
+
+      // Test POST /v1/p/:id/review
+      const res = await reviewer.call("/v1/p/P-4DSP/review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-review-1" },
+        body: JSON.stringify(reviewPayload),
+      });
+      expect(res.status).toBe(201);
+      const body = ReviewResponseSchema.parse(await res.json());
+      expect(body.review_id).toBeDefined();
+
+      // Test replay on POST /v1/p/:id/review returns 200
+      const replay = await reviewer.call("/v1/p/P-4DSP/review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-review-1" },
+        body: JSON.stringify(reviewPayload),
+      });
+      expect(replay.status).toBe(200);
+
+      // Test alias POST /v1/p/:id/reviews
+      const resReviews = await reviewer.call("/v1/p/P-4DSP/reviews", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-reviews-alias-1" },
+        body: JSON.stringify({
+          ...reviewPayload,
+          basis: "Second check on the same claim via reviews route.",
+        }),
+      });
+      expect(resReviews.status).toBe(201);
+      const reviewsBody = ReviewResponseSchema.parse(await resReviews.json());
+      expect(reviewsBody.review_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct dead-ends creates implicit session and closes it atomically", async () => {
+      const f = await fixture();
+      const deadEndPayload = {
+        approach: "Direct algebraic substitution of parity variables.",
+        why_it_fails: "Non-linear feedback prevents Gaussian elimination.",
+        retry_predicate: "Retry only if a bilinear reduction is discovered.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/dead-ends", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-de-1" },
+        body: JSON.stringify(deadEndPayload),
+      });
+      expect(res.status).toBe(201);
+      const body = RecordDeadEndResponseSchema.parse(await res.json());
+      expect(body.recorded).toBe(true);
+      expect(body.dead_end_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Replay returns 200
+      const replay = await f.call("/v1/p/P-4DSP/dead-ends", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-de-1" },
+        body: JSON.stringify(deadEndPayload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = RecordDeadEndResponseSchema.parse(await replay.json());
+      expect(replayBody.dead_end_id).toBe(body.dead_end_id);
+    });
+
+    test("direct append reuses existing open session if one is already active for the fellow", async () => {
+      const f = await fixture();
+      // Explicitly open a session
+      const openRes = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "open-explicit-session" },
+        body: JSON.stringify({
+          problem_id: "P-4DSP",
+          intent: "explore",
+        }),
+      });
+      expect(openRes.status).toBe(201);
+      const opened = SessionOpenResponseSchema.parse(await openRes.json());
+
+      // Direct append claim while session is open
+      const claimRes = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-in-existing-session" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Statement created inside existing session.",
+          falsifier: "Falsifier for existing session claim.",
+        }),
+      });
+      expect(claimRes.status).toBe(201);
+
+      // Verify the existing session was NOT closed (it was an explicit session, not implicit)
+      const sessionRow = await f.db
+        .prepare("SELECT * FROM sessions WHERE session_id = ?")
+        .bind(opened.session_id)
+        .first<{ session_id: string; closed_at: string | null }>();
+      expect(sessionRow).not.toBeNull();
+      expect(sessionRow?.closed_at).toBeNull();
+    });
+
+    test("direct append on non-existent problem returns 404 PROBLEM_NOT_FOUND", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-NONEXISTENT/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-nonexistent" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Some statement",
+          falsifier: "Some falsifier",
+        }),
+      });
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("PROBLEM_NOT_FOUND");
     });
   });
 });
