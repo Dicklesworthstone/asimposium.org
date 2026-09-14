@@ -633,6 +633,34 @@ export const PromoteRequestSchema = z
   .strict();
 export type PromoteRequest = z.infer<typeof PromoteRequestSchema>;
 
+/**
+ * Direct collection append for claims (Fable §7.2: POST /v1/p/:id/claims).
+ * Opens an implicit session, runs the same promote validator, and closes.
+ * workshop_id and expected_workshop_version are optional on direct appends.
+ */
+export const DirectClaimRequestSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema.optional(),
+    expected_workshop_version: z.number().int().positive().optional(),
+    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
+    kind: ClaimKindSchema,
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    falsifier: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4 * 1024)
+      .optional(),
+    relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
+    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+  })
+  .strict();
+export type DirectClaimRequest = z.infer<typeof DirectClaimRequestSchema>;
+
 export const PromoteResponseSchema = z
   .object({
     claim_id: ClaimIdSchema,
@@ -1151,6 +1179,7 @@ export const SessionsContractsSchema = z
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
     promote_request: PromoteRequestSchema,
+    direct_claim_request: DirectClaimRequestSchema,
     promote_response: PromoteResponseSchema,
     session_close_request: SessionCloseRequestSchema,
     session_close_response: SessionCloseResponseSchema,

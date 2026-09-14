@@ -137,6 +137,7 @@ import {
   type ClaimReanchorResponse,
   type ClaimRevision,
   type CursorResponse,
+  type DirectClaimRequest,
   type NextAction,
   type PackBudget,
   type PackItem,
@@ -532,6 +533,7 @@ function generatedSessionsTypes(): string {
     "ClaimReanchorResponse",
     "ClaimRevision",
     "CursorResponse",
+    "DirectClaimRequest",
     "NextAction",
     "PackBudget",
     "PackItem",
@@ -567,6 +569,7 @@ function generatedSessionsTypes(): string {
     ClaimReanchorResponse: ClaimReanchorResponse;
     ClaimRevision: ClaimRevision;
     CursorResponse: CursorResponse;
+    DirectClaimRequest: DirectClaimRequest;
     NextAction: NextAction;
     PackBudget: PackBudget;
     PackItem: PackItem;

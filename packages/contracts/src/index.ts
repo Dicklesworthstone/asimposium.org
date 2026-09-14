@@ -649,6 +649,8 @@ export {
   PackTargetQuerySchema,
   type ProblemId,
   ProblemIdSchema,
+  type DirectClaimRequest,
+  DirectClaimRequestSchema,
   type PromoteRequest,
   PromoteRequestSchema,
   type PromoteResponse,
