@@ -39,6 +39,24 @@ export const PROBLEM_RESOLUTION_DIRECTIONS = [
 export const ProblemResolutionDirectionSchema = z.enum(PROBLEM_RESOLUTION_DIRECTIONS);
 export type ProblemResolutionDirection = z.infer<typeof ProblemResolutionDirectionSchema>;
 
+export const PROBLEM_ROLES = [
+  "observer",
+  "contributor",
+  "steward",
+  "founding-steward",
+] as const;
+export const ProblemRoleSchema = z.enum(PROBLEM_ROLES);
+export type ProblemRole = z.infer<typeof ProblemRoleSchema>;
+
+export const PROBLEM_ADMISSION_MODES = [
+  "open",
+  "approval-required",
+  "invite-only",
+  "archived-read-only",
+] as const;
+export const ProblemAdmissionModeSchema = z.enum(PROBLEM_ADMISSION_MODES);
+export type ProblemAdmissionMode = z.infer<typeof ProblemAdmissionModeSchema>;
+
 /** Famous-problem guardrail formulation and standing disclaimer (Fable §6.2). */
 export const ProblemFamousGuardrailSchema = z
   .object({
@@ -186,6 +204,49 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
       reason: z.string().min(1).max(2048),
     })
     .strict(),
+  z
+    .object({
+      action: z.literal("set-admission-mode"),
+      mode: ProblemAdmissionModeSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("manage-steward"),
+      operation: z.enum(["add", "transfer", "remove"]),
+      target_sponsor_id: SponsorIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("manage-member"),
+      operation: z.enum(["set-role", "remove"]),
+      target_fellow_id: z.string().min(1).max(128),
+      role: z.enum(["observer", "contributor"]).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("set-writer-cap"),
+      writer_cap: z.number().int().positive().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("merge"),
+      canonical_problem_id: PublicLedgerProblemIdSchema,
+      claim_mapping: z.record(z.string(), z.string()).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("fork"),
+      title: z.string().min(1).max(120),
+      statement: z.string().min(1).max(8192).optional(),
+      falsifier: z.string().min(1).max(8192).optional(),
+      motivation: z.string().min(1).max(8192).optional(),
+    })
+    .strict(),
 ]);
 
 export type ProblemLifecycleActionRequest = z.infer<typeof ProblemLifecycleActionRequestSchema>;
@@ -222,6 +283,12 @@ export const ProblemDetailSchema = z
       })
       .strict()
       .optional(),
+    admission_mode: ProblemAdmissionModeSchema.optional(),
+    canonical_problem_id: PublicLedgerProblemIdSchema.optional(),
+    forked_from_problem_id: PublicLedgerProblemIdSchema.optional(),
+    forked_from_cursor: z.number().int().min(0).optional(),
+    writer_cap: z.number().int().positive().nullable().optional(),
+    stewards: z.array(SponsorIdSchema).optional(),
     created_at: ProblemIndexTimestampSchema,
     updated_at: ProblemIndexTimestampSchema,
   })
@@ -280,6 +347,57 @@ export const ProblemGovernanceEventSchema = z
       problem: GovernanceFormulationSchema.extend({
         status: z.literal("retired"),
         resolution_summary: z.string().min(1).max(2048),
+      }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("set-admission-mode"),
+      previous_status: ProblemStatusSchema,
+      problem: GovernanceFormulationSchema.extend({
+        status: ProblemStatusSchema,
+        admission_mode: ProblemAdmissionModeSchema,
+      }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("manage-steward"),
+      operation: z.enum(["add", "transfer", "remove"]),
+      target_sponsor_id: SponsorIdSchema,
+      previous_status: ProblemStatusSchema,
+      problem: GovernanceFormulationSchema.extend({ status: ProblemStatusSchema }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("manage-member"),
+      operation: z.enum(["set-role", "remove"]),
+      target_fellow_id: z.string().min(1).max(128),
+      role: z.enum(["observer", "contributor"]).optional(),
+      previous_status: ProblemStatusSchema,
+      problem: GovernanceFormulationSchema.extend({ status: ProblemStatusSchema }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("set-writer-cap"),
+      previous_status: ProblemStatusSchema,
+      problem: GovernanceFormulationSchema.extend({
+        status: ProblemStatusSchema,
+        writer_cap: z.number().int().positive().nullable().optional(),
+      }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("merge"),
+      canonical_problem_id: PublicLedgerProblemIdSchema,
+      claim_mapping: z.record(z.string(), z.string()).optional(),
+      previous_status: ProblemStatusSchema,
+      problem: GovernanceFormulationSchema.extend({
+        status: z.literal("retired"),
+        canonical_problem_id: PublicLedgerProblemIdSchema.optional(),
+      }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("fork"),
+      forked_problem_id: PublicLedgerProblemIdSchema,
+      parent_problem_id: PublicLedgerProblemIdSchema,
+      parent_cursor: z.number().int().min(0),
+      previous_status: ProblemStatusSchema,
+      problem: GovernanceFormulationSchema.extend({
+        status: ProblemStatusSchema,
       }),
     }),
   ])
