@@ -1,5 +1,15 @@
 import { z } from "zod";
 import {
+  type CorrectCitationRequest,
+  CorrectCitationRequestSchema,
+  type CorrectCitationResponse,
+  CorrectCitationResponseSchema,
+  type RecordCitationRequest,
+  RecordCitationRequestSchema,
+  type RecordCitationResponse,
+  RecordCitationResponseSchema,
+} from "./citations.ts";
+import {
   type NormalizeConflictRequest,
   NormalizeConflictRequestSchema,
   type NormalizeConflictResponse,
@@ -62,6 +72,10 @@ import {
 } from "./scientific-provenance.ts";
 
 export {
+  type CorrectCitationRequest,
+  CorrectCitationRequestSchema,
+  type CorrectCitationResponse,
+  CorrectCitationResponseSchema,
   type LeaseAcquireRequest,
   LeaseAcquireRequestSchema,
   type LeaseAcquireResponse,
@@ -88,6 +102,10 @@ export {
   NormalizeConflictResponseSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
+  type RecordCitationRequest,
+  RecordCitationRequestSchema,
+  type RecordCitationResponse,
+  RecordCitationResponseSchema,
   type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   type RecordDeadEndResponse,
@@ -1229,6 +1247,10 @@ export const SessionsContractsSchema = z
     lease_list_response: LeaseListResponseSchema,
     sponsor_lease_release_request: SponsorLeaseReleaseRequestSchema,
     sponsor_lease_release_response: SponsorLeaseReleaseResponseSchema,
+    record_citation_request: RecordCitationRequestSchema,
+    record_citation_response: RecordCitationResponseSchema,
+    correct_citation_request: CorrectCitationRequestSchema,
+    correct_citation_response: CorrectCitationResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

@@ -8,7 +8,9 @@
 
 /// <reference path="./assets.d.ts" />
 
+import citationsSchemaModule from "../generated/citations.schema.json" with { type: "text" };
 import conflictsSchemaModule from "../generated/conflicts.schema.json" with { type: "text" };
+
 import deadEndsSchemaModule from "../generated/dead-ends.schema.json" with { type: "text" };
 import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "text" };
 import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
@@ -30,8 +32,10 @@ import sessionsSchemaModule from "../generated/sessions.schema.json" with { type
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
+  "citations",
   "conflicts",
   "dead-ends",
+
   "discovery",
   "enrollment",
   "enrollment-capsule",
@@ -90,7 +94,14 @@ function exactTextModule(value: unknown, source: string): string {
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
   Object.freeze({
+    id: "citations",
+    served_at: "/schemas/citations.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(citationsSchemaModule, "generated/citations.schema.json"),
+  }),
+  Object.freeze({
     id: "conflicts",
+
     served_at: "/schemas/conflicts.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(conflictsSchemaModule, "generated/conflicts.schema.json"),

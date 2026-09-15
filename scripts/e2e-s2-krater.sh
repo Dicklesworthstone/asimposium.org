@@ -172,7 +172,9 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0057_workshop_revisions_and_archival.sql
   db/migrations/0058_heartbeat_replay_scope.sql
   db/migrations/0059_events_batch_replay_scope.sql
+  db/migrations/0060_citations_revisions_and_replay_scope.sql
   scripts/verify-cost-model.ts
+
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -211,6 +213,9 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/leases.ts
   packages/contracts/src/syntheses.ts
   packages/contracts/generated/syntheses.schema.json
+  packages/contracts/src/citations.ts
+  packages/contracts/generated/citations.schema.json
+
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
@@ -266,6 +271,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/questions.ts
   apps/wire/src/ledger/retractions.ts
   apps/wire/src/ledger/conflicts.ts
+  apps/wire/src/ledger/citations.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
@@ -403,7 +409,9 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0057_workshop_revisions_and_archival.sql
   0058_heartbeat_replay_scope.sql
   0059_events_batch_replay_scope.sql
+  0060_citations_revisions_and_replay_scope.sql
 )
+
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
 # watchdog rather than leaving Git or the byte reader unbounded during EXIT handling.

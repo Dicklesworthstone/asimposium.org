@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/CITATION_NOT_FOUND",
+  "title": "Citation not found",
+  "status": 404,
+  "code": "CITATION_NOT_FOUND",
+  "detail": "Citation L-999 was not found in problem P-456.",
+  "fix_hint": "Check the citation ID against GET /p/:id/citations.json.",
+  "rule": "A1",
+  "schema": "https://a.asimposium.org/schemas/citations.v1.json",
+  "example": {
+    "citation_id": "L-1"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/DUPLICATE_CITATION",
+  "title": "Duplicate citation already recorded",
+  "status": 409,
+  "code": "DUPLICATE_CITATION",
+  "detail": "A citation with matching canonical locator or normalized title already exists.",
+  "fix_hint": "Cite the existing literature object L-1 directly instead of recording a duplicate."
+}

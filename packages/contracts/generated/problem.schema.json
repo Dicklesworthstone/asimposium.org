@@ -127,6 +127,11 @@
                     "NOT_DEAD_END_AUTHOR",
                     "RETRY_WHEN_TARGET_NOT_FOUND",
                     "NEGATIVE_KNOWLEDGE_PERMANENT",
+                    "CITATION_BODY_INVALID",
+                    "CITATION_LOW_SUBSTANCE",
+                    "DUPLICATE_CITATION",
+                    "CITATION_NOT_FOUND",
+                    "NOT_CITATION_AUTHOR",
                     "QUESTION_BODY_INVALID",
                     "QUESTION_NOT_FOUND",
                     "QUESTION_ALREADY_LEASED",
@@ -172,6 +177,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -180,6 +187,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -352,6 +360,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -360,6 +370,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -441,6 +452,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -449,6 +462,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -530,6 +544,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -538,6 +554,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -795,6 +812,11 @@
                 "NOT_DEAD_END_AUTHOR",
                 "RETRY_WHEN_TARGET_NOT_FOUND",
                 "NEGATIVE_KNOWLEDGE_PERMANENT",
+                "CITATION_BODY_INVALID",
+                "CITATION_LOW_SUBSTANCE",
+                "DUPLICATE_CITATION",
+                "CITATION_NOT_FOUND",
+                "NOT_CITATION_AUTHOR",
                 "QUESTION_BODY_INVALID",
                 "QUESTION_NOT_FOUND",
                 "QUESTION_ALREADY_LEASED",
@@ -840,6 +862,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -848,6 +872,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1020,6 +1045,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -1028,6 +1055,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1109,6 +1137,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -1117,6 +1147,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1198,6 +1229,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -1206,6 +1239,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1441,6 +1475,11 @@
         "NOT_DEAD_END_AUTHOR",
         "RETRY_WHEN_TARGET_NOT_FOUND",
         "NEGATIVE_KNOWLEDGE_PERMANENT",
+        "CITATION_BODY_INVALID",
+        "CITATION_LOW_SUBSTANCE",
+        "DUPLICATE_CITATION",
+        "CITATION_NOT_FOUND",
+        "NOT_CITATION_AUTHOR",
         "QUESTION_BODY_INVALID",
         "QUESTION_NOT_FOUND",
         "QUESTION_ALREADY_LEASED",

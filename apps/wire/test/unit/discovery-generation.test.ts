@@ -36,7 +36,9 @@ function sampleFor(honoPath: string): string {
     if (name === "enrollmentId") return "/join/ASIMP-EN-PROBE".slice(6);
     if (name === "problemId") return "P-4DSP";
     if (name === "target") {
-      return honoPath.includes("/syntheses/") ? "SYNTH-1.json" : "C-1@1.json";
+      if (honoPath.includes("/syntheses/")) return "SYNTH-1.json";
+      if (honoPath.includes("/citations/")) return "L-1.json";
+      return "C-1@1.json";
     }
     return name === "id" && honoPath.startsWith("/p/") ? "P-4DSP" : "PROBE";
   });

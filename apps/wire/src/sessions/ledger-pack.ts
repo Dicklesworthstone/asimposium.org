@@ -65,6 +65,20 @@ interface RelationRow extends ProvenanceRow {
   target_head: number | null;
 }
 
+interface CitationRow extends ProvenanceRow {
+  title: string;
+  version: number;
+  authors_json: string;
+  year: number | null;
+  locator_kind: string;
+  locator: string | null;
+  canonical_locator: string | null;
+  excerpt: string | null;
+  retrieved_at: string | null;
+  source_provenance: string;
+  unanchored: number;
+}
+
 export interface LedgerPackSection {
   candidates: PackCandidate[];
   omitted: { reason: string; detail: string }[];
@@ -844,6 +858,36 @@ export async function readLedgerPackSection(
             ? "superseded"
             : "current";
       return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. This edge is an assertion, not an established implication.`;
+    };
+  } else if (profile === "literature") {
+    kind = "citation";
+    section = "literature";
+    const result = await db
+      .prepare(`
+      SELECT c.citation_id AS id, c.version, c.title, c.authors_json, c.year,
+             c.locator_kind, c.locator, c.canonical_locator, c.excerpt, c.retrieved_at,
+             c.source_provenance, c.unanchored,
+             e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
+             e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
+             e.model_string_self_declared AS model, e.harness,
+             (content.event_id IS NOT NULL AND content.redacted_at IS NULL) AS content_available
+      FROM citations c
+      JOIN events e
+        ON e.problem_id = c.problem_id AND e.object_id = c.citation_id
+       AND e.object_kind = 'citation' AND e.seq = c.seq
+      LEFT JOIN event_content content ON content.event_id = e.id
+      WHERE c.problem_id = ? AND e.seq <= ?
+      ORDER BY e.seq ASC, e.id ASC LIMIT ?
+    `)
+      .bind(problemId, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1)
+      .all<CitationRow>();
+    rows = result.results;
+    describeRow = (value) => {
+      const row = value as CitationRow;
+      const effectiveLoc = row.canonical_locator ?? row.locator ?? "none";
+      const yearStr = row.year ? ` (${row.year})` : "";
+      const unanchoredFlag = row.unanchored ? " [unanchored]" : "";
+      return `Citation ${row.id}@${row.version}${unanchoredFlag}: ${row.title}${yearStr}\nLocator: [${row.locator_kind}] ${effectiveLoc}\nProvenance: ${row.source_provenance}${row.retrieved_at ? ` (retrieved ${row.retrieved_at})` : ""}${row.excerpt ? `\nExcerpt: "${row.excerpt}"` : ""}`;
     };
   } else {
     return { candidates: [], omitted: [] };

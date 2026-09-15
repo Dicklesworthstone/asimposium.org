@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0059_events_batch_replay_scope.sql`.
+schema through `0060_citations_revisions_and_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -112,6 +112,11 @@ for heartbeat idempotency.
 Migration `0059_events_batch_replay_scope.sql` widens the `session_write_replays`
 CHECK constraint to include `events_batch` for POST /v1/p/:id/events:batch
 atomic batch idempotency replays.
+
+Migration `0060_citations_revisions_and_replay_scope.sql` introduces the `citations`
+and `citation_versions` tables for problem-scoped literature and source-provenance
+tracking (W5.8c / Fable §6.1, ADR-21), and widens `session_write_replays` to include
+`citations` and `correct_citation` for 24-hour idempotent replays.
 
 
 Each migration uses the fixed name

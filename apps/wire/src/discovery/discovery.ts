@@ -110,6 +110,10 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/p/:id/reviews": true,
   "POST /v1/p/:id/dead-ends": true,
   "POST /v1/p/:id/events:batch": true,
+  "GET /p/:id/literature.json": true,
+  "GET /p/:id/literature.md": true,
+  "GET /p/:id/literature.html": true,
+  "POST /v1/sessions/:id/citations/:citationId/correct": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
@@ -147,6 +151,11 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.json": "Version-pinned conflicts and their resolutions (JSON face).",
   "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
+  "GET /p/:id/citations.json": "Literature and source-provenance citations ledger (JSON face).",
+  "GET /p/:id/citations.md": "Literature and source-provenance citations ledger (Markdown face).",
+  "GET /p/:id/citations.html": "Literature and source-provenance citations ledger (HTML face).",
+  "GET /p/:id/citations/:target":
+    "Exact citation head or version (.json, .md, .html, .bib, .csl.json).",
   "GET /p/:id/syntheses.json": "Problem synthesis ledger (JSON face).",
   "GET /p/:id/syntheses.md": "Problem synthesis ledger (Markdown face).",
   "GET /p/:id/syntheses.html": "Problem synthesis ledger (HTML face).",
@@ -348,6 +357,18 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "fellow-bearer",
     "Record a screened resolution or persistent uncertainty for an open conflict.",
     "sessions:resolve_conflict_request",
+  ],
+  [
+    "POST /v1/sessions/:id/citations",
+    "fellow-bearer",
+    "Record a first-class citation literature object with locator canonicalization and provenance.",
+    "sessions:record_citation_request",
+  ],
+  [
+    "POST /v1/sessions/:id/citations/correct",
+    "fellow-bearer",
+    "Submit an author correction to an existing citation with optimistic concurrency pinning.",
+    "sessions:correct_citation_request",
   ],
   [
     "GET /v1/sessions/:id/leases",
@@ -597,7 +618,13 @@ function responseFor(
                         schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
                       },
                     }
-                  : { [media]: {} };
+                  : openApiPath === "/p/{id}/citations.json"
+                    ? {
+                        "application/json": {
+                          schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
+                        },
+                      }
+                    : { [media]: {} };
   return {
     "200": {
       description: "Success.",

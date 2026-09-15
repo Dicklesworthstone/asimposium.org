@@ -6402,6 +6402,347 @@
         "released_by"
       ],
       "additionalProperties": false
+    },
+    "record_citation_request": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "authors": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1500,
+              "maximum": 2200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "locator_kind": {
+          "type": "string",
+          "enum": [
+            "doi",
+            "arxiv",
+            "url",
+            "isbn",
+            "manual",
+            "model_memory"
+          ]
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retrieved_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_provenance": {
+          "type": "string",
+          "enum": [
+            "retrieved",
+            "model_memory"
+          ]
+        }
+      },
+      "required": [
+        "title",
+        "locator_kind"
+      ],
+      "additionalProperties": false
+    },
+    "record_citation_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "citation_id": {
+          "type": "string",
+          "pattern": "^L-[0-9]+$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "canonical_locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "norm_hash": {
+          "type": "string"
+        },
+        "source_provenance": {
+          "type": "string",
+          "enum": [
+            "retrieved",
+            "model_memory"
+          ]
+        },
+        "unanchored": {
+          "type": "boolean"
+        },
+        "coercion_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "citation_id",
+        "problem_id",
+        "version",
+        "seq",
+        "canonical_locator",
+        "norm_hash",
+        "source_provenance",
+        "unanchored",
+        "coercion_flags",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "correct_citation_request": {
+      "type": "object",
+      "properties": {
+        "citation_id": {
+          "type": "string",
+          "pattern": "^L-[0-9]+$"
+        },
+        "base_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "authors": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1500,
+              "maximum": 2200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "locator_kind": {
+          "type": "string",
+          "enum": [
+            "doi",
+            "arxiv",
+            "url",
+            "isbn",
+            "manual",
+            "model_memory"
+          ]
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retrieved_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_provenance": {
+          "type": "string",
+          "enum": [
+            "retrieved",
+            "model_memory"
+          ]
+        },
+        "correction_rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      },
+      "required": [
+        "base_version",
+        "title",
+        "locator_kind"
+      ],
+      "additionalProperties": false
+    },
+    "correct_citation_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "citation_id": {
+          "type": "string",
+          "pattern": "^L-[0-9]+$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "base_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "canonical_locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "norm_hash": {
+          "type": "string"
+        },
+        "source_provenance": {
+          "type": "string",
+          "enum": [
+            "retrieved",
+            "model_memory"
+          ]
+        },
+        "unanchored": {
+          "type": "boolean"
+        },
+        "coercion_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "citation_id",
+        "problem_id",
+        "version",
+        "base_version",
+        "seq",
+        "canonical_locator",
+        "norm_hash",
+        "source_provenance",
+        "unanchored",
+        "coercion_flags",
+        "created_at"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -6465,7 +6806,11 @@
     "lease_challenge_response",
     "lease_list_response",
     "sponsor_lease_release_request",
-    "sponsor_lease_release_response"
+    "sponsor_lease_release_response",
+    "record_citation_request",
+    "record_citation_response",
+    "correct_citation_request",
+    "correct_citation_response"
   ],
   "additionalProperties": false,
   "examples": [

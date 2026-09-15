@@ -166,6 +166,12 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "NOT_DEAD_END_AUTHOR",
   "RETRY_WHEN_TARGET_NOT_FOUND",
   "NEGATIVE_KNOWLEDGE_PERMANENT",
+  // W5.8c: Literature & citation lifecycle teaching refusals (Fable §6.1, Rule P8, A1).
+  "CITATION_BODY_INVALID",
+  "CITATION_LOW_SUBSTANCE",
+  "DUPLICATE_CITATION",
+  "CITATION_NOT_FOUND",
+  "NOT_CITATION_AUTHOR",
   // W5.8d: Questions & retractions lifecycle teaching refusals (Fable §6.1, §7.5, Rule P6, P9, P10).
   "QUESTION_BODY_INVALID",
   "QUESTION_NOT_FOUND",
@@ -254,18 +260,21 @@ export const ProblemCodeSchema = z.enum([...CONTRACT_PROBLEM_CODES, ...OPAQUE_PR
 
 /** Rule ids a teaching refusal may cite. Each resolves to published text. */
 export const ProblemRuleSchema = z.enum([
+  "A1",
+  "A3",
   "A5",
   "ADR-20",
   "ADR-21",
   "P-EN-NAME",
   // Validator P-rules cited by mounted ledger/session surfaces (A9): P1
   // identity, P2/P4 self-certification split, P3 falsifier, P6 preserved
-  // dead ends, P9 authorship, P10 reference integrity, P11 near-duplicate,
+  // dead ends, P8 model memory citation limit, P9 authorship, P10 reference integrity, P11 near-duplicate,
   // and §7.6, the served session-protocol section defining note-vs-claim.
   "P1",
   "P2/P4",
   "P3",
   "P6",
+  "P8",
   "P9",
   "P10",
   "P11",

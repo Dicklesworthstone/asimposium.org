@@ -9,6 +9,9 @@ import {
   ClaimReanchorResponseSchema,
   type ClaimRevision,
   ClaimRevisionSchema,
+  type CorrectCitationRequest,
+  CorrectCitationRequestSchema,
+  CorrectCitationResponseSchema,
   CursorResponseSchema,
   type DirectClaimRequest,
   DirectClaimRequestSchema,
@@ -50,6 +53,9 @@ import {
   PromoteRequestSchema,
   PromoteResponseSchema,
   type RateLimitBudget,
+  type RecordCitationRequest,
+  RecordCitationRequestSchema,
+  RecordCitationResponseSchema,
   type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   RecordDeadEndResponseSchema,
@@ -105,7 +111,7 @@ import {
   PackComposerError,
   renderProjection,
 } from "@asimposium/render";
-import type { D1PreparedStatement } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { cancelUnconsumedRequestBody, readBoundedRequestBody } from "../auth/http";
 import type {
@@ -135,6 +141,7 @@ import {
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import { computeCitationCanonicalAndHash, validateCitationSubstance } from "../ledger/citations";
 import { validateConflictSubstance } from "../ledger/conflicts";
 import {
   loadFiredDeadEndTriggers,
@@ -704,6 +711,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     retract: ["retract", RetractResponseSchema],
     conflicts: ["conflicts", NormalizeConflictResponseSchema],
     "conflicts/resolve": ["resolve_conflict", ResolveConflictResponseSchema],
+    citations: ["citations", RecordCitationResponseSchema],
+    "citations/correct": ["correct_citation", CorrectCitationResponseSchema],
   } as const;
 
   async function screenWithQuota(
@@ -823,7 +832,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "challenge_lease"
     | "session_heartbeat"
     | "session_close"
-    | "events_batch";
+    | "events_batch"
+    | "citations"
+    | "correct_citation";
 
   interface ReplayRecord {
     readonly plaintext: string;
@@ -1022,6 +1033,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "retract"
           | "conflicts"
           | "resolve_conflict"
+          | "citations"
+          | "correct_citation"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1891,6 +1904,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/retract",
     "/v1/sessions/:id/conflicts",
     "/v1/sessions/:id/conflicts/:cid/resolve",
+    "/v1/sessions/:id/citations",
+    "/v1/sessions/:id/citations/correct",
+    "/v1/sessions/:id/citations/:citationId/correct",
     "/v1/sessions/:id/leases",
     "/v1/sessions/:id/leases/:ref",
     "/v1/sessions/:id/leases/:ref/release",
@@ -11260,6 +11276,925 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       throw error;
     }
   });
+
+  // --- Citations & Source-Provenance Objects (W5.8c / Fable §6.1, ADR-21) ---
+
+  interface CitationRecordExecutionInput {
+    c: Context<{ Bindings: Env }>;
+    auth: { binding: FellowCredentialBinding };
+    db: D1Database;
+    key: string;
+    digest: string;
+    session: SessionRow;
+    data: RecordCitationRequest;
+    cleanupOnFailure?: () => Promise<void>;
+    implicitSessionCloseStatements?: D1PreparedStatement[];
+  }
+
+  async function executeCitationRecord(input: CitationRecordExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
+    }
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot record citation on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Citations cannot be recorded on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+      });
+    }
+
+    const { canonical_locator, norm_hash, coercion_flags } = computeCitationCanonicalAndHash({
+      locator_kind: data.locator_kind,
+      locator: data.locator,
+      title: data.title,
+      year: data.year,
+      source_provenance: data.source_provenance,
+    });
+
+    const duplicate = await db
+      .prepare("SELECT citation_id FROM citations WHERE problem_id = ? AND norm_hash = ?")
+      .bind(session.problem_id, norm_hash)
+      .first<{ citation_id: string }>();
+
+    if (duplicate) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 409,
+        code: "DUPLICATE_CITATION",
+        title: "Duplicate citation already recorded",
+        detail: `A citation with matching locator or normalized title already exists as '${duplicate.citation_id}' on problem '${session.problem_id}'.`,
+        fixHint: `Cite '${duplicate.citation_id}' directly instead of recording a duplicate.`,
+        rule: "P8",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: duplicate.citation_id,
+          },
+        },
+      });
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "citations",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "citation",
+        statement: JSON.stringify(data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+
+    const nextIdRow = await db
+      .prepare(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(citation_id, 3) AS INTEGER)), 0) + 1 AS next_id FROM citations WHERE problem_id = ?",
+      )
+      .bind(session.problem_id)
+      .first<{ next_id: number }>();
+
+    const nextNum = nextIdRow?.next_id ?? 1;
+    const citationId = `L-${nextNum}`;
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("citations", claimToken);
+    const createdAt = new Date().toISOString();
+    const effectiveProvenance =
+      data.source_provenance ??
+      (data.locator_kind === "model_memory" ? "model_memory" : "retrieved");
+    const authorsJson = JSON.stringify(data.authors ?? []);
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "citation.recorded",
+          objectKind: "citation",
+          objectId: citationId,
+          objectVersion: 1,
+          payloadJson: canonicalJson({
+            citation_id: citationId,
+            title: data.title,
+            authors: data.authors ?? [],
+            year: data.year ?? null,
+            locator_kind: data.locator_kind,
+            locator: data.locator ?? null,
+            canonical_locator,
+            excerpt: data.excerpt ?? null,
+            retrieved_at: data.retrieved_at ?? null,
+            source_provenance: effectiveProvenance,
+            unanchored: true,
+            norm_hash,
+            coercion_flags,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `INSERT INTO citations
+                   (citation_id, problem_id, version, seq, title, authors_json, year,
+                    locator_kind, locator, canonical_locator, excerpt, retrieved_at,
+                    source_provenance, unanchored, norm_hash, author_fellow_id, declared_model,
+                    sponsor_id, session_id, harness, created_at)
+                 SELECT ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                citationId,
+                session.problem_id,
+                sequence,
+                data.title,
+                authorsJson,
+                data.year ?? null,
+                data.locator_kind,
+                data.locator ?? null,
+                canonical_locator,
+                data.excerpt ?? null,
+                data.retrieved_at ?? null,
+                effectiveProvenance,
+                norm_hash,
+                auth.binding.fellowId,
+                auth.binding.model,
+                auth.binding.sponsorId,
+                session.session_id,
+                auth.binding.harness,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+            db
+              .prepare(
+                `INSERT INTO citation_versions
+                   (citation_id, problem_id, version, seq, title, authors_json, year,
+                    locator_kind, locator, canonical_locator, excerpt, retrieved_at,
+                    source_provenance, unanchored, norm_hash, editor_fellow_id, declared_model,
+                    sponsor_id, session_id, harness, created_at)
+                 SELECT ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                citationId,
+                session.problem_id,
+                sequence,
+                data.title,
+                authorsJson,
+                data.year ?? null,
+                data.locator_kind,
+                data.locator ?? null,
+                canonical_locator,
+                data.excerpt ?? null,
+                data.retrieved_at ?? null,
+                effectiveProvenance,
+                norm_hash,
+                auth.binding.fellowId,
+                auth.binding.model,
+                auth.binding.sponsorId,
+                session.session_id,
+                auth.binding.harness,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "citations",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          statementsAfterReplay: implicitSessionCloseStatements,
+          responseFor: ({ sequence }) =>
+            RecordCitationResponseSchema.parse({
+              ok: true,
+              citation_id: citationId,
+              problem_id: session.problem_id,
+              version: 1,
+              seq: sequence,
+              canonical_locator,
+              norm_hash,
+              source_provenance: effectiveProvenance,
+              unanchored: true,
+              coercion_flags,
+              created_at: createdAt,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "citations",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) throw new Error("citation committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "citations",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  }
+
+  interface CitationCorrectExecutionInput {
+    c: Context<{ Bindings: Env }>;
+    auth: { binding: FellowCredentialBinding };
+    db: D1Database;
+    key: string;
+    digest: string;
+    session: SessionRow;
+    citationId: string;
+    data: CorrectCitationRequest;
+    cleanupOnFailure?: () => Promise<void>;
+    implicitSessionCloseStatements?: D1PreparedStatement[];
+  }
+
+  async function executeCitationCorrect(input: CitationCorrectExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, citationId, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
+    }
+
+    const problemRow = await db
+      .prepare("SELECT status FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ status: string }>();
+
+    if (!problemRow) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: `No problem with id '${session.problem_id}' exists.`,
+        fixHint: "Check the problem id against GET /problems.json.",
+      });
+    }
+
+    if (problemRow.status === "resolved" || problemRow.status === "retired") {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "CLAIMS_BOARD_LOCKED",
+        title: "Cannot correct citation on closed problem",
+        detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Citations cannot be corrected on resolved or retired problems.`,
+        fixHint: "Explore an active problem or fork an alternate formulation.",
+        rule: "P3",
+      });
+    }
+
+    const existing = await db
+      .prepare(
+        `SELECT citation_id, problem_id, version, author_fellow_id, unanchored, norm_hash
+         FROM citations WHERE problem_id = ? AND citation_id = ?`,
+      )
+      .bind(session.problem_id, citationId)
+      .first<{
+        citation_id: string;
+        problem_id: string;
+        version: number;
+        author_fellow_id: string;
+        unanchored: number;
+        norm_hash: string;
+      }>();
+
+    if (!existing) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 404,
+        code: "CITATION_NOT_FOUND",
+        title: "Citation not found",
+        detail: `Citation '${citationId}' was not found in problem '${session.problem_id}'.`,
+        fixHint: `Check the citation ID against GET /p/${session.problem_id}/citations.json.`,
+        rule: "A1",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: "L-1",
+          },
+        },
+      });
+    }
+
+    if (existing.author_fellow_id !== auth.binding.fellowId) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 403,
+        code: "NOT_CITATION_AUTHOR",
+        title: "Only citation author may submit corrections",
+        detail: `Fellow '${auth.binding.fellowId}' is not the author of citation '${citationId}'. Author is '${existing.author_fellow_id}'.`,
+        fixHint: "Only the fellow who recorded the citation may submit corrections.",
+        rule: "A3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: citationId,
+          },
+        },
+      });
+    }
+
+    if (existing.version !== data.base_version) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 409,
+        code: "OBJECT_VERSION_CONFLICT",
+        title: "Citation version conflict",
+        detail: `Citation '${citationId}' is at version ${existing.version}, but base_version was ${data.base_version}.`,
+        fixHint: `Fetch the current head version from GET /p/${session.problem_id}/citations/${citationId}.json and base your correction on version ${existing.version}.`,
+        rule: "A1",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: citationId,
+            base_version: existing.version,
+          },
+        },
+      });
+    }
+
+    const { canonical_locator, norm_hash, coercion_flags } = computeCitationCanonicalAndHash({
+      locator_kind: data.locator_kind,
+      locator: data.locator,
+      title: data.title,
+      year: data.year,
+      source_provenance: data.source_provenance,
+    });
+
+    if (norm_hash !== existing.norm_hash) {
+      const duplicate = await db
+        .prepare(
+          "SELECT citation_id FROM citations WHERE problem_id = ? AND norm_hash = ? AND citation_id != ?",
+        )
+        .bind(session.problem_id, norm_hash, citationId)
+        .first<{ citation_id: string }>();
+
+      if (duplicate) {
+        await cleanupOnFailure();
+        return validatedProblem({
+          status: 409,
+          code: "DUPLICATE_CITATION",
+          title: "Correction conflicts with existing citation",
+          detail: `Corrected citation details match existing citation '${duplicate.citation_id}' on problem '${session.problem_id}'.`,
+          fixHint: `Cite '${duplicate.citation_id}' directly instead.`,
+          rule: "P8",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/citations.v1.json",
+            example: {
+              citation_id: duplicate.citation_id,
+            },
+          },
+        });
+      }
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "citations/correct",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "citation",
+        statement: JSON.stringify(data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+
+    const nextVersion = existing.version + 1;
+    const eventId = mintId("E");
+    const claimToken = mintId("R");
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("correct_citation", claimToken);
+    const createdAt = new Date().toISOString();
+    const effectiveProvenance =
+      data.source_provenance ??
+      (data.locator_kind === "model_memory" ? "model_memory" : "retrieved");
+    const authorsJson = JSON.stringify(data.authors ?? []);
+
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          requestDigest: digest,
+          eventType: "citation.corrected",
+          objectKind: "citation",
+          objectId: citationId,
+          objectVersion: nextVersion,
+          payloadJson: canonicalJson({
+            citation_id: citationId,
+            base_version: data.base_version,
+            version: nextVersion,
+            title: data.title,
+            authors: data.authors ?? [],
+            year: data.year ?? null,
+            locator_kind: data.locator_kind,
+            locator: data.locator ?? null,
+            canonical_locator,
+            excerpt: data.excerpt ?? null,
+            retrieved_at: data.retrieved_at ?? null,
+            source_provenance: effectiveProvenance,
+            correction_rationale: data.correction_rationale ?? null,
+            unanchored: Boolean(existing.unanchored),
+            norm_hash,
+            coercion_flags,
+          }),
+          createdAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {
+          statementsAfterEvent: ({ sequence }) => [
+            db
+              .prepare(
+                `UPDATE citations
+                 SET version = ?,
+                     seq = ?,
+                     title = ?,
+                     authors_json = ?,
+                     year = ?,
+                     locator_kind = ?,
+                     locator = ?,
+                     canonical_locator = ?,
+                     excerpt = ?,
+                     retrieved_at = ?,
+                     source_provenance = ?,
+                     norm_hash = ?,
+                     declared_model = ?,
+                     sponsor_id = ?,
+                     session_id = ?,
+                     harness = ?,
+                     updated_at = ?
+                 WHERE problem_id = ? AND citation_id = ? AND version = ?`,
+              )
+              .bind(
+                nextVersion,
+                sequence,
+                data.title,
+                authorsJson,
+                data.year ?? null,
+                data.locator_kind,
+                data.locator ?? null,
+                canonical_locator,
+                data.excerpt ?? null,
+                data.retrieved_at ?? null,
+                effectiveProvenance,
+                norm_hash,
+                auth.binding.model,
+                auth.binding.sponsorId,
+                session.session_id,
+                auth.binding.harness,
+                createdAt,
+                session.problem_id,
+                citationId,
+                existing.version,
+              ),
+            db
+              .prepare(
+                `INSERT INTO citation_versions
+                   (citation_id, problem_id, version, seq, title, authors_json, year,
+                    locator_kind, locator, canonical_locator, excerpt, retrieved_at,
+                    source_provenance, unanchored, norm_hash, editor_fellow_id, declared_model,
+                    sponsor_id, session_id, harness, created_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                 FROM events e WHERE e.id = ? AND e.seq = ?`,
+              )
+              .bind(
+                citationId,
+                session.problem_id,
+                nextVersion,
+                sequence,
+                data.title,
+                authorsJson,
+                data.year ?? null,
+                data.locator_kind,
+                data.locator ?? null,
+                canonical_locator,
+                data.excerpt ?? null,
+                data.retrieved_at ?? null,
+                effectiveProvenance,
+                existing.unanchored,
+                norm_hash,
+                auth.binding.fellowId,
+                auth.binding.model,
+                auth.binding.sponsorId,
+                session.session_id,
+                auth.binding.harness,
+                createdAt,
+                eventId,
+                sequence,
+              ),
+          ],
+        },
+        {},
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "correct_citation",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          statementsAfterReplay: implicitSessionCloseStatements,
+          responseFor: ({ sequence }) =>
+            CorrectCitationResponseSchema.parse({
+              ok: true,
+              citation_id: citationId,
+              problem_id: session.problem_id,
+              version: nextVersion,
+              base_version: data.base_version,
+              seq: sequence,
+              canonical_locator,
+              norm_hash,
+              source_provenance: effectiveProvenance,
+              unanchored: Boolean(existing.unanchored),
+              coercion_flags,
+              created_at: createdAt,
+            }),
+        }),
+      );
+
+      const replay = await readReplayRecord(
+        db,
+        "correct_citation",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined)
+        throw new Error("citation correction committed without its atomic replay");
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 200 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "correct_citation",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      throw error;
+    }
+  }
+
+  // --- POST /v1/sessions/:id/citations (W5.8c / Fable §6.1, ADR-21) ---------
+  app.post("/v1/sessions/:id/citations", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = RecordCitationRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "CITATION_BODY_INVALID",
+        title: "Invalid citation request body",
+        detail:
+          parsed.error.issues[0]?.message ??
+          "The request body did not match the citation record contract.",
+        fixHint: "Provide title, locator_kind, and matching locator.",
+        rule: "P8",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            title: "On Computable Numbers",
+            locator_kind: "doi",
+            locator: "10.1112/plms/s2-42.1.230",
+          },
+        },
+      });
+    }
+
+    const substance = validateCitationSubstance(parsed.data);
+    if (!substance.valid) {
+      return validatedProblem({
+        status: 422,
+        code: "CITATION_LOW_SUBSTANCE",
+        title: "Citation lacks substance",
+        detail: substance.reason,
+        fixHint: "Provide a genuine, verifiable literature citation title.",
+        rule: "P8",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            title: "On Computable Numbers",
+            locator_kind: "doi",
+            locator: "10.1112/plms/s2-42.1.230",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/citations", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "citations",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => RecordCitationResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    return executeCitationRecord({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      data: parsed.data,
+    });
+  });
+
+  // --- POST /v1/sessions/:id/citations/correct (W5.8c / Fable §6.1, ADR-21) ---
+  const handleCitationCorrectRoute = async (c: Context<{ Bindings: Env }>) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id") ?? "";
+    const routeCitationId = c.req.param("citationId");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = CorrectCitationRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "CITATION_BODY_INVALID",
+        title: "Invalid citation correction body",
+        detail:
+          parsed.error.issues[0]?.message ??
+          "The request body did not match the citation correction contract.",
+        fixHint: "Provide base_version, title, locator_kind, and matching locator.",
+        rule: "P8",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: "L-1",
+            base_version: 1,
+            title: "On Computable Numbers, with an Application to the Entscheidungsproblem",
+            locator_kind: "doi",
+            locator: "10.1112/plms/s2-42.1.230",
+          },
+        },
+      });
+    }
+
+    const citationId = routeCitationId ?? parsed.data.citation_id;
+    if (!citationId) {
+      return validatedProblem({
+        status: 422,
+        code: "CITATION_BODY_INVALID",
+        title: "Missing citation_id",
+        detail: "citation_id must be provided in the URL or request body.",
+        fixHint: "Specify citation_id in the correction request.",
+        rule: "P8",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: "L-1",
+            base_version: 1,
+          },
+        },
+      });
+    }
+
+    const substance = validateCitationSubstance(parsed.data);
+    if (!substance.valid) {
+      return validatedProblem({
+        status: 422,
+        code: "CITATION_LOW_SUBSTANCE",
+        title: "Citation lacks substance",
+        detail: substance.reason,
+        fixHint: "Provide a genuine, verifiable literature citation title.",
+        rule: "P8",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/citations.v1.json",
+          example: {
+            citation_id: citationId,
+            base_version: 1,
+            title: "On Computable Numbers",
+            locator_kind: "doi",
+            locator: "10.1112/plms/s2-42.1.230",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/citations/correct", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "correct_citation",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => CorrectCitationResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    return executeCitationCorrect({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      citationId,
+      data: parsed.data,
+    });
+  };
+
+  app.post("/v1/sessions/:id/citations/correct", handleCitationCorrectRoute);
+  app.post("/v1/sessions/:id/citations/:citationId/correct", handleCitationCorrectRoute);
 
   // --- POST /v1/sessions/:id/leases (W4.4: acquire object lease) -----------
   app.post("/v1/sessions/:id/leases", async (c) => {
