@@ -100,6 +100,17 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",
   "HYPOTHESIS_ALREADY_KILLED",
+  // W4.6: event batches
+  "BATCH_BODY_INVALID",
+  "BATCH_EMPTY",
+  "BATCH_TOO_LARGE",
+  "BATCH_INVALID_TEMP_ID",
+  "BATCH_DUPLICATE_TEMP_ID",
+  "BATCH_SELF_CAUSAL_REF",
+  "BATCH_DUPLICATE_CAUSAL_REF",
+  "BATCH_DANGLING_CAUSAL_REF",
+  "BATCH_CAUSAL_CYCLE",
+
   // W4/W5 mounted session-surface refusals (asimposiumorg-but.1). Each names
   // the exact failed precondition so the caller can repair the request: a
   // bad pack budget, an unknown/closed/duplicate session, an unknown problem,

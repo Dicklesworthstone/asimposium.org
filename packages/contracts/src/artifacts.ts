@@ -704,20 +704,28 @@ function generatedBatchTypes(): string {
     "BatchCommitPlanRequest",
     "BatchContracts",
     "BatchMember",
+    "BatchMemberResult",
     "BatchPlan",
     "BatchPlanFailure",
     "BatchPlanRefusalCode",
     "BatchPlanSuccess",
     "BatchTempId",
+    "BatchWriteMember",
+    "EventBatchRequest",
+    "EventBatchResponse",
   ] as const satisfies readonly (keyof {
     BatchCommitPlanRequest: import("./batch.ts").BatchCommitPlanRequest;
     BatchContracts: import("./batch.ts").BatchContracts;
     BatchMember: import("./batch.ts").BatchMember;
+    BatchMemberResult: import("./batch.ts").BatchMemberResult;
     BatchPlan: import("./batch.ts").BatchPlan;
     BatchPlanFailure: import("./batch.ts").BatchPlanFailure;
     BatchPlanRefusalCode: import("./batch.ts").BatchPlanRefusalCode;
     BatchPlanSuccess: import("./batch.ts").BatchPlanSuccess;
     BatchTempId: import("./batch.ts").BatchTempId;
+    BatchWriteMember: import("./batch.ts").BatchWriteMember;
+    EventBatchRequest: import("./batch.ts").EventBatchRequest;
+    EventBatchResponse: import("./batch.ts").EventBatchResponse;
   })[];
   return [
     "// Generated from src/batch.ts by `bun run generate`. Do not edit.",

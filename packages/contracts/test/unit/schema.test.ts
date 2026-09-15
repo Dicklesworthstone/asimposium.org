@@ -475,6 +475,15 @@ const CORPUS_COVERAGE_DEBT: readonly ReasonedSlug[] = Object.freeze([
   Object.freeze({ slug: "sponsor-panic-body-invalid", reason: "W1.5: panic family owed." }),
   Object.freeze({ slug: "step-up-required", reason: "W1.5: authorization family owed." }),
   Object.freeze({ slug: "wrong-principal", reason: "W1.5: authorization family owed." }),
+  Object.freeze({ slug: "batch-body-invalid", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-empty", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-too-large", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-invalid-temp-id", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-duplicate-temp-id", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-self-causal-ref", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-duplicate-causal-ref", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-dangling-causal-ref", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-causal-cycle", reason: "W4.6: event batches." }),
 ]);
 
 /**
