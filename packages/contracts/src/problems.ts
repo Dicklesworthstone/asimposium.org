@@ -388,6 +388,7 @@ export const ProblemGovernanceEventSchema = z
       problem: GovernanceFormulationSchema.extend({
         status: z.literal("retired"),
         canonical_problem_id: PublicLedgerProblemIdSchema.optional(),
+        resolution_summary: z.string().min(1).max(2048).optional(),
       }),
     }),
     GovernanceRecordSchema.extend({

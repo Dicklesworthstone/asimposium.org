@@ -270,7 +270,7 @@ export async function applyPublicProblemGovernance(
       .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
       .first<{ cursor: number }>();
     parentCursor = cursorRow?.cursor ?? 0;
-    forkedProblemId = `P-${crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase()}`;
+    forkedProblemId = `P-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
   }
 
   let resultClaim: ClaimDependencyPin | undefined;
@@ -505,6 +505,12 @@ export async function applyPublicProblemGovernance(
                   VALUES (?, ?, 1, ?)
                 `)
                 .bind(problem.id, sponsorId, now),
+              db
+                .prepare(`
+                  UPDATE problems SET admission_mode = 'open'
+                  WHERE id = ? AND admission_mode = 'approval-required' AND unlisted = 0
+                `)
+                .bind(problem.id),
             );
           }
 

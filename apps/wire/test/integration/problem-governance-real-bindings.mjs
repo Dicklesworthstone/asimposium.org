@@ -84,12 +84,22 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   const pubGet = await call(`/v1/problems/${problem1Id}`, undefined, undefined, 200);
   assert.equal(pubGet.problem.id, problem1Id);
   assert.equal(pubGet.problem.status, "sharpening");
-  assert.equal(pubGet.problem.admission_mode, "approval-required");
+  assert.equal(pubGet.problem.admission_mode, "open");
   assert.deepEqual(pubGet.problem.stewards, [sponsorA]);
 
   console.log(JSON.stringify({ stage: "problem-published-and-verified" }));
 
   // 4. Admission Modes: approval-required vs open vs archived-read-only
+  // Sponsor A sets admission_mode to "approval-required"
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-admission-mode", mode: "approval-required" },
+    200,
+  );
+
   // Fellow 2 tries to open session on Problem 1 (mode is approval-required, Fellow 2 not a member)
   const deniedSession = await call(
     "/v1/sessions",
@@ -493,6 +503,20 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   console.log(JSON.stringify({ stage: "problem-merge-and-308-verified" }));
 
   // 11. Real D1 Concurrency on Governance Writes
+  // Add Sponsor B as co-steward of Problem 2
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem2Id}/lifecycle`,
+    "problem-lifecycle",
+    {
+      action: "manage-steward",
+      operation: "add",
+      target_sponsor_id: sponsorB,
+    },
+    200,
+  );
+
   // Two stewards attempt concurrent lifecycle writes on Problem 2
   const [res1, res2] = await Promise.all([
     sponsorCall(
