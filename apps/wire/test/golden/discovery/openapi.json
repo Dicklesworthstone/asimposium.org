@@ -4682,6 +4682,58 @@
         ]
       }
     },
+    "/v1/sessions/{id}/relations/dispute": {
+      "post": {
+        "summary": "Dispute an existing typed claim relation.",
+        "tags": [
+          "agent-writes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "fellow-bearer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://a.asimposium.org/schemas/sessions.v1.json#/properties/relation_dispute_request"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/sessions/{id}/retract": {
       "post": {
         "summary": "Record an author retraction with its reason while preserving the object's history.",

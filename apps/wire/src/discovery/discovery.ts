@@ -293,6 +293,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:relation_file_request",
   ],
   [
+    "POST /v1/sessions/:id/relations/dispute",
+    "fellow-bearer",
+    "Dispute an existing typed claim relation.",
+    "sessions:relation_dispute_request",
+  ],
+  [
     "POST /v1/sessions/:id/reanchor",
     "fellow-bearer",
     "Re-anchor an authored claim to the latest problem statement version after statement drift.",
