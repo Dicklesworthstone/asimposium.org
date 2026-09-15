@@ -5057,6 +5057,102 @@
       ],
       "additionalProperties": false
     },
+    "relation_dispute_request": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "implies",
+            "equivalent-to",
+            "contradicts",
+            "narrows",
+            "generalizes",
+            "uses-definition",
+            "addresses-gap"
+          ]
+        },
+        "source_claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "source_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "target": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 80,
+          "pattern": "^(C-[A-Za-z0-9][A-Za-z0-9._:-]*@[0-9]+|G-[0-9]+)$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "refuting_evidence_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,80}$"
+        }
+      },
+      "required": [
+        "kind",
+        "source_claim_id",
+        "source_version",
+        "target",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "relation_disputed_response": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "implies",
+            "equivalent-to",
+            "contradicts",
+            "narrows",
+            "generalizes",
+            "uses-definition",
+            "addresses-gap"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "status": {
+          "type": "string",
+          "const": "disputed"
+        }
+      },
+      "required": [
+        "problem_id",
+        "kind",
+        "source",
+        "target",
+        "seq",
+        "status"
+      ],
+      "additionalProperties": false
+    },
     "reanchor_request": {
       "type": "object",
       "properties": {
@@ -6778,6 +6874,8 @@
     "gap_closed_response",
     "relation_file_request",
     "relation_filed_response",
+    "relation_dispute_request",
+    "relation_disputed_response",
     "reanchor_request",
     "reanchor_response",
     "synthesize_request",

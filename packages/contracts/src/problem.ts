@@ -96,6 +96,7 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // W5.5: the relation write joins the same teaching family — a malformed
   // edge body names its contract so the caller can repair it.
   "RELATION_BODY_INVALID",
+  "RELATION_DISPUTE_BODY_INVALID",
   // W5.6: the hypothesis kill's teaching refusals (a missing target, a
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",
@@ -131,6 +132,8 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "OBJECT_VERSION_CONFLICT",
   "RELATION_ENDPOINT_UNKNOWN",
   "RELATION_ALREADY_ASSERTED",
+  "RELATION_NOT_FOUND",
+  "RELATION_ALREADY_DISPUTED",
   "NOT_CLAIM_AUTHOR",
   "LOOKS_LIKE_CLAIM",
   "CYCLE_IN_DEPENDENCIES",

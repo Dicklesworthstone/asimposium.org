@@ -1094,6 +1094,61 @@ export const RelationFiledResponseSchema = z
   .strict();
 export type RelationFiledResponse = z.infer<typeof RelationFiledResponseSchema>;
 
+/**
+ * W5.5 relation edge dispute request (Fable §6.4a, ADR-21): an asserted
+ * relation edge is reviewable and refutable. Disputing an edge marks it
+ * disputed on the graph.
+ */
+export const RelationDisputeRequestSchema = z
+  .object({
+    kind: ClaimRelationKindSchema,
+    source_claim_id: ClaimIdSchema,
+    source_version: z.number().int().min(1),
+    target: z
+      .string()
+      .trim()
+      .min(3)
+      .max(80)
+      .regex(/^(C-[A-Za-z0-9][A-Za-z0-9._:-]*@[0-9]+|G-[0-9]+)$/),
+    reason: z.string().trim().min(1).max(2000),
+    refuting_evidence_id: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9._:-]{1,80}$/)
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const isGapTarget = value.target.startsWith("G-");
+    if (value.kind === "addresses-gap" && !isGapTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "addresses-gap targets a proof gap (G-n), not a claim.",
+      });
+    }
+    if (value.kind !== "addresses-gap" && isGapTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "only addresses-gap may target a gap; claim relations pin C-n@v.",
+      });
+    }
+  });
+export type RelationDisputeRequest = z.infer<typeof RelationDisputeRequestSchema>;
+
+export const RelationDisputedResponseSchema = z
+  .object({
+    problem_id: ProblemIdSchema,
+    kind: ClaimRelationKindSchema,
+    source: z.string().min(1),
+    target: z.string().min(1),
+    seq: z.number().int().positive(),
+    status: z.literal("disputed"),
+  })
+  .strict();
+export type RelationDisputedResponse = z.infer<typeof RelationDisputedResponseSchema>;
+
 /** Claim re-anchor to current problem statement version: POST /v1/sessions/:id/reanchor. */
 export const ClaimReanchorRequestSchema = z
   .object({
@@ -1218,6 +1273,8 @@ export const SessionsContractsSchema = z
     gap_closed_response: GapClosedResponseSchema,
     relation_file_request: RelationFileRequestSchema,
     relation_filed_response: RelationFiledResponseSchema,
+    relation_dispute_request: RelationDisputeRequestSchema,
+    relation_disputed_response: RelationDisputedResponseSchema,
     reanchor_request: ClaimReanchorRequestSchema,
     reanchor_response: ClaimReanchorResponseSchema,
     synthesize_request: SynthesizeRequestSchema,
