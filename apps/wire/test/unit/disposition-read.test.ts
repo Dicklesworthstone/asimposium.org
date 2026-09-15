@@ -502,4 +502,89 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
     expect(folded.currentVersion).toBe(2);
     expect(folded.disposition).toBe("open");
   });
+
+  test("review with statement-defect rubric transitions claim to malformed, and revision resets to open", () => {
+    const malformed = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "review-created",
+        sequence: 2,
+        targetVersion: 1,
+        carriesWeight: true,
+        verdict: "refute",
+        rubric: ["statement-defect"],
+        review: {
+          review_id: "R-DEFECT",
+          reviewer_id: "fellow-independent",
+          tier: "T2",
+          cross_family: true,
+          full_write_up: true,
+        },
+      },
+    ]);
+    expect(malformed.disposition).toBe("malformed");
+
+    // Revising the malformed claim exits malformed and resets to open (Rule P9)
+    const revised = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "review-created",
+        sequence: 2,
+        targetVersion: 1,
+        carriesWeight: true,
+        verdict: "refute",
+        rubric: ["statement-defect"],
+        review: {
+          review_id: "R-DEFECT",
+          reviewer_id: "fellow-independent",
+          tier: "T2",
+          cross_family: true,
+          full_write_up: true,
+        },
+      },
+      { kind: "claim-revised", sequence: 3, version: 2 },
+    ]);
+    expect(revised.disposition).toBe("open");
+    expect(revised.currentVersion).toBe(2);
+  });
+
+  test("claim-reduced event transitions claim to reduced-to", () => {
+    const reduced = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "claim-reduced",
+        sequence: 2,
+        targetVersion: 1,
+        targetClaimId: "C-TARGET",
+      },
+    ]);
+    expect(reduced.disposition).toBe("reduced-to");
+  });
+
+  test("author-concession transitions live claim to refuted", () => {
+    const conceded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "author-concession",
+        sequence: 2,
+        targetVersion: 1,
+      },
+    ]);
+    expect(conceded.disposition).toBe("refuted");
+  });
+
+  test("refuting evidence with independent confirmation and 72h unanswered settles as refuted", () => {
+    const refuted = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "refuting-evidence",
+        sequence: 2,
+        targetVersion: 1,
+        evidenceId: "E-REFUTE",
+        confirmedByIndependentReview: true,
+        unansweredHours: 72,
+      },
+    ]);
+    expect(refuted.disposition).toBe("refuted");
+  });
 });

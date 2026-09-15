@@ -34,6 +34,8 @@ export interface ScientificRow {
   content_digest: string | null;
   statement: string | null;
   direction: string | null;
+  claim_kind?: string | null;
+  reduced_to_claim_id?: string | null;
   weighted_refutation?: number;
 }
 
@@ -117,6 +119,8 @@ export function prepareScientificDispositions(
       END AS target_version,
       e.payload_sha256, c.payload_json, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
+      v.kind AS claim_kind,
+      (SELECT cd.depends_on_claim_id FROM claim_deps cd WHERE cd.problem_id = e.problem_id AND cd.claim_id = s.id LIMIT 1) AS reduced_to_claim_id,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
         AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation
     FROM events e
@@ -242,10 +246,22 @@ export async function foldScientificRows(
   for (const row of rows) {
     const payload = contents.get(row.event_id);
     if (row.type === "claim.created" || row.type === "claim.revised") {
+      const targetClaimId =
+        row.reduced_to_claim_id ??
+        (payload &&
+        Array.isArray(payload.relates_to) &&
+        payload.relates_to.length > 0 &&
+        typeof payload.relates_to[0] === "string"
+          ? (payload.relates_to[0] as string)
+          : undefined);
+      const isReduction =
+        (row.claim_kind === "reduction" || (payload && payload.kind === "reduction")) &&
+        Boolean(targetClaimId);
       timeline.push({
         kind: row.type === "claim.created" ? "claim-created" : "claim-revised",
         sequence: row.seq,
         version: row.object_version,
+        targetClaimId: isReduction ? targetClaimId : undefined,
       });
       continue;
     }
@@ -278,12 +294,23 @@ export async function foldScientificRows(
       row.type === "evidence.created" &&
       (row.direction === "refutes" || row.direction === "fails-to-reproduce")
     ) {
-      timeline.push({
-        kind: "refuting-evidence",
-        sequence: row.seq,
-        targetVersion: row.target_version,
-        evidenceId: row.object_id,
-      });
+      if (payload && payload.concession === true) {
+        timeline.push({
+          kind: "author-concession",
+          sequence: row.seq,
+          targetVersion: row.target_version,
+        });
+      } else {
+        timeline.push({
+          kind: "refuting-evidence",
+          sequence: row.seq,
+          targetVersion: row.target_version,
+          evidenceId: row.object_id,
+          confirmedByIndependentReview: payload?.confirmed_by_independent_review === true,
+          unansweredHours:
+            typeof payload?.unanswered_hours === "number" ? payload.unanswered_hours : 0,
+        });
+      }
       continue;
     }
     const claim = claims.get(row.target_version);
@@ -310,7 +337,7 @@ export async function foldScientificRows(
     if (row.type === "evidence.created") {
       if (
         payload.mode !== "confirmatory" ||
-        payload.selected_hypothesis_id != null ||
+        (payload.selected_hypothesis_id !== undefined && payload.selected_hypothesis_id !== null) ||
         payload.computed_class === "assertion" ||
         payload.computed_class === "heuristic"
       )
@@ -372,7 +399,7 @@ export async function foldScientificRows(
     if (legacy) legacyReviews++;
     let fullWriteUp = false;
     let artifactEvidenceId: string | undefined;
-    if (payload.verification != null) {
+    if (payload.verification !== undefined && payload.verification !== null) {
       const verification = ScientificVerificationSchema.safeParse(payload.verification);
       const material = verification.success ? resolve(verification.data.evidence, row) : undefined;
       try {
@@ -400,12 +427,16 @@ export async function foldScientificRows(
         carriesWeight = false;
       markStale(row);
     }
+    const rubric = Array.isArray(payload.rubric)
+      ? (payload.rubric.filter((r) => typeof r === "string") as string[])
+      : undefined;
     timeline.push({
       kind: "review-created",
       sequence: row.seq,
       targetVersion: row.target_version,
       carriesWeight,
       verdict: typeof payload.verdict === "string" ? payload.verdict : "cannot-verify",
+      rubric,
       review: {
         review_id: row.object_id,
         reviewer_id: row.fellow_id,
