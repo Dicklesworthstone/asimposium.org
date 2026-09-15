@@ -3,12 +3,17 @@ import {
   AnswerQuestionResponseSchema,
   AskQuestionRequestSchema,
   AskQuestionResponseSchema,
+  type BatchMemberResult,
+  type BatchWriteMember,
   ClaimReanchorRequestSchema,
   ClaimReanchorResponseSchema,
+  type ClaimRevision,
   ClaimRevisionSchema,
   CursorResponseSchema,
   type DirectClaimRequest,
   DirectClaimRequestSchema,
+  EventBatchRequestSchema,
+  EventBatchResponseSchema,
   type EvidenceRequest,
   EvidenceRequestSchema,
   EvidenceResponseSchema,
@@ -111,6 +116,7 @@ import type {
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
+import { planBatchCommit } from "../krater/batch";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
@@ -551,8 +557,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   const app = new Hono<{ Bindings: Env }>();
   // This nested app handles errors before the outer Worker. A failed atomic
   // write must preserve JSON retry guidance without exposing the D1 exception.
-  app.onError(() =>
-    validatedProblem({
+  app.onError((err) => {
+    return validatedProblem({
       status: 500,
       code: "INTERNAL_ERROR",
       title: "The Worker failed to handle this request",
@@ -560,8 +566,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       fixHint:
         "Retry the request with the same Idempotency-Key. If it persists, report the route and time.",
       headers: { "cache-control": "private, no-store" },
-    }),
-  );
+    });
+  });
   const privateNoStore = (response: Response): Response => {
     const headers = new Headers(response.headers);
     headers.set("cache-control", "private, no-store");
@@ -816,7 +822,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "release_lease"
     | "challenge_lease"
     | "session_heartbeat"
-    | "session_close";
+    | "session_close"
+    | "events_batch";
 
   interface ReplayRecord {
     readonly plaintext: string;
@@ -4153,6 +4160,39 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  async function computeProblemReviewQueuePosition(
+    db: Env["DB"],
+    problemId: string,
+    seq: number,
+    claimId: string,
+  ): Promise<number> {
+    const row = await db
+      .prepare(
+        `WITH claim_heads AS (
+           SELECT object_id, MAX(seq) AS head_seq
+           FROM events
+           WHERE problem_id = ? AND seq < ? AND object_kind = 'claim'
+             AND type IN ('claim.created', 'claim.revised')
+           GROUP BY object_id
+         )
+         SELECT COUNT(*) AS pos
+         FROM claim_heads h
+         JOIN events e ON e.problem_id = ? AND e.seq = h.head_seq
+         WHERE e.object_id != ?
+           AND NOT EXISTS (
+             SELECT 1 FROM reviews r
+             WHERE r.problem_id = ? AND r.target_claim_id = e.object_id AND r.target_version = e.object_version
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM retractions ret
+             WHERE ret.problem_id = ? AND ret.target_object = e.object_id
+           )`,
+      )
+      .bind(problemId, seq, problemId, claimId, problemId, problemId)
+      .first<{ pos: number }>();
+    return row?.pos ?? 0;
+  }
+
   interface ClaimPromotionExecutionInput {
     readonly c: Context<{ Bindings: Env }>;
     readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
@@ -4335,12 +4375,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           requestDigest: digest,
           claimIdForSequence: (sequence) => `C-${sequence}`,
           statementsAfterIdempotencySettlement: async (settlement) => {
+            const queuePosition = await computeProblemReviewQueuePosition(
+              db,
+              session.problem_id,
+              settlement.sequence,
+              settlement.claimId,
+            );
             const value = PromoteResponseSchema.parse({
               claim_id: settlement.claimId,
               problem_id: session.problem_id,
               seq: settlement.sequence,
               version: versionMint.version,
-              queue_position: 0,
+              queue_position: queuePosition,
             });
             const sealed = await options.replayProtector.seal(
               JSON.stringify(value),
@@ -4816,6 +4862,589 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
   });
 
+  interface ClaimRevisionExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    readonly data: ClaimRevision;
+    readonly cleanupOnFailure?: () => Promise<void>;
+    readonly checkSessionStillOpen?: boolean;
+  }
+
+  async function executeClaimRevision(input: ClaimRevisionExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+
+    if (CONJECTURE_CLASS_KINDS.has(data.kind) && data.falsifier === undefined) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "MISSING_FALSIFIER",
+        title: "Conjecture-class claims require a falsifier",
+        detail: `claim kind '${data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
+        fixHint:
+          "Add 'falsifier' to a new replacement (push a new workshop revision if using a draft). If nothing could refute the statement, it may be a definition (kind: 'definition').",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: data.claim_id,
+            base_version: data.base_version,
+            kind: data.kind,
+            statement: data.statement,
+            falsifier: "<what would refute this>",
+            depends_on: data.depends_on,
+          },
+        },
+      });
+    }
+    const claimHead = await db
+      .prepare(
+        `SELECT
+           (SELECT MAX(v.version) FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id) AS head_version,
+           (SELECT v.editor_fellow_id FROM claim_versions v
+            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id AND v.version = 1
+           ) AS author_fellow_id
+         FROM claims c WHERE c.problem_id = ? AND c.id = ?`,
+      )
+      .bind(session.problem_id, data.claim_id)
+      .first<{ head_version: number; author_fellow_id: string }>();
+    if (claimHead === null || claimHead === undefined) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 404,
+        code: "CLAIM_NOT_FOUND",
+        title: "No such claim on this problem",
+        detail: `Claim ${data.claim_id} does not exist on this problem.`,
+        fixHint: "Check the id against your pack's claims board.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: "C-1",
+            base_version: 1,
+            kind: "conjecture",
+            statement: "<claim text>",
+          },
+        },
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const activeExclusiveLease = await db
+      .prepare(
+        `SELECT lease_id, fellow_id, leased_until, object_ref, parallel_safe
+         FROM leases
+         WHERE problem_id = ? AND (object_id = ? OR object_ref = ?)
+           AND status = 'active' AND parallel_safe = 0 AND leased_until > ?`,
+      )
+      .bind(session.problem_id, data.claim_id, data.claim_id, nowIso)
+      .first<{
+        lease_id: string;
+        fellow_id: string;
+        leased_until: string;
+        object_ref: string;
+        parallel_safe: number;
+      }>();
+
+    if (activeExclusiveLease && activeExclusiveLease.fellow_id !== auth.binding.fellowId) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 409,
+        code: "LEASED",
+        title: "Object is leased by another Fellow",
+        detail: `Claim '${data.claim_id}' is currently under exclusive lease by fellow '${activeExclusiveLease.fellow_id}' until ${activeExclusiveLease.leased_until}.`,
+        fixHint:
+          "Wait for the lease to expire or be released, or coordinate with the lessee's sponsor, or challenge the lease if it has become stale.",
+        rule: "§7.5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            claim_id: data.claim_id,
+            leased_by: activeExclusiveLease.fellow_id,
+            leased_until: activeExclusiveLease.leased_until,
+            parallel_safe: false,
+          },
+        },
+      });
+    }
+
+    if (claimHead.author_fellow_id !== auth.binding.fellowId) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 403,
+        code: "NOT_CLAIM_AUTHOR",
+        title: "Only the claim author may revise it",
+        detail: `Claim ${data.claim_id} was authored by another Fellow.`,
+        fixHint: "Review it instead, or ask its author to mint a new version.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { kind: "review", target_claim_id: "C-1", verdict: "confirm" },
+        },
+      });
+    }
+    if (claimHead.head_version !== data.base_version) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 409,
+        code: "OBJECT_VERSION_CONFLICT",
+        title: "The base version is stale",
+        detail: `Claim ${data.claim_id} is at head version ${claimHead.head_version}; the replacement was based on ${data.base_version}.`,
+        fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          head_version: claimHead.head_version,
+          example: {
+            claim_id: "C-1",
+            base_version: 2,
+            kind: "conjecture",
+            statement: "<new text>",
+          },
+        },
+      });
+    }
+
+    // P11: same normalized statement as ANOTHER claim refuses; the claim under
+    // revision is excluded from its own gate. The unique index stays the
+    // commit-time guard — a revision that introduces a duplicate aborts its
+    // own batch WITHOUT minting a version (mapped in the catch below).
+    const candidateHash = await normHash(data.statement);
+    const existingDuplicate = await db
+      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? AND id != ? LIMIT 1")
+      .bind(session.problem_id, candidateHash, data.claim_id)
+      .first<{ id: string }>();
+    if (existingDuplicate !== null && existingDuplicate !== undefined) {
+      await cleanupOnFailure();
+      const refusal = duplicateClaimRefusal(existingDuplicate.id);
+      return validatedProblem({
+        status: 409,
+        code: refusal.code,
+        title: "A near-duplicate claim already exists",
+        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+        fixHint: refusal.fixHint,
+        rule: refusal.rule,
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          existing_claim_id: refusal.existingId,
+          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
+        },
+      });
+    }
+
+    const dependencyCycleProblem = () =>
+      validatedProblem({
+        status: 422,
+        code: "CYCLE_IN_DEPENDENCIES",
+        title: "The dependency would close a cycle",
+        detail:
+          "A proposed dependency reaches back to the claim being revised. No revision was published.",
+        fixHint:
+          "Remove the proposed dependency that leads back to this claim and retry with a new Idempotency-Key.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { depends_on: [] },
+        },
+      });
+    const resolvedDeps = [...new Set(data.depends_on ?? [])];
+    if (resolvedDeps.includes(data.claim_id)) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "CYCLE_IN_DEPENDENCIES",
+        title: "A claim cannot depend on itself",
+        detail: `${data.claim_id} lists itself in depends_on.`,
+        fixHint: "Remove the self-reference from depends_on.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { depends_on: ["C-2"] },
+        },
+      });
+    }
+    if (resolvedDeps.length > 0) {
+      const found = await db
+        .prepare(
+          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
+        )
+        .bind(session.problem_id, ...resolvedDeps)
+        .all<{ id: string }>();
+      const known = new Set((found.results ?? []).map((row) => row.id));
+      const missing = resolvedDeps.filter((dep) => !known.has(dep));
+      if (missing.length > 0) {
+        await cleanupOnFailure();
+        return validatedProblem({
+          status: 422,
+          code: "DEPENDENCY_NOT_FOUND",
+          title: "depends_on references unknown claims",
+          detail: `No claim ${missing.join(", ")} exists on this problem.`,
+          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
+          rule: "P10",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            missing_dependency_ids: missing,
+            example: { depends_on: ["C-1"] },
+          },
+        });
+      }
+    }
+
+    if (resolvedDeps.length > 0) {
+      const cycle = await db
+        .prepare(`
+        WITH RECURSIVE reachable(claim_id) AS (
+          VALUES ${resolvedDeps.map(() => "(?)").join(", ")}
+          UNION
+          SELECT d.depends_on_claim_id FROM claim_deps d
+          JOIN reachable r ON d.claim_id = r.claim_id WHERE d.problem_id = ?
+        )
+        SELECT 1 AS cycle FROM reachable WHERE claim_id = ? LIMIT 1
+      `)
+        .bind(...resolvedDeps, session.problem_id, data.claim_id)
+        .first();
+      if (cycle !== null && cycle !== undefined) {
+        await cleanupOnFailure();
+        return dependencyCycleProblem();
+      }
+    }
+
+    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
+    try {
+      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
+    } catch (error) {
+      await cleanupOnFailure();
+      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
+      throw error;
+    }
+
+    // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
+    // bytes; it must earn its own screening decision and can never inherit
+    // one from the previous version.
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "revise",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "revise",
+        statement: JSON.stringify(data),
+        falsifier: data.falsifier ?? null,
+      },
+    );
+    if ("error" in screened) {
+      await cleanupOnFailure();
+      return screened.error;
+    }
+    const { screening, reservation } = screened;
+
+    try {
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const promotedAt = new Date().toISOString();
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
+      // P9: the content is fixed by the request, so mint the @n+1 decision
+      // before the batch; the route commits what mintClaimVersion decided.
+      const versionMint = await mintClaimVersion({
+        currentVersion: data.base_version,
+        newContent: {
+          kind: data.kind,
+          statement: data.statement,
+          falsifier: data.falsifier ?? null,
+        },
+        editorFellowId: auth.binding.fellowId,
+        sha256Hex,
+      });
+      const write = await writeClaimRevision(
+        db,
+        {
+          problemId: session.problem_id,
+          claimId: data.claim_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          baseVersion: data.base_version,
+          newVersion: versionMint.version,
+          kind: data.kind,
+          statement: data.statement,
+          scientificProvenance: data.scientific_provenance,
+          dependencyPins,
+          falsifier: data.falsifier ?? null,
+          contentDigest: versionMint.contentDigest,
+          editorFellowId: auth.binding.fellowId,
+          normHash: candidateHash,
+          createdAt: promotedAt,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+            credentialId: auth.binding.credentialId,
+          },
+        },
+        {},
+        {
+          requestDigest: digest,
+          statementsAfterIdempotencySettlement: async (settlement) => {
+            const queuePosition = await computeProblemReviewQueuePosition(
+              db,
+              session.problem_id,
+              settlement.sequence,
+              settlement.claimId,
+            );
+            const value = ReviseResponseSchema.parse({
+              claim_id: settlement.claimId,
+              problem_id: session.problem_id,
+              seq: settlement.sequence,
+              version: versionMint.version,
+              queue_position: queuePosition,
+            });
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(value),
+              sessionReplayContext("revise", auth.binding.fellowId, c.req.path, key, digest),
+            );
+            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+            return [
+              ...(await prepareDeadEndTriggers(db, session.problem_id, settlement)),
+              ...scientificContentGuards(
+                db,
+                dependencyPins.map((pin) => ({
+                  eventId: pin.event_id,
+                  payloadDigest: pin.payload_digest,
+                })),
+              ),
+              screeningPublicationStatement(
+                db,
+                screening,
+                settlement.eventId,
+                session.session_id,
+                digest,
+              ),
+              settleQuotaReservationStatement(db, reservation.reservationId),
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                     (scope, principal_scope, idempotency_key, request_digest,
+                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'revise', ?, ?,
+                     CASE WHEN EXISTS (
+                       SELECT 1 FROM sessions
+                       JOIN problems ON problems.id = sessions.problem_id
+                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                         AND problems.status NOT IN ('resolved', 'retired')
+                     ) THEN ? ELSE NULL END,
+                     ?, ?, ?, ?
+                   FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?
+                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  session.session_id,
+                  auth.binding.fellowId,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  expiresAt,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  settlement.eventId,
+                  settlement.sequence,
+                  auth.binding.credentialId,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'revise' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(auth.binding.fellowId, key, digest, claimToken),
+              db
+                .prepare(
+                  `UPDATE idempotency
+                   SET request_digest = CASE WHEN EXISTS (
+                     SELECT 1 FROM session_write_replays
+                     WHERE scope = 'revise' AND principal_scope = ?
+                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+                   ) THEN request_digest ELSE NULL END
+                   WHERE problem_id = ? AND idempotency_key = ?
+                     AND event_id = ? AND event_seq = ?`,
+                )
+                .bind(
+                  auth.binding.fellowId,
+                  key,
+                  digest,
+                  claimToken,
+                  session.problem_id,
+                  kraterIdempotencyKey,
+                  settlement.eventId,
+                  settlement.sequence,
+                ),
+              ...resolvedDeps.map((dep) =>
+                db
+                  .prepare(
+                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+                     SELECT p.id, ?, ?, ?
+                     FROM problems p
+                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?
+                     ON CONFLICT(problem_id, claim_id, depends_on_claim_id) DO NOTHING`,
+                  )
+                  .bind(
+                    settlement.claimId,
+                    dep,
+                    promotedAt,
+                    kraterIdempotencyKey,
+                    session.problem_id,
+                    settlement.eventId,
+                    settlement.sequence,
+                  ),
+              ),
+            ];
+          },
+        },
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(
+        db,
+        "revise",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) {
+        throw new Error("Krater revision committed without its atomic replay");
+      }
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await cleanupOnFailure();
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "revise",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message)) {
+        return dependencyCycleProblem();
+      }
+      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
+      if (error instanceof Error && /claim_versions/.test(error.message)) {
+        // The stale-base backstop: a concurrent revision minted @base+1 first,
+        // so this batch died on the claim_versions primary key without
+        // minting anything.
+        return validatedProblem({
+          status: 409,
+          code: "OBJECT_VERSION_CONFLICT",
+          title: "The base version is stale",
+          detail: `A concurrent revision of ${data.claim_id} won the race to version ${data.base_version + 1}; nothing was minted.`,
+          fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
+          rule: "P9",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              claim_id: "C-1",
+              base_version: 2,
+              kind: "conjecture",
+              statement: "<new text>",
+            },
+          },
+        });
+      }
+      if (
+        error instanceof Error &&
+        /claims_problem_norm_hash_idx|UNIQUE constraint failed: claims\./.test(error.message)
+      ) {
+        // P11 commit-time guard: the revision introduced a statement that
+        // collides with another OPEN claim. No version was minted (the whole
+        // batch rolled back).
+        const winnerClaim = await db
+          .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+          .bind(session.problem_id, candidateHash)
+          .first<{ id: string }>();
+        const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
+        return validatedProblem({
+          status: 409,
+          code: refusal.code,
+          title: "A near-duplicate claim already exists",
+          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+          fixHint: refusal.fixHint,
+          rule: refusal.rule,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            existing_claim_id: refusal.existingId,
+            example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
+          },
+        });
+      }
+      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
+        return idempotencyConflictProblem();
+      }
+      if (error instanceof KraterProblemNotFoundError) {
+        return validatedProblem({
+          status: 404,
+          code: "PROBLEM_NOT_FOUND",
+          title: "No such problem",
+          detail: "The session's problem is missing from the ledger.",
+          fixHint: "Check the problem id against GET /problems.json.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { method: "GET", path: "/problems.json" },
+          },
+        });
+      }
+      if (input.checkSessionStillOpen ?? true) {
+        const current = await openSessionOf(db, session.session_id, auth.binding.fellowId);
+        if (current instanceof Response) return current;
+      }
+      if (
+        error instanceof ReplayClaimNotCommittedError ||
+        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+      ) {
+        return writeRefusedProblem();
+      }
+      const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
+      if (lifecycleRefusal) return lifecycleRefusal;
+      throw error;
+    }
+  }
+
   // --- POST /v1/sessions/:id/revise (W5.3 P9: mint @n+1, reset to open) ----
   app.post("/v1/sessions/:id/revise", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -5000,548 +5629,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       }
     }
-    const parsed = { data: replacement };
-    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
-      return validatedProblem({
-        status: 422,
-        code: "MISSING_FALSIFIER",
-        title: "Conjecture-class claims require a falsifier",
-        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this revised statement?`,
-        fixHint:
-          "Add 'falsifier' to a new replacement (push a new workshop revision if using a draft). If nothing could refute the statement, it may be a definition (kind: 'definition').",
-        rule: "P3",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            claim_id: parsed.data.claim_id,
-            base_version: parsed.data.base_version,
-            kind: parsed.data.kind,
-            statement: parsed.data.statement,
-            falsifier: "<what would refute this>",
-            depends_on: parsed.data.depends_on,
-          },
-        },
-      });
-    }
-    const claimHead = await db
-      .prepare(
-        `SELECT
-           (SELECT MAX(v.version) FROM claim_versions v
-            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id) AS head_version,
-           (SELECT v.editor_fellow_id FROM claim_versions v
-            WHERE v.problem_id = c.problem_id AND v.claim_id = c.id AND v.version = 1
-           ) AS author_fellow_id
-         FROM claims c WHERE c.problem_id = ? AND c.id = ?`,
-      )
-      .bind(session.problem_id, parsed.data.claim_id)
-      .first<{ head_version: number; author_fellow_id: string }>();
-    if (claimHead === null || claimHead === undefined) {
-      return validatedProblem({
-        status: 404,
-        code: "CLAIM_NOT_FOUND",
-        title: "No such claim on this problem",
-        detail: `Claim ${parsed.data.claim_id} does not exist on this problem.`,
-        fixHint: "Check the id against your pack's claims board.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            claim_id: "C-1",
-            base_version: 1,
-            kind: "conjecture",
-            statement: "<claim text>",
-          },
-        },
-      });
-    }
 
-    const nowIso = new Date().toISOString();
-    const activeExclusiveLease = await db
-      .prepare(
-        `SELECT lease_id, fellow_id, leased_until, object_ref, parallel_safe
-         FROM leases
-         WHERE problem_id = ? AND (object_id = ? OR object_ref = ?)
-           AND status = 'active' AND parallel_safe = 0 AND leased_until > ?`,
-      )
-      .bind(session.problem_id, parsed.data.claim_id, parsed.data.claim_id, nowIso)
-      .first<{
-        lease_id: string;
-        fellow_id: string;
-        leased_until: string;
-        object_ref: string;
-        parallel_safe: number;
-      }>();
-
-    if (activeExclusiveLease && activeExclusiveLease.fellow_id !== auth.binding.fellowId) {
-      return validatedProblem({
-        status: 409,
-        code: "LEASED",
-        title: "Object is leased by another Fellow",
-        detail: `Claim '${parsed.data.claim_id}' is currently under exclusive lease by fellow '${activeExclusiveLease.fellow_id}' until ${activeExclusiveLease.leased_until}.`,
-        fixHint:
-          "Wait for the lease to expire or be released, or coordinate with the lessee's sponsor, or challenge the lease if it has become stale.",
-        rule: "§7.5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            claim_id: parsed.data.claim_id,
-            leased_by: activeExclusiveLease.fellow_id,
-            leased_until: activeExclusiveLease.leased_until,
-            parallel_safe: false,
-          },
-        },
-      });
-    }
-
-    if (claimHead.author_fellow_id !== auth.binding.fellowId) {
-      return validatedProblem({
-        status: 403,
-        code: "NOT_CLAIM_AUTHOR",
-        title: "Only the claim author may revise it",
-        detail: `Claim ${parsed.data.claim_id} was authored by another Fellow.`,
-        fixHint: "Review it instead, or ask its author to mint a new version.",
-        rule: "P9",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { kind: "review", target_claim_id: "C-1", verdict: "confirm" },
-        },
-      });
-    }
-    if (claimHead.head_version !== parsed.data.base_version) {
-      return validatedProblem({
-        status: 409,
-        code: "OBJECT_VERSION_CONFLICT",
-        title: "The base version is stale",
-        detail: `Claim ${parsed.data.claim_id} is at head version ${claimHead.head_version}; the replacement was based on ${parsed.data.base_version}.`,
-        fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
-        rule: "P9",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          head_version: claimHead.head_version,
-          example: {
-            claim_id: "C-1",
-            base_version: 2,
-            kind: "conjecture",
-            statement: "<new text>",
-          },
-        },
-      });
-    }
-
-    // P11: same normalized statement as ANOTHER claim refuses; the claim under
-    // revision is excluded from its own gate. The unique index stays the
-    // commit-time guard — a revision that introduces a duplicate aborts its
-    // own batch WITHOUT minting a version (mapped in the catch below).
-    const candidateHash = await normHash(parsed.data.statement);
-    const existingDuplicate = await db
-      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? AND id != ? LIMIT 1")
-      .bind(session.problem_id, candidateHash, parsed.data.claim_id)
-      .first<{ id: string }>();
-    if (existingDuplicate !== null && existingDuplicate !== undefined) {
-      const refusal = duplicateClaimRefusal(existingDuplicate.id);
-      return validatedProblem({
-        status: 409,
-        code: refusal.code,
-        title: "A near-duplicate claim already exists",
-        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
-        fixHint: refusal.fixHint,
-        rule: refusal.rule,
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          existing_claim_id: refusal.existingId,
-          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
-        },
-      });
-    }
-
-    const dependencyCycleProblem = () =>
-      validatedProblem({
-        status: 422,
-        code: "CYCLE_IN_DEPENDENCIES",
-        title: "The dependency would close a cycle",
-        detail:
-          "A proposed dependency reaches back to the claim being revised. No revision was published.",
-        fixHint:
-          "Remove the proposed dependency that leads back to this claim and retry with a new Idempotency-Key.",
-        rule: "P10",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { depends_on: [] },
-        },
-      });
-    const resolvedDeps = [...new Set(parsed.data.depends_on)];
-    if (resolvedDeps.includes(parsed.data.claim_id)) {
-      return validatedProblem({
-        status: 422,
-        code: "CYCLE_IN_DEPENDENCIES",
-        title: "A claim cannot depend on itself",
-        detail: `${parsed.data.claim_id} lists itself in depends_on.`,
-        fixHint: "Remove the self-reference from depends_on.",
-        rule: "P10",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { depends_on: ["C-2"] },
-        },
-      });
-    }
-    if (resolvedDeps.length > 0) {
-      const found = await db
-        .prepare(
-          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
-        )
-        .bind(session.problem_id, ...resolvedDeps)
-        .all<{ id: string }>();
-      const known = new Set((found.results ?? []).map((row) => row.id));
-      const missing = resolvedDeps.filter((dep) => !known.has(dep));
-      if (missing.length > 0) {
-        return validatedProblem({
-          status: 422,
-          code: "DEPENDENCY_NOT_FOUND",
-          title: "depends_on references unknown claims",
-          detail: `No claim ${missing.join(", ")} exists on this problem.`,
-          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
-          rule: "P10",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            missing_dependency_ids: missing,
-            example: { depends_on: ["C-1"] },
-          },
-        });
-      }
-    }
-
-    if (resolvedDeps.length > 0) {
-      const cycle = await db
-        .prepare(`
-        WITH RECURSIVE reachable(claim_id) AS (
-          VALUES ${resolvedDeps.map(() => "(?)").join(", ")}
-          UNION
-          SELECT d.depends_on_claim_id FROM claim_deps d
-          JOIN reachable r ON d.claim_id = r.claim_id WHERE d.problem_id = ?
-        )
-        SELECT 1 AS cycle FROM reachable WHERE claim_id = ? LIMIT 1
-      `)
-        .bind(...resolvedDeps, session.problem_id, parsed.data.claim_id)
-        .first();
-      if (cycle !== null && cycle !== undefined) return dependencyCycleProblem();
-    }
-
-    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
-    try {
-      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
-    } catch (error) {
-      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
-      throw error;
-    }
-
-    // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
-    // bytes; it must earn its own screening decision and can never inherit
-    // one from the previous version.
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "revise",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "revise",
-        statement: JSON.stringify(parsed.data),
-        falsifier: parsed.data.falsifier ?? null,
-      },
-    );
-    if ("error" in screened) return screened.error;
-    const { screening, reservation } = screened;
-
-    try {
-      const eventId = mintId("E");
-      const claimToken = mintId("R");
-      const promotedAt = new Date().toISOString();
-      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
-      // P9: the content is fixed by the request, so mint the @n+1 decision
-      // before the batch; the route commits what mintClaimVersion decided.
-      const versionMint = await mintClaimVersion({
-        currentVersion: parsed.data.base_version,
-        newContent: {
-          kind: parsed.data.kind,
-          statement: parsed.data.statement,
-          falsifier: parsed.data.falsifier ?? null,
-        },
-        editorFellowId: auth.binding.fellowId,
-        sha256Hex,
-      });
-      const write = await writeClaimRevision(
-        db,
-        {
-          problemId: session.problem_id,
-          claimId: parsed.data.claim_id,
-          eventId,
-          idempotencyKey: kraterIdempotencyKey,
-          baseVersion: parsed.data.base_version,
-          newVersion: versionMint.version,
-          kind: parsed.data.kind,
-          statement: parsed.data.statement,
-          scientificProvenance: parsed.data.scientific_provenance,
-          dependencyPins,
-          falsifier: parsed.data.falsifier ?? null,
-          contentDigest: versionMint.contentDigest,
-          editorFellowId: auth.binding.fellowId,
-          normHash: candidateHash,
-          createdAt: promotedAt,
-          attribution: {
-            fellowId: auth.binding.fellowId,
-            sponsorId: auth.binding.sponsorId,
-            sessionId: session.session_id,
-            modelSelfDeclared: auth.binding.model,
-            harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
-          },
-        },
-        {},
-        {
-          requestDigest: digest,
-          statementsAfterIdempotencySettlement: async (settlement) => {
-            const value = ReviseResponseSchema.parse({
-              claim_id: settlement.claimId,
-              problem_id: session.problem_id,
-              seq: settlement.sequence,
-              version: versionMint.version,
-              queue_position: 0,
-            });
-            const sealed = await options.replayProtector.seal(
-              JSON.stringify(value),
-              sessionReplayContext("revise", auth.binding.fellowId, c.req.path, key, digest),
-            );
-            const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
-            return [
-              ...(await prepareDeadEndTriggers(db, session.problem_id, settlement)),
-              ...scientificContentGuards(
-                db,
-                dependencyPins.map((pin) => ({
-                  eventId: pin.event_id,
-                  payloadDigest: pin.payload_digest,
-                })),
-              ),
-              screeningPublicationStatement(
-                db,
-                screening,
-                settlement.eventId,
-                session.session_id,
-                digest,
-              ),
-              settleQuotaReservationStatement(db, reservation.reservationId),
-              db
-                .prepare(
-                  `INSERT INTO session_write_replays
-                     (scope, principal_scope, idempotency_key, request_digest,
-                      response_ciphertext, response_initialization_vector, expires_at, claim_token)
-                   SELECT 'revise', ?, ?,
-                     CASE WHEN EXISTS (
-                       SELECT 1 FROM sessions
-                       JOIN problems ON problems.id = sessions.problem_id
-                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
-                         AND problems.status NOT IN ('resolved', 'retired')
-                     ) THEN ? ELSE NULL END,
-                     ?, ?, ?, ?
-                   FROM idempotency
-                   WHERE problem_id = ? AND idempotency_key = ?
-                     AND event_id = ? AND event_seq = ?
-                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
-                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
-                )
-                .bind(
-                  auth.binding.fellowId,
-                  key,
-                  session.session_id,
-                  auth.binding.fellowId,
-                  digest,
-                  sealed.ciphertext,
-                  sealed.initializationVector,
-                  expiresAt,
-                  claimToken,
-                  session.problem_id,
-                  kraterIdempotencyKey,
-                  settlement.eventId,
-                  settlement.sequence,
-                  auth.binding.credentialId,
-                ),
-              db
-                .prepare(
-                  `UPDATE public_cursor SET cursor = cursor + 1
-                   WHERE singleton = 1 AND EXISTS (
-                     SELECT 1 FROM session_write_replays
-                     WHERE scope = 'revise' AND principal_scope = ?
-                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-                   )`,
-                )
-                .bind(auth.binding.fellowId, key, digest, claimToken),
-              db
-                .prepare(
-                  `UPDATE idempotency
-                   SET request_digest = CASE WHEN EXISTS (
-                     SELECT 1 FROM session_write_replays
-                     WHERE scope = 'revise' AND principal_scope = ?
-                       AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
-                   ) THEN request_digest ELSE NULL END
-                   WHERE problem_id = ? AND idempotency_key = ?
-                     AND event_id = ? AND event_seq = ?`,
-                )
-                .bind(
-                  auth.binding.fellowId,
-                  key,
-                  digest,
-                  claimToken,
-                  session.problem_id,
-                  kraterIdempotencyKey,
-                  settlement.eventId,
-                  settlement.sequence,
-                ),
-              ...resolvedDeps.map((dep) =>
-                db
-                  .prepare(
-                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
-                     SELECT p.id, ?, ?, ?
-                     FROM problems p
-                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?
-                     ON CONFLICT(problem_id, claim_id, depends_on_claim_id) DO NOTHING`,
-                  )
-                  .bind(
-                    settlement.claimId,
-                    dep,
-                    promotedAt,
-                    kraterIdempotencyKey,
-                    session.problem_id,
-                    settlement.eventId,
-                    settlement.sequence,
-                  ),
-              ),
-            ];
-          },
-        },
-      );
-      scheduleCommittedPromotionNudge(c);
-      const replay = await readReplayRecord(
-        db,
-        "revise",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) {
-        throw new Error("Krater revision committed without its atomic replay");
-      }
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "revise",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) {
-          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-        }
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message)) {
-        return dependencyCycleProblem();
-      }
-      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
-      if (error instanceof Error && /claim_versions/.test(error.message)) {
-        // The stale-base backstop: a concurrent revision minted @base+1 first,
-        // so this batch died on the claim_versions primary key without
-        // minting anything.
-        return validatedProblem({
-          status: 409,
-          code: "OBJECT_VERSION_CONFLICT",
-          title: "The base version is stale",
-          detail: `A concurrent revision of ${parsed.data.claim_id} won the race to version ${parsed.data.base_version + 1}; nothing was minted.`,
-          fixHint: "Re-read the current head from your pack, then re-apply your change on it.",
-          rule: "P9",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: {
-              claim_id: "C-1",
-              base_version: 2,
-              kind: "conjecture",
-              statement: "<new text>",
-            },
-          },
-        });
-      }
-      if (
-        error instanceof Error &&
-        /claims_problem_norm_hash_idx|UNIQUE constraint failed: claims\./.test(error.message)
-      ) {
-        // P11 commit-time guard: the revision introduced a statement that
-        // collides with another OPEN claim. No version was minted (the whole
-        // batch rolled back).
-        const winnerClaim = await db
-          .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
-          .bind(session.problem_id, candidateHash)
-          .first<{ id: string }>();
-        const refusal = duplicateClaimRefusal(winnerClaim?.id ?? "C-uncommitted");
-        return validatedProblem({
-          status: 409,
-          code: refusal.code,
-          title: "A near-duplicate claim already exists",
-          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
-          fixHint: refusal.fixHint,
-          rule: refusal.rule,
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            existing_claim_id: refusal.existingId,
-            example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
-          },
-        });
-      }
-      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
-        return idempotencyConflictProblem();
-      }
-      if (error instanceof KraterProblemNotFoundError) {
-        return validatedProblem({
-          status: 404,
-          code: "PROBLEM_NOT_FOUND",
-          title: "No such problem",
-          detail: "The session's problem is missing from the ledger.",
-          fixHint: "Check the problem id against GET /problems.json.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { method: "GET", path: "/problems.json" },
-          },
-        });
-      }
-      const current = await openSessionOf(db, sessionId, auth.binding.fellowId);
-      if (current instanceof Response) return current;
-      if (
-        error instanceof ReplayClaimNotCommittedError ||
-        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
-      ) {
-        return writeRefusedProblem();
-      }
-      const lifecycleRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
-      if (lifecycleRefusal) return lifecycleRefusal;
-      throw error;
-    }
+    return executeClaimRevision({
+      c,
+      auth,
+      db,
+      key,
+      digest,
+      session,
+      data: replacement,
+      checkSessionStillOpen: true,
+    });
   });
 
   // --- POST /v1/sessions/:id/reanchor (W5.1 Claim re-anchor to problem statement version) ---
@@ -8009,7 +8107,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const decision =  authorizeFellowWrite({
+    const decision = authorizeFellowWrite({
       effect: "promote",
       credential: auth.binding,
       target: {
@@ -8269,9 +8367,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 data.source.locator ?? null,
                 data.source.excerpt ?? null,
                 data.computation_domain_or_floor ?? null,
-                data.reproduction === undefined
-                  ? null
-                  : JSON.stringify(data.reproduction),
+                data.reproduction === undefined ? null : JSON.stringify(data.reproduction),
                 data.mode,
                 data.selected_hypothesis_id ?? null,
                 assessment.class,
@@ -13118,6 +13214,682 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
       cleanupOnFailure: sessionResult.cleanupOnFailure,
     });
+  });
+
+  // --- POST /v1/p/:id/events:batch ------------------------------------------
+  function resolveBatchTempIds(value: unknown, resolved: Map<string, string>): unknown {
+    if (typeof value === "string") {
+      if (resolved.has(value)) {
+        return resolved.get(value)!;
+      }
+      const atIndex = value.indexOf("@");
+      if (atIndex > 0 && value.startsWith("tmp:")) {
+        const baseTempId = value.slice(0, atIndex);
+        const suffix = value.slice(atIndex);
+        if (resolved.has(baseTempId)) {
+          return `${resolved.get(baseTempId)!}${suffix}`;
+        }
+      }
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => resolveBatchTempIds(item, resolved));
+    }
+    if (value !== null && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = resolveBatchTempIds(v, resolved);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  app.post("/v1/p/:id/events:batch", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = EventBatchRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "BATCH_BODY_INVALID",
+        title: "Invalid batch request body",
+        detail: "The request body did not match the event batch contract.",
+        fixHint:
+          "Provide an array of 1 to 16 members with tempId (tmp:<id>), causedBy, action, and data.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/batch.v1.json",
+          example: {
+            members: [
+              {
+                tempId: "tmp:claim-1",
+                causedBy: [],
+                action: "claim",
+                data: {
+                  kind: "conjecture",
+                  statement: "The orbit count is invariant under all eight toggles.",
+                  falsifier: "A toggle sequence that changes the orbit count.",
+                },
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    const plan = planBatchCommit(
+      parsed.data.members.map((m) => ({
+        tempId: m.tempId,
+        causedBy: m.caused_by ?? m.causedBy ?? [],
+      })),
+    );
+    if (!plan.ok) {
+      return validatedProblem({
+        status: 422,
+        code: plan.code,
+        title: "Batch execution plan failed",
+        detail: plan.detail,
+        fixHint:
+          "Ensure batch has 1-16 members, valid tmp:<id> temporary IDs, no duplicates or cycles in caused_by, and no dangling references.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/batch.v1.json",
+          example: {
+            members: [
+              {
+                tempId: "tmp:claim-1",
+                causedBy: [],
+                action: "claim",
+                data: {
+                  kind: "conjecture",
+                  statement: "The orbit count is invariant under all eight toggles.",
+                  falsifier: "A toggle sequence that changes the orbit count.",
+                },
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "events_batch",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => EventBatchResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
+    const problemId = c.req.param("id");
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    if (!sessionResult.ok) return sessionResult.response;
+
+    const promotionCount = parsed.data.members.filter(
+      (m) => m.action === "claim" || m.action === "promote",
+    ).length;
+    if (promotionCount > 0) {
+      const remainingBudget = await getRemainingBudget(db, {
+        fellowId: auth.binding.fellowId,
+        problemId,
+        sponsorId: auth.binding.sponsorId,
+      });
+      if (remainingBudget.remaining < promotionCount) {
+        await sessionResult.cleanupOnFailure();
+        return promotionRateLimitedProblem({
+          retryAfterSeconds: remainingBudget.retry_after_seconds ?? 3600,
+          budget: remainingBudget,
+        });
+      }
+    }
+
+    const memberMap = new Map<string, BatchWriteMember>();
+    for (const member of parsed.data.members) {
+      memberMap.set(member.tempId, member);
+    }
+
+    const resolvedTempIds = new Map<string, string>();
+    const results: BatchMemberResult[] = [];
+
+    for (const tempId of plan.commitOrder) {
+      const member = memberMap.get(tempId)!;
+      const resolvedData = resolveBatchTempIds(member.data, resolvedTempIds) as Record<
+        string,
+        unknown
+      >;
+      const memberKey = `${key}:${member.tempId}`;
+      const memberDigest = await writeRequestDigest(
+        `POST ${c.req.path}:${member.tempId}`,
+        resolvedData,
+      );
+
+      let memberResponse: Response;
+
+      switch (member.action) {
+        case "claim": {
+          const parsedClaim = DirectClaimRequestSchema.safeParse(resolvedData);
+          if (!parsedClaim.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "PROMOTE_BODY_INVALID",
+              title: "The claim does not match the contract",
+              detail: `Batch member ${member.tempId} does not match the claim contract.`,
+              fixHint: "Send {kind, statement, falsifier, relates_to?}.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  kind: "conjecture",
+                  statement: "The orbit count is invariant under all eight toggles.",
+                  falsifier: "A toggle sequence that changes the orbit count.",
+                },
+              },
+            });
+          }
+
+          let ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
+          if (parsedClaim.data.workshop_id !== undefined) {
+            const row = await db
+              .prepare(
+                "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+              )
+              .bind(
+                parsedClaim.data.workshop_id,
+                sessionResult.session.session_id,
+                auth.binding.fellowId,
+              )
+              .first<{ workshop_id: string; current_version: number }>();
+            if (!row) {
+              await sessionResult.cleanupOnFailure();
+              return validatedProblem({
+                status: 404,
+                code: "WORKSHOP_OBJECT_NOT_FOUND",
+                title: "No such workshop object in this session",
+                detail: `The workshop id in member ${member.tempId} is not one this session and Fellow own.`,
+                fixHint: "Promote an id from your own workshop.",
+                rule: "A5",
+                extensions: {
+                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                  temp_id: member.tempId,
+                  example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+                },
+              });
+            }
+            ownedWorkshop = row;
+          } else {
+            const workshopId = mintId("W");
+            const seqRow = await db
+              .prepare(
+                "SELECT COALESCE(MAX(workshop_seq), 0) + 1 AS next_seq FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",
+              )
+              .bind(problemId, auth.binding.fellowId)
+              .first<{ next_seq: number }>();
+            const workshopSeq = seqRow?.next_seq ?? 1;
+            const createdAt = new Date().toISOString();
+            const title = parsedClaim.data.statement.slice(0, 200);
+
+            await db
+              .prepare(
+                `INSERT INTO workshop_objects
+                   (workshop_id, problem_id, fellow_id, session_id, workshop_seq,
+                    type, title, body_md, relates_to_json, current_version, state, created_at)
+                 VALUES (?, ?, ?, ?, ?, 'claim-draft', ?, ?, '[]', 1, 'open', ?)`,
+              )
+              .bind(
+                workshopId,
+                problemId,
+                auth.binding.fellowId,
+                sessionResult.session.session_id,
+                workshopSeq,
+                title,
+                parsedClaim.data.statement,
+                createdAt,
+              )
+              .run();
+
+            ownedWorkshop = { workshop_id: workshopId, current_version: 1 };
+          }
+
+          memberResponse = await executeClaimPromotion({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            ownedWorkshop,
+            data: parsedClaim.data,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+            checkSessionStillOpen: false,
+          });
+          break;
+        }
+
+        case "promote": {
+          const parsedPromote = PromoteRequestSchema.safeParse(resolvedData);
+          if (!parsedPromote.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "PROMOTE_BODY_INVALID",
+              title: "The promote request does not match the contract",
+              detail: `Batch member ${member.tempId} does not match the promote contract.`,
+              fixHint:
+                "Send {workshop_id, kind, statement, falsifier, relates_to?, expected_workshop_version?}.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+                  kind: "conjecture",
+                  statement: "The orbit count is invariant under all eight toggles.",
+                  falsifier: "A toggle sequence that changes the orbit count.",
+                },
+              },
+            });
+          }
+
+          const row = await db
+            .prepare(
+              "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+            )
+            .bind(
+              parsedPromote.data.workshop_id,
+              sessionResult.session.session_id,
+              auth.binding.fellowId,
+            )
+            .first<{ workshop_id: string; current_version: number }>();
+          if (!row) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 404,
+              code: "WORKSHOP_OBJECT_NOT_FOUND",
+              title: "No such workshop object in this session",
+              detail: `The workshop id in member ${member.tempId} is not one this session and Fellow own.`,
+              fixHint: "Promote an id from your own workshop.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+              },
+            });
+          }
+
+          memberResponse = await executeClaimPromotion({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            ownedWorkshop: row,
+            data: parsedPromote.data as DirectClaimRequest,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+            checkSessionStillOpen: false,
+          });
+          break;
+        }
+
+        case "revise": {
+          const parsedRevise = ReviseRequestSchema.safeParse(resolvedData);
+          if (!parsedRevise.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "REVISE_BODY_INVALID",
+              title: "The revise request does not match the contract",
+              detail: `Batch member ${member.tempId} does not match the revision contract.`,
+              fixHint:
+                "Send {claim_id, base_version, kind, statement, falsifier?, depends_on?}, or {workshop_id}.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  claim_id: "C-1",
+                  base_version: 1,
+                  kind: "conjecture",
+                  statement: "The orbit count is invariant under all eight toggles.",
+                  falsifier: "A toggle sequence that changes the orbit count.",
+                },
+              },
+            });
+          }
+
+          let revisionData: ClaimRevision;
+          if ("workshop_id" in parsedRevise.data) {
+            const draft = await db
+              .prepare(
+                `SELECT revision_json FROM workshop_objects
+             WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
+              )
+              .bind(
+                parsedRevise.data.workshop_id,
+                sessionResult.session.session_id,
+                auth.binding.fellowId,
+                problemId,
+              )
+              .first<{ revision_json: string | null }>();
+            if (draft === null || draft === undefined || draft.revision_json === null) {
+              await sessionResult.cleanupOnFailure();
+              return validatedProblem({
+                status: 404,
+                code: "WORKSHOP_OBJECT_NOT_FOUND",
+                title: "No revision draft in this session",
+                detail:
+                  "The workshop id does not name a typed revision owned by this session and Fellow.",
+                fixHint:
+                  "Push a workshop object with a revision payload, then send its workshop_id to this route.",
+                rule: "A5",
+                extensions: {
+                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                  example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+                },
+              });
+            }
+            try {
+              revisionData = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
+            } catch {
+              await sessionResult.cleanupOnFailure();
+              return validatedProblem({
+                status: 500,
+                code: "INTERNAL_ERROR",
+                title: "The stored revision is unavailable",
+                detail:
+                  "The private replacement could not be read safely. No revision was published.",
+                fixHint:
+                  "Retry shortly. If this persists, report the route and the time to the operator.",
+              });
+            }
+          } else {
+            revisionData = parsedRevise.data;
+          }
+
+          memberResponse = await executeClaimRevision({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            data: revisionData,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+            checkSessionStillOpen: false,
+          });
+          break;
+        }
+
+        case "hypothesis": {
+          const parsedHypothesis = HypothesisRequestSchema.safeParse(resolvedData);
+          if (!parsedHypothesis.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "HYPOTHESIS_BODY_INVALID",
+              title: "The hypothesis does not match the contract",
+              detail: `Batch member ${member.tempId} does not match the hypothesis contract.`,
+              fixHint:
+                "Send {route, mechanism, falsifier, expected_evidence?, discriminating_predictions?, origin, body_md}.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  route: "Induct on length.",
+                  mechanism: "One step preserves parity.",
+                  falsifier: "A step changes parity.",
+                  origin: "proposed",
+                  body_md: "A synthetic route.",
+                },
+              },
+            });
+          }
+
+          memberResponse = await executeHypothesisCreate({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            data: parsedHypothesis.data,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+          });
+          break;
+        }
+
+        case "evidence": {
+          const parsedEvidence = EvidenceRequestSchema.safeParse(resolvedData);
+          if (!parsedEvidence.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "EVIDENCE_BODY_INVALID",
+              title: "The evidence does not match the contract",
+              detail: `Batch member ${member.tempId} does not match the evidence contract.`,
+              fixHint:
+                "Send {bears_on_kind, bears_on_id, direction, kind, source, mode, body_md, ...}.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  bears_on_kind: "claim",
+                  bears_on_id: "C-1",
+                  bears_on_version: 1,
+                  direction: "supports",
+                  kind: "argument",
+                  source: { kind: "model_memory" },
+                  mode: "exploratory",
+                  body_md: "A verified calculation step.",
+                },
+              },
+            });
+          }
+
+          memberResponse = await executeEvidenceCreate({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            data: parsedEvidence.data,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+          });
+          break;
+        }
+
+        case "review": {
+          const parsedReview = ReviewRequestSchema.safeParse(resolvedData);
+          if (!parsedReview.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "REVIEW_BODY_INVALID",
+              title: "The review does not match the contract",
+              detail: `Batch member ${member.tempId} does not match the review contract.`,
+              fixHint:
+                "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  target_claim_id: "C-1",
+                  target_version: 1,
+                  verdict: "confirm",
+                  basis: "Checked line-by-line.",
+                  body_md: "All steps verified successfully.",
+                },
+              },
+            });
+          }
+
+          memberResponse = await executeReviewCreate({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            data: parsedReview.data,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+          });
+          break;
+        }
+
+        case "dead-end": {
+          const parsedDeadEnd = RecordDeadEndRequestSchema.safeParse(resolvedData);
+          if (!parsedDeadEnd.success) {
+            await sessionResult.cleanupOnFailure();
+            return validatedProblem({
+              status: 422,
+              code: "DEAD_END_BODY_INVALID",
+              title: "Invalid dead-end request body",
+              detail: `Batch member ${member.tempId} does not match the dead-end contract.`,
+              fixHint: "Provide approach, why_it_fails, and retry_predicate with optional fields.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                temp_id: member.tempId,
+                example: {
+                  approach: "Search all permutations.",
+                  why_it_fails: "Exponential state explosion.",
+                  retry_predicate: "When state bounds are known.",
+                },
+              },
+            });
+          }
+
+          memberResponse = await executeDeadEndCreate({
+            c,
+            auth,
+            db,
+            key: memberKey,
+            digest: memberDigest,
+            session: sessionResult.session,
+            data: parsedDeadEnd.data,
+            cleanupOnFailure: sessionResult.cleanupOnFailure,
+          });
+          break;
+        }
+      }
+
+      if (memberResponse.status !== 201) {
+        await sessionResult.cleanupOnFailure();
+        return memberResponse;
+      }
+
+      const resBody = (await memberResponse.json()) as Record<string, unknown>;
+      let mintedId = "";
+      let seq = 0;
+      let version: number | undefined;
+
+      if (member.action === "claim" || member.action === "promote" || member.action === "revise") {
+        mintedId = String(resBody.claim_id ?? "");
+        seq = typeof resBody.seq === "number" && !Number.isNaN(resBody.seq) ? resBody.seq : 0;
+        version =
+          typeof resBody.version === "number" && !Number.isNaN(resBody.version)
+            ? resBody.version
+            : undefined;
+      } else if (member.action === "hypothesis") {
+        mintedId = String(resBody.hypothesis_id ?? "");
+      } else if (member.action === "evidence") {
+        mintedId = String(resBody.evidence_id ?? "");
+      } else if (member.action === "review") {
+        mintedId = String(resBody.review_id ?? "");
+      } else if (member.action === "dead-end") {
+        mintedId = String(resBody.dead_end_id ?? "");
+      }
+
+      if (seq <= 0 || Number.isNaN(seq)) {
+        const eventRow = await db
+          .prepare(
+            "SELECT seq FROM events WHERE problem_id = ? AND object_id = ? ORDER BY seq DESC LIMIT 1",
+          )
+          .bind(problemId, mintedId)
+          .first<{ seq: number }>();
+        seq = Number(eventRow?.seq ?? 0);
+      }
+
+      resolvedTempIds.set(member.tempId, mintedId);
+      if (version !== undefined) {
+        resolvedTempIds.set(`${member.tempId}@${version}`, `${mintedId}@${version}`);
+      }
+
+      results.push({
+        tempId: member.tempId,
+        action: member.action,
+        id: mintedId,
+        seq,
+        ...(version !== undefined ? { version } : {}),
+      });
+    }
+
+    if (sessionResult.isImplicit) {
+      for (const stmt of sessionResult.implicitCloseStatements) {
+        await stmt.run().catch(() => {});
+      }
+    }
+
+    const responseBody = EventBatchResponseSchema.parse({
+      ok: true,
+      problem_id: problemId,
+      results,
+    });
+
+    const sealed = await options.replayProtector.seal(
+      JSON.stringify(responseBody),
+      sessionReplayContext("events_batch", auth.binding.fellowId, c.req.path, key, digest),
+    );
+    const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
+    await db
+      .prepare(
+        `INSERT INTO session_write_replays
+           (scope, principal_scope, idempotency_key, request_digest,
+            response_ciphertext, response_initialization_vector, expires_at, claim_token)
+         VALUES ('events_batch', ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(scope, principal_scope, idempotency_key) DO UPDATE SET
+           request_digest = excluded.request_digest,
+           response_ciphertext = excluded.response_ciphertext,
+           response_initialization_vector = excluded.response_initialization_vector,
+           expires_at = excluded.expires_at`,
+      )
+      .bind(
+        auth.binding.fellowId,
+        key,
+        digest,
+        sealed.ciphertext,
+        sealed.initializationVector,
+        expiresAt,
+      )
+      .run();
+
+    return privateNoStore(
+      new Response(JSON.stringify(responseBody), {
+        status: 201,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+    );
   });
 
   // --- GET /cursor ---------------------------------------------------------

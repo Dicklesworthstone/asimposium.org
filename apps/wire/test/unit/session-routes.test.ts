@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   ContractProblemSchema,
+  EventBatchResponseSchema,
   EvidenceResponseSchema,
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
@@ -849,7 +850,7 @@ function migratedDb(options: LocalD1Options = {}): Env["DB"] {
     .filter((name) => name.endsWith(".sql"))
     .sort();
   for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
+    sqlite.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
   }
   return localD1(sqlite, options);
 }
@@ -7083,7 +7084,7 @@ describe("session protocol routes", () => {
       ).toEqual({
         claim_id: "C-2",
         problem_id: "P-4DSP",
-        queue_position: 0,
+        queue_position: 1,
         seq: 2,
         version: 1,
       });
@@ -11182,7 +11183,9 @@ describe("committed promotion outbox nudge", () => {
 
       // Verify the implicit session was closed with handback = 'Direct append'
       const closedSession = await f.db
-        .prepare("SELECT * FROM sessions WHERE handback = 'Direct append' AND problem_id = 'P-4DSP'")
+        .prepare(
+          "SELECT * FROM sessions WHERE handback = 'Direct append' AND problem_id = 'P-4DSP'",
+        )
         .first<{ session_id: string; handback: string; closed_at: string }>();
       expect(closedSession).not.toBeNull();
       expect(closedSession?.closed_at).not.toBeNull();
@@ -11325,7 +11328,10 @@ describe("committed promotion outbox nudge", () => {
       // First create a claim to bear on
       const claimRes = await f.call("/v1/p/P-4DSP/claims", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-for-evidence" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-claim-for-evidence",
+        },
         body: JSON.stringify({
           kind: "conjecture",
           statement: "Evidence target statement.",
@@ -11381,7 +11387,10 @@ describe("committed promotion outbox nudge", () => {
       // First create a claim
       const claimRes = await f.call("/v1/p/P-4DSP/claims", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-for-review" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-claim-for-review",
+        },
         body: JSON.stringify({
           kind: "conjecture",
           statement: "Review target statement.",
@@ -11429,7 +11438,10 @@ describe("committed promotion outbox nudge", () => {
       // Test alias POST /v1/p/:id/reviews
       const resReviews = await reviewer.call("/v1/p/P-4DSP/reviews", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "direct-reviews-alias-1" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-reviews-alias-1",
+        },
         body: JSON.stringify({
           ...reviewPayload,
           basis: "Second check on the same claim via reviews route.",
@@ -11498,7 +11510,10 @@ describe("committed promotion outbox nudge", () => {
       // Direct append claim while session is open
       const claimRes = await f.call("/v1/p/P-4DSP/claims", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-in-existing-session" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-claim-in-existing-session",
+        },
         body: JSON.stringify({
           kind: "conjecture",
           statement: "Statement created inside existing session.",
@@ -11516,20 +11531,278 @@ describe("committed promotion outbox nudge", () => {
       expect(sessionRow?.closed_at).toBeNull();
     });
 
-    test("direct append on non-existent problem returns 404 PROBLEM_NOT_FOUND", async () => {
+    test("dynamic review queue position tracks active unreviewed claim heads", async () => {
       const f = await fixture();
-      const res = await f.call("/v1/p/P-NONEXISTENT/claims", {
+      // 1. Promote claim 1: queue_position should be 0
+      const claim1Res = await f.call("/v1/p/P-4DSP/claims", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "direct-nonexistent" },
+        headers: { "content-type": "application/json", "idempotency-key": "qp-claim-1" },
         body: JSON.stringify({
           kind: "conjecture",
-          statement: "Some statement",
-          falsifier: "Some falsifier",
+          statement: "Queue position claim 1 statement.",
+          falsifier: "Queue position claim 1 falsifier.",
         }),
       });
-      expect(res.status).toBe(404);
+      expect(claim1Res.status).toBe(201);
+      const claim1 = PromoteResponseSchema.parse(await claim1Res.json());
+      expect(claim1.queue_position).toBe(0);
+
+      // 2. Promote claim 2: claim 1 is unreviewed, so queue_position should be 1
+      const claim2Res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-claim-2" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Queue position claim 2 statement.",
+          falsifier: "Queue position claim 2 falsifier.",
+        }),
+      });
+      expect(claim2Res.status).toBe(201);
+      const claim2 = PromoteResponseSchema.parse(await claim2Res.json());
+      expect(claim2.queue_position).toBe(1);
+
+      // 3. Add reviewer and review claim 1
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "qp-reviewer",
+        scopes: ["promote", "review"],
+        model: "reviewer-model-qp",
+        harness: "reviewer-harness-qp",
+      });
+      const reviewRes = await reviewer.call("/v1/p/P-4DSP/review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-review-claim-1" },
+        body: JSON.stringify({
+          target_claim_id: claim1.claim_id,
+          target_version: 1,
+          verdict: "confirm",
+          basis: "Checked line-by-line against axioms.",
+          capable_of_failure: "Any counterexample.",
+          rubric: ["soundness-of-inference"],
+          body_md: "Verified.",
+        }),
+      });
+      expect(reviewRes.status).toBe(201);
+
+      // 4. Promote claim 3: claim 1 is now reviewed, so only claim 2 is unreviewed -> queue_position is 1
+      const claim3Res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-claim-3" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Queue position claim 3 statement.",
+          falsifier: "Queue position claim 3 falsifier.",
+        }),
+      });
+      expect(claim3Res.status).toBe(201);
+      const claim3 = PromoteResponseSchema.parse(await claim3Res.json());
+      expect(claim3.queue_position).toBe(1);
+    });
+  });
+
+  describe("W4.6 Event batches: POST /v1/p/:id/events:batch", () => {
+    test("rejects empty batch with 422 BATCH_EMPTY", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-empty" },
+        body: JSON.stringify({ members: [] }),
+      });
+      expect(res.status).toBe(422);
       const body = (await res.json()) as { code: string };
-      expect(body.code).toBe("PROBLEM_NOT_FOUND");
+      expect(body.code).toBe("BATCH_EMPTY");
+    });
+
+    test("rejects oversized batch (>16 members) with 422 BATCH_TOO_LARGE", async () => {
+      const f = await fixture();
+      const members = Array.from({ length: 17 }, (_, i) => ({
+        tempId: `tmp:c${i}`,
+        action: "claim",
+        data: {
+          kind: "conjecture",
+          statement: `Statement number ${i}.`,
+          falsifier: `Falsifier number ${i}.`,
+        },
+      }));
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-oversized" },
+        body: JSON.stringify({ members }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_TOO_LARGE");
+    });
+
+    test("refuses causal cycle with 422 BATCH_CAUSAL_CYCLE", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-cycle" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:a",
+              action: "claim",
+              caused_by: ["tmp:b"],
+              data: { kind: "conjecture", statement: "Statement A.", falsifier: "Falsifier A." },
+            },
+            {
+              tempId: "tmp:b",
+              action: "claim",
+              caused_by: ["tmp:a"],
+              data: { kind: "conjecture", statement: "Statement B.", falsifier: "Falsifier B." },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_CAUSAL_CYCLE");
+    });
+
+    test("refuses dangling causal reference with 422 BATCH_DANGLING_CAUSAL_REF", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-dangling" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:a",
+              action: "claim",
+              caused_by: ["tmp:ghost"],
+              data: { kind: "conjecture", statement: "Statement A.", falsifier: "Falsifier A." },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_DANGLING_CAUSAL_REF");
+    });
+
+    test("refuses duplicate temporary ID with 422 BATCH_DUPLICATE_TEMP_ID", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-dup-id" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:same",
+              action: "claim",
+              data: { kind: "conjecture", statement: "Statement 1.", falsifier: "Falsifier 1." },
+            },
+            {
+              tempId: "tmp:same",
+              action: "claim",
+              data: { kind: "conjecture", statement: "Statement 2.", falsifier: "Falsifier 2." },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_DUPLICATE_TEMP_ID");
+    });
+
+    test("executes causal chain, resolves temp IDs, and replays idempotently", async () => {
+      const f = await fixture();
+      const batchPayload = {
+        members: [
+          {
+            tempId: "tmp:claim-1",
+            action: "claim",
+            data: {
+              kind: "conjecture",
+              statement: "Batch-created prime conjecture statement.",
+              falsifier: "Batch-created prime conjecture falsifier.",
+            },
+          },
+          {
+            tempId: "tmp:ev-1",
+            action: "evidence",
+            caused_by: ["tmp:claim-1"],
+            data: {
+              bears_on_kind: "claim",
+              bears_on_id: "tmp:claim-1",
+              bears_on_version: 1,
+              direction: "supports",
+              kind: "argument",
+              source: { kind: "model_memory" },
+              mode: "exploratory",
+              body_md: "Grounded analytical support for prime conjecture.",
+            },
+          },
+        ],
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
+        body: JSON.stringify(batchPayload),
+      });
+
+      expect(res.status).toBe(201);
+      const batchResponse = EventBatchResponseSchema.parse(await res.json());
+      expect(batchResponse.results).toHaveLength(2);
+
+      const claimResult = batchResponse.results[0];
+      const evidenceResult = batchResponse.results[1];
+      if (!claimResult || !evidenceResult) {
+        throw new Error("Expected at least two batch results");
+      }
+
+      expect(claimResult.tempId).toBe("tmp:claim-1");
+      expect(claimResult.action).toBe("claim");
+      expect(claimResult.id).toMatch(/^C-/);
+      expect(claimResult.seq).toBeGreaterThan(0);
+
+      expect(evidenceResult.tempId).toBe("tmp:ev-1");
+      expect(evidenceResult.action).toBe("evidence");
+      expect(evidenceResult.id).toMatch(/^E-/);
+      expect(evidenceResult.seq).toBeGreaterThan(claimResult.seq);
+
+      // Verify in DB that the evidence record actually points to the resolved claim ID
+      const evidenceRow = await f.db
+        .prepare("SELECT bears_on_id, bears_on_kind FROM evidence WHERE evidence_id = ?")
+        .bind(evidenceResult.id)
+        .first<{ bears_on_id: string; bears_on_kind: string }>();
+      expect(evidenceRow).not.toBeNull();
+      expect(evidenceRow?.bears_on_id).toBe(claimResult.id);
+      expect(evidenceRow?.bears_on_kind).toBe("claim");
+
+      // Verify idempotent replay returns 200 with identical results
+      const replayRes = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
+        body: JSON.stringify(batchPayload),
+      });
+      expect(replayRes.status).toBe(200);
+      const replayBody = EventBatchResponseSchema.parse(await replayRes.json());
+      expect(replayBody.results).toEqual(batchResponse.results);
+
+      // Verify replaying with same key but different body returns 409 conflict
+      const conflictRes = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:different",
+              action: "claim",
+              data: {
+                kind: "conjecture",
+                statement: "Different statement.",
+                falsifier: "Different falsifier.",
+              },
+            },
+          ],
+        }),
+      });
+      expect(conflictRes.status).toBe(409);
+      const conflictBody = (await conflictRes.json()) as { code: string };
+      expect(conflictBody.code).toBe("IDEMPOTENCY_CONFLICT");
     });
   });
 });

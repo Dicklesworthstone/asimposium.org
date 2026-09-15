@@ -31,10 +31,13 @@ interface RawRoute {
 
 /** One-way normalization: mounted regex suffixes retain their public suffix. */
 function normalizeMountedPath(path: string): string {
-  return path.replace(/:([A-Za-z0-9_]+)(?:\{([^}]*)\})?/g, (_match, name, pattern) => {
-    const suffix = ["md", "json", "html"].find((face) => pattern?.endsWith(`\\.${face}$`));
-    return `<${name}>${suffix === undefined ? "" : `.${suffix}`}`;
-  });
+  return path.replace(
+    /(^|\/):([A-Za-z0-9_]+)(?:\{([^}]*)\})?/g,
+    (_match, prefix, name, pattern) => {
+      const suffix = ["md", "json", "html"].find((face) => pattern?.endsWith(`\\.${face}$`));
+      return `${prefix}<${name}>${suffix === undefined ? "" : `.${suffix}`}`;
+    },
+  );
 }
 
 /**
@@ -159,6 +162,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "convenience direct collection append alias; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/review)",
     "POST /v1/p/<id>/dead-ends":
       "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/dead-ends)",
+    "POST /v1/p/<id>/events:batch":
+      "convenience direct batch append; canonical agent disclosure uses the session workflow",
   };
 
   function mountedCensus(): {

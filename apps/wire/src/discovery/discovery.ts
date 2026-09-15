@@ -109,6 +109,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/p/:id/review": true,
   "POST /v1/p/:id/reviews": true,
   "POST /v1/p/:id/dead-ends": true,
+  "POST /v1/p/:id/events:batch": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
