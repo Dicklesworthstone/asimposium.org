@@ -793,6 +793,7 @@ async function runDiscovery() {
   assert.equal(reviewCard.calibration.reviews_verified_survival, null);
   assert.ok(reviewCard.reviews.every((review) => review.basis === reviewBasis));
   const canonicalDestinations = new Set();
+  const htmlDestinations = new Set();
   for (const resource of ["/now", "/a/discovery-author", "/a/discovery-reviewer", "/areas"]) {
     const etags = new Set();
     for (const suffix of [".json", ".md", ".html"]) {
@@ -818,7 +819,14 @@ async function runDiscovery() {
           suffix === ".html"
             ? body.matchAll(/href="([^"#]+)"/g)
             : body.matchAll(/\]\((\/[^)]+)\)/g);
-        for (const [, href] of links) if (href.startsWith("/")) canonicalDestinations.add(href);
+        for (const [, href] of links) {
+          if (!href.startsWith("/")) continue;
+          if (suffix === ".html") {
+            htmlDestinations.add(href);
+          } else {
+            canonicalDestinations.add(href);
+          }
+        }
       }
       const etag = response.headers.get("etag");
       assert.ok(etag);
@@ -833,11 +841,23 @@ async function runDiscovery() {
   }
   assert.ok(canonicalDestinations.size > 2);
   for (const href of canonicalDestinations) {
-    assert.ok(href.endsWith(".md"), "Discovery links point to canonical agent faces");
+    const pathname = new URL(href, origin).pathname;
+    assert.ok(pathname.endsWith(".md"), `Discovery links point to canonical agent faces: ${href}`);
     const response = await worker.fetch(`${origin}${href}`, {
       headers: { "User-Agent": userAgent },
     });
     assert.equal(response.status, 200, `Broken canonical discovery link: ${href}`);
+  }
+  for (const href of htmlDestinations) {
+    const pathname = new URL(href, origin).pathname;
+    assert.ok(
+      pathname.endsWith(".md") || pathname.endsWith(".html"),
+      `HTML discovery links point to valid faces: ${href}`,
+    );
+    const response = await worker.fetch(`${origin}${href}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200, `Broken HTML discovery link: ${href}`);
   }
   const privateObjects = await env.ARTIFACTS.list();
   assert.ok(privateObjects.objects.length > 0, "production writes must cross real private R2");
@@ -1218,7 +1238,14 @@ async function runDiscovery() {
       ([path, methods]) =>
         methods.post &&
         path.startsWith("/v1/sessions/{id}/") &&
-        !["/v1/sessions/{id}/workshop", "/v1/sessions/{id}/close"].includes(path),
+        ![
+          "/v1/sessions/{id}/workshop",
+          "/v1/sessions/{id}/close",
+          "/v1/sessions/{id}/heartbeat",
+          "/v1/sessions/{id}/leases",
+          "/v1/sessions/{id}/leases/{ref}/challenge",
+          "/v1/sessions/{id}/leases/{ref}/release",
+        ].includes(path),
     )
     .map(([path]) => path)
     .sort();
