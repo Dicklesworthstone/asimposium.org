@@ -90,5 +90,10 @@ if ! "$node_binary" apps/wire/test/integration/problem-lifecycle-real-bindings.m
   exit 1
 fi
 
+if ! "$node_binary" apps/wire/test/integration/problem-lifecycle-ledger-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "PROBLEM_LIFECYCLE_LEDGER_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
 exit 0
