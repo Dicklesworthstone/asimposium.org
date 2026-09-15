@@ -1357,13 +1357,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     binding: FellowCredentialBinding,
   ): Promise<void> {
     const problem = await db
-      .prepare("SELECT id, status, sponsor_id, created_by_fellow_id FROM problems WHERE id = ?")
+      .prepare(
+        "SELECT id, status, sponsor_id, created_by_fellow_id, admission_mode, writer_cap FROM problems WHERE id = ?",
+      )
       .bind(problemId)
       .first<{
         id: string;
         status: string;
         sponsor_id: string | null;
         created_by_fellow_id: string | null;
+        admission_mode: string | null;
+        writer_cap: number | null;
       }>();
     if (
       !problem ||
@@ -1379,6 +1383,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ))
     )
       throw new SessionProblemMissingError(problemId);
+
+    if (problem.admission_mode === "archived-read-only") {
+      throw new ProblemArchivedError(problemId);
+    }
+
+    if (problem.admission_mode === "approval-required" || problem.admission_mode === "invite-only") {
+      const membership = await db
+        .prepare("SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+        .bind(problemId, binding.fellowId)
+        .first<{ role: string }>();
+
+      const isStewardFellow =
+        problem.sponsor_id === binding.sponsorId ||
+        !!(await db
+          .prepare("SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+          .bind(problemId, binding.sponsorId)
+          .first());
+
+      if (!membership && !isStewardFellow) {
+        throw new AdmissionRequiredError(problemId, problem.admission_mode);
+      }
+    }
+
+    if (problem.writer_cap !== null && problem.writer_cap !== undefined && problem.writer_cap > 0) {
+      const existingMember = await db
+        .prepare("SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+        .bind(problemId, binding.fellowId)
+        .first<{ role: string }>();
+      if (!existingMember || existingMember.role !== "contributor") {
+        const contributorCount = await db
+          .prepare(
+            "SELECT COUNT(*) as count FROM problem_memberships WHERE problem_id = ? AND role = 'contributor'",
+          )
+          .bind(problemId)
+          .first<{ count: number }>();
+        if (contributorCount && contributorCount.count >= problem.writer_cap) {
+          throw new WriterCapReachedError(problemId, problem.writer_cap);
+        }
+      }
+    }
   }
 
   async function authenticate(
@@ -2735,6 +2779,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
+      if (error instanceof ProblemArchivedError) {
+        return validatedProblem({
+          status: 403,
+          code: "WRITE_REFUSED",
+          title: "Problem is archived and read-only",
+          detail: `Problem '${error.problemId}' has admission_mode 'archived-read-only' and does not admit new sessions.`,
+          fixHint: "Fork the problem or select an active problem.",
+        });
+      }
+      if (error instanceof AdmissionRequiredError) {
+        return validatedProblem({
+          status: 403,
+          code: "WRITE_REFUSED",
+          title: "Problem admission requires approval or invitation",
+          detail: `Problem '${error.problemId}' has admission_mode '${error.mode}'. A problem steward must grant membership before opening a session.`,
+          fixHint: "Contact the problem steward to request admission or membership.",
+        });
+      }
+      if (error instanceof WriterCapReachedError) {
+        return validatedProblem({
+          status: 403,
+          code: "WRITE_REFUSED",
+          title: "Problem writer cap reached",
+          detail: `Problem '${error.problemId}' has reached its writer cap of ${error.cap} active contributors.`,
+          fixHint: "Wait for a contributor slot to open or join as an observer.",
+        });
+      }
       if (error instanceof SessionProblemMissingError) {
         return validatedProblem({
           status: 404,
@@ -15262,5 +15333,26 @@ class SessionProblemMissingError extends Error {
   constructor(readonly problemId: string) {
     super("problem missing");
     this.name = "SessionProblemMissingError";
+  }
+}
+
+class ProblemArchivedError extends Error {
+  constructor(readonly problemId: string) {
+    super("problem archived and read-only");
+    this.name = "ProblemArchivedError";
+  }
+}
+
+class AdmissionRequiredError extends Error {
+  constructor(readonly problemId: string, readonly mode: string) {
+    super("problem admission requires approval or invitation");
+    this.name = "AdmissionRequiredError";
+  }
+}
+
+class WriterCapReachedError extends Error {
+  constructor(readonly problemId: string, readonly cap: number) {
+    super("problem writer cap reached");
+    this.name = "WriterCapReachedError";
   }
 }

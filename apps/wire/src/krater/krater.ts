@@ -2493,6 +2493,12 @@ export async function writeLedgerEvent(
         "problem.statement-revised",
         "problem.result-review-started",
         "problem.retired",
+        "problem.admission-mode-changed",
+        "problem.steward-updated",
+        "problem.member-updated",
+        "problem.writer-cap-changed",
+        "problem.merged",
+        "problem.forked",
       ].includes(input.eventType) ||
       input.attribution.fellowId !== null ||
       input.attribution.sessionId !== null ||
