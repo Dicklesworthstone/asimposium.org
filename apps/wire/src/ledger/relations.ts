@@ -4,9 +4,8 @@
  * BOTH ends and its pins are checked against current heads at read time, so a
  * material revision never silently carries an old edge forward.
  *
- * The dispute lifecycle (asserted → disputed via review-gate events) lands
- * with the review-gate extension; this module owns the parts that are already
- * mechanical: canonical target refs, composite event ids, and pin staleness.
+ * The dispute lifecycle (asserted → disputed via peer review dispute writes)
+ * transitions an asserted edge to disputed with attribution, reason, and optional refuting evidence.
  */
 
 export const CLAIM_RELATION_KINDS = [
@@ -23,6 +22,13 @@ export type ClaimRelationKindName = (typeof CLAIM_RELATION_KINDS)[number];
 
 export function isClaimRelationKind(value: string): value is ClaimRelationKindName {
   return (CLAIM_RELATION_KINDS as readonly string[]).includes(value);
+}
+
+export const RELATION_EDGE_STATUSES = ["asserted", "disputed"] as const;
+export type RelationEdgeStatus = (typeof RELATION_EDGE_STATUSES)[number];
+
+export function isRelationEdgeStatus(value: string): value is RelationEdgeStatus {
+  return (RELATION_EDGE_STATUSES as readonly string[]).includes(value);
 }
 
 /** Canonical pinned target refs: "C-7@2" (claim) or "G-2" (proof gap). */

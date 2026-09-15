@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_NOT_FOUND",
+  "title": "Claim relation not found",
+  "status": 404,
+  "code": "RELATION_NOT_FOUND",
+  "detail": "No matching asserted relation edge exists on this problem to dispute.",
+  "fix_hint": "Check the source claim, version, relation kind, and target ref against the claim graph."
+}

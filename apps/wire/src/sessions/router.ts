@@ -59,6 +59,8 @@ import {
   type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   RecordDeadEndResponseSchema,
+  RelationDisputedResponseSchema,
+  RelationDisputeRequestSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
   ResolveConflictRequestSchema,
@@ -137,6 +139,7 @@ import {
   writeClaimRevision,
   writeGapEvent,
   writeLedgerEvent,
+  writeRelationDisputeEvent,
   writeRelationEvent,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
@@ -700,6 +703,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     gaps: ["gaps", GapFiledResponseSchema],
     "gaps/close": ["gaps", GapClosedResponseSchema],
     relations: ["relations", RelationFiledResponseSchema],
+    "relations/dispute": ["dispute_relation", RelationDisputedResponseSchema],
     review: ["review", ReviewResponseSchema],
     "statement-review": ["review", ProblemStatementReviewResponseSchema],
     hypotheses: ["hypotheses", HypothesisResponseSchema],
@@ -814,6 +818,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "reanchor"
     | "gaps"
     | "relations"
+    | "dispute_relation"
     | "review"
     | "hypotheses"
     | "hypothesis-kill"
@@ -1027,6 +1032,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "evidence"
           | "gaps"
           | "relations"
+          | "dispute_relation"
           | "synthesize"
           | "dead_end"
           | "ask_question"
@@ -1891,6 +1897,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/gaps",
     "/v1/sessions/:id/gaps/close",
     "/v1/sessions/:id/relations",
+    "/v1/sessions/:id/relations/dispute",
     "/v1/sessions/:id/review",
     "/v1/sessions/:id/hypotheses",
     "/v1/sessions/:id/hypotheses/:hid/kill",
@@ -3418,7 +3425,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       graveyard: ["friction-reports"],
       literature: ["citations"],
       formal: ["formal-artifacts", "friction-reports", "verification-records"],
-      "claim-graph": ["relation-disputes", "weakest-link-paths"],
+      "claim-graph": ["weakest-link-paths"],
       full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
@@ -6801,6 +6808,301 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
+      throw error;
+    }
+  });
+
+  // --- POST /v1/sessions/:id/relations/dispute (W5.5: dispute a typed edge) --------
+  app.post("/v1/sessions/:id/relations/dispute", async (c) => {
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const rawBody = await readJsonBody(c.req.raw);
+    if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = RelationDisputeRequestSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "RELATION_DISPUTE_BODY_INVALID",
+        title: "The relation dispute does not match the contract",
+        detail: "The JSON body does not match the relation dispute contract.",
+        fixHint:
+          "Send {kind, source_claim_id, source_version, target, reason, refuting_evidence_id?} — target is the pinned endpoint (C-n@v, or G-n for addresses-gap).",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: "implies",
+            source_claim_id: "C-1",
+            source_version: 1,
+            target: "C-2@1",
+            reason: "Claim 1 does not strictly imply Claim 2 under edge cases where x=0.",
+          },
+        },
+      });
+    }
+
+    const digest = await writeRequestDigest(
+      `POST /v1/sessions/${sessionId}/relations/dispute`,
+      parsed.data,
+    );
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "dispute_relation",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+        (raw) => RelationDisputedResponseSchema.parse(JSON.parse(raw)),
+      );
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
+    if (session instanceof Response) return session;
+
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: {
+        eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0,
+      },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
+    const edge = await db
+      .prepare(
+        `SELECT status, asserted_by_fellow
+         FROM claim_relations
+         WHERE problem_id = ? AND kind = ? AND source_claim_id = ? AND source_version = ? AND target_ref = ?`,
+      )
+      .bind(
+        session.problem_id,
+        parsed.data.kind,
+        parsed.data.source_claim_id,
+        parsed.data.source_version,
+        parsed.data.target,
+      )
+      .first<{ status: string; asserted_by_fellow: string }>();
+
+    if (edge === null || edge === undefined) {
+      return validatedProblem({
+        status: 404,
+        code: "RELATION_NOT_FOUND",
+        title: "Relation edge does not exist",
+        detail: `No ${parsed.data.kind} edge exists from ${parsed.data.source_claim_id}@${parsed.data.source_version} to ${parsed.data.target} on problem ${session.problem_id}.`,
+        fixHint:
+          "Verify the relation kind, source claim, source version, and target ref against the claim-graph pack.",
+        rule: "P10",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: "implies",
+            source_claim_id: "C-1",
+            source_version: 1,
+            target: "C-2@1",
+            reason: "Claim 1 does not strictly imply Claim 2.",
+          },
+        },
+      });
+    }
+
+    if (edge.status === "disputed") {
+      return validatedProblem({
+        status: 409,
+        code: "RELATION_ALREADY_DISPUTED",
+        title: "Relation edge is already disputed",
+        detail: `This ${parsed.data.kind} edge from ${parsed.data.source_claim_id}@${parsed.data.source_version} to ${parsed.data.target} has already been disputed.`,
+        fixHint: "Check the claim-graph pack; this edge already carries disputed status.",
+        rule: "P11",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: "implies",
+            source_claim_id: "C-1",
+            source_version: 1,
+            target: "C-2@1",
+            reason: "Claim 1 does not strictly imply Claim 2.",
+          },
+        },
+      });
+    }
+
+    // Rule P1: Self-dispute is refused. Reviewer cannot be author/assertor.
+    if (edge.asserted_by_fellow === auth.binding.fellowId) {
+      return validatedProblem({
+        status: 422,
+        code: "REVIEWER_IS_AUTHOR",
+        title: "An author cannot dispute their own relation assertion",
+        detail:
+          "Self-dispute of an asserted relation is refused under Rule P1. The asserting Fellow cannot review or dispute their own edge.",
+        fixHint: "Have an independent Fellow dispute the relation, or file a revised claim or gap.",
+        rule: "P1",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            kind: "implies",
+            source_claim_id: "C-1",
+            source_version: 1,
+            target: "C-2@1",
+            reason: "Claim 1 does not strictly imply Claim 2.",
+          },
+        },
+      });
+    }
+
+    if (parsed.data.refuting_evidence_id !== undefined) {
+      const ev = await db
+        .prepare("SELECT evidence_id FROM evidence WHERE problem_id = ? AND evidence_id = ?")
+        .bind(session.problem_id, parsed.data.refuting_evidence_id)
+        .first<{ evidence_id: string }>();
+      if (ev === null || ev === undefined) {
+        return validatedProblem({
+          status: 422,
+          code: "EVIDENCE_BODY_INVALID",
+          title: "The refuting evidence was not found",
+          detail: `refuting_evidence_id must name recorded evidence on problem ${session.problem_id}.`,
+          fixHint: "First file the refuting evidence, or omit refuting_evidence_id.",
+          rule: "P6",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              kind: "implies",
+              source_claim_id: "C-1",
+              source_version: 1,
+              target: "C-2@1",
+              reason: "Claim 1 does not imply Claim 2.",
+            },
+          },
+        });
+      }
+    }
+
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "relations/dispute",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "relation-dispute",
+        statement: JSON.stringify(parsed.data),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
+    try {
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
+      await writeRelationDisputeEvent(
+        db,
+        {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: kraterIdempotencyKey,
+          kind: parsed.data.kind,
+          sourceClaimId: parsed.data.source_claim_id,
+          sourceVersion: parsed.data.source_version,
+          targetRef: parsed.data.target,
+          disputedByFellow: auth.binding.fellowId,
+          reason: parsed.data.reason,
+          refutingEvidenceId: parsed.data.refuting_evidence_id,
+          writerCredentialId: auth.binding.credentialId,
+          attribution: {
+            fellowId: auth.binding.fellowId,
+            sponsorId: auth.binding.sponsorId,
+            sessionId: session.session_id,
+            modelSelfDeclared: auth.binding.model,
+            harness: auth.binding.harness,
+          },
+          createdAt: new Date().toISOString(),
+        },
+        atomicLedgerReplayCompanion({
+          db,
+          scope: "dispute_relation",
+          screening,
+          principal: auth.binding.fellowId,
+          target: c.req.path,
+          callerKey: key,
+          requestDigest: digest,
+          claimToken,
+          kraterIdempotencyKey,
+          credentialId: auth.binding.credentialId,
+          session,
+          reservationId: reservation.reservationId,
+          responseFor: (settlement) =>
+            RelationDisputedResponseSchema.parse({
+              problem_id: session.problem_id,
+              kind: parsed.data.kind,
+              source: `${parsed.data.source_claim_id}@${parsed.data.source_version}`,
+              target: parsed.data.target,
+              seq: settlement.sequence,
+              status: "disputed",
+            }),
+        }),
+      );
+      scheduleCommittedPromotionNudge(c);
+      const replay = await readReplayRecord(
+        db,
+        "dispute_relation",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (replay === undefined) {
+        throw new Error("Krater relation dispute committed without its atomic replay");
+      }
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 201));
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(
+          db,
+          "dispute_relation",
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner !== undefined) {
+          return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+        }
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
       throw error;
     }
   });

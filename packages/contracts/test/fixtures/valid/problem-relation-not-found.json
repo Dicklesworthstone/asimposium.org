@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_NOT_FOUND",
+  "title": "Claim relation not found",
+  "status": 404,
+  "code": "RELATION_NOT_FOUND",
+  "detail": "No matching asserted relation edge exists on this problem to dispute.",
+  "fix_hint": "Check the source claim, version, relation kind, and target ref against the claim graph.",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": { "kind": "implies", "source_claim_id": "C-1", "source_version": 1, "target": "C-2@1" }
+}

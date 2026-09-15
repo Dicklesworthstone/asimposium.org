@@ -61,6 +61,7 @@ interface RelationRow extends ProvenanceRow {
   source_claim_id: string;
   source_version: number;
   target_ref: string;
+  status: string;
   source_head: number | null;
   target_head: number | null;
 }
@@ -824,7 +825,7 @@ export async function readLedgerPackSection(
       SELECT e.id AS id, e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
              e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
              e.model_string_self_declared AS model, e.harness,
-             r.kind, r.source_claim_id, r.source_version, r.target_ref,
+             r.kind, r.source_claim_id, r.source_version, r.target_ref, r.status,
              (c.event_id IS NOT NULL AND c.redacted_at IS NULL) AS content_available,
              (SELECT MAX(head.object_version) FROM events head
               WHERE head.problem_id = r.problem_id AND head.object_id = r.source_claim_id
@@ -857,7 +858,11 @@ export async function readLedgerPackSection(
               (targetVersion !== null && row.target_head !== targetVersion)
             ? "superseded"
             : "current";
-      return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. This edge is an assertion, not an established implication.`;
+      const statusNote =
+        row.status === "disputed"
+          ? "Status: disputed. This edge was disputed by peer review."
+          : "This edge is an assertion, not an established implication.";
+      return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. ${statusNote}`;
     };
   } else if (profile === "literature") {
     kind = "citation";

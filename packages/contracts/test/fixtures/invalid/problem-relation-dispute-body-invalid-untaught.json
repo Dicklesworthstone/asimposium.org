@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_DISPUTE_BODY_INVALID",
+  "title": "The relation dispute does not match the contract",
+  "status": 422,
+  "code": "RELATION_DISPUTE_BODY_INVALID",
+  "detail": "The JSON body does not match the relation dispute contract.",
+  "fix_hint": "Send {kind, source_claim_id, source_version, target, reason, refuting_evidence_id?}."
+}

@@ -15,6 +15,8 @@ import {
   PackResponseSchema,
   PackTargetQuerySchema,
   PromoteRequestSchema,
+  RelationDisputedResponseSchema,
+  RelationDisputeRequestSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
   ReviewRequestSchema,
@@ -828,6 +830,85 @@ test("session-heartbeat schemas validate request and response fixtures", async (
     SessionHeartbeatResponseSchema.safeParse({
       ...(validResp as Record<string, unknown>),
       extra: 123,
+    }).success,
+  ).toBe(false);
+});
+
+test("relation dispute schemas validate request and response formats", async () => {
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validateReq = ajv.compile({ $ref: "sessions#/properties/relation_dispute_request" });
+  const validateResp = ajv.compile({ $ref: "sessions#/properties/relation_disputed_response" });
+
+  const validClaimDispute = {
+    kind: "implies" as const,
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "C-2@1",
+    reason: "Claim 1 does not strictly imply Claim 2 under edge cases where x=0.",
+  };
+  expect(RelationDisputeRequestSchema.safeParse(validClaimDispute).success).toBe(true);
+  expect(validateReq(validClaimDispute)).toBe(true);
+
+  // refuting evidence ID is allowed
+  const validWithEvidence = {
+    ...validClaimDispute,
+    refuting_evidence_id: "E-1",
+  };
+  expect(RelationDisputeRequestSchema.safeParse(validWithEvidence).success).toBe(true);
+  expect(validateReq(validWithEvidence)).toBe(true);
+
+  // Claim relation dispute cannot target a gap
+  expect(
+    RelationDisputeRequestSchema.safeParse({
+      ...validClaimDispute,
+      target: "G-1",
+    }).success,
+  ).toBe(false);
+
+  // addresses-gap dispute requires gap target
+  const validGapDispute = {
+    kind: "addresses-gap" as const,
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "G-1",
+    reason: "Claim 1 only partially addresses Gap 1; lemma 3 is missing.",
+  };
+  expect(RelationDisputeRequestSchema.safeParse(validGapDispute).success).toBe(true);
+  expect(validateReq(validGapDispute)).toBe(true);
+
+  // addresses-gap dispute cannot target a claim
+  expect(
+    RelationDisputeRequestSchema.safeParse({
+      ...validGapDispute,
+      target: "C-2@1",
+    }).success,
+  ).toBe(false);
+
+  // Empty reason is invalid
+  expect(
+    RelationDisputeRequestSchema.safeParse({
+      ...validClaimDispute,
+      reason: "",
+    }).success,
+  ).toBe(false);
+
+  const validDisputeResponse = {
+    problem_id: "P-4DSP",
+    kind: "implies" as const,
+    source: "C-1@1",
+    target: "C-2@1",
+    seq: 42,
+    status: "disputed" as const,
+  };
+  expect(RelationDisputedResponseSchema.safeParse(validDisputeResponse).success).toBe(true);
+  expect(validateResp(validDisputeResponse)).toBe(true);
+
+  // Status must be 'disputed'
+  expect(
+    RelationDisputedResponseSchema.safeParse({
+      ...validDisputeResponse,
+      status: "asserted",
     }).success,
   ).toBe(false);
 });

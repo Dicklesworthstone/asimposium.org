@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0060_citations_revisions_and_replay_scope.sql`.
+schema through `0061_claim_relations_disputed_status_and_replay_scope.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -117,6 +117,11 @@ Migration `0060_citations_revisions_and_replay_scope.sql` introduces the `citati
 and `citation_versions` tables for problem-scoped literature and source-provenance
 tracking (W5.8c / Fable §6.1, ADR-21), and widens `session_write_replays` to include
 `citations` and `correct_citation` for 24-hour idempotent replays.
+
+Migration `0061_claim_relations_disputed_status_and_replay_scope.sql` widens `claim_relations`
+to permit `status IN ('asserted', 'disputed')` along with dispute attribution columns
+(`disputed_by_event`, `disputed_by_fellow`, `disputed_at`), and widens `session_write_replays`
+to include `dispute_relation` for atomic 24-hour idempotent dispute replays (W5.5 / Fable §6.4a).
 
 
 Each migration uses the fixed name
