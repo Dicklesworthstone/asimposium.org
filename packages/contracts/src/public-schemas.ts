@@ -27,6 +27,7 @@ import retractionsSchemaModule from "../generated/retractions.schema.json" with 
 import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
+import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "conflicts",
@@ -44,6 +45,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "rubrics",
   "screening",
   "sessions",
+  "syntheses",
 ] as const);
 
 /**
@@ -179,6 +181,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/sessions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(sessionsSchemaModule, "generated/sessions.schema.json"),
+  }),
+  Object.freeze({
+    id: "syntheses",
+    served_at: "/schemas/syntheses.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(synthesesSchemaModule, "generated/syntheses.schema.json"),
   }),
 ]);
 

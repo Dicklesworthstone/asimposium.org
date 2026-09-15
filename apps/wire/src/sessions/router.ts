@@ -3243,6 +3243,53 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // Fable §7.3: orient / working profile surfaces the synthesis-staleness line
+    // ("synthesis covers through #1820 — stale by 22 material events")
+    if (profile === "orient" || profile === "working") {
+      const latestSynthesis = await db
+        .prepare(
+          `SELECT synthesis_id, covers_through, created_at FROM syntheses
+           WHERE problem_id = ? ORDER BY covers_through DESC, rowid DESC LIMIT 1`,
+        )
+        .bind(session.problem_id)
+        .first<{ synthesis_id: string; covers_through: number; created_at: string }>();
+
+      if (latestSynthesis) {
+        const materialEvents = await db
+          .prepare(
+            `SELECT COUNT(*) AS count FROM events
+             WHERE problem_id = ? AND seq > ? AND seq <= ?
+               AND object_kind IN ('claim', 'hypothesis', 'review', 'evidence', 'dead_end', 'conflict', 'gap')`,
+          )
+          .bind(session.problem_id, latestSynthesis.covers_through, cursor)
+          .first<{ count: number }>();
+        const staleBy = materialEvents?.count ?? 0;
+        candidates.push({
+          kind: "standing-context",
+          id: "SYS-synthesis-staleness",
+          scope: "system",
+          tokens: 1,
+          untrusted: false,
+          body: `synthesis covers through #${latestSynthesis.covers_through} — stale by ${staleBy} material events`,
+          why_included: "surface problem synthesis recency and material event drift",
+          stable_prefix: 410,
+        });
+
+        if (staleBy >= 200 && profile === "working") {
+          candidates.push({
+            kind: "move",
+            id: "MOVE-synthesize",
+            scope: "system",
+            tokens: 1,
+            untrusted: false,
+            body: `Recommended move: synthesize problem state. ${staleBy} material events have landed since last synthesis #${latestSynthesis.covers_through}.`,
+            why_included: "200+ material events since last synthesis recommend periodic synthesis",
+            stable_prefix: 411,
+          });
+        }
+      }
+    }
+
     // W4.2: the graveyard profile preserves the Fellow's dead ends — the
     // negative results that must never be author-erased (P6). These are the
     // Fellow's own workshop dead-end objects, newest first.
@@ -8653,14 +8700,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const anchorClaimIds = new Set(
-      parsed.data.anchors.filter((a) => a.target_kind === "claim").map((a) => a.target_id),
-    );
+    const anchorTargetIds = new Set(parsed.data.anchors.map((a) => a.target_id));
     const droppedSingleAuthorCount = await computeDroppedSingleAuthorCount(
       db,
       session.problem_id,
       parsed.data.covers_through,
-      anchorClaimIds,
+      anchorTargetIds,
     );
 
     const screened = await screenWithQuota(

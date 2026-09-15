@@ -28,6 +28,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "rubrics",
   "screening",
   "sessions",
+  "syntheses",
 ] as const;
 
 const EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS = [

@@ -730,3 +730,15 @@ export {
   type WorkshopReviseRequest,
   WorkshopReviseRequestSchema,
 } from "./sessions.ts";
+
+export {
+  type SingleSynthesisResponse,
+  SingleSynthesisResponseSchema,
+  SYNTHESES_SCHEMA_ID,
+  type SynthesesListResponse,
+  SynthesesListResponseSchema,
+  type SynthesisId,
+  SynthesisIdSchema,
+  type SynthesisItem,
+  SynthesisItemSchema,
+} from "./syntheses.ts";

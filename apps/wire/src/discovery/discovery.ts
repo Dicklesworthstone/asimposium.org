@@ -147,6 +147,10 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/conflicts.json": "Version-pinned conflicts and their resolutions (JSON face).",
   "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
   "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
+  "GET /p/:id/syntheses.json": "Problem synthesis ledger (JSON face).",
+  "GET /p/:id/syntheses.md": "Problem synthesis ledger (Markdown face).",
+  "GET /p/:id/syntheses.html": "Problem synthesis ledger (HTML face).",
+  "GET /p/:id/syntheses/:target": "Exact problem synthesis version (Markdown, JSON, or HTML face).",
   "GET /p/:id/claims/:target":
     "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",

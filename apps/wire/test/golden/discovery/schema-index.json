@@ -91,6 +91,12 @@
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
       "body_bytes": 191243
+    },
+    {
+      "id": "syntheses",
+      "url": "https://a.asimposium.org/schemas/syntheses.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4959
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."

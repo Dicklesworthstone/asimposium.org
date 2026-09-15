@@ -876,7 +876,10 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         segments[3] === "questions.html" ||
         segments[3] === "retractions.json" ||
         segments[3] === "retractions.md" ||
-        segments[3] === "retractions.html")
+        segments[3] === "retractions.html" ||
+        segments[3] === "syntheses.json" ||
+        segments[3] === "syntheses.md" ||
+        segments[3] === "syntheses.html")
     ) {
       await next();
       return;
@@ -884,10 +887,12 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (
       !encodedSeparator &&
       segments.length === 5 &&
-      segments[3] === "claims" &&
-      /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html|bib|csl\.json)$/.test(
-        (segments[4] ?? "").replace(/%40/gi, "@"),
-      )
+      ((segments[3] === "claims" &&
+        /^C-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html|bib|csl\.json)$/.test(
+          (segments[4] ?? "").replace(/%40/gi, "@"),
+        )) ||
+        (segments[3] === "syntheses" &&
+          /^SYNTH-[A-Z0-9-]+\.(md|json|html)$/.test(segments[4] ?? "")))
     ) {
       await next();
       return;

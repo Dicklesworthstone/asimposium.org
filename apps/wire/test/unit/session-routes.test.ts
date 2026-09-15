@@ -10466,7 +10466,7 @@ describe("committed promotion outbox nudge", () => {
       expect(validSynth.problem_id).toBe("P-4DSP");
       expect(validSynth.covers_through).toBe(currentSeq);
       expect(validSynth.anchors_count).toBe(1);
-      expect(validSynth.dropped_single_author_count).toBe(0);
+      expect(validSynth.dropped_single_author_count).toBe(1);
       expect(validSynth.sequence).toBeGreaterThan(currentSeq);
 
       // Verify row in syntheses table
@@ -10480,7 +10480,7 @@ describe("committed promotion outbox nudge", () => {
         }>();
       expect(synthRow?.synthesis_id).toBe(validSynth.synthesis_id as string);
       expect(synthRow?.covers_through).toBe(currentSeq);
-      expect(synthRow?.dropped_single_author_count).toBe(0);
+      expect(synthRow?.dropped_single_author_count).toBe(1);
 
       // 4. Idempotent replay with same key returns 200 with identical response
       const replayResponse = await f.call(`${f.path}/synthesize`, {

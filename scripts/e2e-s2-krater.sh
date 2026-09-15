@@ -209,6 +209,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/retractions.ts
   packages/contracts/src/conflicts.ts
   packages/contracts/src/leases.ts
+  packages/contracts/src/syntheses.ts
+  packages/contracts/generated/syntheses.schema.json
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as

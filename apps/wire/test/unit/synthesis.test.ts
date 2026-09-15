@@ -2,10 +2,16 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { SynthesisAnchor } from "@asimposium/contracts";
+import type { SynthesisAnchor, SynthesisItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   computeDroppedSingleAuthorCount,
+  loadProblemSyntheses,
+  loadSingleSynthesis,
+  renderSingleSynthesisHtmlFragment,
+  renderSingleSynthesisMarkdown,
+  renderSynthesesHtmlFragment,
+  renderSynthesesMarkdown,
   validateSynthesisAnchors,
 } from "../../src/ledger/synthesis.ts";
 
@@ -21,22 +27,27 @@ function createTestDb(): D1Database {
   }
 
   const prepare = (query: string) => {
+    interface Statement {
+      all(...params: unknown[]): unknown[];
+      get(...params: unknown[]): unknown;
+      run(...params: unknown[]): { changes: number };
+    }
     const methods = (...values: unknown[]) => ({
       async run() {
-        const statement = sqlite.prepare(query);
+        const statement = sqlite.prepare(query) as unknown as Statement;
         if (/^\s*SELECT\b/i.test(query)) {
-          const rows = statement.all(...(values as any[]));
+          const rows = statement.all(...values);
           return { results: rows, meta: { changes: 0 } };
         }
-        const result = statement.run(...(values as any[]));
+        const result = statement.run(...values);
         return { results: [], meta: { changes: result.changes } };
       },
       async first<T>(): Promise<T | null> {
-        const row = (sqlite.prepare(query) as any).get(...(values as any[]));
+        const row = (sqlite.prepare(query) as unknown as Statement).get(...values);
         return (row ?? null) as T | null;
       },
       async all<T>(): Promise<{ results: T[] }> {
-        const rows = (sqlite.prepare(query) as any).all(...(values as any[])) as T[];
+        const rows = (sqlite.prepare(query) as unknown as Statement).all(...values) as T[];
         return { results: rows };
       },
     });
@@ -440,5 +451,202 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     expect(await computeDroppedSingleAuthorCount(db, problemId, 1, new Set())).toBe(1);
     const droppedCount = await computeDroppedSingleAuthorCount(db, problemId, 2, new Set());
     expect(droppedCount).toBe(0);
+  });
+
+  test("includes hypotheses and dead ends in dropped single-author finding count", async () => {
+    const db = createTestDb();
+    const problemId = "P-SYNTH-HYP-DE";
+    const now = new Date().toISOString();
+
+    await createProblem(db, problemId, now);
+
+    // Event 1: Hypothesis H-1 authored by F-1
+    await insertEvent(
+      db,
+      problemId,
+      1,
+      "E-1",
+      "hypothesis.created",
+      "hypothesis",
+      "H-1",
+      1,
+      "F-1",
+      now,
+    );
+
+    // Event 2: Dead end DE-1 authored by F-1
+    await insertEvent(
+      db,
+      problemId,
+      2,
+      "E-2",
+      "dead_end.recorded",
+      "dead_end",
+      "DE-1",
+      1,
+      "F-1",
+      now,
+    );
+
+    // Both omitted -> dropped count is 2
+    expect(await computeDroppedSingleAuthorCount(db, problemId, 2, new Set())).toBe(2);
+
+    // If H-1 is anchored, only DE-1 dropped -> count is 1
+    expect(await computeDroppedSingleAuthorCount(db, problemId, 2, new Set(["H-1"]))).toBe(1);
+
+    // If both anchored -> count is 0
+    expect(await computeDroppedSingleAuthorCount(db, problemId, 2, new Set(["H-1", "DE-1"]))).toBe(
+      0,
+    );
+
+    // Event 3: Evidence citing H-1 by F-2 (external fellow)
+    await insertEvent(
+      db,
+      problemId,
+      3,
+      "E-3",
+      "evidence.published",
+      "evidence",
+      "EV-1",
+      1,
+      "F-2",
+      now,
+    );
+    await db
+      .prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+      )
+      .bind("E-3", DUMMY_SHA, JSON.stringify({ hypothesis_id: "H-1" }))
+      .run();
+
+    // Now H-1 is externally cited at seq 3; only DE-1 is single-author
+    expect(await computeDroppedSingleAuthorCount(db, problemId, 3, new Set())).toBe(1);
+
+    // Event 4: Retry of DE-1 by F-3 (external fellow)
+    await insertEvent(
+      db,
+      problemId,
+      4,
+      "E-4",
+      "dead_end.recorded",
+      "dead_end",
+      "DE-2",
+      1,
+      "F-3",
+      now,
+    );
+    await db
+      .prepare(
+        `INSERT INTO dead_ends (dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate, author_fellow_id, declared_model, supersedes_dead_end_id, created_at)
+         VALUES ('DE-2', ?, 4, 'Retry', 'Fails again', 'Retry again', 'F-3', 'model', 'DE-1', ?)`,
+      )
+      .bind(problemId, now)
+      .run();
+
+    // At seq 4, DE-1 is superseded so it is no longer single-author; DE-2 is anchored -> dropped count is 0
+    expect(await computeDroppedSingleAuthorCount(db, problemId, 4, new Set(["DE-2"]))).toBe(0);
+  });
+
+  test("renderers produce canonical GFM markdown and HTML fragments (Rule A1 Diptych)", () => {
+    const item: SynthesisItem = {
+      synthesis_id: "SYNTH-TEST-1",
+      problem_id: "P-RENDER-TEST",
+      seq: 10,
+      covers_through: 5,
+      body_md: "## State of Problem\nProgress is solid.",
+      anchors: [
+        {
+          target_kind: "claim",
+          target_id: "C-1",
+          target_version: 1,
+          assertion_summary: "Main theorem",
+        },
+      ],
+      omitted: ["claim:C-2: dropped"],
+      selection_policy: "Include corroborated claims",
+      dropped_single_author_count: 1,
+      authoring_principal: "fel_test_author",
+      declared_model: "claude-3-7-sonnet",
+      created_at: "2026-09-15T00:00:00Z",
+    };
+
+    const listMd = renderSynthesesMarkdown("P-RENDER-TEST", [item], []);
+    expect(listMd).toContain("# Problem Syntheses: P-RENDER-TEST");
+    expect(listMd).toContain("SYNTH-TEST-1");
+    expect(listMd).toContain("Main theorem");
+
+    const listHtml = renderSynthesesHtmlFragment("P-RENDER-TEST", [item], []);
+    expect(listHtml).toContain('class="syntheses-list"');
+    expect(listHtml).toContain("SYNTH-TEST-1");
+
+    const singleMd = renderSingleSynthesisMarkdown(item, { material_events_since: 3, stale: true });
+    expect(singleMd).toContain("# Synthesis SYNTH-TEST-1 (P-RENDER-TEST)");
+    expect(singleMd).toContain("stale by 3 material events");
+    expect(singleMd).toContain("Disclosed Omissions");
+
+    const singleHtml = renderSingleSynthesisHtmlFragment(item, {
+      material_events_since: 0,
+      stale: false,
+    });
+    expect(singleHtml).toContain('class="single-synthesis"');
+    expect(singleHtml).toContain("current with ledger");
+  });
+
+  test("loadProblemSyntheses and loadSingleSynthesis query records and compute staleness", async () => {
+    const db = createTestDb();
+    const problemId = "P-SYNTH-LOAD";
+    const now = new Date().toISOString();
+
+    await createProblem(db, problemId, now);
+
+    // Event 1 & 2: Claim events
+    await insertEvent(db, problemId, 1, "E-1", "claim.promoted", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(db, problemId, 2, "E-2", "claim.promoted", "claim", "C-2", 1, "F-1", now);
+
+    // Event 3: Synthesis event
+    await insertEvent(
+      db,
+      problemId,
+      3,
+      "E-3",
+      "synthesis.created",
+      "synthesis",
+      "SYNTH-L1",
+      1,
+      "F-1",
+      now,
+    );
+    await db
+      .prepare(
+        `INSERT INTO syntheses
+           (synthesis_id, problem_id, covers_through, body_md, anchors_json, omitted_json,
+            dropped_single_author_count, authoring_principal, declared_model, created_at)
+         VALUES ('SYNTH-L1', ?, 2, 'Synthesis body text', ?, ?, 0, 'F-1', 'test-model', ?)`,
+      )
+      .bind(
+        problemId,
+        JSON.stringify([{ target_kind: "claim", target_id: "C-1", target_version: 1 }]),
+        JSON.stringify(["claim:C-2: omitted"]),
+        now,
+      )
+      .run();
+
+    // Event 4: Another claim event after covers_through
+    await insertEvent(db, problemId, 4, "E-4", "claim.promoted", "claim", "C-3", 1, "F-1", now);
+
+    const list = await loadProblemSyntheses(db, problemId);
+    expect(list.syntheses.length).toBe(1);
+    expect(list.syntheses[0]?.synthesis_id).toBe("SYNTH-L1");
+    expect(list.syntheses[0]?.covers_through).toBe(2);
+
+    const single = await loadSingleSynthesis(db, problemId, "SYNTH-L1");
+    expect(single).not.toBeNull();
+    expect(single?.synthesis.synthesis_id).toBe("SYNTH-L1");
+    // 2 material events landed after covers_through (seq 2): seq 3 (synthesis is not claim/hypothesis/etc.) and seq 4 (claim). So material_events_since = 1 (E-4 claim).
+    expect(single?.staleness.material_events_since).toBe(1);
+    expect(single?.staleness.stale).toBe(true);
+
+    const nonExistent = await loadSingleSynthesis(db, problemId, "SYNTH-NONE");
+    expect(nonExistent).toBeNull();
   });
 });

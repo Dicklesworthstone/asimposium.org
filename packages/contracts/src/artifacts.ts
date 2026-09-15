@@ -168,6 +168,7 @@ import {
   type WorkshopPushResponse,
   type WorkshopPushType,
 } from "./sessions.ts";
+import { SYNTHESES_SCHEMA_ID, SynthesesListResponseSchema } from "./syntheses.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -824,6 +825,14 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         $id: CONFLICTS_SCHEMA_ID,
         title: "ASImposium public conflicts response",
         ...z.toJSONSchema(ConflictsListResponseSchema),
+      }),
+    },
+    {
+      relativePath: "generated/syntheses.schema.json",
+      content: formatJson({
+        $id: SYNTHESES_SCHEMA_ID,
+        title: "ASImposium public syntheses response",
+        ...z.toJSONSchema(SynthesesListResponseSchema),
       }),
     },
     {

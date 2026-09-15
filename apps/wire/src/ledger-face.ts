@@ -22,6 +22,7 @@ import {
   QuestionsListResponseSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
+  SYNTHESES_SCHEMA_ID,
 } from "@asimposium/contracts";
 import {
   type ComposedPack,
@@ -33,7 +34,6 @@ import {
   safeCodeSpan,
 } from "@asimposium/render";
 import { Hono } from "hono";
-
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
@@ -62,6 +62,14 @@ import {
   renderRetractionsMarkdown,
 } from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
+import {
+  loadProblemSyntheses,
+  loadSingleSynthesis,
+  renderSingleSynthesisHtmlFragment,
+  renderSingleSynthesisMarkdown,
+  renderSynthesesHtmlFragment,
+  renderSynthesesMarkdown,
+} from "./ledger/synthesis";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -1692,6 +1700,158 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("html", body);
     const headers = {
       "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = JSON.stringify({
+      schema: SYNTHESES_SCHEMA_ID,
+      problem_id: problemId,
+      syntheses,
+      omitted,
+    });
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderSynthesesMarkdown(problemId, syntheses, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderSynthesesHtmlFragment(problemId, syntheses, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses/:target", async (c) => {
+    const problemId = c.req.param("id");
+    const target = c.req.param("target");
+    const match = /^(SYNTH-[A-Z0-9-]+)\.(json|md|html)$/.exec(target);
+    if (!match) return problemNotFound(c.req.method);
+
+    const synthesisId = match[1] as string;
+    const format = match[2] as "json" | "md" | "html";
+
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const result = await loadSingleSynthesis(c.env.DB, problemId, synthesisId);
+    if (!result) {
+      const refusal = problemDocument({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Synthesis not found",
+        detail: `No public synthesis with id '${synthesisId}' exists for problem '${problemId}'.`,
+        fixHint: `Check available syntheses at /p/${problemId}/syntheses.json.`,
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+          example: { method: "GET", path: `/p/${problemId}/syntheses.json` },
+        },
+      });
+      return new Response(c.req.method === "HEAD" ? null : refusal.body, {
+        status: refusal.status,
+        headers: refusal.headers,
+      });
+    }
+
+    let body: string;
+    let contentType: string;
+    let etagKind: "json" | "markdown" | "html";
+
+    if (format === "json") {
+      body = JSON.stringify({
+        schema: SYNTHESES_SCHEMA_ID,
+        synthesis: result.synthesis,
+        staleness: result.staleness,
+      });
+      contentType = "application/json; charset=utf-8";
+      etagKind = "json";
+    } else if (format === "md") {
+      body = renderSingleSynthesisMarkdown(result.synthesis, result.staleness);
+      contentType = "text/markdown; charset=utf-8";
+      etagKind = "markdown";
+    } else {
+      body = renderSingleSynthesisHtmlFragment(result.synthesis, result.staleness);
+      contentType = "text/html; charset=utf-8";
+      etagKind = "html";
+    }
+
+    const etag = await strongEtag(etagKind, body);
+    const headers = {
+      "content-type": contentType,
       "cache-control": "public, max-age=0, must-revalidate",
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,

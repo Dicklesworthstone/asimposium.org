@@ -35,7 +35,9 @@ function sampleFor(honoPath: string): string {
   return honoPath.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/gu, (_all, name) => {
     if (name === "enrollmentId") return "/join/ASIMP-EN-PROBE".slice(6);
     if (name === "problemId") return "P-4DSP";
-    if (name === "target") return "C-1@1.json";
+    if (name === "target") {
+      return honoPath.includes("/syntheses/") ? "SYNTH-1.json" : "C-1@1.json";
+    }
     return name === "id" && honoPath.startsWith("/p/") ? "P-4DSP" : "PROBE";
   });
 }
