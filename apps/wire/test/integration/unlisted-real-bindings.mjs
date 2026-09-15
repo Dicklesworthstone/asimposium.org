@@ -54,6 +54,10 @@ export async function unlistedJourney({
   await sponsorCall(sponsor, "POST", `/v1/sponsors/problems/${id}/lifecycle`, "problem-lifecycle", {
     action: "publish",
   });
+  await sponsorCall(sponsor, "POST", `/v1/sponsors/problems/${id}/lifecycle`, "problem-lifecycle", {
+    action: "set-admission-mode",
+    mode: "open",
+  });
   // Causal negative on the old source: detail succeeds while the digest 404s.
   assert.equal((await call(`/v1/problems/${id}`)).problem.unlisted, true);
   const digest = await fetch(`/p/${id}.json`);

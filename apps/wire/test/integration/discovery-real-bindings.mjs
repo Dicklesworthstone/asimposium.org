@@ -461,6 +461,106 @@ async function runDiscovery() {
     );
     return { paths: [...exercised], screeningRefusals };
   }
+  async function verifyCitationAndRelationDisputeDiscovery() {
+    await fixtures.setScreenMode("pass");
+    const problem = "P-DISC-CITE";
+    await fixtures.seedProblem(problem);
+    const token = await enroll("citation-discovery-author", "usr_citation_discovery_author");
+    const session = await call("/v1/sessions", { problem_id: problem }, token, 201);
+    const path = `/v1/sessions/${session.session_id}`;
+    const draft = await call(
+      `${path}/workshop`,
+      {
+        type: "claim-draft",
+        title: "Citation base claim",
+        body_md: "PRIVATE-CITATION-DISCOVERY",
+      },
+      token,
+      201,
+    );
+    await call(
+      `${path}/promote`,
+      {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement: "Base claim verifying Turing citations.",
+        falsifier: "Counterexample exists.",
+      },
+      token,
+      201,
+    );
+    const gap = await call(
+      `${path}/gaps`,
+      {
+        target_claim_id: "C-1",
+        target_version: 1,
+        obligation: "Prove the induction step.",
+        closes_what: "Induction step.",
+      },
+      token,
+      201,
+    );
+    await call(
+      `${path}/relations`,
+      {
+        kind: "addresses-gap",
+        source_claim_id: "C-1",
+        source_version: 1,
+        target: gap.gap_id,
+      },
+      token,
+      201,
+    );
+    const disputer = await enroll("citation-discovery-disputer", "usr_citation_discovery_disputer");
+    const disputerSession = await call("/v1/sessions", { problem_id: problem }, disputer, 201);
+    await call(
+      `/v1/sessions/${disputerSession.session_id}/relations/dispute`,
+      {
+        kind: "addresses-gap",
+        source_claim_id: "C-1",
+        source_version: 1,
+        target: gap.gap_id,
+        reason: "Does not address the required obligation.",
+      },
+      disputer,
+      201,
+    );
+    const cit = await call(
+      `${path}/citations`,
+      {
+        title: "On Computable Numbers, with an Application to the Entscheidungsproblem",
+        authors: ["Alan Turing"],
+        locator_kind: "doi",
+        locator: "10.1112/plms/s2-42.1.230",
+        source_provenance: "retrieved",
+        retrieved_at: "1936-11-12T00:00:00Z",
+      },
+      token,
+      201,
+    );
+    await call(
+      `${path}/citations/correct`,
+      {
+        citation_id: cit.citation_id,
+        base_version: 1,
+        title: "On Computable Numbers, with an Application to the Entscheidungsproblem: A Correction",
+        authors: ["Alan Turing"],
+        locator_kind: "doi",
+        locator: "10.1112/plms/s2-43.6.544",
+        source_provenance: "retrieved",
+        retrieved_at: "1937-01-01T00:00:00Z",
+      },
+      token,
+      200,
+    );
+    return {
+      paths: [
+        "/v1/sessions/{id}/citations",
+        "/v1/sessions/{id}/citations/correct",
+        "/v1/sessions/{id}/relations/dispute",
+      ],
+    };
+  }
   const discovery = await call("/openapi.json");
   assert.deepEqual(discovery.servers, [{ url: origin }]);
   function discoveredRequest(property) {
@@ -1224,6 +1324,7 @@ async function runDiscovery() {
   // metadata transitions do not claim paid-screening coverage; question text
   // and retraction reasons must cross the same tested screening boundary.
   const questionCensus = await verifyQuestionConflictDiscovery();
+  const citationCensus = await verifyCitationAndRelationDisputeDiscovery();
   const beforePolicy = await publicState();
   const censusPaths = candidates
     .map(([suffix, kind]) =>
@@ -1231,7 +1332,7 @@ async function runDiscovery() {
         ? "/v1/sessions/{id}/review"
         : `/v1/sessions/{id}/${suffix.replace(hypothesis.hypothesis_id, "{hid}")}`,
     )
-    .concat(metadataPath, ...questionCensus.paths)
+    .concat(metadataPath, ...questionCensus.paths, ...citationCensus.paths)
     .sort();
   const advertisedPublicWrites = Object.entries(discovery.paths)
     .filter(
