@@ -81,8 +81,14 @@ fi
 
 cd "$repository_root" || exit 1
 
+# Wrangler requires genuine Node. Select a genuine Node runtime when PATH's node is a Bun shim.
+node_binary="${ASIMPOSIUM_NODE_BINARY:-$(e2e_select_node_runtime 2>/dev/null || true)}"
+if [[ -z "$node_binary" || ! -x "$node_binary" ]]; then
+  node_binary="node"
+fi
+
 # Run the session presence real-bindings preflight against real Workerd / D1
-if ! node apps/wire/test/integration/session-presence-real-bindings.mjs; then
+if ! "$node_binary" apps/wire/test/integration/session-presence-real-bindings.mjs; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "SESSION_PRESENCE_REAL_BINDINGS_FAILED" "$reproduce"
   exit 1
 fi

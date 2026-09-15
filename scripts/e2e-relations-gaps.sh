@@ -70,7 +70,7 @@ if [[ "$write_artifacts" -eq 1 ]] \
   exit 78
 fi
 
-cd "$repository_root"
+cd "$repository_root" || exit 1
 
 # Run contracts and unit tests
 if ! bun test packages/contracts/test/unit/conflicts.test.ts; then
@@ -90,7 +90,11 @@ fi
 
 # Run real-bindings integration test if present
 if [[ -f apps/wire/test/integration/conflicts-real-bindings.mjs ]]; then
-  if ! node apps/wire/test/integration/conflicts-real-bindings.mjs; then
+  node_binary="${ASIMPOSIUM_NODE_BINARY:-$(e2e_select_node_runtime 2>/dev/null || true)}"
+  if [[ -z "$node_binary" || ! -x "$node_binary" ]]; then
+    node_binary="node"
+  fi
+  if ! "$node_binary" apps/wire/test/integration/conflicts-real-bindings.mjs; then
     e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CONFLICTS_REAL_BINDINGS_FAILED" "$reproduce"
     exit 1
   fi
