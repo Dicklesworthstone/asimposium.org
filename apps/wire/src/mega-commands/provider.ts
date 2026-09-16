@@ -82,8 +82,7 @@ export function computeViewerPermissions(input: {
   readonly problemId: string;
 }): Record<string, boolean> {
   const { fellowStatus, role, admissionMode = "open", problemBinding, problemId } = input;
-  if (fellowStatus !== "active" ||
-      (problemBinding !== undefined && problemBinding !== problemId)) {
+  if (fellowStatus !== "active" || (problemBinding !== undefined && problemBinding !== problemId)) {
     return { read: true, session_open: false, workshop_push: false, promote: false, review: false };
   }
   const isMember = role !== "none";
@@ -111,7 +110,8 @@ export function filterMovesByPermissions(
   effectivePermissions: Record<string, boolean>,
 ): readonly NextMoveCandidate[] {
   return candidates.filter((candidate) => {
-    if (PROMOTION_MOVE_KINDS.has(candidate.move) && effectivePermissions.promote !== true) return false;
+    if (PROMOTION_MOVE_KINDS.has(candidate.move) && effectivePermissions.promote !== true)
+      return false;
     if (candidate.move === "review" && effectivePermissions.review !== true) return false;
     if (effectivePermissions.session_open !== true) return false;
     return true;
@@ -122,8 +122,12 @@ export function filterMovesByPermissions(
  * scientific evaluator is reachable from request data. */
 export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
   constructor() {
-    super({ loadQueue: loadReviewQueue, templateFor: getMoveTemplate,
-      authorize: authorizeFellowWrite, now: () => Date.now() });
+    super({
+      loadQueue: loadReviewQueue,
+      templateFor: getMoveTemplate,
+      authorize: authorizeFellowWrite,
+      now: () => Date.now(),
+    });
   }
 }
 
@@ -150,12 +154,17 @@ export class ContractFixtureMovesProvider implements MegaCommandsMoveProvider {
 
   async triageMove(request: TriageMovesRequest): Promise<TriageMovesResult> {
     const candidate = this.fixtures.triageMoves?.[request.fellowId] ?? null;
-    if (candidate === null) return { move: null, degraded: false, selectionBoundary: "contract-fixture-provider" };
+    if (candidate === null)
+      return { move: null, degraded: false, selectionBoundary: "contract-fixture-provider" };
     const problemRef = candidate.refs.find((ref) => ref.startsWith("P-"));
     if (problemRef !== undefined) {
       const assignment = request.assignments.find((a) => a.problem_id === problemRef);
       if (assignment?.role === "observer" && PROMOTION_MOVE_KINDS.has(candidate.move)) {
-        return { move: null, degraded: false, selectionBoundary: "contract-fixture-provider-permission-filtered" };
+        return {
+          move: null,
+          degraded: false,
+          selectionBoundary: "contract-fixture-provider-permission-filtered",
+        };
       }
     }
     return { move: candidate, degraded: false, selectionBoundary: "contract-fixture-provider" };

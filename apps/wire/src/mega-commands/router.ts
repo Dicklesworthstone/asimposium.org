@@ -167,7 +167,9 @@ export function createMegaCommandsRouter(
 
     if (db !== undefined) {
       const problemRow = await db
-        .prepare("SELECT id, admission_mode FROM problems WHERE id = ? AND status != 'private-draft'")
+        .prepare(
+          "SELECT id, admission_mode FROM problems WHERE id = ? AND status != 'private-draft'",
+        )
         .bind(problemId)
         .first<{ id: string; admission_mode: string | null }>();
 
