@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProblemCodeSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -10,7 +8,7 @@ assert.equal(process.versions.bun, undefined, "This lane requires genuine Node")
 export async function problemGovernanceJourney({
   call,
   enroll,
-  fixtures,
+  fixtures: _fixtures,
   env,
   worker,
   origin,
@@ -41,7 +39,7 @@ export async function problemGovernanceJourney({
   const f3 = await env.DB.prepare("SELECT fellow_id FROM enrollment_fellows WHERE name = ?")
     .bind("fellow-three")
     .first();
-  const fellow3Id = f3.fellow_id;
+  const _fellow3Id = f3.fellow_id;
 
   // 2. Propose Problem 1
   const propRes = await call(

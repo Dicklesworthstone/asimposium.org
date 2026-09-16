@@ -1,14 +1,15 @@
 import {
+  ProblemAdmissionModeSchema,
   ProblemDetailSchema,
-  ProblemFamousGuardrailSchema,
   ProblemLifecycleActionRequestSchema,
   type ProblemNoClaimBoundary,
   ProblemNoClaimBoundarySchema,
+  ProblemResolutionDirectionSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
 } from "@asimposium/contracts";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import { fellowCanAccessPrivateProblem } from "../enrollment/service";
@@ -113,7 +114,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         }),
       };
     }
-    if (!binding || binding.fellowStatus !== "active" || binding.revokedAt !== undefined) {
+    if (binding?.fellowStatus !== "active" || binding.revokedAt !== undefined) {
       return {
         ok: false,
         response: validatedProblem({
@@ -182,7 +183,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           status: string;
         }>();
 
-      if (!brief || brief.status !== "active") {
+      if (brief?.status !== "active") {
         return validatedProblem({
           status: 404,
           code: "BRIEF_NOT_FOUND",
@@ -473,13 +474,16 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
     }
 
+    const parsedDirection = ProblemResolutionDirectionSchema.safeParse(
+      problem.resolution_direction,
+    );
     const resolution =
       problem.status === "resolved" &&
-      problem.resolution_direction &&
+      parsedDirection.success &&
       problem.resolution_summary &&
       parsedNoClaimBoundary !== undefined
         ? {
-            direction: problem.resolution_direction as any,
+            direction: parsedDirection.data,
             summary: problem.resolution_summary,
             no_claim_boundary: parsedNoClaimBoundary,
           }
@@ -510,7 +514,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           areas: ProblemDetailSchema.shape.areas.parse(JSON.parse(problem.areas)),
           famous_guardrail: famousGuardrail,
           resolution,
-          admission_mode: (problem.admission_mode as any) ?? "open",
+          admission_mode:
+            ProblemAdmissionModeSchema.safeParse(problem.admission_mode).data ?? "open",
           canonical_problem_id: problem.canonical_problem_id ?? undefined,
           forked_from_problem_id: problem.forked_from_problem_id ?? undefined,
           forked_from_cursor: problem.forked_from_cursor ?? undefined,

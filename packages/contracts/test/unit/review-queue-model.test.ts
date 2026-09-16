@@ -29,13 +29,10 @@ for (const invalid of [
 }
 
 for (const control of ["\n", "\r", "\r\n"]) {
-  test(
-    "actual trailing line ending is not part of a canonical cursor: " + JSON.stringify(control),
-    () => {
-      assert.throws(
-        () => parseReviewQueueAfter("2026-09-01T00:00:00.000Z|E-1" + control),
-        /REVIEW_QUEUE_CURSOR_INVALID/,
-      );
-    },
-  );
+  test(`actual trailing line ending is not part of a canonical cursor: ${JSON.stringify(control)}`, () => {
+    assert.throws(
+      () => parseReviewQueueAfter(`2026-09-01T00:00:00.000Z|E-1${control}`),
+      /REVIEW_QUEUE_CURSOR_INVALID/,
+    );
+  });
 }

@@ -440,7 +440,9 @@ export async function applyPublicProblemGovernance(
           problem.status,
           problem.current_statement_version,
           problem.title,
-          ...(publishing ? [problem.created_by_fellow_id!, problem.created_by_fellow_id!] : []),
+          ...(publishing && problem.created_by_fellow_id
+            ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
+            : []),
           ...(resultClaim
             ? [
                 resultClaim.event_id,

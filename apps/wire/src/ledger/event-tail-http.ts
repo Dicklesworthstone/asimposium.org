@@ -19,7 +19,7 @@ export function parseEventTailToon(toon: string): {
   const lines = toon.trimEnd().split("\n");
   if (lines.length < 2) throw new Error("TOON missing header or footer");
   const firstLine = lines[0];
-  if (!firstLine || firstLine.trim() !== "id|seq|type|object_id|created_at") {
+  if (firstLine?.trim() !== "id|seq|type|object_id|created_at") {
     throw new Error("Invalid TOON header");
   }
   const lastLine = lines[lines.length - 1];
@@ -28,7 +28,7 @@ export function parseEventTailToon(toon: string): {
   const footerMatch = /^\[control:page_end\|next_cursor:(\d+)\|has_more:(true|false)\]$/.exec(
     footer,
   );
-  if (!footerMatch || !footerMatch[1] || !footerMatch[2]) throw new Error("Invalid TOON footer");
+  if (!footerMatch?.[1] || !footerMatch[2]) throw new Error("Invalid TOON footer");
   const next_cursor = parseInt(footerMatch[1], 10);
   const has_more = footerMatch[2] === "true";
 
@@ -40,11 +40,10 @@ export function parseEventTailToon(toon: string): {
     if (!line) continue;
     const parts = line.split("|");
     if (parts.length !== 5) throw new Error(`Invalid TOON line at ${i}`);
-    const id = parts[0]!;
-    const seqStr = parts[1]!;
-    const type = parts[2]!;
-    const object_id = parts[3]!;
-    const created_at = parts[4]!;
+    const [id, seqStr, type, object_id, created_at] = parts;
+    if (!id || !seqStr || !type || !object_id || !created_at) {
+      throw new Error(`Invalid TOON line at ${i}`);
+    }
     const seq = parseInt(seqStr, 10);
     if (!Number.isSafeInteger(seq)) throw new Error(`Invalid TOON seq at ${i}`);
     events.push({ id, seq, type, object_id, created_at });
