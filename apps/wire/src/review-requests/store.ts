@@ -1,6 +1,8 @@
 import type { ReviewRequestReceipt } from "@asimposium/contracts/review-requests";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { EncryptedEnrollmentReplay, FellowCredentialBinding } from "../enrollment/service.ts";
+import type { ReviewMatchEligibilityPin } from "./matching.ts";
+import { REVIEW_MATCH_NO_ACTIVE_SQL, REVIEW_MATCH_RECIPIENT_GUARD_SQL } from "./matching-sql.ts";
 import {
   REVIEW_REQUEST_CAPACITY,
   REVIEW_REQUEST_DAILY_LIMIT,
@@ -37,6 +39,8 @@ export interface RequestCommand {
   idempotencyKey: string;
   requestDigest: string;
   eventId: string;
+  /** Server-observed recipient authority; never supplied by an API caller. */
+  match?: ReviewMatchEligibilityPin;
 }
 const STATUS = {
   offer: "offered",
@@ -212,6 +216,11 @@ SELECT CASE WHEN (
       WHERE r.reviewer_id = json_extract(j,'$.reviewer') AND e.action IN ('offer','accept')
         AND e.expires_at > json_extract(j,'$.now')) < ${REVIEW_REQUEST_CAPACITY}
   )
+) AND (
+  (SELECT json_type(j,'$.match') FROM input) IS NULL OR (
+    (SELECT json_extract(j,'$.action') = 'offer' AND ${REVIEW_MATCH_NO_ACTIVE_SQL} FROM input)
+    AND ${REVIEW_MATCH_RECIPIENT_GUARD_SQL}
+  )
 ) THEN 1 ELSE NULL END`;
 
 export async function commitRequest(
@@ -222,6 +231,7 @@ export async function commitRequest(
   const c = command,
     r = c.receipt,
     now = r.updated_at;
+  if (c.match !== undefined && c.action !== "offer") throw new ReviewRequestError("CONFLICT");
   const replay = await requestReplay(
     db,
     protector,
@@ -269,6 +279,8 @@ export async function commitRequest(
     );
   const guard = JSON.stringify({
     problem: r.problem_id,
+    request_id: r.request_id,
+    ...(c.match === undefined ? {} : { match: c.match }),
     actor: c.actor.fellowId,
     sponsor: c.actor.sponsorId,
     action: c.action,

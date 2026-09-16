@@ -54,7 +54,10 @@ const grantReady = `json_valid(g.granted_scopes_json) AND json_valid(g.granted_r
   AND (json_extract(g.granted_resources_json, '$.problemBinding') IS NULL
     OR json_extract(g.granted_resources_json, '$.problemBinding') = json_extract(j, '$.problem'))
   AND (json_extract(g.granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
-    OR json_extract(g.granted_resources_json, '$.fellowGrantExpiresAt') > json_extract(j, '$.now'))`;
+    OR json_extract(g.granted_resources_json, '$.fellowGrantExpiresAt') > json_extract(j, '$.now'))
+  AND (json_extract(g.granted_resources_json, '$.eventBudget') IS NULL
+    OR (SELECT COUNT(*) FROM events used WHERE used.writer_credential_id = t.credential_id)
+      < json_extract(g.granted_resources_json, '$.eventBudget'))`;
 
 export const REVIEW_MATCH_CANDIDATES_SQL = `WITH input AS (SELECT ? AS j)
 SELECT f.fellow_id, f.sponsor_id, m.role,
