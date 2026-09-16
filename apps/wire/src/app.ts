@@ -50,6 +50,7 @@ import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createInboxRouter } from "./inbox/router";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
+import { createHypothesesRoutes } from "./ledger/hypotheses-router";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { createMegaCommandsRouter } from "./mega-commands/router";
@@ -927,6 +928,10 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // from the public capabilities document by design — it is an operator
   // attestation endpoint, not an agent face.
   app.post(SCREENING_ROUTE_PATH, (c) => handleScreeningRequest(c.req.raw, c.env));
+
+  // Exact contracted hypothesis routes validate their own IDs and queries.
+  // Mount before the broad legacy digest/quarantine matcher can consume them.
+  app.route("/", createHypothesesRoutes());
 
   // Let only contracted problem and exact-claim faces reach D1. The digest's
   // regex parameter can consume slashes, so unknown nested paths must be

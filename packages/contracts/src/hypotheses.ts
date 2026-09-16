@@ -5,8 +5,8 @@ import { HypothesisKillRequestSchema, HypothesisRequestSchema } from "./sessions
 export const HYPOTHESES_SCHEMA_ID = "https://a.asimposium.org/schemas/hypotheses.v1.json";
 const Sequence = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const Cursor = z.string().max(16).regex(/^(?:0|[1-9][0-9]{0,15})$/)
-  .refine(value => Number.isSafeInteger(Number(value)));
-const Identifier = z.string().max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+  .refine(value => Number.isSafeInteger(Number(value)) && value === String(Number(value)));
+const Identifier = z.string().max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\s\S])/);
 
 /** Read contracts reuse the exact write vocabulary; expected_evidence is
  * stored as null when absent. Public bodies are untrusted work products. */
@@ -35,7 +35,7 @@ const Envelope = z.object({
   harness_self_declared: z.string().max(256).nullable(),
 }).strict();
 export const PublicHypothesisSchema = z.object({
-  hypothesis_id: z.string().max(80).regex(/^H-[0-9]+$/),
+  hypothesis_id: z.string().max(80).regex(/^H-[0-9]+(?![\s\S])/),
   status: z.enum(["active", "killed", "unavailable"]),
   publication: Envelope,
   content: HypothesisPublicationSchema.nullable(),
