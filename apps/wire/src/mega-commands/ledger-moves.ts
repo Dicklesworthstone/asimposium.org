@@ -1,6 +1,7 @@
 import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { ReviewQueueSnapshot } from "../discovery/review-queue-admissions";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 
 export const LEDGER_MOVES_BOUNDARY =
@@ -21,6 +22,7 @@ export interface LedgerMovesDependencies {
   loadQueue(
     db: D1Database,
     query: { problem: string; after?: string },
+    snapshot?: ReviewQueueSnapshot,
   ): Promise<ReviewQueueResponse>;
   templateFor(move: "review" | "add-refuter"): MoveTemplate;
 }
@@ -142,6 +144,7 @@ export async function loadLedgerMoves(
   viewer: MoveViewer,
   permissions: MovePermissions,
   dependencies: LedgerMovesDependencies,
+  through?: number,
 ): Promise<{
   items: ReviewQueueItem[];
   moves: NextMoveCandidate[];
@@ -149,6 +152,10 @@ export async function loadLedgerMoves(
   continuation: string | null;
 }> {
   const items: ReviewQueueItem[] = [];
+  if (through !== undefined && (!Number.isSafeInteger(through) || through < 0)) {
+    throw new Error("MOVE_QUEUE_SNAPSHOT_INVALID");
+  }
+  const snapshot = through === undefined ? undefined : { problemId, through };
   if (!permissions.session_open || (!permissions.review && !permissions.promote)) {
     return { items, moves: [], degraded: false, continuation: null };
   }
@@ -160,12 +167,15 @@ export async function loadLedgerMoves(
     const queue = await dependencies.loadQueue(db, {
       problem: problemId,
       ...(after ? { after } : {}),
-    });
+    }, snapshot);
     if (
       queue.problem !== problemId ||
       queue.candidates.some((item) => item.problem_id !== problemId)
     ) {
       throw new Error("MOVE_QUEUE_SCOPE_MISMATCH");
+    }
+    if (through !== undefined && queue.candidates.some(item => item.cursor !== through)) {
+      throw new Error("MOVE_QUEUE_SNAPSHOT_MISMATCH");
     }
     degraded ||= queue.omitted.some(
       (item) => item.reason === "content_unavailable" || item.reason === "scope_budget_exceeded",
