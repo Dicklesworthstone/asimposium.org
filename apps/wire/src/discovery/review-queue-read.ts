@@ -4,7 +4,6 @@ import type {
   ReviewQueueResponse,
 } from "@asimposium/contracts/review-queue";
 import {
-  parseReviewQueueAfter,
   REVIEW_QUEUE_BOUNDARY,
   REVIEW_QUEUE_PAGE_SIZE,
   REVIEW_QUEUE_SCHEMA_ID,
@@ -14,8 +13,8 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import { claimContentDigest } from "../krater/claim-version";
 import type { ScientificDisposition, ScientificRow } from "../ledger/scientific-disposition";
 import { rankReviewQueue, reviewNeed } from "./review-queue-selection";
+import { readReviewAdmissions, type ReviewQueueSnapshot } from "./review-queue-admissions";
 import {
-  REVIEW_QUEUE_DISCOVERY_SQL,
   REVIEW_QUEUE_MAX_DEPENDENTS,
   REVIEW_QUEUE_MAX_SCOPE_BYTES,
   REVIEW_QUEUE_MAX_SCOPE_EVENTS,
@@ -180,23 +179,10 @@ export async function readReviewQueue(
   db: D1Database,
   query: ReviewQueueQuery,
   science: ReviewQueueScience,
+  snapshot?: ReviewQueueSnapshot,
 ): Promise<ReviewQueueResponse> {
-  const after = parseReviewQueueAfter(query.after);
-  const result = await db
-    .prepare(REVIEW_QUEUE_DISCOVERY_SQL)
-    .bind(
-      query.problem ?? null,
-      query.problem ?? null,
-      after?.createdAt ?? "",
-      after?.createdAt ?? "",
-      after?.eventId ?? "",
-      REVIEW_QUEUE_PAGE_SIZE + 1,
-    )
-    .all<ReviewAdmission>();
-  if (!Array.isArray(result.results) || result.results.length > REVIEW_QUEUE_PAGE_SIZE + 1) {
-    throw new Error("REVIEW_QUEUE_DISCOVERY_INVALID");
-  }
-  const scanned = result.results.slice(0, REVIEW_QUEUE_PAGE_SIZE);
+  const rows = await readReviewAdmissions(db, query, snapshot);
+  const scanned = rows.slice(0, REVIEW_QUEUE_PAGE_SIZE);
   const counts = new Map<ReviewQueueResponse["omitted"][number]["reason"], number>();
   const omit = (reason: ReviewQueueResponse["omitted"][number]["reason"]) =>
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
@@ -278,7 +264,7 @@ export async function readReviewQueue(
     });
   }
   const last = scanned.at(-1);
-  const hasMore = result.results.length > REVIEW_QUEUE_PAGE_SIZE;
+  const hasMore = rows.length > REVIEW_QUEUE_PAGE_SIZE;
   if (hasMore) omit("page_limit");
   return {
     schema: REVIEW_QUEUE_SCHEMA_ID,

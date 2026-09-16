@@ -9,13 +9,24 @@ import {
 } from "../ledger/scientific-disposition";
 import { readReviewQueue } from "./review-queue-read";
 
+const science = { prepare: prepareScientificDispositions, fold: foldScientificRows };
+
 /** There is one production scientific evaluator, shared with exact claim
  * faces and packs. Neither query parameters nor a caller can replace it. */
 export async function loadReviewQueue(db: D1Database, query: unknown = {}) {
   const parsed = ReviewQueueQuerySchema.parse(query);
-  const response = await readReviewQueue(db, parsed, {
-    prepare: prepareScientificDispositions,
-    fold: foldScientificRows,
-  });
+  const response = await readReviewQueue(db, parsed, science);
   return ReviewQueueResponseSchema.parse(response);
+}
+
+/** Internal snapshot adapter for session packs and next/triage selection.
+ * Pagination keeps the enclosing problem cut even across empty pages. Public
+ * discovery retains its existing contract; through is not accepted there. */
+export async function loadReviewQueueAtCursor(
+  db: D1Database, problemId: string, through: number, after?: string,
+) {
+  const query = ReviewQueueQuerySchema.parse({ problem: problemId,
+    ...(after === undefined ? {} : { after }) });
+  return ReviewQueueResponseSchema.parse(await readReviewQueue(db, query, science,
+    { problemId, through }));
 }

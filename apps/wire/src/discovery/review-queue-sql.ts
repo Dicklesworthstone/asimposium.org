@@ -4,19 +4,22 @@ export const REVIEW_QUEUE_MAX_SCOPE_EVENTS = 512;
 export const REVIEW_QUEUE_MAX_SCOPE_BYTES = 1024 * 1024;
 export const REVIEW_QUEUE_MAX_DEPENDENTS = 32;
 
-export const REVIEW_QUEUE_DISCOVERY_SQL = `
-WITH admitted AS (
-  SELECT p.id AS problem_id, p.public_seq AS cursor,
+/** The scope CTE changes only the captured cut. Both entry points use the
+ * identical admission/head/count query and the same scientific evaluator. */
+function discoverySql(scope: string): string {
+  return `
+WITH review_scope AS (${scope}), admitted AS (
+  SELECT p.id AS problem_id, p.cursor,
     a.object_id AS claim_id, a.id AS admission_id, a.created_at,
     h.id AS head_id, h.object_version AS version
-  FROM problems p
+  FROM review_scope p
   JOIN events a ON a.problem_id = p.id AND a.object_kind = 'claim'
-    AND a.type = 'claim.created' AND a.object_version = 1 AND a.seq <= p.public_seq
+    AND a.type = 'claim.created' AND a.object_version = 1 AND a.seq <= p.cursor
   JOIN events h ON h.problem_id = p.id AND h.object_kind = 'claim'
     AND h.object_id = a.object_id AND h.type IN ('claim.created', 'claim.revised')
     AND h.seq = (SELECT MAX(e.seq) FROM events e WHERE e.problem_id = p.id
       AND e.object_kind = 'claim' AND e.object_id = a.object_id
-      AND e.type IN ('claim.created', 'claim.revised') AND e.seq <= p.public_seq)
+      AND e.type IN ('claim.created', 'claim.revised') AND e.seq <= p.cursor)
   WHERE p.unlisted = 0 AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
     AND (? IS NULL OR p.id = ?)
     AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
@@ -30,6 +33,17 @@ SELECT admitted.*,
     WHERE e.problem_id = admitted.problem_id AND e.seq <= admitted.cursor LIMIT 513
   )) AS scope_bytes
 FROM admitted ORDER BY created_at ASC, admission_id ASC`;
+}
+
+export const REVIEW_QUEUE_DISCOVERY_SQL = discoverySql(
+  "SELECT p.*, p.public_seq AS cursor FROM problems p",
+);
+
+/** Internal, problem-scoped pack/next reads. No public query field can select
+ * this mode. The three additional bindings are through, problem and through. */
+export const REVIEW_QUEUE_SNAPSHOT_SQL = discoverySql(
+  "SELECT p.*, ? AS cursor FROM problems p WHERE p.id = ? AND p.public_seq >= ?",
+);
 
 /** Body and dependency metadata are read in the same D1 batch as the shared
  * scientific fold. Present-day visibility/redaction wins over captured cursors.
