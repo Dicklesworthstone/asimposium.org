@@ -20,6 +20,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "discovery",
   "enrollment",
   "enrollment-capsule",
+  "event-tail",
   "internal-health",
   "ledger",
   "moves",

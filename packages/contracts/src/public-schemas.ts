@@ -17,6 +17,7 @@ import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { 
 import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schema.json" with {
   type: "text",
 };
+import eventTailSchemaModule from "../generated/event-tail.schema.json" with { type: "text" };
 import internalHealthSchemaModule from "../generated/internal-health.schema.json" with {
   type: "text",
 };
@@ -39,6 +40,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "discovery",
   "enrollment",
   "enrollment-capsule",
+  "event-tail",
   "internal-health",
   "ledger",
   "moves",
@@ -132,6 +134,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
       enrollmentCapsuleSchemaModule,
       "generated/enrollment-capsule.schema.json",
     ),
+  }),
+  Object.freeze({
+    id: "event-tail",
+    served_at: "/schemas/event-tail.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(eventTailSchemaModule, "generated/event-tail.schema.json"),
   }),
   Object.freeze({
     id: "internal-health",
