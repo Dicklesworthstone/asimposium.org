@@ -5,10 +5,10 @@ import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
 import {
   type HypothesisMoveSource,
-  LIVE_MOVES_BOUNDARY,
   selectThirdAlternative,
 } from "./hypothesis-moves.ts";
 import { type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey } from "./ledger-moves.ts";
+import { type GapMoveSource, GAP_MOVES_BOUNDARY, withGapMove } from "./gap-moves.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -16,6 +16,8 @@ import type {
   TriageMovesRequest,
   TriageMovesResult,
 } from "./provider.ts";
+
+const LIVE_MOVES_BOUNDARY = `ledger-needs-v3: review, add-refuter, close-gap, third-alternative and first-claim moves. Review needs remain first; unowned proof obligations precede new exploration. ${GAP_MOVES_BOUNDARY}`;
 
 export const TRIAGE_MAX_PROBLEMS = 4;
 export const TRIAGE_CONCURRENCY = 2;
@@ -28,6 +30,7 @@ export interface LiveMovesDependencies extends LedgerMovesDependencies {
   /** Production supplies the canonical hypothesis reader; optional only for
    * isolated queue tests and partial deployments of the provider adapter. */
   readonly hypotheses?: HypothesisMoveSource;
+  readonly gaps?: GapMoveSource;
 }
 
 /** Permission hints use the exact same central policy as the writes, with
@@ -209,17 +212,21 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         };
       }
     }
-    const result = await loadLedgerMoves(
-      db,
-      problemId,
-      credential,
-      effectivePermissions,
-      this.dependencies,
-      row.cursor,
-    );
+    let result: Awaited<ReturnType<typeof loadLedgerMoves>>;
+    try {
+      result = await loadLedgerMoves(
+        db, problemId, credential, effectivePermissions, this.dependencies, row.cursor,
+      );
+    } catch (error) {
+      // A failing review source cannot erase independently readable gap work.
+      // Preserve the existing error behavior when no gap source is installed.
+      if (!this.dependencies.gaps) throw error;
+      result = { items: [], moves: [], degraded: true, continuation: null };
+    }
+    const selected = await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, result);
     return {
       ...result,
-      ...(await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, result)),
+      ...(await withGapMove(db, problemId, row.cursor, now, effectivePermissions, selected, this.dependencies.gaps)),
       role,
       effectivePermissions,
     };
@@ -325,11 +332,12 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       // targets. Completion order of concurrent reads cannot change the winner.
       const first = rankReviewQueue(eligible)[0];
       return {
-        // Existing independent checks come first, then a two-route alternative,
+        // Existing independent checks come first, then unowned gaps and alternatives,
         // then an empty board. Cross-problem ties retain ASCII problem order.
         move: first
           ? (moves.get(reviewTargetKey(first)) ?? null)
-          : ([...moves.values()].find((move) => move.move === "third-alternative") ??
+          : ([...moves.values()].find((move) => move.move === "close-gap") ??
+            [...moves.values()].find((move) => move.move === "third-alternative") ??
             [...moves.values()].find((move) => move.move === "state-claim") ??
             null),
         degraded,

@@ -11,6 +11,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { loadReviewQueue } from "../discovery/review-queue-service.ts";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { loadLiveHypotheses } from "../ledger/hypotheses-service.ts";
+import { loadProofGapMove } from "./gap-moves-service.ts";
 import { LedgerMovesProvider } from "./live-provider.ts";
 
 /** Moves needing promotion permission. Reviews have their own scope and are
@@ -129,6 +130,7 @@ export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
       authorize: authorizeFellowWrite,
       now: () => Date.now(),
       firstClaimTemplate: () => getMoveTemplate("state-claim"),
+      gaps: { load: loadProofGapMove },
       hypotheses: {
         load: loadLiveHypotheses,
         template: () => getMoveTemplate("third-alternative"),
