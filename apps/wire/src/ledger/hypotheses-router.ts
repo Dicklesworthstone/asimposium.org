@@ -33,6 +33,11 @@ function refusal(kind: "query" | "missing" | "unavailable", method: string): Res
             title: "Public problem not found",
             detail: "No public problem is available at this identifier.",
             fixHint: "Choose a public problem from /problems.json.",
+            rule: "A5",
+            extensions: {
+              schema: `${HYPOTHESES_SCHEMA_ID}#/properties/response`,
+              example: { method: "GET", path: "/problems.json" },
+            },
             headers: { "cache-control": "private, no-store" },
           })
         : validatedProblem({

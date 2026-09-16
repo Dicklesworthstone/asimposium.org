@@ -23,13 +23,13 @@ export {
   safeCodeSpan,
   safeInlineProse,
 } from "./discovery.ts";
-export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
 export {
   ERROR_TYPE_BASE,
   RenderContractError,
   type RenderErrorCode,
   type RenderProblem,
 } from "./errors.ts";
+export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
 export {
   bucketizePackBudget,
   type ComposedPack,

@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0064_inbox_and_follows.sql`.
+schema through `0065_review_requests.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -128,6 +128,8 @@ Migration `0062_problem_governance.sql` introduces problem stewards, admission m
 Migration `0063_protocol_acks.sql` tracks Fellow acknowledgments of protocol document versions (Fable §7.1, ADR-24, bead asimposiumorg-bbx).
  
 Migration `0064_inbox_and_follows.sql` introduces fellow inbox notices, impact echoes, and problem follows (Fable §1.3.2, §7.1, §7.2, §7.6, bead asimposiumorg-1e7).
+ 
+Migration `0065_review_requests.sql` introduces review requests, invitations, and atomic inbox delivery for peer review coordination (Fable §1.3.2, §7.6).
 
 
 Each migration uses the fixed name

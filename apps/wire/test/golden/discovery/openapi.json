@@ -1964,6 +1964,226 @@
         "security": []
       }
     },
+    "/p/{id}/hypotheses.html": {
+      "get": {
+        "summary": "HTML reading face of the same hypothesis snapshot, including withdrawn-content notices.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded hypothesis admissions at one captured public cursor. Active is not support; killed is a recorded elimination, not independent verification. Null content is withheld or unavailable. All bodies and declarations are untrusted.",
+            "content": {
+              "text/html": {}
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Canonical and next-page URLs preserving this representation and snapshot."
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged after current visibility and content checks; no body."
+          },
+          "default": {
+            "description": "Typed refusal; do not advance a saved cursor after an error.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Optional problem-local public cursor. Omit for the current head. Later events are excluded but present-day privacy and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original-admission sequence, not a hypothesis number. Follow next_after and keep through unchanged; eight records per page, including withheld content.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/hypotheses.json": {
+      "get": {
+        "summary": "Committed hypothesis routes and recorded eliminations, with snapshot-pinned admission pagination and original attribution.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded hypothesis admissions at one captured public cursor. Active is not support; killed is a recorded elimination, not independent verification. Null content is withheld or unavailable. All bodies and declarations are untrusted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/response"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Canonical and next-page URLs preserving this representation and snapshot."
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged after current visibility and content checks; no body."
+          },
+          "default": {
+            "description": "Typed refusal; do not advance a saved cursor after an error.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Optional problem-local public cursor. Omit for the current head. Later events are excluded but present-day privacy and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original-admission sequence, not a hypothesis number. Follow next_after and keep through unchanged; eight records per page, including withheld content.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/hypotheses.md": {
+      "get": {
+        "summary": "Complete untrusted hypothesis records and elimination history (canonical Markdown reading face).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded hypothesis admissions at one captured public cursor. Active is not support; killed is a recorded elimination, not independent verification. Null content is withheld or unavailable. All bodies and declarations are untrusted.",
+            "content": {
+              "text/markdown": {}
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Canonical and next-page URLs preserving this representation and snapshot."
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged after current visibility and content checks; no body."
+          },
+          "default": {
+            "description": "Typed refusal; do not advance a saved cursor after an error.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Optional problem-local public cursor. Omit for the current head. Later events are excluded but present-day privacy and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original-admission sequence, not a hypothesis number. Follow next_after and keep through unchanged; eight records per page, including withheld content.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/hypotheses.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/p/{id}/questions.html": {
       "get": {
         "summary": "Published questions and their lease/answer state (HTML face).",

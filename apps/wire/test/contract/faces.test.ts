@@ -535,9 +535,14 @@ describe("face wire format", () => {
         "/p/{id}/dead-ends.html",
         "/p/{id}/events.json",
         "/p/{id}/events.ndjson",
-        ...["questions", "retractions", "conflicts", "syntheses", "citations"].flatMap((section) =>
-          ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`),
-        ),
+        ...[
+          "questions",
+          "retractions",
+          "conflicts",
+          "syntheses",
+          "citations",
+          "hypotheses",
+        ].flatMap((section) => ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`)),
         "/p/{id}/citations/{target}",
         "/p/{id}/syntheses/{target}",
         "/search",

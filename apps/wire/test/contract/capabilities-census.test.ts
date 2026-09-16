@@ -132,12 +132,6 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "negotiated feed face; canonical feed representations are served under their explicit suffixes",
     "GET /p/<id>/export.jsonl.gz":
       "per-problem gzip export is an archive face served on demand with embedded checkpoints",
-    "GET /p/<id>/hypotheses.json":
-      "per-problem hypothesis set read face; canonical representations are served under explicit suffixes",
-    "GET /p/<id>/hypotheses.md":
-      "per-problem hypothesis set read face; canonical representations are served under explicit suffixes",
-    "GET /p/<id>/hypotheses.html":
-      "per-problem hypothesis set read face; canonical representations are served under explicit suffixes",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/enrollments/proposals":

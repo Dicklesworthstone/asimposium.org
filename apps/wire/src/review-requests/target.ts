@@ -1,6 +1,6 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { ReviewRequestError } from "./model.ts";
-import { hashText, type ContentPin } from "./store.ts";
+import { type ContentPin, hashText } from "./store.ts";
 
 export interface ReviewRequestTarget {
   cursor: number;
@@ -30,33 +30,75 @@ export const REVIEW_REQUEST_TARGET_SQL = `SELECT p.public_seq AS cursor, e.objec
         AND re.seq <= p.public_seq
     ) LIMIT 2`;
 async function verifiedPayload(row: ContentPin): Promise<Record<string, unknown>> {
-  if (typeof row.payload_json !== "string" || new TextEncoder().encode(row.payload_json).length > 32768 ||
-      !/^[0-9a-f]{64}$/.test(row.digest) || await hashText(row.payload_json) !== row.digest) {
+  if (
+    typeof row.payload_json !== "string" ||
+    new TextEncoder().encode(row.payload_json).length > 32768 ||
+    !/^[0-9a-f]{64}$/.test(row.digest) ||
+    (await hashText(row.payload_json)) !== row.digest
+  ) {
     throw new ReviewRequestError("INELIGIBLE");
   }
   let payload: unknown;
-  try { payload = JSON.parse(row.payload_json); } catch { throw new ReviewRequestError("INELIGIBLE"); }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new ReviewRequestError("INELIGIBLE");
+  try {
+    payload = JSON.parse(row.payload_json);
+  } catch {
+    throw new ReviewRequestError("INELIGIBLE");
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    throw new ReviewRequestError("INELIGIBLE");
   return payload as Record<string, unknown>;
 }
 /** Invitation readiness means a current readable exact statement, not an
  * affirmative scientific standing. Authors may request scrutiny of disputes. */
-export async function readReviewRequestTarget(db: D1Database, problem: string, claim: string, version: number): Promise<ReviewRequestTarget> {
-  const result = await db.prepare(REVIEW_REQUEST_TARGET_SQL).bind(claim, problem, version)
+export async function readReviewRequestTarget(
+  db: D1Database,
+  problem: string,
+  claim: string,
+  version: number,
+): Promise<ReviewRequestTarget> {
+  const result = await db
+    .prepare(REVIEW_REQUEST_TARGET_SQL)
+    .bind(claim, problem, version)
     .all<Omit<ReviewRequestTarget, "pin"> & ContentPin>();
   const row = result.results[0];
-  if (result.results.length !== 1 || !row || !Number.isSafeInteger(row.cursor) || row.cursor < 1 ||
-      row.claim_id !== claim || row.claim_version !== version || typeof row.author_id !== "string" ||
-      typeof row.author_sponsor_id !== "string") throw new ReviewRequestError("INELIGIBLE");
+  if (
+    result.results.length !== 1 ||
+    !row ||
+    !Number.isSafeInteger(row.cursor) ||
+    row.cursor < 1 ||
+    row.claim_id !== claim ||
+    row.claim_version !== version ||
+    typeof row.author_id !== "string" ||
+    typeof row.author_sponsor_id !== "string"
+  )
+    throw new ReviewRequestError("INELIGIBLE");
   const pin = { event_id: row.event_id, digest: row.digest, payload_json: row.payload_json };
   const payload = await verifiedPayload(pin);
-  if (payload.claim_id !== claim || typeof payload.statement !== "string" ||
-      (version > 1 && payload.base_version !== version - 1)) throw new ReviewRequestError("INELIGIBLE");
-  return { cursor: row.cursor, claim_id: claim, claim_version: version, author_id: row.author_id,
-    author_sponsor_id: row.author_sponsor_id, pin };
+  if (
+    payload.claim_id !== claim ||
+    typeof payload.statement !== "string" ||
+    (version > 1 && payload.base_version !== version - 1)
+  )
+    throw new ReviewRequestError("INELIGIBLE");
+  return {
+    cursor: row.cursor,
+    claim_id: claim,
+    claim_version: version,
+    author_id: row.author_id,
+    author_sponsor_id: row.author_sponsor_id,
+    pin,
+  };
 }
-export async function readCompletionReview(db: D1Database, problem: string, claim: string, version: number, reviewer: string, reviewId: string): Promise<ContentPin> {
-  const result = await db.prepare(`SELECT e.id AS event_id, e.payload_sha256 AS digest,
+export async function readCompletionReview(
+  db: D1Database,
+  problem: string,
+  claim: string,
+  version: number,
+  reviewer: string,
+  reviewId: string,
+): Promise<ContentPin> {
+  const result = await db
+    .prepare(`SELECT e.id AS event_id, e.payload_sha256 AS digest,
     CASE WHEN length(CAST(c.payload_json AS BLOB)) <= 32768 THEN c.payload_json END AS payload_json
     FROM reviews r JOIN events e ON e.id = r.source_event_id AND e.problem_id = r.problem_id
       AND e.object_id = r.review_id AND e.seq = r.source_seq AND e.type = 'review.created' AND e.object_kind = 'review'
@@ -64,10 +106,12 @@ export async function readCompletionReview(db: D1Database, problem: string, clai
     JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
     WHERE r.problem_id = ? AND r.review_id = ? AND r.target_claim_id = ? AND r.target_version = ?
       AND r.reviewer_fellow_id = ? AND e.actor_fellow_id = ? LIMIT 2`)
-    .bind(problem, reviewId, claim, version, reviewer, reviewer).all<ContentPin>();
+    .bind(problem, reviewId, claim, version, reviewer, reviewer)
+    .all<ContentPin>();
   const row = result.results[0];
   if (result.results.length !== 1 || !row) throw new ReviewRequestError("INELIGIBLE");
   const payload = await verifiedPayload(row);
-  if (payload.target_claim_id !== claim || payload.target_version !== version) throw new ReviewRequestError("INELIGIBLE");
+  if (payload.target_claim_id !== claim || payload.target_version !== version)
+    throw new ReviewRequestError("INELIGIBLE");
   return row;
 }

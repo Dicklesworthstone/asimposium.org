@@ -1,14 +1,29 @@
-import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { ReviewRequestReceipt } from "@asimposium/contracts/review-requests";
-import type { FellowCredentialBinding, EncryptedEnrollmentReplay } from "../enrollment/service.ts";
-import { ReviewRequestError, type ReviewRequestAction, type ReviewRequestState, REVIEW_REQUEST_CAPACITY, REVIEW_REQUEST_DAILY_LIMIT } from "./model.ts";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import type { EncryptedEnrollmentReplay, FellowCredentialBinding } from "../enrollment/service.ts";
+import {
+  REVIEW_REQUEST_CAPACITY,
+  REVIEW_REQUEST_DAILY_LIMIT,
+  type ReviewRequestAction,
+  ReviewRequestError,
+  type ReviewRequestState,
+} from "./model.ts";
 
 export interface ReplayProtector {
   seal(value: string, context?: string): Promise<EncryptedEnrollmentReplay>;
   open(value: EncryptedEnrollmentReplay, context?: string): Promise<string>;
 }
-export interface ContentPin { event_id: string; digest: string; payload_json: string }
-export interface RequestRecord extends ReviewRequestReceipt { seq: number; author_sponsor_id: string; reviewer_sponsor_id: string; target_json: string | null }
+export interface ContentPin {
+  event_id: string;
+  digest: string;
+  payload_json: string;
+}
+export interface RequestRecord extends ReviewRequestReceipt {
+  seq: number;
+  author_sponsor_id: string;
+  reviewer_sponsor_id: string;
+  target_json: string | null;
+}
 export interface RequestCommand {
   receipt: ReviewRequestReceipt;
   actor: FellowCredentialBinding;
@@ -23,8 +38,15 @@ export interface RequestCommand {
   requestDigest: string;
   eventId: string;
 }
-const STATUS = { offer: "offered", accept: "accepted", decline: "declined", cancel: "cancelled", complete: "completed" } as const;
-export const REQUEST_NOTICE = "Private author invitations, not scientific reviews or exclusive reservations. Independence is evaluated only by the review submission pipeline." as const;
+const STATUS = {
+  offer: "offered",
+  accept: "accepted",
+  decline: "declined",
+  cancel: "cancelled",
+  complete: "completed",
+} as const;
+export const REQUEST_NOTICE =
+  "Private author invitations, not scientific reviews or exclusive reservations. Independence is evaluated only by the review submission pipeline." as const;
 export const REQUEST_SCHEMA = "https://a.asimposium.org/schemas/review-requests.v1.json";
 export const REQUEST_SELECT_SQL = `SELECT r.*, last.version, last.action, last.occurred_at AS updated_at,
   last.expires_at, last.review_event_id,
@@ -53,34 +75,82 @@ function record(row: Record<string, unknown>): RequestRecord {
   const { action: _action, ...rest } = row;
   return { ...rest, schema: REQUEST_SCHEMA, status: STATUS[action] } as unknown as RequestRecord;
 }
-export async function readRequest(db: D1Database, problem: string, fellow: string, id: string): Promise<RequestRecord | null> {
-  const row = await db.prepare(`${REQUEST_SELECT_SQL} AND r.request_id = ?`).bind(problem, fellow, fellow, id).first<Record<string, unknown>>();
+export async function readRequest(
+  db: D1Database,
+  problem: string,
+  fellow: string,
+  id: string,
+): Promise<RequestRecord | null> {
+  const row = await db
+    .prepare(`${REQUEST_SELECT_SQL} AND r.request_id = ?`)
+    .bind(problem, fellow, fellow, id)
+    .first<Record<string, unknown>>();
   return row ? record(row) : null;
 }
-export async function listRequests(db: D1Database, problem: string, fellow: string, after?: string): Promise<RequestRecord[]> {
+export async function listRequests(
+  db: D1Database,
+  problem: string,
+  fellow: string,
+  after?: string,
+): Promise<RequestRecord[]> {
   const boundary = after === undefined ? null : await readRequest(db, problem, fellow, after);
   if (after !== undefined && boundary === null) throw new ReviewRequestError("NOT_FOUND");
-  const rows = await db.prepare(`${REQUEST_SELECT_SQL} AND r.seq > ? ORDER BY r.seq LIMIT 21`).bind(problem, fellow, fellow, boundary?.seq ?? 0).all<Record<string, unknown>>();
+  const rows = await db
+    .prepare(`${REQUEST_SELECT_SQL} AND r.seq > ? ORDER BY r.seq LIMIT 21`)
+    .bind(problem, fellow, fellow, boundary?.seq ?? 0)
+    .all<Record<string, unknown>>();
   return rows.results.map(record);
 }
 export function requestReceipt(row: RequestRecord): ReviewRequestReceipt {
-  const { seq: _seq, author_sponsor_id: _author, reviewer_sponsor_id: _reviewer, target_json: _target, ...receipt } = row;
+  const {
+    seq: _seq,
+    author_sponsor_id: _author,
+    reviewer_sponsor_id: _reviewer,
+    target_json: _target,
+    ...receipt
+  } = row;
   return receipt;
 }
 export function requestState(row: ReviewRequestReceipt): ReviewRequestState {
-  return { version: row.version, status: row.status, occurred_at: row.updated_at, expires_at: row.expires_at };
+  return {
+    version: row.version,
+    status: row.status,
+    occurred_at: row.updated_at,
+    expires_at: row.expires_at,
+  };
 }
 export async function hashText(text: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-export async function requestReplay(db: D1Database, protector: ReplayProtector, fellow: string, key: string, digest: string, now: number): Promise<ReviewRequestReceipt | null> {
-  const row = await db.prepare(`SELECT request_digest, response_ciphertext, response_initialization_vector
+export async function requestReplay(
+  db: D1Database,
+  protector: ReplayProtector,
+  fellow: string,
+  key: string,
+  digest: string,
+  now: number,
+): Promise<ReviewRequestReceipt | null> {
+  const row = await db
+    .prepare(`SELECT request_digest, response_ciphertext, response_initialization_vector
     FROM review_request_replays WHERE fellow_id = ? AND idempotency_key = ? AND expires_at > ?`)
-    .bind(fellow, key, now).first<{ request_digest: string; response_ciphertext: string; response_initialization_vector: string }>();
+    .bind(fellow, key, now)
+    .first<{
+      request_digest: string;
+      response_ciphertext: string;
+      response_initialization_vector: string;
+    }>();
   if (!row) return null;
   if (row.request_digest !== digest) throw new ReviewRequestError("IDEMPOTENCY_CONFLICT");
-  return JSON.parse(await protector.open({ ciphertext: row.response_ciphertext, initializationVector: row.response_initialization_vector }, `review-request-v1:${fellow}:${key}`));
+  return JSON.parse(
+    await protector.open(
+      {
+        ciphertext: row.response_ciphertext,
+        initializationVector: row.response_initialization_vector,
+      },
+      `review-request-v1:${fellow}:${key}`,
+    ),
+  );
 }
 
 /** Central policy runs before this statement. This guard closes its TOCTOU
@@ -144,43 +214,151 @@ SELECT CASE WHEN (
   )
 ) THEN 1 ELSE NULL END`;
 
-export async function commitRequest(db: D1Database, protector: ReplayProtector, command: RequestCommand): Promise<ReviewRequestReceipt> {
-  const c = command, r = c.receipt, now = r.updated_at;
-  const replay = await requestReplay(db, protector, c.actor.fellowId, c.idempotencyKey, c.requestDigest, now);
+export async function commitRequest(
+  db: D1Database,
+  protector: ReplayProtector,
+  command: RequestCommand,
+): Promise<ReviewRequestReceipt> {
+  const c = command,
+    r = c.receipt,
+    now = r.updated_at;
+  const replay = await requestReplay(
+    db,
+    protector,
+    c.actor.fellowId,
+    c.idempotencyKey,
+    c.requestDigest,
+    now,
+  );
   if (replay) return replay;
-  const encrypted = await protector.seal(JSON.stringify(r), `review-request-v1:${c.actor.fellowId}:${c.idempotencyKey}`);
-  const statements: D1PreparedStatement[] = [db.prepare("DELETE FROM review_request_replays WHERE rowid IN (SELECT rowid FROM review_request_replays WHERE expires_at <= ? ORDER BY expires_at LIMIT 100)").bind(now), db.prepare("DELETE FROM review_request_replays WHERE fellow_id = ? AND idempotency_key = ? AND expires_at <= ?")
-    .bind(c.actor.fellowId, c.idempotencyKey, now)];
-  if (c.action === "offer") statements.push(db.prepare(`INSERT INTO review_requests
+  const encrypted = await protector.seal(
+    JSON.stringify(r),
+    `review-request-v1:${c.actor.fellowId}:${c.idempotencyKey}`,
+  );
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        "DELETE FROM review_request_replays WHERE rowid IN (SELECT rowid FROM review_request_replays WHERE expires_at <= ? ORDER BY expires_at LIMIT 100)",
+      )
+      .bind(now),
+    db
+      .prepare(
+        "DELETE FROM review_request_replays WHERE fellow_id = ? AND idempotency_key = ? AND expires_at <= ?",
+      )
+      .bind(c.actor.fellowId, c.idempotencyKey, now),
+  ];
+  if (c.action === "offer")
+    statements.push(
+      db
+        .prepare(`INSERT INTO review_requests
     (request_id,problem_id,claim_id,claim_version,claim_event_id,claim_payload_sha256,author_id,author_sponsor_id,reviewer_id,reviewer_sponsor_id,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(r.request_id,r.problem_id,r.claim_id,r.claim_version,r.claim_event_id,r.claim_payload_sha256,r.author_id,c.authorSponsor,r.reviewer_id,c.reviewerSponsor,r.created_at));
-  const guard = JSON.stringify({ problem: r.problem_id, actor: c.actor.fellowId, sponsor: c.actor.sponsorId,
-    action: c.action, credential: c.actor.credentialId, token_hash: c.actor.tokenHash, now, role: c.role, scope: c.scope,
-    strict: c.action === "offer" || c.action === "accept" ? 1 : 0, cursor: c.cursor,
-    pins: c.pins, claim: r.claim_id, claim_version: r.claim_version, offer: c.action === "offer" ? 1 : 0,
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(
+          r.request_id,
+          r.problem_id,
+          r.claim_id,
+          r.claim_version,
+          r.claim_event_id,
+          r.claim_payload_sha256,
+          r.author_id,
+          c.authorSponsor,
+          r.reviewer_id,
+          c.reviewerSponsor,
+          r.created_at,
+        ),
+    );
+  const guard = JSON.stringify({
+    problem: r.problem_id,
+    actor: c.actor.fellowId,
+    sponsor: c.actor.sponsorId,
+    action: c.action,
+    credential: c.actor.credentialId,
+    token_hash: c.actor.tokenHash,
+    now,
+    role: c.role,
+    scope: c.scope,
+    strict: c.action === "offer" || c.action === "accept" ? 1 : 0,
+    cursor: c.cursor,
+    pins: c.pins,
+    claim: r.claim_id,
+    claim_version: r.claim_version,
+    offer: c.action === "offer" ? 1 : 0,
     recipient_check: c.action === "offer" || c.action === "accept" ? 1 : 0,
-    reviewer: r.reviewer_id, reviewer_sponsor: c.reviewerSponsor, author_sponsor: c.authorSponsor });
-  statements.push(db.prepare(`INSERT INTO review_request_events
+    reviewer: r.reviewer_id,
+    reviewer_sponsor: c.reviewerSponsor,
+    author_sponsor: c.authorSponsor,
+  });
+  statements.push(
+    db
+      .prepare(`INSERT INTO review_request_events
     (event_id,request_id,version,action,actor_id,occurred_at,expires_at,review_event_id,guard)
     VALUES(?,?,?,?,?,?,?,?,(${REQUEST_GUARD_SQL}))`)
-    .bind(c.eventId,r.request_id,r.version,c.action,c.actor.fellowId,now,r.expires_at,r.review_event_id,guard));
+      .bind(
+        c.eventId,
+        r.request_id,
+        r.version,
+        c.action,
+        c.actor.fellowId,
+        now,
+        r.expires_at,
+        r.review_event_id,
+        guard,
+      ),
+  );
   const recipient = c.action === "offer" || c.action === "cancel" ? r.reviewer_id : r.author_id;
   // No work product or human-supplied instruction enters an inbox notice.
   const detail = `Review invitation ${c.action}. Read its current state at /v1/p/${r.problem_id}/review-requests/${r.request_id}. This notice is not scientific evidence.`;
-  statements.push(db.prepare(`INSERT INTO fellow_inbox_notices
+  statements.push(
+    db
+      .prepare(`INSERT INTO fellow_inbox_notices
     (id,fellow_id,problem_id,notice_type,seq,title,detail,target_id,created_at,expires_at)
     SELECT ?,?,?, 'review_request', COALESCE(MAX(seq),0)+1,?,?,?, ?,? FROM fellow_inbox_notices WHERE fellow_id = ?`)
-    .bind(`IN-${c.eventId}`,recipient,r.problem_id,"Review invitation update",detail,r.request_id,now,r.expires_at,recipient));
-  statements.push(db.prepare("UPDATE fellow_inbox_notices SET acknowledged_at = ? WHERE fellow_id = ? AND target_id = ? AND notice_type = 'review_request' AND acknowledged_at IS NULL")
-    .bind(now,c.actor.fellowId,r.request_id));
+      .bind(
+        `IN-${c.eventId}`,
+        recipient,
+        r.problem_id,
+        "Review invitation update",
+        detail,
+        r.request_id,
+        now,
+        r.expires_at,
+        recipient,
+      ),
+  );
+  statements.push(
+    db
+      .prepare(
+        "UPDATE fellow_inbox_notices SET acknowledged_at = ? WHERE fellow_id = ? AND target_id = ? AND notice_type = 'review_request' AND acknowledged_at IS NULL",
+      )
+      .bind(now, c.actor.fellowId, r.request_id),
+  );
   // Collision aborts all preceding effects, including inbox delivery. Never
   // overwrite a live encrypted replay with a different request or response.
-  statements.push(db.prepare(`INSERT INTO review_request_replays VALUES(?,?,?,?,?,?)
+  statements.push(
+    db
+      .prepare(`INSERT INTO review_request_replays VALUES(?,?,?,?,?,?)
     ON CONFLICT(fellow_id,idempotency_key) DO UPDATE SET request_digest = NULL`)
-    .bind(c.actor.fellowId,c.idempotencyKey,c.requestDigest,encrypted.ciphertext,encrypted.initializationVector,now + 86400000));
-  try { await db.batch(statements); return r; }
-  catch (error) {
-    const raced = await requestReplay(db, protector,c.actor.fellowId,c.idempotencyKey,c.requestDigest,now);
+      .bind(
+        c.actor.fellowId,
+        c.idempotencyKey,
+        c.requestDigest,
+        encrypted.ciphertext,
+        encrypted.initializationVector,
+        now + 86400000,
+      ),
+  );
+  try {
+    await db.batch(statements);
+    return r;
+  } catch (error) {
+    const raced = await requestReplay(
+      db,
+      protector,
+      c.actor.fellowId,
+      c.idempotencyKey,
+      c.requestDigest,
+      now,
+    );
     if (raced) return raced;
     const message = error instanceof Error ? error.message : "";
     // Only a fixed coarse error leaves the adapter; never SQL or private IDs.

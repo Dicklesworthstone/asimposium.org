@@ -14,14 +14,26 @@ export interface ReviewRequestState {
   readonly expires_at: number;
 }
 export class ReviewRequestError extends Error {
-  constructor(readonly code: "NOT_FOUND" | "CONFLICT" | "UNAVAILABLE" | "INELIGIBLE" | "LIMIT" | "IDEMPOTENCY_CONFLICT") {
+  constructor(
+    readonly code:
+      | "NOT_FOUND"
+      | "CONFLICT"
+      | "UNAVAILABLE"
+      | "INELIGIBLE"
+      | "LIMIT"
+      | "IDEMPOTENCY_CONFLICT",
+  ) {
     super(code);
     this.name = "ReviewRequestError";
   }
 }
-export function effectiveReviewRequestStatus(state: ReviewRequestState, now: number): ReviewRequestStatus | "expired" {
+export function effectiveReviewRequestStatus(
+  state: ReviewRequestState,
+  now: number,
+): ReviewRequestStatus | "expired" {
   return (state.status === "offered" || state.status === "accepted") && now >= state.expires_at
-    ? "expired" : state.status;
+    ? "expired"
+    : state.status;
 }
 /** Decline/cancel remain possible after expiry. Completion requires a real
  * exact-version review; the persistence adapter verifies that reference. */
@@ -32,20 +44,38 @@ export function transitionReviewRequest(
   participant: "author" | "reviewer",
   now: number,
 ): ReviewRequestState {
-  if (!Number.isSafeInteger(now) || now < state.occurred_at ||
-      state.version !== expectedVersion || state.version >= Number.MAX_SAFE_INTEGER) {
+  if (
+    !Number.isSafeInteger(now) ||
+    now < state.occurred_at ||
+    state.version !== expectedVersion ||
+    state.version >= Number.MAX_SAFE_INTEGER
+  ) {
     throw new ReviewRequestError("CONFLICT");
   }
   const active = state.status === "offered" || state.status === "accepted";
-  const allowed = action === "cancel" ? participant === "author" && active
-    : participant === "reviewer" && (action === "decline" ? active
-      : now < state.expires_at && (action === "accept" ? state.status === "offered"
-        : state.status === "accepted"));
+  const allowed =
+    action === "cancel"
+      ? participant === "author" && active
+      : participant === "reviewer" &&
+        (action === "decline"
+          ? active
+          : now < state.expires_at &&
+            (action === "accept" ? state.status === "offered" : state.status === "accepted"));
   if (!allowed) throw new ReviewRequestError("CONFLICT");
-  const status = { accept: "accepted", decline: "declined", cancel: "cancelled", complete: "completed" } as const;
+  const status = {
+    accept: "accepted",
+    decline: "declined",
+    cancel: "cancelled",
+    complete: "completed",
+  } as const;
   const expires = action === "accept" ? now + REVIEW_ACCEPTED_MS : state.expires_at;
   if (!Number.isSafeInteger(expires)) throw new ReviewRequestError("CONFLICT");
-  return { version: state.version + 1, status: status[action], occurred_at: now, expires_at: expires };
+  return {
+    version: state.version + 1,
+    status: status[action],
+    occurred_at: now,
+    expires_at: expires,
+  };
 }
 
 /** Ending or reconciling private coordination is not a fresh scientific write.

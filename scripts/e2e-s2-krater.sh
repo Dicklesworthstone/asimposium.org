@@ -177,6 +177,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0062_problem_governance.sql
   db/migrations/0063_protocol_acks.sql
   db/migrations/0064_inbox_and_follows.sql
+  db/migrations/0065_review_requests.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -253,6 +254,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger-face.ts
   apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
+  apps/wire/src/discovery/hypotheses-discovery.ts
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts
   apps/wire/src/discovery/fellow-service.ts
@@ -375,6 +377,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/protocol/assets/inoculation.md
   packages/render/package.json
   packages/render/src/index.ts
+  packages/render/src/hypotheses.ts
   packages/render/src/canonical.ts
   packages/render/src/discovery.ts
   packages/render/src/errors.ts
@@ -459,6 +462,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0062_problem_governance.sql
   0063_protocol_acks.sql
   0064_inbox_and_follows.sql
+  0065_review_requests.sql
 )
 
 

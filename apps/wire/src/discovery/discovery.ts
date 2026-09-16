@@ -43,10 +43,21 @@ import {
   eventTailParameters,
   eventTailResponses,
 } from "./event-tail-discovery";
-
-import { REVIEW_QUEUE_PUBLIC_READS, reviewQueueParameters, reviewQueueResponses } from "./review-queue-discovery";
-import { HYPOTHESES_PUBLIC_READS, hypothesesParameters, hypothesesResponses } from "./hypotheses-discovery";
-import { REVIEW_REQUEST_OPERATIONS, reviewRequestParameters, reviewRequestResponses } from "./review-requests-discovery";
+import {
+  HYPOTHESES_PUBLIC_READS,
+  hypothesesParameters,
+  hypothesesResponses,
+} from "./hypotheses-discovery";
+import {
+  REVIEW_QUEUE_PUBLIC_READS,
+  reviewQueueParameters,
+  reviewQueueResponses,
+} from "./review-queue-discovery";
+import {
+  REVIEW_REQUEST_OPERATIONS,
+  reviewRequestParameters,
+  reviewRequestResponses,
+} from "./review-requests-discovery";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
