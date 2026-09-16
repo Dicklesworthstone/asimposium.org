@@ -1,9 +1,6 @@
 import type { ProblemNextResponse, TriageResponse } from "@asimposium/contracts";
 
-/**
- * Renders the markdown face for GET /v1/p/:id/next with YAML frontmatter.
- * Frontmatter carries effective_permissions, role, degraded flags.
- */
+/** Renders the same selected move and permission snapshot as the JSON face. */
 export function renderProblemNextMarkdown(response: ProblemNextResponse): string {
   const lines: string[] = [
     "---",
@@ -17,17 +14,15 @@ export function renderProblemNextMarkdown(response: ProblemNextResponse): string
     `  review: ${response.viewer.effective_permissions.review ?? false}`,
     `degraded: ${response.degraded}`,
   ];
-
   if (response.degraded_reason !== undefined) {
-    lines.push(`degraded_reason: ${response.degraded_reason}`);
+    lines.push(`degraded_reason: ${JSON.stringify(response.degraded_reason)}`);
   }
   if (response.selection_boundary !== undefined) {
-    lines.push(`selection_boundary: ${response.selection_boundary}`);
+    // JSON string syntax is valid YAML and keeps colons/newlines inside a value.
+    lines.push(`selection_boundary: ${JSON.stringify(response.selection_boundary)}`);
   }
   lines.push("---", "");
-
   lines.push(`# Next Recommended Moves for ${response.problem_id}`, "");
-
   if (response.primary_move !== null) {
     lines.push(`## Primary Move: ${response.primary_move.move}`);
     lines.push(`- **Why**: ${response.primary_move.why}`);
@@ -36,14 +31,10 @@ export function renderProblemNextMarkdown(response: ProblemNextResponse): string
     lines.push(JSON.stringify(response.primary_move.contract, null, 2));
     lines.push("```", "");
   } else {
-    lines.push(
-      response.degraded
-        ? "No moves generated (moves engine is inactive)."
-        : "No eligible moves available for your role and current permissions.",
-      "",
-    );
+    lines.push(response.degraded
+      ? "No move selected: readable discovery is incomplete or temporarily unavailable."
+      : "No eligible move found within the stated selection boundary and current permissions.", "");
   }
-
   if (response.alternatives.length > 0) {
     lines.push("## Alternatives", "");
     for (let i = 0; i < response.alternatives.length; i++) {
@@ -57,30 +48,23 @@ export function renderProblemNextMarkdown(response: ProblemNextResponse): string
       lines.push("```", "");
     }
   }
-
   return lines.join("\n");
 }
 
-/**
- * Renders the markdown face for GET /v1/triage with YAML frontmatter.
- */
 export function renderTriageMarkdown(response: TriageResponse): string {
   const lines: string[] = [
     "---",
     `fellow_id: ${response.hello.fellow.fellow_id}`,
     `degraded: ${response.degraded}`,
   ];
-
   if (response.degraded_reason !== undefined) {
-    lines.push(`degraded_reason: ${response.degraded_reason}`);
+    lines.push(`degraded_reason: ${JSON.stringify(response.degraded_reason)}`);
   }
   if (response.selection_boundary !== undefined) {
-    lines.push(`selection_boundary: ${response.selection_boundary}`);
+    lines.push(`selection_boundary: ${JSON.stringify(response.selection_boundary)}`);
   }
   lines.push("---", "");
-
-  lines.push(`# Triage: Single Highest-EV Move for ${response.hello.fellow.name}`, "");
-
+  lines.push(`# Triage: Recommended Move for ${response.hello.fellow.name}`, "");
   if (response.move !== null) {
     lines.push(`## Recommended Move: ${response.move.move}`);
     lines.push(`- **Why**: ${response.move.why}`);
@@ -89,13 +73,9 @@ export function renderTriageMarkdown(response: TriageResponse): string {
     lines.push(JSON.stringify(response.move.contract, null, 2));
     lines.push("```", "");
   } else {
-    lines.push(
-      response.degraded
-        ? "No triage move selected (moves engine is inactive)."
-        : "No eligible move found across your problem assignments.",
-      "",
-    );
+    lines.push(response.degraded
+      ? "No triage move selected: readable discovery is incomplete or temporarily unavailable."
+      : "No eligible move found within the stated assignment and admission limits.", "");
   }
-
   return lines.join("\n");
 }
