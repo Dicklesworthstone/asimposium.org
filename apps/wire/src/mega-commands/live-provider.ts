@@ -215,6 +215,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       credential,
       effectivePermissions,
       this.dependencies,
+      row.cursor,
     );
     return {
       ...result,
