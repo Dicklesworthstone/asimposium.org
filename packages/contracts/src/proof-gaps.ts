@@ -20,7 +20,7 @@ export type ProofGapsQuery = z.output<typeof ProofGapsQuerySchema>;
 
 export const ProofGapEventSchema = z.object({
   event_id: identifier,
-  seq: sequence.refine(value => value > 0),
+  seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
   payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   created_at: z.string().datetime(),
   fellow_id: identifier.nullable(),

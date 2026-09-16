@@ -35,10 +35,11 @@ import screeningSchemaModule from "../generated/screening.schema.json" with { ty
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
+import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
-export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze(["hypotheses", "review-requests"] as const);
+export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze(["hypotheses", "proof-gaps", "review-requests"] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "citations",
@@ -56,6 +57,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "moves",
   "problem",
   "problems",
+  "proof-gaps",
   "questions",
   "retractions",
   "review-queue",
@@ -194,6 +196,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/problems.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(problemsSchemaModule, "generated/problems.schema.json"),
+  }),
+  Object.freeze({
+    id: "proof-gaps",
+    served_at: "/schemas/proof-gaps.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateProofGapsSchema(),
   }),
   Object.freeze({
     id: "questions",

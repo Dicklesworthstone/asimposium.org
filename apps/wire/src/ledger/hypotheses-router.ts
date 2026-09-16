@@ -7,6 +7,7 @@ import { validatedProblem } from "../http/envelope";
 import { hypothesisResponse } from "./hypotheses-face";
 import { HypothesisReadError } from "./hypotheses-read";
 import { loadPublicHypotheses } from "./hypotheses-service";
+import { createProofGapRoutes } from "./proof-gaps-router";
 
 function refusal(kind: "query" | "missing" | "unavailable", method: string): Response {
   const response =
@@ -56,6 +57,8 @@ function refusal(kind: "query" | "missing" | "unavailable", method: string): Res
 
 export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  // This public subrouter is mounted before the legacy /p wildcard in app.ts.
+  app.route("/", createProofGapRoutes());
   for (const format of ["json", "md", "html"] as const) {
     app.on(["GET", "HEAD"], `/p/:id/hypotheses.${format}`, async (c) => {
       const problemId = c.req.param("id");

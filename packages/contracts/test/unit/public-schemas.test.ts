@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
+import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
 import {
   getPublicSchema,
   INLINE_PUBLIC_SCHEMA_IDS,
@@ -31,6 +32,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "moves",
   "problem",
   "problems",
+  "proof-gaps",
   "questions",
   "retractions",
   "review-queue",
@@ -131,6 +133,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   );
   const inline = new Map([
     ["hypotheses", generateHypothesesSchema()],
+    ["proof-gaps", generateProofGapsSchema()],
     ["review-requests", generateReviewRequestsSchema()],
   ]);
   expect([...inline.keys()]).toEqual([...INLINE_PUBLIC_SCHEMA_IDS]);
@@ -154,7 +157,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
 
 test("the public schema classification is pinned to approved served ids and exclusions", () => {
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
-  expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual(["hypotheses", "review-requests"]);
+  expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual(["hypotheses", "proof-gaps", "review-requests"]);
   expect(Object.isFrozen(INLINE_PUBLIC_SCHEMA_IDS)).toBe(true);
   expect(PUBLIC_SCHEMA_EXCLUSIONS).toEqual(EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS);
   expect(Object.isFrozen(PUBLIC_SCHEMA_IDS)).toBe(true);
