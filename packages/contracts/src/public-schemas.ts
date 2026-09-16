@@ -28,6 +28,7 @@ import problemSchemaModule from "../generated/problem.schema.json" with { type: 
 import problemsSchemaModule from "../generated/problems.schema.json" with { type: "text" };
 import questionsSchemaModule from "../generated/questions.schema.json" with { type: "text" };
 import retractionsSchemaModule from "../generated/retractions.schema.json" with { type: "text" };
+import reviewQueueSchemaModule from "../generated/review-queue.schema.json" with { type: "text" };
 import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
@@ -50,6 +51,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "problems",
   "questions",
   "retractions",
+  "review-queue",
   "rubrics",
   "screening",
   "sessions",
@@ -190,6 +192,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/retractions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(retractionsSchemaModule, "generated/retractions.schema.json"),
+  }),
+  Object.freeze({
+    id: "review-queue",
+    served_at: "/schemas/review-queue.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(reviewQueueSchemaModule, "generated/review-queue.schema.json"),
   }),
   Object.freeze({
     id: "rubrics",

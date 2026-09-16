@@ -19,7 +19,7 @@ export function parseReviewQueueAfter(value: string | undefined):
   | { createdAt: string; eventId: string }
   | undefined {
   if (value === undefined) return undefined;
-  if (!REVIEW_QUEUE_AFTER_PATTERN.test(value)) throw new Error("REVIEW_QUEUE_CURSOR_INVALID");
+  if (REVIEW_QUEUE_AFTER_PATTERN.exec(value)?.[0] !== value) throw new Error("REVIEW_QUEUE_CURSOR_INVALID");
   const [createdAt, eventId] = value.split("|");
   if (!createdAt || !eventId || !Number.isFinite(Date.parse(createdAt)) ||
       new Date(createdAt).toISOString() !== createdAt) {

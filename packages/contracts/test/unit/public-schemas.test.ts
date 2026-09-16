@@ -29,6 +29,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "problems",
   "questions",
   "retractions",
+  "review-queue",
   "rubrics",
   "screening",
   "sessions",

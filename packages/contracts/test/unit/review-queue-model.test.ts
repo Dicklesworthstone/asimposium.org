@@ -17,3 +17,9 @@ for (const invalid of ["", "0", "2026-02-30T00:00:00.000Z|E-1", "2026-09-01T00:0
     assert.throws(() => parseReviewQueueAfter(invalid), /REVIEW_QUEUE_CURSOR_INVALID/);
   });
 }
+
+for (const control of ["\n", "\r", "\r\n"]) {
+  test("actual trailing line ending is not part of a canonical cursor: " + JSON.stringify(control), () => {
+    assert.throws(() => parseReviewQueueAfter("2026-09-01T00:00:00.000Z|E-1" + control), /REVIEW_QUEUE_CURSOR_INVALID/);
+  });
+}
