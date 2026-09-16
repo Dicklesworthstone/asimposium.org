@@ -123,7 +123,8 @@ export function filterMovesByPermissions(
 export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
   constructor() {
     super({ loadQueue: loadReviewQueue, templateFor: getMoveTemplate,
-      authorize: authorizeFellowWrite, now: () => Date.now() });
+      authorize: authorizeFellowWrite, now: () => Date.now(),
+      firstClaimTemplate: () => getMoveTemplate("state-claim") });
   }
 }
 

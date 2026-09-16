@@ -30,13 +30,14 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
 }
 function fixture(problems = ["P-DEMO"]) {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER);
+  sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER, public_seq INTEGER);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
     CREATE TABLE events(id TEXT, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER, actor_fellow_id TEXT, writer_credential_id TEXT);
     CREATE TABLE reviews(problem_id TEXT, review_id TEXT, source_event_id TEXT, source_seq INTEGER, reviewer_fellow_id TEXT, target_claim_id TEXT, target_version INTEGER);`);
   for (const problem of problems) {
-    sqlite.query("INSERT INTO problems VALUES (?, 'active', 0)").run(problem);
+    sqlite.query("INSERT INTO problems VALUES (?, 'active', 0, 10)").run(problem);
     sqlite.query("INSERT INTO problem_memberships VALUES (?, 'F-READER', 'contributor')").run(problem);
+    sqlite.query("INSERT INTO events (problem_id, object_kind, type, seq) VALUES (?, 'claim', 'claim.created', 1)").run(problem);
   }
   let reads = 0;
   const db = { prepare(sql: string) { reads += 1; return { bind: (...values: unknown[]) => ({
@@ -48,6 +49,7 @@ function fixture(problems = ["P-DEMO"]) {
   const dependencies: LiveMovesDependencies = {
     now: () => 100,
     templateFor,
+    firstClaimTemplate: () => ({ ...templateFor("review"), move: "state-claim" }),
     loadQueue: async (_db, query) => { queueReads += 1; return page(query.problem); },
     // A scripted central-policy seam, not a test of the policy implementation.
     // Assertions below verify which real membership/usage the provider submits.
@@ -198,5 +200,49 @@ test("no assignments performs no SQL and does not pretend the engine is uninstal
   const f = fixture(); try {
     const result = await new LedgerMovesProvider(f.dependencies).triageMove({ db: f.db, credential, fellowId: credential.fellowId, assignments: [] });
     assert.equal(result.degraded, false); assert.equal(result.move, null); assert.equal(f.reads(), 0);
+  } finally { f.sqlite.close(); }
+});
+
+test("an empty active board gives a workshop-first claim move without scanning the review queue", async () => {
+  const f = fixture(); try {
+    f.sqlite.exec("UPDATE problems SET public_seq=0");
+    const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
+    assert.equal(result.primaryMove?.move, "state-claim"); assert.equal(f.queueReads(), 0);
+    assert.deepEqual(result.primaryMove?.refs, ["P-DEMO"]);
+    assert.match(JSON.stringify(result.primaryMove?.contract), /workshop_first/);
+    assert.match(JSON.stringify(result.primaryMove?.contract), /captured_cursor\":0/);
+  } finally { f.sqlite.close(); }
+});
+test("an old published claim, even without its content, prevents inventing an empty board", async () => {
+  const f = fixture(); try {
+    let queried = false;
+    f.dependencies.loadQueue = async () => { queried = true; return page("P-DEMO", []); };
+    const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
+    assert.equal(result.primaryMove, null); assert.equal(queried, true);
+  } finally { f.sqlite.close(); }
+});
+test("an observer cannot receive the first-claim promotion move", async () => {
+  const f = fixture(); try {
+    f.sqlite.exec("UPDATE problems SET public_seq=0; UPDATE problem_memberships SET role='observer'");
+    f.dependencies.loadQueue = async () => page("P-DEMO", []);
+    const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
+    assert.equal(result.primaryMove, null); assert.equal(result.effectivePermissions?.promote, false);
+  } finally { f.sqlite.close(); }
+});
+test("triage selects a first claim when assigned boards have no existing review need", async () => {
+  const f = fixture(["P-AAA", "P-BBB"]); try {
+    f.sqlite.exec("UPDATE problems SET public_seq=0");
+    const result = await new LedgerMovesProvider(f.dependencies).triageMove({ db: f.db, credential,
+      fellowId: credential.fellowId, assignments: [assignment("P-BBB"), assignment("P-AAA")] });
+    assert.equal(result.move?.move, "state-claim"); assert.deepEqual(result.move?.refs, ["P-AAA"]);
+    assert.equal(f.queueReads(), 0);
+  } finally { f.sqlite.close(); }
+});
+test("triage prioritizes an existing independent check over opening another board", async () => {
+  const f = fixture(["P-AAA", "P-BBB"]); try {
+    f.sqlite.exec("UPDATE problems SET public_seq=0 WHERE id='P-AAA'");
+    const result = await new LedgerMovesProvider(f.dependencies).triageMove({ db: f.db, credential,
+      fellowId: credential.fellowId, assignments: [assignment("P-AAA"), assignment("P-BBB")] });
+    assert.equal(result.move?.move, "review"); assert.deepEqual(result.move?.refs, ["P-BBB", "C-1@1"]);
   } finally { f.sqlite.close(); }
 });

@@ -1,4 +1,4 @@
-import type { NextMoveCandidate, ProblemRole } from "@asimposium/contracts";
+import type { MoveTemplate, NextMoveCandidate, ProblemRole } from "@asimposium/contracts";
 import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
@@ -18,11 +18,14 @@ const TRIAGE_BOUNDARY = `${LEDGER_MOVES_BOUNDARY} Triage examines at most ${TRIA
 export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly authorize: typeof authorizeFellowWrite;
   readonly now: () => number;
+  readonly firstClaimTemplate: () => MoveTemplate;
 }
 
 /** Permission hints use the exact same central policy as the writes, with
  * current membership and grant-wide recorded usage. They are not write grants. */
-export const MOVE_MEMBERSHIP_SQL = `SELECT m.role
+export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor,
+    EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq
+      AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')) AS has_claims
   FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
   WHERE p.id = ? AND p.unlisted = 0
     AND p.status IN ('active', 'dormant', 'under-result-review')`;
@@ -52,7 +55,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     db: D1Database, problemId: string, credential: FellowCredentialBinding,
     eventsRecorded: number, now: number,
   ) {
-    const row = await db.prepare(MOVE_MEMBERSHIP_SQL).bind(credential.fellowId, problemId).first<{ role: string }>();
+    const row = await db.prepare(MOVE_MEMBERSHIP_SQL).bind(credential.fellowId, problemId)
+      .first<{ role: string; cursor: number; has_claims: number }>();
     const role: ProblemRole | "none" = row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
       ? row.role : "none";
     if (role === "none") return { items: [] as ReviewQueueItem[], moves: [] as NextMoveCandidate[],
@@ -68,6 +72,30 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         target: { kind: "session-admission", problemId }, usage, now }).decision === "allow",
       workshop_push: allowed("workshop.push"), promote: allowed("promote"), review: allowed("review"),
     };
+    if (!row || !Number.isSafeInteger(row.cursor) || row.cursor < 0 ||
+        (row.has_claims !== 0 && row.has_claims !== 1)) throw new Error("MOVE_HEAD_UNAVAILABLE");
+    if (row.has_claims === 0 && effectivePermissions.session_open && effectivePermissions.promote) {
+      const template = this.dependencies.firstClaimTemplate();
+      if (template.availability === "available" && template.move === "state-claim") {
+        const move: NextMoveCandidate = {
+          move: "state-claim",
+          why: "No published claim envelopes exist at this problem cursor. Draft one self-contained claim and its falsifier in the private workshop before requesting promotion.",
+          refs: [problemId],
+          contract: { ...template, preparation: {
+            problem_id: problemId, captured_cursor: row.cursor,
+            read_first: { method: "GET", path: `/p/${encodeURIComponent(problemId)}.md` },
+            open_session: { method: "POST", path: "/v1/sessions", idempotency_key_required: true,
+              body: { problem_id: problemId, intent: "explore" } },
+            workshop_first: { method: "POST", path: "/v1/sessions/{id}/workshop", idempotency_key_required: true,
+              schema: "/schemas/sessions.v1.json#/properties/workshop_push_request", type: "claim-draft" },
+            note: "Read the latest problem formulation; it may have changed since selection. Reuse an owned session or open one. Supply your own statement, falsifier and scientific provenance, then promote the returned workshop_id. No public claim is created by this recommendation.",
+          } },
+          selection_boundary: LEDGER_MOVES_BOUNDARY,
+        };
+        return { items: [] as ReviewQueueItem[], moves: [move], degraded: false,
+          continuation: null, role, effectivePermissions };
+      }
+    }
     const result = await loadLedgerMoves(db, problemId, credential, effectivePermissions, this.dependencies);
     return { ...result, role, effectivePermissions };
   }
@@ -137,7 +165,10 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       // targets. Completion order of concurrent reads cannot change the winner.
       const first = rankReviewQueue(eligible)[0];
       return {
-        move: first ? moves.get(reviewTargetKey(first)) ?? null : null,
+        // Existing independent checks take precedence over starting another
+        // empty board. Empty-board ties retain deterministic problem order.
+        move: first ? moves.get(reviewTargetKey(first)) ?? null
+          : [...moves.values()].find(move => move.move === "state-claim") ?? null,
         degraded, ...(degraded ? { degradedReason: failed && moves.size === 0 ? "MOVES_UNAVAILABLE" : "MOVES_PARTIAL" } : {}),
         selectionBoundary: `${TRIAGE_BOUNDARY}${continuations.length ? ` Continue discovery: ${continuations.join(" ; ")}` : ""}`,
       };

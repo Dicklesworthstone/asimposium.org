@@ -4,7 +4,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 
 export const LEDGER_MOVES_BOUNDARY =
-  "ledger-review-needs-v1: review and add-refuter only; consequence, missing check and age within bounded admissions, not a global optimum. No assignment or reservation. Submission rechecks authorization, version and scientific evidence.";
+  "ledger-needs-v1: review, add-refuter and first-claim moves only; consequence, missing check and age within bounded admissions, not a global optimum. No assignment or reservation. Submission rechecks authorization, version and scientific evidence.";
 export const MOVE_QUEUE_MAX_PAGES = 2;
 
 export interface MoveViewer {
@@ -47,15 +47,16 @@ export function selectLedgerMoves(
   if (!permissions.session_open) return [];
   const candidates: NextMoveCandidate[] = [];
   const seen = new Set<string>();
-  for (const item of rankReviewQueue(items)) {
+  // Ineligible authors/reviews must not consume a sponsor-diversity tie-break.
+  const eligible = items.filter(item => item.need === "falsification-attempt"
+    ? permissions.promote === true
+    : permissions.review === true && item.author_fellow_id !== viewer.fellowId &&
+      item.author_sponsor_id !== viewer.sponsorId && !reviewed.has(reviewTargetKey(item)));
+  for (const item of rankReviewQueue(eligible)) {
     const key = reviewTargetKey(item);
     if (seen.has(key)) continue;
     seen.add(key);
     const move = item.need === "falsification-attempt" ? "add-refuter" : "review";
-    if (move === "review") {
-      if (!permissions.review || item.author_fellow_id === viewer.fellowId ||
-          item.author_sponsor_id === viewer.sponsorId || reviewed.has(key)) continue;
-    } else if (!permissions.promote) continue;
     const template = templateFor(move);
     if (template.availability !== "available" || template.move !== move) continue;
     const target = `${item.claim_id}@${item.version}`;
