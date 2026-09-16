@@ -1014,6 +1014,11 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        },
+        "client_context_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
@@ -1087,6 +1092,11 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        },
+        "client_context_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "problem_id": {
           "type": "string",

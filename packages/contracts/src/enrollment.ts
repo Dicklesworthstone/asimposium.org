@@ -387,7 +387,7 @@ export const RequestedScopeSchema = z.enum([
 
 export const EnrollmentProblemBindingSchema = z
   .string()
-  .regex(/^P-[A-Z0-9]{4,26}$/, "invalid problem binding");
+  .regex(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, "invalid problem binding");
 
 // These values cross SQLite's text functions in migration and trigger proofs.
 // SQLite length/substr stop at U+0000 while JavaScript strings do not, so NUL
@@ -844,6 +844,60 @@ export const DeviceLookupResponseSchema = z
   })
   .strict();
 
+export const HelloAssignmentSchema = z
+  .object({
+    problem_id: EnrollmentProblemBindingSchema,
+    role: z.enum(["observer", "contributor", "steward", "founding-steward"]),
+    joined_at: z.string().min(1),
+    title: z.string().min(1).max(256).optional(),
+  })
+  .strict();
+export type HelloAssignment = z.infer<typeof HelloAssignmentSchema>;
+
+export const HelloOpenSessionSchema = z
+  .object({
+    session_id: z.string().regex(/^S-[A-Z0-9]{26}$/),
+    problem_id: EnrollmentProblemBindingSchema,
+    opened_at: z.string().min(1),
+    idle_close_at: z.string().min(1),
+    intent: z
+      .enum(["prove", "refute", "review", "sharpen-statement", "explore"])
+      .nullable()
+      .optional(),
+  })
+  .strict();
+export type HelloOpenSession = z.infer<typeof HelloOpenSessionSchema>;
+
+export const HelloUnreadReviewSchema = z
+  .object({
+    review_id: z.string().min(1).max(80),
+    problem_id: EnrollmentProblemBindingSchema,
+    target_claim_id: z.string().regex(/^C-[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/),
+    target_version: z.number().int().min(1),
+    reviewer_fellow_id: z.string().min(1).max(80),
+    verdict: z.string().min(1).max(50),
+    created_at: z.string().min(1),
+  })
+  .strict();
+export type HelloUnreadReview = z.infer<typeof HelloUnreadReviewSchema>;
+
+export const ProtocolAckRequestSchema = z
+  .object({
+    protocol_digest: z.string().min(1).max(128),
+  })
+  .strict();
+export type ProtocolAckRequest = z.infer<typeof ProtocolAckRequestSchema>;
+
+export const ProtocolAckResponseSchema = z
+  .object({
+    acknowledged: z.literal(true),
+    fellow_id: FellowIdSchema,
+    protocol_digest: z.string().min(1).max(128),
+    acknowledged_at: z.string().min(1),
+  })
+  .strict();
+export type ProtocolAckResponse = z.infer<typeof ProtocolAckResponseSchema>;
+
 export const EnrollmentHelloResponseSchema = z
   .object({
     fellow: z
@@ -857,6 +911,11 @@ export const EnrollmentHelloResponseSchema = z
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
     promotion_budget: RateLimitBudgetSchema.optional(),
+    assignments: z.array(HelloAssignmentSchema).optional(),
+    open_sessions: z.array(HelloOpenSessionSchema).optional(),
+    unread_reviews: z.array(HelloUnreadReviewSchema).optional(),
+    protocol_digest: z.string().min(1).max(128).optional(),
+    protocol_acknowledged: z.boolean().optional(),
     next_actions: z.array(EnrollmentNextActionSchema).max(8),
   })
   .strict();
@@ -1311,6 +1370,8 @@ export const EnrollmentContractsSchema = z
     slow_down_response: EnrollmentSlowDownResponseSchema,
     approved_response: EnrollmentApprovedResponseSchema,
     hello_response: EnrollmentHelloResponseSchema,
+    protocol_ack_request: ProtocolAckRequestSchema,
+    protocol_ack_response: ProtocolAckResponseSchema,
   })
   .strict();
 

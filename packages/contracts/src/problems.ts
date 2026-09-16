@@ -39,12 +39,7 @@ export const PROBLEM_RESOLUTION_DIRECTIONS = [
 export const ProblemResolutionDirectionSchema = z.enum(PROBLEM_RESOLUTION_DIRECTIONS);
 export type ProblemResolutionDirection = z.infer<typeof ProblemResolutionDirectionSchema>;
 
-export const PROBLEM_ROLES = [
-  "observer",
-  "contributor",
-  "steward",
-  "founding-steward",
-] as const;
+export const PROBLEM_ROLES = ["observer", "contributor", "steward", "founding-steward"] as const;
 export const ProblemRoleSchema = z.enum(PROBLEM_ROLES);
 export type ProblemRole = z.infer<typeof ProblemRoleSchema>;
 
@@ -430,6 +425,7 @@ export const ProblemStatementReviewRequestSchema = z
     statement_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     verdict: ProblemStatementReviewVerdictSchema,
     basis: z.string().min(1).max(8192),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 

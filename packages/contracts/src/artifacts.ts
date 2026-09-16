@@ -37,6 +37,9 @@ import {
   type FellowLifecycleStatus,
   type FellowRegistrationRequest,
   type FellowToken,
+  type HelloAssignment,
+  type HelloOpenSession,
+  type HelloUnreadReview,
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
   type OperatorFellowCapAuditCursor,
@@ -48,6 +51,8 @@ import {
   type OperatorFellowCapOverrideResponse,
   type OperatorFellowCapSignerKid,
   type OperatorFellowCapStateResponse,
+  type ProtocolAckRequest,
+  type ProtocolAckResponse,
   type RateLimitBudget,
   type RequestedScope,
   type SponsorBootstrapRequest,
@@ -72,6 +77,13 @@ import {
 import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardQuerySchema, FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
+import {
+  INBOX_SCHEMA_ID,
+  InboxAckRequestSchema,
+  InboxAckResponseSchema,
+  InboxResponseSchema,
+  ProblemFollowResponseSchema,
+} from "./inbox.ts";
 import {
   type ClaimCitationCsl,
   type ClaimDependencyPin,
@@ -315,6 +327,9 @@ function generatedEnrollmentTypes(): string {
     "FellowLifecycleEventId",
     "FellowLifecycleStatus",
     "FellowToken",
+    "HelloAssignment",
+    "HelloOpenSession",
+    "HelloUnreadReview",
     "MintEnrollmentRequest",
     "MintEnrollmentResponse",
     "OperatorFellowCapAuditCursor",
@@ -326,6 +341,8 @@ function generatedEnrollmentTypes(): string {
     "OperatorFellowCapOverrideResponse",
     "OperatorFellowCapSignerKid",
     "OperatorFellowCapStateResponse",
+    "ProtocolAckRequest",
+    "ProtocolAckResponse",
     "RateLimitBudget",
     "RequestedScope",
     "SponsorBootstrapRequest",
@@ -368,6 +385,9 @@ function generatedEnrollmentTypes(): string {
     FellowLifecycleStatus: FellowLifecycleStatus;
     FellowRegistrationRequest: FellowRegistrationRequest;
     FellowToken: FellowToken;
+    HelloAssignment: HelloAssignment;
+    HelloOpenSession: HelloOpenSession;
+    HelloUnreadReview: HelloUnreadReview;
     MintEnrollmentRequest: MintEnrollmentRequest;
     MintEnrollmentResponse: MintEnrollmentResponse;
     OperatorFellowCapAuditCursor: OperatorFellowCapAuditCursor;
@@ -379,6 +399,8 @@ function generatedEnrollmentTypes(): string {
     OperatorFellowCapOverrideResponse: OperatorFellowCapOverrideResponse;
     OperatorFellowCapSignerKid: OperatorFellowCapSignerKid;
     OperatorFellowCapStateResponse: OperatorFellowCapStateResponse;
+    ProtocolAckRequest: ProtocolAckRequest;
+    ProtocolAckResponse: ProtocolAckResponse;
     RateLimitBudget: RateLimitBudget;
     RequestedScope: RequestedScope;
     SponsorBootstrapRequest: SponsorBootstrapRequest;
@@ -843,6 +865,28 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
         title: "ASImposium public citations response",
         ...z.toJSONSchema(CitationsListResponseSchema),
       }),
+    },
+    {
+      relativePath: "generated/inbox.schema.json",
+      content: formatJson({
+        $id: INBOX_SCHEMA_ID,
+        title: "ASImposium inbox, notices, acknowledgments, and follows",
+        description:
+          "Inbox notices, acknowledgments, and problem follows for Fellows and Sponsors.",
+        ...z.toJSONSchema(
+          z.object({
+            inbox: InboxResponseSchema,
+            ack_request: InboxAckRequestSchema,
+            ack_response: InboxAckResponseSchema,
+            follow_response: ProblemFollowResponseSchema,
+          }),
+        ),
+      }),
+    },
+    {
+      relativePath: "generated/inbox.types.ts",
+      content:
+        "// Generated from src/inbox.ts. Do not edit.\nexport type { InboxNoticeType, ImpactEchoKind, InboxItem, InboxQuery, InboxResponse, InboxAckRequest, InboxAckResponse, ProblemFollowResponse } from '../src/inbox.ts';\n",
     },
 
     {

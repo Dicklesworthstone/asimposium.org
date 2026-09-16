@@ -484,6 +484,26 @@ const CORPUS_COVERAGE_DEBT: readonly ReasonedSlug[] = Object.freeze([
   Object.freeze({ slug: "batch-duplicate-causal-ref", reason: "W4.6: event batches." }),
   Object.freeze({ slug: "batch-dangling-causal-ref", reason: "W4.6: event batches." }),
   Object.freeze({ slug: "batch-causal-cycle", reason: "W4.6: event batches." }),
+  Object.freeze({
+    slug: "protocol-digest-mismatch",
+    reason: "W6.2: mega-commands protocol ack mismatch owed.",
+  }),
+  Object.freeze({
+    slug: "inbox-ack-body-invalid",
+    reason: "W6.3: inbox ack body invalid owed.",
+  }),
+  Object.freeze({
+    slug: "inbox-cursor-invalid",
+    reason: "W6.3: inbox cursor invalid owed.",
+  }),
+  Object.freeze({
+    slug: "statement-revised-since",
+    reason: "W6.3: statement revised since owed.",
+  }),
+  Object.freeze({
+    slug: "unsupported-protocol-version",
+    reason: "W6.6: protocol version negotiation refusal owed.",
+  }),
 ]);
 
 /**

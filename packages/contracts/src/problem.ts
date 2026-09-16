@@ -51,7 +51,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "NAME_RESERVED",
   "NAME_TAKEN",
   "PATH_ONLY_REQUIRED",
+  "PROTOCOL_DIGEST_MISMATCH",
   "REGISTRATION_BODY_INVALID",
+  "UNSUPPORTED_PROTOCOL_VERSION",
   "SCOPE_ESCALATION",
   "SCOPE_NOT_REDUCED",
   "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
@@ -208,6 +210,10 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "LEASE_CHALLENGE_BODY_INVALID",
   "LEASE_RELEASE_BODY_INVALID",
   "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+  // W6.3: Inbox and statement-revision teaching refusals (Fable §1.3.2, §7.1, §7.6).
+  "INBOX_ACK_BODY_INVALID",
+  "INBOX_CURSOR_INVALID",
+  "STATEMENT_REVISED_SINCE",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -348,6 +354,15 @@ const generalContractProblem = z
     window_seconds: z.number().int().positive().optional(),
     /** Unanchored ledger object references, present only on SYNTHESIS_UNANCHORED. */
     unanchored: z.array(z.string().min(1).max(256)).max(100).optional(),
+    /** Protocol version negotiation extensions (W6.6). */
+    supported_versions: z.array(z.string().min(1).max(32)).optional(),
+    requested_version: z.string().min(1).max(64).optional(),
+    /** Statement revision cursor extensions (W6.6). */
+    delta_pointer: z.string().optional(),
+    problem_id: z.string().optional(),
+    client_context_cursor: z.number().int().nonnegative().optional(),
+    revised_at_cursor: z.number().int().nonnegative().optional(),
+    statement_version: z.number().int().positive().optional(),
   })
   .strict();
 

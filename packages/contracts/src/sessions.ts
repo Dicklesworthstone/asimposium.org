@@ -415,6 +415,7 @@ export const ClaimRevisionSchema = z
       .max(4 * 1024)
       .optional(),
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ClaimRevision = z.infer<typeof ClaimRevisionSchema>;
@@ -647,6 +648,7 @@ export const PromoteRequestSchema = z
      * citations instead of minting a dangling or circular edge.
      */
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type PromoteRequest = z.infer<typeof PromoteRequestSchema>;
@@ -675,6 +677,7 @@ export const DirectClaimRequestSchema = z
       .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type DirectClaimRequest = z.infer<typeof DirectClaimRequestSchema>;
@@ -753,6 +756,7 @@ export const ReviewRequestSchema = z
       .string()
       .min(1)
       .max(64 * 1024),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;

@@ -9,11 +9,15 @@ import {
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,
+  ProblemEventTailControlSchema,
+  ProblemEventTailQuerySchema,
+  ProblemEventTailResponseSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
   ProblemsIndexQuerySchema,
   ProblemsIndexResponseSchema,
   PublicClaimTargetSchema,
+  PublicLedgerEventSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
 import { ProblemDocumentSchema } from "../../src/problem.ts";
@@ -699,4 +703,46 @@ test("the ledger root schema positively carries both index faces and the problem
       problem_face_response: await fixture(VALID_PROBLEM_FACE),
     }).success,
   ).toBe(true);
+});
+
+test("event tail contracts validate valid payloads and reject malformed ones", () => {
+  const validEvent = {
+    id: "evt-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    seq: 1,
+    type: "problem.statement-revised",
+    object_id: "P-4DSP",
+    created_at: "2026-08-19T00:00:07.000Z",
+  };
+  expect(PublicLedgerEventSchema.safeParse(validEvent).success).toBe(true);
+  expect(PublicLedgerEventSchema.safeParse({ ...validEvent, seq: 0 }).success).toBe(false);
+  expect(PublicLedgerEventSchema.safeParse({ ...validEvent, id: "" }).success).toBe(false);
+  expect(PublicLedgerEventSchema.safeParse({ ...validEvent, created_at: "invalid-date" }).success).toBe(false);
+
+  const validControl = {
+    control: "page_end",
+    next_cursor: 1,
+    has_more: false,
+  };
+  expect(ProblemEventTailControlSchema.safeParse(validControl).success).toBe(true);
+  expect(ProblemEventTailControlSchema.safeParse({ ...validControl, control: "other" }).success).toBe(false);
+  expect(ProblemEventTailControlSchema.safeParse({ ...validControl, next_cursor: -1 }).success).toBe(false);
+
+  const validTail = {
+    schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+    problem_id: "P-4DSP",
+    since: 0,
+    events: [validEvent],
+    next_cursor: 1,
+    has_more: false,
+    omitted: ["omitted reason"],
+  };
+  expect(ProblemEventTailResponseSchema.safeParse(validTail).success).toBe(true);
+  expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, schema: "wrong" }).success).toBe(false);
+  expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, since: -1 }).success).toBe(false);
+
+  expect(ProblemEventTailQuerySchema.safeParse({ since: "0", format: "ndjson", limit: 50 }).success).toBe(true);
+  expect(ProblemEventTailQuerySchema.safeParse({ since: "-1" }).success).toBe(false);
+  expect(ProblemEventTailQuerySchema.safeParse({ format: "xml" }).success).toBe(false);
+  expect(ProblemEventTailQuerySchema.safeParse({ limit: 0 }).success).toBe(false);
+  expect(ProblemEventTailQuerySchema.safeParse({ limit: 201 }).success).toBe(false);
 });
