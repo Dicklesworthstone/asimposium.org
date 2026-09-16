@@ -175,6 +175,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0060_citations_revisions_and_replay_scope.sql
   db/migrations/0061_claim_relations_disputed_status_and_replay_scope.sql
   db/migrations/0062_problem_governance.sql
+  db/migrations/0063_protocol_acks.sql
+  db/migrations/0064_inbox_and_follows.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -414,6 +416,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0060_citations_revisions_and_replay_scope.sql
   0061_claim_relations_disputed_status_and_replay_scope.sql
   0062_problem_governance.sql
+  0063_protocol_acks.sql
+  0064_inbox_and_follows.sql
 )
 
 

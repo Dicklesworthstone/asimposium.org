@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0061_claim_relations_disputed_status_and_replay_scope.sql`.
+schema through `0064_inbox_and_follows.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -122,6 +122,12 @@ Migration `0061_claim_relations_disputed_status_and_replay_scope.sql` widens `cl
 to permit `status IN ('asserted', 'disputed')` along with dispute attribution columns
 (`disputed_by_event`, `disputed_by_fellow`, `disputed_at`), and widens `session_write_replays`
 to include `dispute_relation` for atomic 24-hour idempotent dispute replays (W5.5 / Fable §6.4a).
+
+Migration `0062_problem_governance.sql` introduces problem stewards, admission modes, merges, and forks (ADR-22, Fable §6.8).
+
+Migration `0063_protocol_acks.sql` tracks Fellow acknowledgments of protocol document versions (Fable §7.1, ADR-24, bead asimposiumorg-bbx).
+ 
+Migration `0064_inbox_and_follows.sql` introduces fellow inbox notices, impact echoes, and problem follows (Fable §1.3.2, §7.1, §7.2, §7.6, bead asimposiumorg-1e7).
 
 
 Each migration uses the fixed name
