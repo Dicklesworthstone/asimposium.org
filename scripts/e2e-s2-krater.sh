@@ -225,6 +225,10 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/event-tail.ts
   packages/contracts/src/event-tail-model.ts
   packages/contracts/generated/event-tail.schema.json
+  packages/contracts/src/review-queue.ts
+  packages/contracts/src/review-queue-model.ts
+  packages/contracts/src/review-queue-artifact.ts
+  packages/contracts/generated/review-queue.schema.json
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -253,6 +257,13 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/discovery/now-service.ts
   apps/wire/src/discovery/markdown.ts
   apps/wire/src/discovery/event-tail-discovery.ts
+  apps/wire/src/discovery/review-queue-discovery.ts
+  apps/wire/src/discovery/review-queue-http.ts
+  apps/wire/src/discovery/review-queue-read.ts
+  apps/wire/src/discovery/review-queue-router.ts
+  apps/wire/src/discovery/review-queue-selection.ts
+  apps/wire/src/discovery/review-queue-service.ts
+  apps/wire/src/discovery/review-queue-sql.ts
   apps/wire/src/auth/canonical.ts
   apps/wire/src/auth/envelope.ts
   apps/wire/src/auth/http.ts
@@ -317,6 +328,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/inbox/markdown.ts
   apps/wire/src/inbox/router.ts
   apps/wire/src/inbox/store.ts
+  apps/wire/src/mega-commands/ledger-moves.ts
+  apps/wire/src/mega-commands/live-provider.ts
   apps/wire/src/mega-commands/markdown.ts
   apps/wire/src/mega-commands/provider.ts
   apps/wire/src/mega-commands/router.ts
@@ -367,6 +380,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/faces/html.ts
   packages/render/src/faces/json.ts
   packages/render/src/faces/markdown.ts
+  packages/render/src/review-queue.ts
   package.json
   bun.lock
   apps/wire/package.json

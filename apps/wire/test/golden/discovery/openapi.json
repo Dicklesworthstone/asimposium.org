@@ -2554,6 +2554,274 @@
         "security": []
       }
     },
+    "/reviews": {
+      "get": {
+        "summary": "Redirect to canonical public review discovery in Markdown.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "308": {
+            "description": "Permanent redirect to /reviews.md, preserving problem and after query parameters.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "problem",
+            "in": "query",
+            "required": false,
+            "description": "Optional public, listed problem identifier. Omit for the global queue.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/problem"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_after unchanged and preserve the problem filter. Live admission-order traversal; priority is within each eight-admission page, not across unseen candidates.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/after"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/reviews.html": {
+      "get": {
+        "summary": "Bounded public review candidates and exact claim snapshots (HTML).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "At most eight admission candidates, selected using the canonical scientific fold. Current visibility is rechecked; missing data and read-budget exclusions are explicit. Recommendations are not review authority or a truth score.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "public, max-age=0, must-revalidate"
+                }
+              }
+            },
+            "content": {
+              "text/html": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged representation after rechecking current public visibility. No response body."
+          },
+          "400": {
+            "description": "Invalid or repeated problem/after parameter; no database read.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Opaque unavailable response; never an invented empty queue.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "problem",
+            "in": "query",
+            "required": false,
+            "description": "Optional public, listed problem identifier. Omit for the global queue.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/problem"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_after unchanged and preserve the problem filter. Live admission-order traversal; priority is within each eight-admission page, not across unseen candidates.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/after"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/reviews.json": {
+      "get": {
+        "summary": "Bounded public review candidates with missing checks, exact claim snapshots and continuation (JSON).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "At most eight admission candidates, selected using the canonical scientific fold. Current visibility is rechecked; missing data and read-budget exclusions are explicit. Recommendations are not review authority or a truth score.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "public, max-age=0, must-revalidate"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/response"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged representation after rechecking current public visibility. No response body."
+          },
+          "400": {
+            "description": "Invalid or repeated problem/after parameter; no database read.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Opaque unavailable response; never an invented empty queue.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "problem",
+            "in": "query",
+            "required": false,
+            "description": "Optional public, listed problem identifier. Omit for the global queue.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/problem"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_after unchanged and preserve the problem filter. Live admission-order traversal; priority is within each eight-admission page, not across unseen candidates.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/after"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/reviews.md": {
+      "get": {
+        "summary": "Bounded public review candidates and exact claim snapshots (Markdown).",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "At most eight admission candidates, selected using the canonical scientific fold. Current visibility is rechecked; missing data and read-budget exclusions are explicit. Recommendations are not review authority or a truth score.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "public, max-age=0, must-revalidate"
+                }
+              }
+            },
+            "content": {
+              "text/markdown": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged representation after rechecking current public visibility. No response body."
+          },
+          "400": {
+            "description": "Invalid or repeated problem/after parameter; no database read.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Opaque unavailable response; never an invented empty queue.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "problem",
+            "in": "query",
+            "required": false,
+            "description": "Optional public, listed problem identifier. Omit for the global queue.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/problem"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "URL-encode next_after unchanged and preserve the problem filter. Live admission-order traversal; priority is within each eight-admission page, not across unseen candidates.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/review-queue.v1.json#/properties/query/properties/after"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/rubrics": {
       "get": {
         "summary": "Review rubrics (JSON alias).",
@@ -3050,6 +3318,35 @@
     "/schemas/retractions.v1.json": {
       "get": {
         "summary": "Contract schema: retractions.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/review-queue.v1.json": {
+      "get": {
+        "summary": "Contract schema: review-queue.",
         "tags": [
           "schema-documents"
         ],

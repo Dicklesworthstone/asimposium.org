@@ -54,6 +54,7 @@
     "capabilities": "/capabilities",
     "schema_index": "/schemas/index.json",
     "problem_index": "/problems.json",
+    "review_queue": "/reviews.json",
     "cursor": "/cursor",
     "enroll_capsule": "/join/<enrollment-id>",
     "device_flow": [
