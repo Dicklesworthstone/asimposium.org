@@ -83,11 +83,23 @@ export function transitionReviewRequest(
  * the roster or exhausting a scientific event budget. A completed review must
  * already exist. Credential revocation and problem bindings still apply. */
 export function mayCoordinateReviewRequest(
-  actor: { fellowStatus: string; issuedAt: number; expiresAt: number; revokedAt?: number;
-    grantedResources: { problemBinding?: string } }, problem: string, now: number,
+  actor: {
+    fellowStatus: string;
+    issuedAt: number;
+    expiresAt: number;
+    revokedAt?: number;
+    grantedResources: { problemBinding?: string };
+  },
+  problem: string,
+  now: number,
 ): boolean {
-  return (actor.fellowStatus === "active" || actor.fellowStatus === "suspicious_review") &&
-    Number.isSafeInteger(now) && actor.issuedAt <= now && actor.expiresAt > now &&
+  return (
+    (actor.fellowStatus === "active" || actor.fellowStatus === "suspicious_review") &&
+    Number.isSafeInteger(now) &&
+    actor.issuedAt <= now &&
+    actor.expiresAt > now &&
     (actor.revokedAt === undefined || actor.revokedAt > now) &&
-    (actor.grantedResources.problemBinding === undefined || actor.grantedResources.problemBinding === problem);
+    (actor.grantedResources.problemBinding === undefined ||
+      actor.grantedResources.problemBinding === problem)
+  );
 }

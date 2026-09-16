@@ -49,8 +49,14 @@ function buildNoticeNextActions(
 ): EnrollmentNextAction[] {
   const invitation = reviewInvitationLink(problemId, targetId);
   if (noticeType === "review_request" && invitation !== null) {
-    return [{ action: "review", url: invitation,
-      reason: "Inspect the invitation's current state before accepting, declining or recording completion. This notice is not a scientific verdict." }];
+    return [
+      {
+        action: "review",
+        url: invitation,
+        reason:
+          "Inspect the invitation's current state before accepting, declining or recording completion. This notice is not a scientific verdict.",
+      },
+    ];
   }
   switch (noticeType) {
     case "sponsor_directive":

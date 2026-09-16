@@ -185,16 +185,10 @@ async function fixture() {
     eventId: "RRE-1",
   };
   function response(action: "accept" | "decline" = "accept"): RequestCommand {
-<<<<<<< HEAD
-    return { ...offer, action, scope: action === "accept" ? "review" : "coordinate", actor: { fellowId: REVIEWER, sponsorId: "usr_reviewer", credentialId: "cred-reviewer", tokenHash: "cred-reviewer-hash" } as RequestCommand["actor"],
-      receipt: { ...offer.receipt, version: 2, status: action === "accept" ? "accepted" : "declined", updated_at: NOW+1,
-        expires_at: action === "accept" ? NOW+1+REVIEW_ACCEPTED_MS : offer.receipt.expires_at },
-      idempotencyKey: action, requestDigest: action, eventId: `RRE-${action}` };
-=======
     return {
       ...offer,
       action,
-      scope: "review",
+      scope: action === "accept" ? "review" : "coordinate",
       actor: {
         fellowId: REVIEWER,
         sponsorId: "usr_reviewer",
@@ -212,7 +206,6 @@ async function fixture() {
       requestDigest: action,
       eventId: `RRE-${action}`,
     };
->>>>>>> ebfe9e00 (fix(wire,contracts,e2e): reconcile hypothesis discovery, migration 0065 pins, and biome formatting)
   }
   const count = (table: string) =>
     (sql.query(`SELECT COUNT(*) n FROM ${table}`).get() as { n: number }).n;
@@ -343,8 +336,10 @@ for (const [name, mutate] of [
 test("capacity is global to the recipient, and decline releases a slot", async () => {
   const f = await fixture();
   try {
+    const firstPin = f.offer.pins[0];
+    assert.ok(firstPin);
     for (let i = 1; i <= 5; i++) {
-      const pin = i === 1 ? f.offer.pins[0]! : f.claim(`C-${i}`, `EV-claim-${i}`, i);
+      const pin = i === 1 ? firstPin : f.claim(`C-${i}`, `EV-claim-${i}`, i);
       const command = {
         ...f.offer,
         cursor: i,
@@ -567,7 +562,10 @@ test("private opt-out survives exhausted scientific grants and lost membership, 
 test("private-coordination scope cannot be used to offer or accept a review", async () => {
   const f = await fixture();
   try {
-    await assert.rejects(commitRequest(f.db, f.crypto, { ...f.offer, scope: "coordinate" }), /CONFLICT/);
+    await assert.rejects(
+      commitRequest(f.db, f.crypto, { ...f.offer, scope: "coordinate" }),
+      /CONFLICT/,
+    );
     await commitRequest(f.db, f.crypto, f.offer);
     await assert.rejects(
       commitRequest(f.db, f.crypto, { ...f.response(), scope: "coordinate" }),

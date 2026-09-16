@@ -4,7 +4,6 @@ import { join } from "node:path";
 
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
-import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import {
   getPublicSchema,
   INLINE_PUBLIC_SCHEMA_IDS,
@@ -12,6 +11,7 @@ import {
   PUBLIC_SCHEMA_EXCLUSIONS,
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
+import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
@@ -129,7 +129,10 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   const artifacts = new Map(
     generatedArtifacts().map((artifact) => [artifact.relativePath, artifact.content]),
   );
-  const inline = new Map([["hypotheses", generateHypothesesSchema()], ["review-requests", generateReviewRequestsSchema()]]);
+  const inline = new Map([
+    ["hypotheses", generateHypothesesSchema()],
+    ["review-requests", generateReviewRequestsSchema()],
+  ]);
   expect([...inline.keys()]).toEqual([...INLINE_PUBLIC_SCHEMA_IDS]);
 
   expect(listPublicSchemas().map((document) => document.id)).toEqual([...PUBLIC_SCHEMA_IDS]);
