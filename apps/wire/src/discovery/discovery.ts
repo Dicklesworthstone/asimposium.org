@@ -38,6 +38,11 @@
 import { isTrustedAgoraOrigin, isTrustedStoaOrigin } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
+import {
+  EVENT_TAIL_PUBLIC_READS,
+  eventTailParameters,
+  eventTailResponses,
+} from "./event-tail-discovery";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
@@ -100,7 +105,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history": true,
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
-  "GET /p/:id/events.json": true,
   "GET /p/:id/*": true,
   // W4.6 direct appends (convenience surface, implicit session).
   "POST /v1/p/:id/claims": true,
@@ -118,6 +122,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
 
 /** One honest line per disclosed surface; omission here would be the lie. */
 const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
+  ...EVENT_TAIL_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -523,7 +528,7 @@ export function generateWellKnownDocument(origins: DiscoveryOrigins = DISCOVERY_
     schema_version: "1",
     version: DISCOVERY_VERSION,
     origins: { ...origins },
-    formats: ["md", "json"],
+    formats: ["md", "json", "ndjson"],
     protocol: {
       rules_word_cap: PROTOCOL_RULES_WORD_CAP,
       rules_word_count: rules.words,
@@ -562,6 +567,8 @@ function responseFor(
   openApiPath: string,
   origins: DiscoveryOrigins,
 ): Readonly<Record<string, unknown>> {
+  const tail = eventTailResponses(openApiPath, origins.agent);
+  if (tail !== undefined) return tail;
   const media = openApiPath.endsWith(".md")
     ? "text/markdown; charset=utf-8"
     : openApiPath.endsWith(".html")
@@ -656,6 +663,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...eventTailParameters(operation.openApiPath, origins.agent),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {

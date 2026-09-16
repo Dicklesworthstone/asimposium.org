@@ -46,6 +46,7 @@ import type { Env } from "./env";
 import { validatedProblem as problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
+import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createLedgerFaceRoutes } from "./ledger-face";
 import { createProblemRouter } from "./problems/router";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
@@ -229,8 +230,8 @@ const capabilitiesBody = (origin: string): string =>
         "leases",
         "triage",
         "inbox",
-        "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
-        "event tails (W6.4)",
+        "expanded problem lists beyond the contracted public faces (Fable §7.9)",
+        "event-tail long-poll, SSE, TOON, feeds and signed exports (W6.4)",
       ],
     },
     null,
@@ -865,7 +866,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     if (
       !encodedSeparator &&
       segments.length === 4 &&
-      (segments[3] === "dead-ends.json" ||
+      (segments[3] === "events.json" ||
+        segments[3] === "events.ndjson" ||
+        segments[3] === "dead-ends.json" ||
         segments[3] === "dead-ends.md" ||
         segments[3] === "dead-ends.html" ||
         segments[3] === "conflicts.json" ||
@@ -910,13 +913,11 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     return routeNotFound(c.req.url);
   });
 
-  // W6.4 source exists, but its response contract and dependencies do not.
-  // Keep this explicit pin alongside the general nested-path guard so mounting
-  // the event tail later requires a deliberate contract and route change.
-  app.on(["GET", "HEAD"], "/p/:id/events.json", (c) => routeNotFound(c.req.url));
+  // Contracted public tails, independent of enrollment configuration. Other
+  // formats and the retained experimental tail remain deliberately unmounted.
+  app.route("/", createEventTailRoutes());
 
-  // The contracted public ledger faces (no auth, ever). The event-tail guard
-  // above remains first so the nested W6.4 route stays explicitly unavailable.
+  // The contracted public ledger faces (no auth, ever).
   app.route("/", createLedgerFaceRoutes());
   app.route("/", createSearchRoutes());
   app.route("/", createDiscoveryRoutes());
