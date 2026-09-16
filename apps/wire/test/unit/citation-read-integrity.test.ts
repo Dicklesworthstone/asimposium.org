@@ -1,5 +1,5 @@
-import assert from "node:assert/strict";
 import { describe, test } from "bun:test";
+import assert from "node:assert/strict";
 import {
   CITATION_EVENT_MAX_BYTES,
   type CitationContentRow,
@@ -80,10 +80,24 @@ describe("exact citation mentions", () => {
     });
   }
   for (const text of [
-    "L-10@2", "L-1@20", "L-1@1", "L-1@02", "L-1@0", "L-1@2@3",
-    "XL-1@2", "L-1@2suffix", "L-1@2_more", "L-1@2-extra", "éL-1@2",
-    "L-1@2é", "𝒙L-1@2", "https://example.invalid/L-1@2", "file.L-1@2",
-    "L-1@2.json", "%L-1@2", "L-1",
+    "L-10@2",
+    "L-1@20",
+    "L-1@1",
+    "L-1@02",
+    "L-1@0",
+    "L-1@2@3",
+    "XL-1@2",
+    "L-1@2suffix",
+    "L-1@2_more",
+    "L-1@2-extra",
+    "éL-1@2",
+    "L-1@2é",
+    "𝒙L-1@2",
+    "https://example.invalid/L-1@2",
+    "file.L-1@2",
+    "L-1@2.json",
+    "%L-1@2",
+    "L-1",
   ]) {
     test(`does not invent a pinned association from ${text}`, () => {
       assert.equal(mentionsCitation(text, "L-1", 2), false);

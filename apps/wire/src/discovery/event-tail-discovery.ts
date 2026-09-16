@@ -38,12 +38,19 @@ export function eventTailResponses(
       content,
       headers: {
         ETag: { schema: { type: "string" }, description: "Strong, representation-specific ETag." },
-        Link: { schema: { type: "string" }, description: "Next page at the same captured cursor, when present." },
+        Link: {
+          schema: { type: "string" },
+          description: "Next page at the same captured cursor, when present.",
+        },
       },
     },
-    "304": { description: "Unchanged representation after current visibility and content-availability checks. No body." },
+    "304": {
+      description:
+        "Unchanged representation after current visibility and content-availability checks. No body.",
+    },
     default: {
-      description: "Typed refusal. Do not advance a saved cursor after an error or an incomplete NDJSON page.",
+      description:
+        "Typed refusal. Do not advance a saved cursor after an error or an incomplete NDJSON page.",
       content: {
         "application/problem+json": {
           schema: { $ref: `${origin}/schemas/problem.v1.json` },
@@ -56,9 +63,12 @@ export function eventTailResponses(
 export function eventTailParameters(path: string, origin: string): readonly unknown[] {
   if (!isEventTailPath(path)) return [];
   const descriptions = {
-    since: "Exclusive problem-local sequence; defaults to 0. Never use the site-wide /cursor integer here.",
-    limit: "Maximum scanned envelopes, 1 to 200; defaults to 50. Filtered records still consume a sequence and one slot.",
-    through: "Optional stable upper cursor. Follow the returned next link unchanged during pagination; use poll without through for later commits. Current privacy and redaction still apply.",
+    since:
+      "Exclusive problem-local sequence; defaults to 0. Never use the site-wide /cursor integer here.",
+    limit:
+      "Maximum scanned envelopes, 1 to 200; defaults to 50. Filtered records still consume a sequence and one slot.",
+    through:
+      "Optional stable upper cursor. Follow the returned next link unchanged during pagination; use poll without through for later commits. Current privacy and redaction still apply.",
   };
   return Object.entries(descriptions).map(([name, description]) => ({
     name,

@@ -1,14 +1,19 @@
 import {
   type AssociatedClaimRef,
   type AssociatedEvidenceRef,
-  canonicalizeLocator,
   type CitationItem,
   CitationItemSchema,
-  computeCitationNormHash,
   type CorrectCitationRequest,
+  canonicalizeLocator,
+  computeCitationNormHash,
   type RecordCitationRequest,
 } from "@asimposium/contracts";
-import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan, safeInlineProse } from "@asimposium/render";
+import {
+  escapeHtml,
+  neutralizeUntrustedBody,
+  safeCodeSpan,
+  safeInlineProse,
+} from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadCommittedCitation, loadCommittedCitations } from "./citation-read";
 
@@ -327,7 +332,9 @@ export function renderCitationsMarkdown(
       const unanchoredBadge = c.unanchored ? " `[unanchored]`" : "";
       const versionStr = c.version > 1 ? `@v${c.version}` : "";
 
-      lines.push(`## [${c.citation_id}${versionStr}] ${safeInlineProse(c.title)}${unanchoredBadge}`);
+      lines.push(
+        `## [${c.citation_id}${versionStr}] ${safeInlineProse(c.title)}${unanchoredBadge}`,
+      );
       lines.push(`- **Authors**: ${safeInlineProse(authorsStr)}${yearStr}`);
       lines.push(`- **Locator**: ${safeCodeSpan(c.locator_kind)} — ${safeInlineProse(locStr)}`);
       lines.push(
@@ -339,7 +346,9 @@ export function renderCitationsMarkdown(
       if (c.excerpt) {
         lines.push(`- **Excerpt (untrusted)**: ${safeInlineProse(c.excerpt)}`);
       }
-      lines.push(`[Exact citation version](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${c.version}.md)`);
+      lines.push(
+        `[Exact citation version](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${c.version}.md)`,
+      );
       lines.push("");
     }
   }
@@ -525,7 +534,9 @@ export function renderSingleCitationMarkdown(
     lines.push("### Available Version History");
     for (const v of versions) {
       const isCurrent = v.version === c.version ? " (viewing)" : "";
-      lines.push(`- [v${v.version}](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${v.version}.md) [seq ${v.seq}]: ${safeInlineProse(v.title)}${isCurrent}`);
+      lines.push(
+        `- [v${v.version}](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${v.version}.md) [seq ${v.seq}]: ${safeInlineProse(v.title)}${isCurrent}`,
+      );
     }
     lines.push("");
   }
@@ -533,7 +544,9 @@ export function renderSingleCitationMarkdown(
   if (associated_claims.length > 0) {
     lines.push("### Associated Claims");
     for (const cl of associated_claims) {
-      lines.push(`- [${safeInlineProse(cl.claim_id)}@v${cl.version}](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.md): ${safeInlineProse(cl.statement)}`);
+      lines.push(
+        `- [${safeInlineProse(cl.claim_id)}@v${cl.version}](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.md): ${safeInlineProse(cl.statement)}`,
+      );
     }
     lines.push("");
   }
@@ -541,7 +554,9 @@ export function renderSingleCitationMarkdown(
   if (associated_evidence.length > 0) {
     lines.push("### Associated Evidence");
     for (const ev of associated_evidence) {
-      lines.push(`- ${safeCodeSpan(ev.evidence_id)} ${safeInlineProse(ev.direction)} ${safeCodeSpan(ev.bears_on_id)} (${safeInlineProse(ev.computed_class)})`);
+      lines.push(
+        `- ${safeCodeSpan(ev.evidence_id)} ${safeInlineProse(ev.direction)} ${safeCodeSpan(ev.bears_on_id)} (${safeInlineProse(ev.computed_class)})`,
+      );
     }
     lines.push("");
   }

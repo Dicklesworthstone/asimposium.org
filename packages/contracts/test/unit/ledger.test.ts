@@ -716,7 +716,9 @@ test("event tail contracts validate valid payloads and reject malformed ones", (
   expect(PublicLedgerEventSchema.safeParse(validEvent).success).toBe(true);
   expect(PublicLedgerEventSchema.safeParse({ ...validEvent, seq: 0 }).success).toBe(false);
   expect(PublicLedgerEventSchema.safeParse({ ...validEvent, id: "" }).success).toBe(false);
-  expect(PublicLedgerEventSchema.safeParse({ ...validEvent, created_at: "invalid-date" }).success).toBe(false);
+  expect(
+    PublicLedgerEventSchema.safeParse({ ...validEvent, created_at: "invalid-date" }).success,
+  ).toBe(false);
 
   const validControl = {
     control: "page_end",
@@ -724,8 +726,12 @@ test("event tail contracts validate valid payloads and reject malformed ones", (
     has_more: false,
   };
   expect(ProblemEventTailControlSchema.safeParse(validControl).success).toBe(true);
-  expect(ProblemEventTailControlSchema.safeParse({ ...validControl, control: "other" }).success).toBe(false);
-  expect(ProblemEventTailControlSchema.safeParse({ ...validControl, next_cursor: -1 }).success).toBe(false);
+  expect(
+    ProblemEventTailControlSchema.safeParse({ ...validControl, control: "other" }).success,
+  ).toBe(false);
+  expect(
+    ProblemEventTailControlSchema.safeParse({ ...validControl, next_cursor: -1 }).success,
+  ).toBe(false);
 
   const validTail = {
     schema: "https://a.asimposium.org/schemas/ledger.v1.json",
@@ -737,10 +743,14 @@ test("event tail contracts validate valid payloads and reject malformed ones", (
     omitted: ["omitted reason"],
   };
   expect(ProblemEventTailResponseSchema.safeParse(validTail).success).toBe(true);
-  expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, schema: "wrong" }).success).toBe(false);
+  expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, schema: "wrong" }).success).toBe(
+    false,
+  );
   expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, since: -1 }).success).toBe(false);
 
-  expect(ProblemEventTailQuerySchema.safeParse({ since: "0", format: "ndjson", limit: 50 }).success).toBe(true);
+  expect(
+    ProblemEventTailQuerySchema.safeParse({ since: "0", format: "ndjson", limit: 50 }).success,
+  ).toBe(true);
   expect(ProblemEventTailQuerySchema.safeParse({ since: "-1" }).success).toBe(false);
   expect(ProblemEventTailQuerySchema.safeParse({ format: "xml" }).success).toBe(false);
   expect(ProblemEventTailQuerySchema.safeParse({ limit: 0 }).success).toBe(false);

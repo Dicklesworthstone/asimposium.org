@@ -238,10 +238,7 @@ const capabilitiesBody = (origin: string): string =>
       not_yet: [
         "rate-limit budgets",
         "leases",
-        "triage",
-        "inbox",
         "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
-        "event-tail long-poll, SSE, TOON, feeds and signed exports (W6.4)",
       ],
     },
     null,
@@ -946,6 +943,13 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       segments.length === 4 &&
       (segments[3] === "events.json" ||
         segments[3] === "events.ndjson" ||
+        segments[3] === "events.toon" ||
+        segments[3] === "events" ||
+        segments[3] === "feed.rss" ||
+        segments[3] === "feed.atom" ||
+        segments[3] === "feed.json" ||
+        segments[3] === "feed" ||
+        segments[3] === "export.jsonl.gz" ||
         segments[3] === "dead-ends.json" ||
         segments[3] === "dead-ends.md" ||
         segments[3] === "dead-ends.html" ||

@@ -219,6 +219,12 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/generated/syntheses.schema.json
   packages/contracts/src/citations.ts
   packages/contracts/generated/citations.schema.json
+  packages/contracts/src/inbox.ts
+  packages/contracts/generated/inbox.schema.json
+  packages/contracts/src/mega-commands.ts
+  packages/contracts/src/event-tail.ts
+  packages/contracts/src/event-tail-model.ts
+  packages/contracts/generated/event-tail.schema.json
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -246,6 +252,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/discovery/fellow-service.ts
   apps/wire/src/discovery/now-service.ts
   apps/wire/src/discovery/markdown.ts
+  apps/wire/src/discovery/event-tail-discovery.ts
   apps/wire/src/auth/canonical.ts
   apps/wire/src/auth/envelope.ts
   apps/wire/src/auth/http.ts
@@ -276,6 +283,13 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/retractions.ts
   apps/wire/src/ledger/conflicts.ts
   apps/wire/src/ledger/citations.ts
+  apps/wire/src/ledger/citation-read.ts
+  apps/wire/src/ledger/citation-read-integrity.ts
+  apps/wire/src/ledger/event-tail-feeds.ts
+  apps/wire/src/ledger/event-tail-http.ts
+  apps/wire/src/ledger/event-tail-read.ts
+  apps/wire/src/ledger/event-tail-router.ts
+  apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
@@ -300,6 +314,12 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/service.ts
   apps/wire/src/problems/router.ts
   apps/wire/src/problems/lifecycle-ledger.ts
+  apps/wire/src/inbox/markdown.ts
+  apps/wire/src/inbox/router.ts
+  apps/wire/src/inbox/store.ts
+  apps/wire/src/mega-commands/markdown.ts
+  apps/wire/src/mega-commands/provider.ts
+  apps/wire/src/mega-commands/router.ts
   packages/contracts/src/public-schemas.ts
   packages/contracts/generated/dead-ends.schema.json
   packages/contracts/generated/discovery.schema.json

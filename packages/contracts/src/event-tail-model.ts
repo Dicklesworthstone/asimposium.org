@@ -78,12 +78,22 @@ export function parseEventTailQuery(params: URLSearchParams): EventTailQuery | u
   const limit = eventTailCursor(params.get("limit") ?? String(EVENT_TAIL_DEFAULT_LIMIT));
   const throughText = params.get("through");
   const through = throughText === null ? undefined : eventTailCursor(throughText);
-  if (since === undefined || limit === undefined || limit < 1 || limit > EVENT_TAIL_MAX_EVENTS ||
-      (throughText !== null && (through === undefined || through < since))) return undefined;
+  if (
+    since === undefined ||
+    limit === undefined ||
+    limit < 1 ||
+    limit > EVENT_TAIL_MAX_EVENTS ||
+    (throughText !== null && (through === undefined || through < since))
+  )
+    return undefined;
   return { since, limit, ...(through === undefined ? {} : { through }) };
 }
 
-export function eventTailPath(problem: string, format: "json" | "ndjson", query: EventTailQuery): string {
+export function eventTailPath(
+  problem: string,
+  format: "json" | "ndjson",
+  query: EventTailQuery,
+): string {
   const params = new URLSearchParams({ since: String(query.since), limit: String(query.limit) });
   if (query.through !== undefined) params.set("through", String(query.through));
   return `/p/${encodeURIComponent(problem)}/events.${format}?${params}`;
@@ -92,9 +102,11 @@ export function eventTailPath(problem: string, format: "json" | "ndjson", query:
 /** A completed NDJSON page always has exactly one final control line, even when empty. */
 export function renderEventTail(page: EventTailPage, format: "json" | "ndjson"): string {
   if (format === "json") return `${JSON.stringify(page)}\n`;
-  const end = { ...page.page_end,
+  const end = {
+    ...page.page_end,
     next: page.page_end.next?.replace("/events.json?", "/events.ndjson?") ?? null,
     poll: page.page_end.poll.replace("/events.json?", "/events.ndjson?"),
-    omitted: page.omitted };
-  return [...page.events.map((event) => JSON.stringify(event)), JSON.stringify(end)].join("\n") + "\n";
+    omitted: page.omitted,
+  };
+  return `${[...page.events.map((event) => JSON.stringify(event)), JSON.stringify(end)].join("\n")}\n`;
 }

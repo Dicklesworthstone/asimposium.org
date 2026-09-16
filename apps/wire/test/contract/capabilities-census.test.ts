@@ -118,8 +118,20 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
     "GET /p/<id>/*":
       "nested /p path guard; contracted digest faces are one-segment only and this template 404s every nested spelling before D1",
-    "GET /p/<id>/events.json":
-      "the nested W6.4 route remains fail-closed until its response contract and complete implementation land",
+    "GET /p/<id>/events.toon":
+      "TOON event tail is opt-in and rendered after lossless round-trip validation",
+    "GET /p/<id>/events":
+      "negotiated event tail face; canonical representations are advertised under their explicit suffixes",
+    "GET /p/<id>/feed.rss":
+      "RSS 2.0 feed is advertised on the Agora human surface and served per problem",
+    "GET /p/<id>/feed.atom":
+      "Atom feed is advertised on the Agora human surface and served per problem",
+    "GET /p/<id>/feed.json":
+      "JSON Feed is advertised on the Agora human surface and served per problem",
+    "GET /p/<id>/feed":
+      "negotiated feed face; canonical feed representations are served under their explicit suffixes",
+    "GET /p/<id>/export.jsonl.gz":
+      "per-problem gzip export is an archive face served on demand with embedded checkpoints",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/enrollments/proposals":

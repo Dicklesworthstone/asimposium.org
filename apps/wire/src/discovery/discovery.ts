@@ -116,6 +116,13 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/*": true,
+  "GET /p/:id/events.toon": true,
+  "GET /p/:id/events": true,
+  "GET /p/:id/feed.rss": true,
+  "GET /p/:id/feed.atom": true,
+  "GET /p/:id/feed.json": true,
+  "GET /p/:id/feed": true,
+  "GET /p/:id/export.jsonl.gz": true,
   // W4.6 direct appends (convenience surface, implicit session).
   "POST /v1/p/:id/claims": true,
   "POST /v1/p/:id/hypotheses": true,

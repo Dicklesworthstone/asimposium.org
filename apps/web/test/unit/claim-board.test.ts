@@ -11,7 +11,7 @@ function problem(count = 3): ProblemFaceResponse {
     face: "json",
     kind: "problem-face",
     problem: "P-BOARD",
-    problem_status: "open",
+    problem_status: "active",
     profile: "face",
     cursor: 42,
     fingerprint: "fnv1a64:0000000000000000",

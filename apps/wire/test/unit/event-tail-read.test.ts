@@ -1,7 +1,14 @@
-import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { EventTailReadError, readPublicEventTail, type EventTailDatabase } from "../../src/ledger/event-tail-read.ts";
-import { parseEventTailQuery, renderEventTail } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { describe, expect, test } from "bun:test";
+import {
+  parseEventTailQuery,
+  renderEventTail,
+} from "../../../../packages/contracts/src/event-tail-model.ts";
+import {
+  type EventTailDatabase,
+  EventTailReadError,
+  readPublicEventTail,
+} from "../../src/ledger/event-tail-read.ts";
 
 function fixture(count = 0) {
   const sql = new Database(":memory:");
@@ -17,26 +24,40 @@ function fixture(count = 0) {
     INSERT INTO workshop_objects VALUES ('PRIVATE-WORKSHOP-CANARY');`);
   const digest = "a".repeat(64);
   const queries: string[] = [];
-  const db: EventTailDatabase = { prepare(query: string) {
-    queries.push(query);
-    return { bind(...values: (string | number | null)[]) {
-      return { all: async <T>() => ({ results: sql.prepare(query).all(...values) as T[] }) };
-    } };
-  } };
+  const db: EventTailDatabase = {
+    prepare(query: string) {
+      queries.push(query);
+      return {
+        bind(...values: (string | number | null)[]) {
+          return { all: async <T>() => ({ results: sql.prepare(query).all(...values) as T[] }) };
+        },
+      };
+    },
+  };
   const append = (seq: number, kind = "claim", type = "claim.created", problem = "P-DEMO") => {
     const id = `${problem}-event-${seq}`;
-    sql.prepare("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'F-1', 'S-1', 'SES-1', 'model', 'harness', 'PRIVATE-CREDENTIAL-CANARY')")
+    sql
+      .prepare(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'F-1', 'S-1', 'SES-1', 'model', 'harness', 'PRIVATE-CREDENTIAL-CANARY')",
+      )
       .run(id, problem, seq, type, kind, `C-${seq}`, "2026-09-15T00:00:00.000Z", digest);
-    sql.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(id, digest, '{"secret":"PRIVATE-CONTENT-CANARY"}');
+    sql
+      .prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)")
+      .run(id, digest, '{"secret":"PRIVATE-CONTENT-CANARY"}');
     sql.prepare("UPDATE problems SET public_seq=? WHERE id=?").run(seq, problem);
   };
   for (let i = 1; i <= count; i++) append(i);
   return { sql, db, append, queries };
 }
 
-async function expectCode(run: () => Promise<unknown>, code: string) {
-  try { await run(); throw new Error("expected refusal"); }
-  catch (error) {
+async function expectCode(
+  run: () => Promise<unknown>,
+  code: "CURSOR_INVALID" | "EVENT_TAIL_UNAVAILABLE",
+) {
+  try {
+    await run();
+    throw new Error("expected refusal");
+  } catch (error) {
     expect(error instanceof EventTailReadError).toBe(true);
     expect((error as EventTailReadError).code).toBe(code);
   }
@@ -56,7 +77,9 @@ describe("W6.4 actual SQLite public event tail", () => {
         expect(f.queries.length).toBe(1);
         expect(f.queries[0]).not.toContain("payload_json");
         expect(f.queries[0]).not.toContain("writer_credential_id");
-      } finally { f.sql.close(); }
+      } finally {
+        f.sql.close();
+      }
     });
   }
   test("empty public problem has a terminal page, missing and private do not", async () => {
@@ -65,7 +88,9 @@ describe("W6.4 actual SQLite public event tail", () => {
       expect(await readPublicEventTail(f.db, "P-MISSING", { since: 0, limit: 10 })).toBeNull();
       f.sql.exec("UPDATE problems SET status='private-draft'");
       expect(await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 })).toBeNull();
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("unlisted direct reads retain noindex authority", async () => {
     const f = fixture(1);
@@ -73,7 +98,9 @@ describe("W6.4 actual SQLite public event tail", () => {
       f.sql.exec("UPDATE problems SET unlisted=1");
       const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
       expect(result?.unlisted).toBe(true);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("concurrent appends do not shift a pinned traversal; polling discovers them", async () => {
     const f = fixture(5);
@@ -81,7 +108,8 @@ describe("W6.4 actual SQLite public event tail", () => {
       const first = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 2 });
       if (!first?.page.page_end.next) throw new Error("missing continuation");
       const seen = first.page.events.map((event) => event.seq);
-      f.append(6); f.append(7);
+      f.append(6);
+      f.append(7);
       let next: string | null = first.page.page_end.next;
       let poll = first.page.page_end.poll;
       while (next !== null) {
@@ -91,14 +119,17 @@ describe("W6.4 actual SQLite public event tail", () => {
         if (!result) throw new Error("lost public problem");
         expect(result.page.page_end.through).toBe(5);
         seen.push(...result.page.events.map((event) => event.seq));
-        next = result.page.page_end.next; poll = result.page.page_end.poll;
+        next = result.page.page_end.next;
+        poll = result.page.page_end.poll;
       }
       expect(seen).toEqual([1, 2, 3, 4, 5]);
       const query = parseEventTailQuery(new URL(poll, "https://a.asimposium.org").searchParams);
       if (!query) throw new Error("invalid poll link");
       const fresh = await readPublicEventTail(f.db, "P-DEMO", query);
       expect(fresh?.page.events.map((event) => event.seq)).toEqual([6, 7]);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("unknown/private producers retain sequences, not identifiers or actor fields", async () => {
     const f = fixture(1);
@@ -117,7 +148,9 @@ describe("W6.4 actual SQLite public event tail", () => {
       for (const secret of ["PRIVATE-", "workshop.changed", "commentary.posted", "internal-secret"])
         expect(body).not.toContain(secret);
       expect(result.page.page_end.next_cursor).toBe(4);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("redaction retains only the immutable public envelope and changes output", async () => {
     const f = fixture(1);
@@ -127,52 +160,83 @@ describe("W6.4 actual SQLite public event tail", () => {
       const after = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10, through: 1 });
       expect(before?.page.events[0]?.body_omitted).toBe("separate_object_face");
       expect(after?.page.events[0]?.body_omitted).toBe("content_unavailable");
-      expect(after?.page.events[0]?.event?.object_url).toBe("/p/P-DEMO/claims/C-1@1.json?through=1");
+      expect(after?.page.events[0]?.event?.object_url).toBe(
+        "/p/P-DEMO/claims/C-1@1.json?through=1",
+      );
       expect(JSON.stringify(after)).not.toContain("PRIVATE-");
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("missing or digest-detached content never appears available", async () => {
     const f = fixture(2);
     try {
-      f.sql.exec("DELETE FROM event_content WHERE event_id='P-DEMO-event-1'; UPDATE event_content SET payload_sha256='mismatch'");
+      f.sql.exec(
+        "DELETE FROM event_content WHERE event_id='P-DEMO-event-1'; UPDATE event_content SET payload_sha256='mismatch'",
+      );
       const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
-      expect(result?.page.events.map((event) => event.body_omitted)).toEqual(["content_unavailable", "content_unavailable"]);
-    } finally { f.sql.close(); }
+      expect(result?.page.events.map((event) => event.body_omitted)).toEqual([
+        "content_unavailable",
+        "content_unavailable",
+      ]);
+    } finally {
+      f.sql.close();
+    }
   });
   test("other problems and unpublished events cannot bleed into a tail", async () => {
     const f = fixture(2);
     try {
       f.sql.exec("INSERT INTO problems VALUES ('P-OTHER', 0, 'open', 0)");
       f.append(1, "claim", "claim.created", "P-OTHER");
-      f.append(3); f.sql.exec("UPDATE problems SET public_seq=2 WHERE id='P-DEMO'");
+      f.append(3);
+      f.sql.exec("UPDATE problems SET public_seq=2 WHERE id='P-DEMO'");
       const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
       expect(result?.page.events.map((event) => event.seq)).toEqual([1, 2]);
       expect(JSON.stringify(result)).not.toContain("P-OTHER");
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("a missing sequence refuses instead of certifying a completed page", async () => {
     const f = fixture(3);
     try {
       f.sql.exec("DELETE FROM events WHERE seq=2");
-      await expectCode(() => readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 2 }), "EVENT_TAIL_UNAVAILABLE");
-    } finally { f.sql.close(); }
+      await expectCode(
+        () => readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 2 }),
+        "EVENT_TAIL_UNAVAILABLE",
+      );
+    } finally {
+      f.sql.close();
+    }
   });
   test("future or regressed cuts cannot skip undiscovered data", async () => {
     const f = fixture(3);
     try {
-      await expectCode(() => readPublicEventTail(f.db, "P-DEMO", { since: 4, limit: 10 }), "CURSOR_INVALID");
-      await expectCode(() => readPublicEventTail(f.db, "P-DEMO", { since: 0, through: 4, limit: 10 }), "CURSOR_INVALID");
-    } finally { f.sql.close(); }
+      await expectCode(
+        () => readPublicEventTail(f.db, "P-DEMO", { since: 4, limit: 10 }),
+        "CURSOR_INVALID",
+      );
+      await expectCode(
+        () => readPublicEventTail(f.db, "P-DEMO", { since: 0, through: 4, limit: 10 }),
+        "CURSOR_INVALID",
+      );
+    } finally {
+      f.sql.close();
+    }
   });
   test("malformed/overlong envelopes remain bounded sequence-only entries", async () => {
     const f = fixture(3);
     try {
       f.sql.prepare("UPDATE events SET object_id=? WHERE seq=1").run("x".repeat(100000));
-      f.sql.exec("UPDATE events SET created_at='2026-02-30T00:00:00.000Z' WHERE seq=2; UPDATE events SET payload_sha256='broken' WHERE seq=3");
+      f.sql.exec(
+        "UPDATE events SET created_at='2026-02-30T00:00:00.000Z' WHERE seq=2; UPDATE events SET payload_sha256='broken' WHERE seq=3",
+      );
       const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
       expect(result?.page.events.map((event) => event.event)).toEqual([null, null, null]);
       expect(JSON.stringify(result).length < 2000).toBe(true);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("privacy change wins even during a pinned traversal", async () => {
     const f = fixture(3);
@@ -180,16 +244,29 @@ describe("W6.4 actual SQLite public event tail", () => {
       const first = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 1 });
       expect(first?.page.page_end.has_more).toBe(true);
       f.sql.exec("UPDATE problems SET status='private-draft'");
-      expect(await readPublicEventTail(f.db, "P-DEMO", { since: 1, limit: 1, through: 3 })).toBeNull();
-    } finally { f.sql.close(); }
+      expect(
+        await readPublicEventTail(f.db, "P-DEMO", { since: 1, limit: 1, through: 3 }),
+      ).toBeNull();
+    } finally {
+      f.sql.close();
+    }
   });
   test("invalid programmatic inputs never touch the binding", async () => {
     const f = fixture();
     try {
-      for (const query of [{ since: -1, limit: 1 }, { since: 0, limit: 201 }, { since: 0, limit: 1, through: NaN }])
+      for (const query of [
+        { since: -1, limit: 1 },
+        { since: 0, limit: 201 },
+        { since: 0, limit: 1, through: NaN },
+      ])
         await expectCode(() => readPublicEventTail(f.db, "P-DEMO", query), "CURSOR_INVALID");
-      await expectCode(() => readPublicEventTail(f.db, "../private", { since: 0, limit: 1 }), "CURSOR_INVALID");
+      await expectCode(
+        () => readPublicEventTail(f.db, "../private", { since: 0, limit: 1 }),
+        "CURSOR_INVALID",
+      );
       expect(f.queries.length).toBe(0);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 });

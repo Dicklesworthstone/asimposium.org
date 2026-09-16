@@ -2782,32 +2782,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
-      if (error instanceof ProblemArchivedError) {
-        return validatedProblem({
-          status: 403,
-          code: "WRITE_REFUSED",
-          title: "Problem is archived and read-only",
-          detail: `Problem '${error.problemId}' has admission_mode 'archived-read-only' and does not admit new sessions.`,
-          fixHint: "Fork the problem or select an active problem.",
-        });
-      }
-      if (error instanceof AdmissionRequiredError) {
-        return validatedProblem({
-          status: 403,
-          code: "WRITE_REFUSED",
-          title: "Problem admission requires approval or invitation",
-          detail: `Problem '${error.problemId}' has admission_mode '${error.mode}'. A problem steward must grant membership before opening a session.`,
-          fixHint: "Contact the problem steward to request admission or membership.",
-        });
-      }
-      if (error instanceof WriterCapReachedError) {
-        return validatedProblem({
-          status: 403,
-          code: "WRITE_REFUSED",
-          title: "Problem writer cap reached",
-          detail: `Problem '${error.problemId}' has reached its writer cap of ${error.cap} active contributors.`,
-          fixHint: "Wait for a contributor slot to open or join as an observer.",
-        });
+      if (
+        error instanceof ProblemArchivedError ||
+        error instanceof AdmissionRequiredError ||
+        error instanceof WriterCapReachedError
+      ) {
+        return writeRefusedProblem();
       }
       if (error instanceof SessionProblemMissingError) {
         return validatedProblem({

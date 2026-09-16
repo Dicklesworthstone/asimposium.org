@@ -457,15 +457,9 @@ const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
   "/p/P-4DSP/hypotheses.toon",
   "/p/P-4DSP/gaps.md",
   "/p/P-4DSP/conflicts.toon",
-  "/p/P-4DSP/events.json?since=0",
-  "/p/P-4DSP/events.ndjson?since=0",
-  "/p/P-4DSP/events.toon?since=0",
   "/p/P-4DSP/orders",
   "/p/P-4DSP/moves.md",
   "/p/P-4DSP/dead-ends.toon",
-  "/p/P-4DSP/feed.rss",
-  "/p/P-4DSP/feed.json",
-  "/p/P-4DSP/export.jsonl.gz",
 ] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
@@ -537,6 +531,8 @@ describe("face wire format", () => {
         "/p/{id}/dead-ends.md",
         "/p/{id}/dead-ends.json",
         "/p/{id}/dead-ends.html",
+        "/p/{id}/events.json",
+        "/p/{id}/events.ndjson",
         ...["questions", "retractions", "conflicts", "syntheses", "citations"].flatMap((section) =>
           ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`),
         ),
@@ -634,7 +630,6 @@ describe("face wire format", () => {
       "rate-limit budgets",
       "leases",
       "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
-      "event tails (W6.4)",
     ]);
   });
 

@@ -68,9 +68,11 @@ function citationDatabase(problemId = "P-MATH") {
     );
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
   `);
-  sqlite.query("INSERT INTO problems (id, public_seq, status) VALUES (?, 100, 'open')")
+  sqlite
+    .query("INSERT INTO problems (id, public_seq, status) VALUES (?, 100, 'open')")
     .run(problemId);
-  sqlite.query("INSERT INTO citations VALUES (?, 'L-1', 'PRIVATE_PROJECTION_CANARY')")
+  sqlite
+    .query("INSERT INTO citations VALUES (?, 'L-1', 'PRIVATE_PROJECTION_CANARY')")
     .run(problemId);
   const prepare = (sql: string) => {
     let values: Array<string | number | null> = [];
@@ -120,12 +122,24 @@ function citationDatabase(problemId = "P-MATH") {
       byte.toString(16).padStart(2, "0"),
     ).join("");
     const id = `${item.problem_id}-${item.seq}`;
-    sqlite.query("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, item.problem_id, item.seq,
+    sqlite
+      .query("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(
+        id,
+        item.problem_id,
+        item.seq,
         item.version === 1 ? "citation.recorded" : "citation.corrected",
-        "citation", item.citation_id, item.version, hash, item.created_at,
-        item.author_fellow_id, item.sponsor_id ?? null, item.session_id ?? null,
-        item.declared_model ?? null, item.harness ?? null);
+        "citation",
+        item.citation_id,
+        item.version,
+        hash,
+        item.created_at,
+        item.author_fellow_id,
+        item.sponsor_id ?? null,
+        item.session_id ?? null,
+        item.declared_model ?? null,
+        item.harness ?? null,
+      );
     sqlite.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(id, hash, payload);
     return id;
   }
@@ -194,8 +208,13 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
 
   describe("validateCitationSubstance", () => {
     test("accepts valid requests for all locator kinds", () => {
-      for (const request of [validDoiRequest, validArxivRequest, validUrlRequest,
-        validIsbnRequest, validModelMemoryRequest]) {
+      for (const request of [
+        validDoiRequest,
+        validArxivRequest,
+        validUrlRequest,
+        validIsbnRequest,
+        validModelMemoryRequest,
+      ]) {
         expect(validateCitationSubstance(request).valid).toBe(true);
       }
     });
@@ -210,64 +229,102 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       }
     });
     test("enforces Rule P8 on model_memory citations", () => {
-      const withLocator = validateCitationSubstance({ ...validModelMemoryRequest,
-        locator: "https://external.org" });
+      const withLocator = validateCitationSubstance({
+        ...validModelMemoryRequest,
+        locator: "https://external.org",
+      });
       expect(withLocator.valid).toBe(false);
-      if (!withLocator.valid) expect(withLocator.reason).toContain("cannot have an external locator");
-      const withRetrieved = validateCitationSubstance({ ...validModelMemoryRequest,
-        retrieved_at: "2026-09-01T00:00:00.000Z" });
+      if (!withLocator.valid)
+        expect(withLocator.reason).toContain("cannot have an external locator");
+      const withRetrieved = validateCitationSubstance({
+        ...validModelMemoryRequest,
+        retrieved_at: "2026-09-01T00:00:00.000Z",
+      });
       expect(withRetrieved.valid).toBe(false);
-      if (!withRetrieved.valid) expect(withRetrieved.reason).toContain("cannot have a retrieved_at timestamp");
-      const nonAssertion = validateCitationSubstance({ ...validModelMemoryRequest,
-        source_provenance: "retrieved" });
+      if (!withRetrieved.valid)
+        expect(withRetrieved.reason).toContain("cannot have a retrieved_at timestamp");
+      const nonAssertion = validateCitationSubstance({
+        ...validModelMemoryRequest,
+        source_provenance: "retrieved",
+      });
       expect(nonAssertion.valid).toBe(false);
-      if (!nonAssertion.valid) expect(nonAssertion.reason).toContain("source_provenance must be 'model_memory'");
+      if (!nonAssertion.valid)
+        expect(nonAssertion.reason).toContain("source_provenance must be 'model_memory'");
     });
     test("validates external locator formats", () => {
-      expect(validateCitationSubstance({ ...validDoiRequest, locator: "invalid-doi-format" }).valid).toBe(false);
-      expect(validateCitationSubstance({ ...validArxivRequest, locator: "totally-not-arxiv" }).valid).toBe(false);
-      expect(validateCitationSubstance({ ...validUrlRequest, locator: "ftp://example.org/file.pdf" }).valid).toBe(false);
-      expect(validateCitationSubstance({ ...validIsbnRequest, locator: "12345" }).valid).toBe(false);
+      expect(
+        validateCitationSubstance({ ...validDoiRequest, locator: "invalid-doi-format" }).valid,
+      ).toBe(false);
+      expect(
+        validateCitationSubstance({ ...validArxivRequest, locator: "totally-not-arxiv" }).valid,
+      ).toBe(false);
+      expect(
+        validateCitationSubstance({ ...validUrlRequest, locator: "ftp://example.org/file.pdf" })
+          .valid,
+      ).toBe(false);
+      expect(validateCitationSubstance({ ...validIsbnRequest, locator: "12345" }).valid).toBe(
+        false,
+      );
     });
   });
 
   describe("computeCitationCanonicalAndHash", () => {
     test("canonicalizes DOI identifiers correctly", () => {
-      const first = computeCitationCanonicalAndHash({ ...validDoiRequest,
-        locator: "https://doi.org/10.1007/S00222-020-00980-8" });
+      const first = computeCitationCanonicalAndHash({
+        ...validDoiRequest,
+        locator: "https://doi.org/10.1007/S00222-020-00980-8",
+      });
       const second = computeCitationCanonicalAndHash(validDoiRequest);
       expect(first.canonical_locator).toBe("10.1007/s00222-020-00980-8");
       expect(second.canonical_locator).toBe(first.canonical_locator);
       expect(first.norm_hash).toBe(second.norm_hash);
     });
     test("canonicalizes arXiv identifiers correctly", () => {
-      const first = computeCitationCanonicalAndHash({ ...validArxivRequest,
-        locator: "https://arxiv.org/abs/1301.0001" });
-      const second = computeCitationCanonicalAndHash({ ...validArxivRequest, locator: "arXiv:1301.0001" });
+      const first = computeCitationCanonicalAndHash({
+        ...validArxivRequest,
+        locator: "https://arxiv.org/abs/1301.0001",
+      });
+      const second = computeCitationCanonicalAndHash({
+        ...validArxivRequest,
+        locator: "arXiv:1301.0001",
+      });
       expect(first.canonical_locator).toBe("1301.0001");
       expect(second.canonical_locator).toBe(first.canonical_locator);
       expect(first.norm_hash).toBe(second.norm_hash);
-      expect(computeCitationCanonicalAndHash({ ...validArxivRequest,
-        locator: "https://arxiv.org/abs/1301.0001v2" }).canonical_locator).toBe("1301.0001v2");
+      expect(
+        computeCitationCanonicalAndHash({
+          ...validArxivRequest,
+          locator: "https://arxiv.org/abs/1301.0001v2",
+        }).canonical_locator,
+      ).toBe("1301.0001v2");
     });
     test("canonicalizes URLs (trailing slashes stripped)", () => {
-      const first = computeCitationCanonicalAndHash({ ...validUrlRequest,
-        locator: "https://example.org/papers/modular-cycles.pdf/" });
+      const first = computeCitationCanonicalAndHash({
+        ...validUrlRequest,
+        locator: "https://example.org/papers/modular-cycles.pdf/",
+      });
       const second = computeCitationCanonicalAndHash(validUrlRequest);
       expect(first.canonical_locator).toBe("https://example.org/papers/modular-cycles.pdf");
       expect(first.norm_hash).toBe(second.norm_hash);
     });
     test("canonicalizes ISBN (hyphens and whitespace stripped)", () => {
       const first = computeCitationCanonicalAndHash(validIsbnRequest);
-      const second = computeCitationCanonicalAndHash({ ...validIsbnRequest, locator: "9780387953854" });
+      const second = computeCitationCanonicalAndHash({
+        ...validIsbnRequest,
+        locator: "9780387953854",
+      });
       expect(first.canonical_locator).toBe("9780387953854");
       expect(first.norm_hash).toBe(second.norm_hash);
     });
     test("model_memory hashes normalized title", () => {
-      const first = computeCitationCanonicalAndHash({ ...validModelMemoryRequest,
-        title: "Cramer Probabilistic Heuristic on Prime Gaps" });
-      const second = computeCitationCanonicalAndHash({ ...validModelMemoryRequest,
-        title: "cramer probabilistic heuristic on prime gaps" });
+      const first = computeCitationCanonicalAndHash({
+        ...validModelMemoryRequest,
+        title: "Cramer Probabilistic Heuristic on Prime Gaps",
+      });
+      const second = computeCitationCanonicalAndHash({
+        ...validModelMemoryRequest,
+        title: "cramer probabilistic heuristic on prime gaps",
+      });
       expect(first.canonical_locator).toBeNull();
       expect(first.norm_hash).toBe(second.norm_hash);
     });
@@ -275,10 +332,13 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
 
   describe("bibtexForCitation and cslForCitation", () => {
     test("generates BibTeX fields", () => {
-      const bib = bibtexForCitation(sampleCitation({
-        title: "Bounded gaps & sieves with 100% rigor #1",
-        authors: ["Jane Doe", "John Smith"], year: 2020,
-      }));
+      const bib = bibtexForCitation(
+        sampleCitation({
+          title: "Bounded gaps & sieves with 100% rigor #1",
+          authors: ["Jane Doe", "John Smith"],
+          year: 2020,
+        }),
+      );
       expect(bib).toContain("@article{L-1,");
       expect(bib).toContain("title = {Bounded gaps & sieves with 100% rigor #1},");
       expect(bib).toContain("author = {Jane Doe and John Smith},");
@@ -286,9 +346,17 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       expect(bib).toContain("year = {2020},");
     });
     test("generates CSL-JSON item structure", () => {
-      const csl = cslForCitation(sampleCitation({ citation_id: "L-2", title: "Algebraic Geometry",
-        authors: ["Robin Hartshorne"], year: 1977, locator_kind: "isbn",
-        locator: "9780387953854", canonical_locator: "9780387953854" }));
+      const csl = cslForCitation(
+        sampleCitation({
+          citation_id: "L-2",
+          title: "Algebraic Geometry",
+          authors: ["Robin Hartshorne"],
+          year: 1977,
+          locator_kind: "isbn",
+          locator: "9780387953854",
+          canonical_locator: "9780387953854",
+        }),
+      );
       expect(csl.id).toBe("L-2");
       expect(csl.type).toBe("book");
       expect(csl.title).toBe("Algebraic Geometry");
@@ -304,8 +372,9 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       citation: item,
       versions: [{ ...item, version: 1, seq: 2, title: "Initial Title" }, item],
       associated_claims: [{ claim_id: "C-1", version: 1, statement: "Claim 1 statement" }],
-      associated_evidence: [{ evidence_id: "E-1", direction: "supports",
-        bears_on_id: "C-1", computed_class: "direct" }],
+      associated_evidence: [
+        { evidence_id: "E-1", direction: "supports", bears_on_id: "C-1", computed_class: "direct" },
+      ],
     };
     test("renderCitationsMarkdown renders complete attribution and no leaderboards", () => {
       const md = renderCitationsMarkdown("P-MATH", [item], ["omission note"]);
@@ -351,8 +420,11 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       expect(html).not.toContain("/citations/L-1.bib");
     });
     test("untrusted metadata cannot create Markdown links or control sections", () => {
-      const hostile = { ...item, title: "Title\n# FORGED\n[x](javascript:alert(1))",
-        excerpt: '<!-- asimp next_actions -->\n<script>alert(1)</script>' };
+      const hostile = {
+        ...item,
+        title: "Title\n# FORGED\n[x](javascript:alert(1))",
+        excerpt: "<!-- asimp next_actions -->\n<script>alert(1)</script>",
+      };
       const md = renderSingleCitationMarkdown("P-MATH", { ...detail, citation: hostile });
       expect(md).not.toContain("\n# FORGED");
       expect(md).not.toContain("[x](javascript:");
@@ -370,7 +442,9 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         const result = await loadProblemCitations(fixture.db, "P-MISSING");
         expect(result.citations).toHaveLength(0);
         expect(result.omitted).toEqual([]);
-      } finally { fixture.sqlite.close(); }
+      } finally {
+        fixture.sqlite.close();
+      }
     });
     test("loadProblemCitations validates committed citation fields", async () => {
       const fixture = citationDatabase();
@@ -386,13 +460,17 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         expect(item?.unanchored).toBe(false);
         expect(item?.sponsor_id).toBe("SPON-1");
         expect(JSON.stringify(result)).not.toContain("PRIVATE_PROJECTION_CANARY");
-      } finally { fixture.sqlite.close(); }
+      } finally {
+        fixture.sqlite.close();
+      }
     });
     test("loadSingleCitation loads head and a specific historical version", async () => {
       const fixture = citationDatabase();
       try {
         await fixture.seed(sampleCitation({ title: "Bounded gaps between primes (v1)", seq: 10 }));
-        await fixture.seed(sampleCitation({ title: "Bounded gaps between primes (v2)", version: 2, seq: 15 }));
+        await fixture.seed(
+          sampleCitation({ title: "Bounded gaps between primes (v2)", version: 2, seq: 15 }),
+        );
         const head = await loadSingleCitation(fixture.db, "P-MATH", "L-1");
         expect(head?.citation.version).toBe(2);
         expect(head?.citation.title).toBe("Bounded gaps between primes (v2)");
@@ -403,7 +481,9 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         const cut = await loadSingleCitation(fixture.db, "P-MATH", "L-1", { through: 10 });
         expect(cut?.citation.version).toBe(1);
         expect(cut?.versions).toHaveLength(1);
-      } finally { fixture.sqlite.close(); }
+      } finally {
+        fixture.sqlite.close();
+      }
     });
     test("a valid checksum does not bypass the canonical citation schema", async () => {
       const fixture = citationDatabase();
@@ -413,7 +493,9 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         expect(result.citations).toHaveLength(0);
         expect(result.omitted.join(" ")).toContain("unavailable");
         expect(await loadSingleCitation(fixture.db, "P-MATH", "L-1")).toBeNull();
-      } finally { fixture.sqlite.close(); }
+      } finally {
+        fixture.sqlite.close();
+      }
     });
   });
 
@@ -470,15 +552,21 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         expect(await bib.text()).toContain("@article{L-1,");
         const csl = await app.request(`${base}.csl.json`, {}, env);
         expect(csl.status).toBe(200);
-        expect(csl.headers.get("content-type")).toBe("application/vnd.citationstyles.csl+json; charset=utf-8");
-        const cslData = await csl.json() as { id: string; title: string };
+        expect(csl.headers.get("content-type")).toBe(
+          "application/vnd.citationstyles.csl+json; charset=utf-8",
+        );
+        const cslData = (await csl.json()) as { id: string; title: string };
         expect(cslData.id).toBe("L-1");
         expect(cslData.title).toBe("Bounded gaps between primes");
       });
     });
     test("returns 404 for missing problem or non-existent citation", async () => {
       await withPublicCitation(async (_fixture, env) => {
-        const missingProblem = await app.request("https://a.asimposium.org/p/P-NONEXISTENT/citations.json", {}, env);
+        const missingProblem = await app.request(
+          "https://a.asimposium.org/p/P-NONEXISTENT/citations.json",
+          {},
+          env,
+        );
         expect(missingProblem.status).toBe(404);
         const missingCitation = await app.request(`${publicUrl}/citations/L-999.json`, {}, env);
         expect(missingCitation.status).toBe(404);
@@ -489,9 +577,13 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         const first = await app.request(`${publicUrl}/citations.json`, {}, env);
         const etag = first.headers.get("etag");
         expect(etag).toBeTruthy();
-        const second = await app.request(`${publicUrl}/citations.json`, {
-          headers: { "if-none-match": etag ?? "" },
-        }, env);
+        const second = await app.request(
+          `${publicUrl}/citations.json`,
+          {
+            headers: { "if-none-match": etag ?? "" },
+          },
+          env,
+        );
         expect(second.status).toBe(304);
         expect(await second.text()).toBe("");
       });
@@ -510,8 +602,14 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
     });
     test("metadata corrections preserve older pack and face snapshots", async () => {
       await withPublicCitation(async (fixture, env) => {
-        await fixture.seed(sampleCitation({ problem_id: "P-CITATIONS", version: 2,
-          seq: 11, title: "Corrected metadata" }));
+        await fixture.seed(
+          sampleCitation({
+            problem_id: "P-CITATIONS",
+            version: 2,
+            seq: 11,
+            title: "Corrected metadata",
+          }),
+        );
         const older = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
         const current = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
         expect(older.candidates[0]?.id).toBe("L-1@1");
@@ -530,9 +628,13 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         const before = await app.request(`${publicUrl}/citations.json`, {}, env);
         const etag = before.headers.get("etag");
         fixture.sqlite.exec("UPDATE event_content SET redacted_at = 'redacted'");
-        const list = await app.request(`${publicUrl}/citations.json`, {
-          headers: { "if-none-match": etag ?? "" },
-        }, env);
+        const list = await app.request(
+          `${publicUrl}/citations.json`,
+          {
+            headers: { "if-none-match": etag ?? "" },
+          },
+          env,
+        );
         expect(list.status).toBe(200);
         expect(list.headers.get("etag")).not.toBe(etag);
         const data = CitationsListResponseSchema.parse(await list.json());
@@ -552,8 +654,14 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
     });
     test("literature packs omit oversized records whole and explain the omission", async () => {
       await withPublicCitation(async (fixture) => {
-        await fixture.seed(sampleCitation({ problem_id: "P-CITATIONS", version: 2, seq: 11,
-          authors: Array.from({ length: 64 }, () => '"'.repeat(200)) }));
+        await fixture.seed(
+          sampleCitation({
+            problem_id: "P-CITATIONS",
+            version: 2,
+            seq: 11,
+            authors: Array.from({ length: 64 }, () => '"'.repeat(200)),
+          }),
+        );
         const pack = await readLedgerPackSection(fixture.db, "P-CITATIONS", 11, "literature");
         expect(pack.candidates).toHaveLength(0);
         expect(pack.omitted.some((item) => item.reason === "item_too_large")).toBe(true);

@@ -1784,6 +1784,186 @@
         "security": []
       }
     },
+    "/p/{id}/events.json": {
+      "get": {
+        "summary": "Bounded public event envelopes with a problem-local resume cursor and snapshot-pinned continuation. Bodies are separate.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "A complete bounded page through one captured public problem cursor. Follow page_end.next unchanged until exhausted, then page_end.poll. Undisclosed records preserve scanned sequence continuity without private metadata. Event envelopes do not establish scientific standing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/response"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Strong, representation-specific ETag."
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Next page at the same captured cursor, when present."
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged representation after current visibility and content-availability checks. No body."
+          },
+          "default": {
+            "description": "Typed refusal. Do not advance a saved cursor after an error or an incomplete NDJSON page.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive problem-local sequence; defaults to 0. Never use the site-wide /cursor integer here.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/since"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum scanned envelopes, 1 to 200; defaults to 50. Filtered records still consume a sequence and one slot.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/limit"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Optional stable upper cursor. Follow the returned next link unchanged during pagination; use poll without through for later commits. Current privacy and redaction still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/events.ndjson": {
+      "get": {
+        "summary": "Public event envelopes as NDJSON, ending with one required page_end control record. Missing page_end means incomplete transfer.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "A complete bounded page through one captured public problem cursor. Follow page_end.next unchanged until exhausted, then page_end.poll. Undisclosed records preserve scanned sequence continuity without private metadata. Event envelopes do not establish scientific standing.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-asimposium-record-schemas": {
+                  "event": {
+                    "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/ndjson_event"
+                  },
+                  "page_end": {
+                    "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/ndjson_page_end"
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Strong, representation-specific ETag."
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Next page at the same captured cursor, when present."
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged representation after current visibility and content-availability checks. No body."
+          },
+          "default": {
+            "description": "Typed refusal. Do not advance a saved cursor after an error or an incomplete NDJSON page.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive problem-local sequence; defaults to 0. Never use the site-wide /cursor integer here.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/since"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum scanned envelopes, 1 to 200; defaults to 50. Filtered records still consume a sequence and one slot.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/limit"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Optional stable upper cursor. Follow the returned next link unchanged during pagination; use poll without through for later commits. Current privacy and redaction still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/p/{id}/questions.html": {
       "get": {
         "summary": "Published questions and their lease/answer state (HTML face).",
@@ -2580,6 +2760,35 @@
     "/schemas/enrollment.v1.json": {
       "get": {
         "summary": "Contract schema: enrollment.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/event-tail.v1.json": {
+      "get": {
+        "summary": "Contract schema: event-tail.",
         "tags": [
           "schema-documents"
         ],

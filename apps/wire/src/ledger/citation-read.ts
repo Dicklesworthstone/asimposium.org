@@ -103,11 +103,16 @@ export const PUBLIC_CITATION_MENTIONS_SQL = `${SCOPE_SQL}, candidates AS (
 )
 SELECT * FROM candidates WHERE mention_position <= ? ORDER BY seq ASC`;
 
-function readBounds(options: CommittedCitationReadOptions): { limit: number; through: number | null } {
+function readBounds(options: CommittedCitationReadOptions): {
+  limit: number;
+  through: number | null;
+} {
   const limit = options.limit ?? 50;
   const through = options.through ?? null;
   if (
-    !Number.isSafeInteger(limit) || limit < 1 || limit > SCAN_LIMIT ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > SCAN_LIMIT ||
     (through !== null && (!Number.isSafeInteger(through) || through < 0)) ||
     (options.unanchored !== undefined && typeof options.unanchored !== "boolean")
   ) {
@@ -123,8 +128,11 @@ async function citationFromEvent(
 ): Promise<CitationItem | undefined> {
   if (
     row.object_kind !== "citation" ||
-    !Number.isSafeInteger(row.object_version) || row.object_version < 1 ||
-    (row.object_version === 1 ? row.type !== "citation.recorded" : row.type !== "citation.corrected")
+    !Number.isSafeInteger(row.object_version) ||
+    row.object_version < 1 ||
+    (row.object_version === 1
+      ? row.type !== "citation.recorded"
+      : row.type !== "citation.corrected")
   ) {
     return undefined;
   }
@@ -164,8 +172,10 @@ export async function loadCommittedCitations(
   decode: DecodeCitation,
 ): Promise<{ citations: CitationItem[]; omitted: string[] }> {
   const { limit, through } = readBounds(options);
-  const result = await db.prepare(PUBLIC_CITATION_HEADS_SQL)
-    .bind(through, problemId, SCAN_LIMIT + 1).all<CitationEventRow>();
+  const result = await db
+    .prepare(PUBLIC_CITATION_HEADS_SQL)
+    .bind(through, problemId, SCAN_LIMIT + 1)
+    .all<CitationEventRow>();
   const rows = result.results ?? [];
   const citations: CitationItem[] = [];
   const omitted: string[] = [];
@@ -185,9 +195,15 @@ export async function loadCommittedCitations(
     if (citations.length < limit) citations.push(item);
     else overflow = true;
   }
-  if (unavailable) omitted.push("Some citation content is unavailable; retained projections are not used as a fallback.");
+  if (unavailable)
+    omitted.push(
+      "Some citation content is unavailable; retained projections are not used as a fallback.",
+    );
   if (filtered) omitted.push("Citations outside the requested unanchored filter are omitted.");
-  if (overflow) omitted.push(`The public citation read is bounded to ${limit} returned items and ${SCAN_LIMIT} candidate heads; additional records are omitted.`);
+  if (overflow)
+    omitted.push(
+      `The public citation read is bounded to ${limit} returned items and ${SCAN_LIMIT} candidate heads; additional records are omitted.`,
+    );
   return { citations, omitted };
 }
 
@@ -206,11 +222,17 @@ export async function loadCommittedCitation(
   const match = /^(L-[0-9]+)(?:@([1-9][0-9]{0,15}))?$/.exec(target);
   const citationId = match?.[1];
   const requestedVersion = match?.[2] === undefined ? undefined : Number(match[2]);
-  if (citationId === undefined || (requestedVersion !== undefined && !Number.isSafeInteger(requestedVersion))) return null;
+  if (
+    citationId === undefined ||
+    (requestedVersion !== undefined && !Number.isSafeInteger(requestedVersion))
+  )
+    return null;
   const { through } = readBounds(options);
   const results = await db.batch<CitationEventRow>([
     db.prepare(PUBLIC_CITATION_HISTORY_SQL).bind(through, problemId, citationId, SCAN_LIMIT + 1),
-    db.prepare(PUBLIC_CITATION_MENTIONS_SQL).bind(through, problemId, `%${citationId}%`, SCAN_LIMIT),
+    db
+      .prepare(PUBLIC_CITATION_MENTIONS_SQL)
+      .bind(through, problemId, `%${citationId}%`, SCAN_LIMIT),
   ]);
   const history = results[0]?.results;
   const mentions = results[1]?.results;
@@ -220,16 +242,21 @@ export async function loadCommittedCitation(
   if (history.length === 0) return null;
   // Select by the immutable envelope before excluding unavailable content.
   // An unavailable head or requested version must never float to a different one.
-  const selected = requestedVersion === undefined
-    ? history.at(-1)
-    : history.find((row) => row.object_version === requestedVersion);
+  const selected =
+    requestedVersion === undefined
+      ? history.at(-1)
+      : history.find((row) => row.object_version === requestedVersion);
   if (selected === undefined) return null;
   const versions: CitationItem[] = [];
   let citation: CitationItem | undefined;
   let previousVersion = 0;
   let previousSequence = 0;
   for (const row of history) {
-    if (row.object_id !== citationId || row.object_version <= previousVersion || row.seq <= previousSequence) {
+    if (
+      row.object_id !== citationId ||
+      row.object_version <= previousVersion ||
+      row.seq <= previousSequence
+    ) {
       throw new Error(HISTORY_UNAVAILABLE);
     }
     previousVersion = row.object_version;
@@ -247,24 +274,47 @@ export async function loadCommittedCitation(
   const associated_evidence: AssociatedEvidenceRef[] = [];
   for (const row of mentions) {
     const payload = await verifiedCitationContent(problemId, row);
-    if (payload === undefined || !Number.isSafeInteger(row.object_version) || row.object_version < 1) continue;
-    const includes = (value: unknown) => typeof value === "string" &&
+    if (
+      payload === undefined ||
+      !Number.isSafeInteger(row.object_version) ||
+      row.object_version < 1
+    )
+      continue;
+    const includes = (value: unknown) =>
+      typeof value === "string" &&
       mentionsCitation(value, citationId, citationVersion, requestedVersion === undefined);
     // The writer commits source provenance as a nested object. Top-level
     // locator lookalikes are not the published evidence source contract.
     const source = payload.source;
-    const provenance = typeof source === "object" && source !== null && !Array.isArray(source)
-      ? source as Readonly<Record<string, unknown>> : undefined;
-    if (row.object_kind === "claim" && associated_claims.length < MENTION_LIMIT && includes(payload.statement)) {
-      associated_claims.push({ claim_id: row.object_id, version: row.object_version, statement: payload.statement as string });
+    const provenance =
+      typeof source === "object" && source !== null && !Array.isArray(source)
+        ? (source as Readonly<Record<string, unknown>>)
+        : undefined;
+    if (
+      row.object_kind === "claim" &&
+      associated_claims.length < MENTION_LIMIT &&
+      includes(payload.statement)
+    ) {
+      associated_claims.push({
+        claim_id: row.object_id,
+        version: row.object_version,
+        statement: payload.statement as string,
+      });
     } else if (
-      row.object_kind === "evidence" && associated_evidence.length < MENTION_LIMIT &&
-      provenance !== undefined && (includes(provenance.locator) || includes(provenance.excerpt)) &&
-      typeof payload.direction === "string" && typeof payload.bears_on_id === "string" &&
+      row.object_kind === "evidence" &&
+      associated_evidence.length < MENTION_LIMIT &&
+      provenance !== undefined &&
+      (includes(provenance.locator) || includes(provenance.excerpt)) &&
+      typeof payload.direction === "string" &&
+      typeof payload.bears_on_id === "string" &&
       typeof payload.computed_class === "string"
     ) {
-      associated_evidence.push({ evidence_id: row.object_id, direction: payload.direction,
-        bears_on_id: payload.bears_on_id, computed_class: payload.computed_class });
+      associated_evidence.push({
+        evidence_id: row.object_id,
+        direction: payload.direction,
+        bears_on_id: payload.bears_on_id,
+        computed_class: payload.computed_class,
+      });
     }
   }
   return { citation, versions, associated_claims, associated_evidence };

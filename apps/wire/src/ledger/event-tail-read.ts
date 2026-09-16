@@ -6,8 +6,8 @@ import {
   EVENT_TAIL_SCHEMA_ID,
   type EventTailPage,
   type EventTailQuery,
-  type PublicEventEnvelope,
   eventTailPath,
+  type PublicEventEnvelope,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
 
 /** Structural read-only subset implemented by the real D1 binding. */
@@ -61,8 +61,15 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
   synthesis: ["synthesis.published"],
   gap: ["gap.filed", "gap.closed-by", "gap.withdrawn"],
   relation: ["relation.asserted", "relation.disputed"],
-  problem: ["problem.admitted", "problem.published", "problem.statement-revised",
-    "problem.statement-reviewed", "problem.result-review-started", "problem.resolved", "problem.retired"],
+  problem: [
+    "problem.admitted",
+    "problem.published",
+    "problem.statement-revised",
+    "problem.statement-reviewed",
+    "problem.result-review-started",
+    "problem.resolved",
+    "problem.retired",
+  ],
 };
 
 /** One bounded SELECT captures visibility, head, page and content withdrawal.
@@ -104,41 +111,67 @@ function safeId(value: unknown): value is string {
 function publicObjectUrl(problemId: string, row: TailRow, through: number): string | null {
   const prefix = `/p/${encodeURIComponent(problemId)}`;
   if (through > 999_999_999_999_999) return null;
-  if (row.object_kind === "claim" && (row.object_id?.length ?? 0) <= 47 && /^C-[0-9]+$/.test(row.object_id ?? ""))
+  if (
+    row.object_kind === "claim" &&
+    (row.object_id?.length ?? 0) <= 47 &&
+    /^C-[0-9]+$/.test(row.object_id ?? "")
+  )
     return `${prefix}/claims/${row.object_id}@${row.object_version}.json?through=${through}`;
-  if (row.object_kind === "citation" && (row.object_id?.length ?? 0) <= 47 && /^L-[0-9]+$/.test(row.object_id ?? ""))
+  if (
+    row.object_kind === "citation" &&
+    (row.object_id?.length ?? 0) <= 47 &&
+    /^L-[0-9]+$/.test(row.object_id ?? "")
+  )
     return `${prefix}/citations/${row.object_id}@${row.object_version}.json?through=${through}`;
   return null;
 }
 
 function publicEnvelope(row: TailRow, through: number): PublicEventEnvelope {
   const base = { record: "event" as const, problem_id: row.problem_id, seq: row.seq as number };
-  const types = row.object_kind === null || !Object.hasOwn(PUBLIC_TYPES, row.object_kind)
-    ? undefined : PUBLIC_TYPES[row.object_kind];
-  if (!types?.includes(row.type ?? "") || !safeId(row.id) || !safeId(row.object_id) ||
-      !safeInteger(row.object_version) || row.object_version < 1 ||
-      typeof row.created_at !== "string" || !Number.isFinite(Date.parse(row.created_at)) ||
-      new Date(row.created_at).toISOString() !== row.created_at ||
-      typeof row.payload_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.payload_sha256)) {
+  const types =
+    row.object_kind === null || !Object.hasOwn(PUBLIC_TYPES, row.object_kind)
+      ? undefined
+      : PUBLIC_TYPES[row.object_kind];
+  if (
+    !types?.includes(row.type ?? "") ||
+    !safeId(row.id) ||
+    !safeId(row.object_id) ||
+    !safeInteger(row.object_version) ||
+    row.object_version < 1 ||
+    typeof row.created_at !== "string" ||
+    !Number.isFinite(Date.parse(row.created_at)) ||
+    new Date(row.created_at).toISOString() !== row.created_at ||
+    typeof row.payload_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(row.payload_sha256)
+  ) {
     return { ...base, event: null, body_omitted: "undisclosed_event" };
   }
-  const envelope: PublicEventEnvelope = { ...base, event: {
-    id: row.id, type: row.type as string, object_kind: row.object_kind as string,
-    object_id: row.object_id, object_version: row.object_version,
-    created_at: row.created_at, payload_sha256: row.payload_sha256,
-    actor: {
-      fellow_id: safeId(row.actor_fellow_id) ? row.actor_fellow_id : null,
-      sponsor_id: safeId(row.actor_sponsor_id) ? row.actor_sponsor_id : null,
-      session_id: safeId(row.actor_session_id) ? row.actor_session_id : null,
-      model_self_declared: row.model_string_self_declared,
-      harness_self_declared: row.harness,
+  const envelope: PublicEventEnvelope = {
+    ...base,
+    event: {
+      id: row.id,
+      type: row.type as string,
+      object_kind: row.object_kind as string,
+      object_id: row.object_id,
+      object_version: row.object_version,
+      created_at: row.created_at,
+      payload_sha256: row.payload_sha256,
+      actor: {
+        fellow_id: safeId(row.actor_fellow_id) ? row.actor_fellow_id : null,
+        sponsor_id: safeId(row.actor_sponsor_id) ? row.actor_sponsor_id : null,
+        session_id: safeId(row.actor_session_id) ? row.actor_session_id : null,
+        model_self_declared: row.model_string_self_declared,
+        harness_self_declared: row.harness,
+      },
+      object_url: publicObjectUrl(row.problem_id, row, through),
     },
-    object_url: publicObjectUrl(row.problem_id, row, through),
-  }, body_omitted: row.content_available === 1 ? "separate_object_face" : "content_unavailable" };
+    body_omitted: row.content_available === 1 ? "separate_object_face" : "content_unavailable",
+  };
   // Per-record accounting guarantees 200 whole records fit the page byte cap,
   // even when JSON escaping expands declared metadata. Never truncate a field.
   return new TextEncoder().encode(JSON.stringify(envelope)).byteLength <= 2048
-    ? envelope : { ...base, event: null, body_omitted: "undisclosed_event" };
+    ? envelope
+    : { ...base, event: null, body_omitted: "undisclosed_event" };
 }
 
 export async function readPublicEventTail(
@@ -146,36 +179,71 @@ export async function readPublicEventTail(
   problemId: string,
   query: EventTailQuery,
 ): Promise<{ page: EventTailPage; unlisted: boolean } | null> {
-  if (!EVENT_TAIL_PROBLEM_PATTERN.test(problemId) || !safeInteger(query.since) ||
-      !safeInteger(query.limit) || query.limit < 1 || query.limit > EVENT_TAIL_MAX_EVENTS ||
-      (query.through !== undefined && (!safeInteger(query.through) || query.through < query.since)))
+  if (
+    !EVENT_TAIL_PROBLEM_PATTERN.test(problemId) ||
+    !safeInteger(query.since) ||
+    !safeInteger(query.limit) ||
+    query.limit < 1 ||
+    query.limit > EVENT_TAIL_MAX_EVENTS ||
+    (query.through !== undefined && (!safeInteger(query.through) || query.through < query.since))
+  )
     throw new EventTailReadError("CURSOR_INVALID");
-  const result = await db.prepare(EVENT_TAIL_SELECT)
-    .bind(query.through ?? null, problemId, query.since, query.limit + 1).all<TailRow>();
+  const result = await db
+    .prepare(EVENT_TAIL_SELECT)
+    .bind(query.through ?? null, problemId, query.since, query.limit + 1)
+    .all<TailRow>();
   const first = result.results[0];
   if (first === undefined) return null;
-  if (first.problem_id !== problemId || !safeInteger(first.public_seq) || !safeInteger(first.through) ||
-      (first.unlisted !== 0 && first.unlisted !== 1)) throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
+  if (
+    first.problem_id !== problemId ||
+    !safeInteger(first.public_seq) ||
+    !safeInteger(first.through) ||
+    (first.unlisted !== 0 && first.unlisted !== 1)
+  )
+    throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
   const through = first.through;
-  if (through !== (query.through ?? first.public_seq)) throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
-  if (through > first.public_seq || query.since > through) throw new EventTailReadError("CURSOR_INVALID");
+  if (through !== (query.through ?? first.public_seq))
+    throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
+  if (through > first.public_seq || query.since > through)
+    throw new EventTailReadError("CURSOR_INVALID");
   const rows = result.results.filter((row) => row.seq !== null);
   const expected = Math.min(query.limit + 1, through - query.since);
-  if (rows.length !== expected || rows.some((row, i) =>
-    row.problem_id !== problemId || row.through !== through || row.public_seq !== first.public_seq ||
-    row.unlisted !== first.unlisted || row.seq !== query.since + i + 1)) {
+  if (
+    rows.length !== expected ||
+    rows.some(
+      (row, i) =>
+        row.problem_id !== problemId ||
+        row.through !== through ||
+        row.public_seq !== first.public_seq ||
+        row.unlisted !== first.unlisted ||
+        row.seq !== query.since + i + 1,
+    )
+  ) {
     // Never produce a successful page_end for a missing/duplicated sequence.
     throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
   }
   const events = rows.slice(0, query.limit).map((row) => publicEnvelope(row, through));
   const nextCursor = query.since + events.length;
   const hasMore = nextCursor < through;
-  return { unlisted: first.unlisted === 1, page: {
-    schema: EVENT_TAIL_SCHEMA_ID, events,
-    page_end: { control: "page_end", schema: EVENT_TAIL_SCHEMA_ID, problem_id: problemId,
-      since: query.since, through, next_cursor: nextCursor, has_more: hasMore,
-      next: hasMore ? eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, through }) : null,
-      poll: eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit }) },
-    omitted: EVENT_TAIL_OMISSIONS,
-  } };
+  return {
+    unlisted: first.unlisted === 1,
+    page: {
+      schema: EVENT_TAIL_SCHEMA_ID,
+      events,
+      page_end: {
+        control: "page_end",
+        schema: EVENT_TAIL_SCHEMA_ID,
+        problem_id: problemId,
+        since: query.since,
+        through,
+        next_cursor: nextCursor,
+        has_more: hasMore,
+        next: hasMore
+          ? eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, through })
+          : null,
+        poll: eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit }),
+      },
+      omitted: EVENT_TAIL_OMISSIONS,
+    },
+  };
 }
