@@ -9,6 +9,7 @@ import {
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
+import { loadProblemCitations } from "../ledger/citations";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
@@ -64,20 +65,6 @@ interface RelationRow extends ProvenanceRow {
   status: string;
   source_head: number | null;
   target_head: number | null;
-}
-
-interface CitationRow extends ProvenanceRow {
-  title: string;
-  version: number;
-  authors_json: string;
-  year: number | null;
-  locator_kind: string;
-  locator: string | null;
-  canonical_locator: string | null;
-  excerpt: string | null;
-  retrieved_at: string | null;
-  source_provenance: string;
-  unanchored: number;
 }
 
 export interface LedgerPackSection {
@@ -865,35 +852,50 @@ export async function readLedgerPackSection(
       return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. ${statusNote}`;
     };
   } else if (profile === "literature") {
-    kind = "citation";
-    section = "literature";
-    const result = await db
-      .prepare(`
-      SELECT c.citation_id AS id, c.version, c.title, c.authors_json, c.year,
-             c.locator_kind, c.locator, c.canonical_locator, c.excerpt, c.retrieved_at,
-             c.source_provenance, c.unanchored,
-             e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
-             e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
-             e.model_string_self_declared AS model, e.harness,
-             (content.event_id IS NOT NULL AND content.redacted_at IS NULL) AS content_available
-      FROM citations c
-      JOIN events e
-        ON e.problem_id = c.problem_id AND e.object_id = c.citation_id
-       AND e.object_kind = 'citation' AND e.seq = c.seq
-      LEFT JOIN event_content content ON content.event_id = e.id
-      WHERE c.problem_id = ? AND e.seq <= ?
-      ORDER BY e.seq ASC, e.id ASC LIMIT ?
-    `)
-      .bind(problemId, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1)
-      .all<CitationRow>();
-    rows = result.results;
-    describeRow = (value) => {
-      const row = value as CitationRow;
-      const effectiveLoc = row.canonical_locator ?? row.locator ?? "none";
-      const yearStr = row.year ? ` (${row.year})` : "";
-      const unanchoredFlag = row.unanchored ? " [unanchored]" : "";
-      return `Citation ${row.id}@${row.version}${unanchoredFlag}: ${row.title}${yearStr}\nLocator: [${row.locator_kind}] ${effectiveLoc}\nProvenance: ${row.source_provenance}${row.retrieved_at ? ` (retrieved ${row.retrieved_at})` : ""}${row.excerpt ? `\nExcerpt: "${row.excerpt}"` : ""}`;
-    };
+    const result = await loadProblemCitations(db, problemId, {
+      through: cursor,
+      limit: LEDGER_PACK_CANDIDATE_LIMIT,
+    });
+    const omitted: LedgerPackSection["omitted"] = result.omitted.map((detail) => ({
+      reason: "source_omission",
+      detail,
+    }));
+    const candidates: PackCandidate[] = [];
+    for (const [index, item] of result.citations.entries()) {
+      const target = `${item.citation_id}@${item.version}`;
+      const body = JSON.stringify({
+        ...item,
+        source: `/p/${problemId}/citations/${target}.md?through=${cursor}`,
+      });
+      if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
+        omitted.push({ reason: "item_too_large", detail: `literature:${target}` });
+        continue;
+      }
+      candidates.push({
+        kind: "citation",
+        id: target,
+        scope: "ledger",
+        untrusted: true,
+        tokens: 1,
+        body,
+        why_included:
+          "committed public citation version at the pack cursor; source provenance and model declarations are not verification",
+        stable_prefix: 20 + index,
+      });
+    }
+    if (candidates.length === 0 && omitted.length === 0) {
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-literature-empty",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        body: "No readable published citations are available at this problem cursor. This is not a claim that no relevant literature exists.",
+        why_included: "state the public literature baseline without inventing a source",
+        stable_prefix: 20,
+      });
+    }
+    return { candidates, omitted };
   } else {
     return { candidates: [], omitted: [] };
   }
