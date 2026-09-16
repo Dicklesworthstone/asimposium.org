@@ -1,6 +1,7 @@
 import type { PackCandidate } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadLedgerMoves, reviewTargetKey, type LedgerMovesDependencies, type MoveViewer } from "../mega-commands/ledger-moves";
+import type { ReviewInvitationPack } from "./review-invitation-pack";
 
 export interface ReviewPackSection {
   candidates: PackCandidate[];
@@ -66,15 +67,30 @@ export function composeReviewSelectionPack(
 export async function readReviewSelectionPack(
   db: D1Database, problemId: string, cursor: number, reviewer: MoveViewer,
   dependencies: LedgerMovesDependencies, neutralize: (body: string) => string,
+  invitations?: () => Promise<ReviewInvitationPack>,
 ): Promise<ReviewPackSection> {
+  let section: ReviewPackSection;
   try {
     const selection = await loadLedgerMoves(db, problemId, reviewer,
       { session_open: true, review: true, promote: false }, dependencies, cursor);
-    return composeReviewSelectionPack(selection, problemId, cursor, neutralize);
+    section = composeReviewSelectionPack(selection, problemId, cursor, neutralize);
   } catch {
     // Discovery loss cannot hide otherwise readable workshop/ledger records,
     // invent an empty queue, or fall back to an older, less strict selector.
-    return { candidates: [], targets: [], omitted: [{ reason: "review_selection_unavailable",
+    section = { candidates: [], targets: [], omitted: [{ reason: "review_selection_unavailable",
       detail: "Canonical reviewer-specific selection is unavailable at this pack cursor. Other readable pack records remain usable; retry or use live public discovery." }] };
+  }
+  try {
+    const privateSection = await (invitations ? invitations() :
+      import("./review-invitation-pack-service").then(module =>
+        module.loadReviewInvitationPack(db, problemId, reviewer.fellowId)));
+    // The review-queue profile includes these private coordination records;
+    // working packs consume only targets and retain their existing move path.
+    // Invitations never reorder scientific targets or mint a review verdict.
+    return { ...section, candidates: [...privateSection.candidates, ...section.candidates],
+      omitted: [...section.omitted, ...privateSection.omitted] };
+  } catch {
+    return { ...section, omitted: [...section.omitted, { reason: "review_invitations_unavailable",
+      detail: "Private invitation context is unavailable; scientific recommendations are unaffected." }] };
   }
 }

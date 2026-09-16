@@ -53,7 +53,7 @@ function fixture(pages: ReviewQueueResponse[]) {
       seq, reviewer, claim, version);
   }
   return { sqlite, db, calls, dependencies, review,
-    read: () => readReviewSelectionPack(db, "P-DEMO", 50, viewer, dependencies, unchanged) };
+    read: () => readReviewSelectionPack(db, "P-DEMO", 50, viewer, dependencies, unchanged, async () => ({ candidates: [], omitted: [] })) };
 }
 
 test("pack selection follows canonical consequence and missing-check priority, not admission age", async () => {
@@ -220,5 +220,29 @@ test("unchanged optional snapshot callers retain the previous interface", async 
   try {
     assert.equal((await loadLedgerMoves(f.db, "P-DEMO", viewer, permissions, f.dependencies)).moves.length, 1);
     assert.equal(f.calls[0]?.snapshot, undefined);
+  } finally { f.sqlite.close(); }
+});
+
+test("private invitation context cannot change the scientific target order", async () => {
+  const f = fixture([page([item(1), item(2, { direct_dependents: 9 })])]);
+  try {
+    const invite = { kind: "review-invitation", id: `RR-${"a".repeat(32)}`, scope: "workshop" as const,
+      untrusted: true, tokens: 1, stable_prefix: 2, requires: ["workshop:read"], body: "private invitation",
+      why_included: "own incoming work" };
+    const pack = await readReviewSelectionPack(f.db, "P-DEMO", 50, viewer, f.dependencies, unchanged,
+      async () => ({ candidates: [invite], omitted: [] }));
+    assert.deepEqual(pack.targets, ["C-2@1", "C-1@1"]);
+    assert.equal(pack.candidates[0], invite);
+  } finally { f.sqlite.close(); }
+});
+
+test("invitation outages cannot erase canonical scientific recommendations", async () => {
+  const f = fixture([page([item(1)])]);
+  try {
+    const pack = await readReviewSelectionPack(f.db, "P-DEMO", 50, viewer, f.dependencies, unchanged,
+      async () => { throw new Error("private failure"); });
+    assert.deepEqual(pack.targets, ["C-1@1"]);
+    assert.equal(pack.omitted[0]?.reason, "review_invitations_unavailable");
+    assert.ok(!JSON.stringify(pack).includes("private failure"));
   } finally { f.sqlite.close(); }
 });
