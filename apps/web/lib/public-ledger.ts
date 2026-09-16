@@ -8,6 +8,9 @@ import {
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
+  DeadEndsListQuerySchema,
+  type DeadEndsListResponse,
+  DeadEndsListResponseSchema,
   FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
@@ -25,6 +28,7 @@ import {
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
+import { deadEndsMatchView } from "./dead-end-view";
 import { configuredStoaOrigin } from "./stoa";
 
 export const PUBLIC_LEDGER_TIMEOUT_MS = 3_000;
@@ -313,4 +317,33 @@ export async function stoaFetchFellowCard(
     0,
     "FELLOW_NOT_FOUND",
   );
+}
+
+/** Public negative evidence, with current and superseded-history views kept distinct. */
+export async function stoaFetchDeadEnds(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<DeadEndsListResponse>> {
+  const parsed = DeadEndsListQuerySchema.safeParse(query);
+  if (
+    !parsed.success ||
+    !DeadEndsListResponseSchema.shape.problem_id.safeParse(problemId).success
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const includeSuperseded =
+    parsed.data.include_superseded === "true" || parsed.data.include_superseded === "1";
+  const suffix = includeSuperseded ? "?include_superseded=true" : "";
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/dead-ends.json${suffix}`,
+    stoaOrigin,
+    DeadEndsListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return deadEndsMatchView(problemId, result.data, includeSuperseded)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }

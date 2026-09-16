@@ -165,6 +165,19 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
 
         <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} />
 
+        <section aria-labelledby="negative-results-heading">
+          <h2 id="negative-results-heading">Dead ends and retry conditions</h2>
+          <p>
+            Inspect published failed approaches, the scope of each check, and the conditions
+            that would justify revisiting it. Superseded records remain accessible as history.
+          </p>
+          <p>
+            <Link href={`/p/${encodeURIComponent(face.problem)}/dead-ends`} prefetch={false}>
+              Read the negative-results ledger
+            </Link>
+          </p>
+        </section>
+
         {reviews.length > 0 && (
           <section aria-labelledby="statement-reviews-heading">
             <h2 id="statement-reviews-heading">Statement reviews</h2>
