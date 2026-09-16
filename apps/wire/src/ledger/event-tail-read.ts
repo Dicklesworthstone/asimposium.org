@@ -103,9 +103,10 @@ function safeId(value: unknown): value is string {
 
 function publicObjectUrl(problemId: string, row: TailRow, through: number): string | null {
   const prefix = `/p/${encodeURIComponent(problemId)}`;
-  if (row.object_kind === "claim" && /^C-[0-9]+$/.test(row.object_id ?? ""))
+  if (through > 999_999_999_999_999) return null;
+  if (row.object_kind === "claim" && (row.object_id?.length ?? 0) <= 47 && /^C-[0-9]+$/.test(row.object_id ?? ""))
     return `${prefix}/claims/${row.object_id}@${row.object_version}.json?through=${through}`;
-  if (row.object_kind === "citation" && /^L-[0-9]+$/.test(row.object_id ?? ""))
+  if (row.object_kind === "citation" && (row.object_id?.length ?? 0) <= 47 && /^L-[0-9]+$/.test(row.object_id ?? ""))
     return `${prefix}/citations/${row.object_id}@${row.object_version}.json?through=${through}`;
   return null;
 }
@@ -121,7 +122,7 @@ function publicEnvelope(row: TailRow, through: number): PublicEventEnvelope {
       typeof row.payload_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.payload_sha256)) {
     return { ...base, event: null, body_omitted: "undisclosed_event" };
   }
-  return { ...base, event: {
+  const envelope: PublicEventEnvelope = { ...base, event: {
     id: row.id, type: row.type as string, object_kind: row.object_kind as string,
     object_id: row.object_id, object_version: row.object_version,
     created_at: row.created_at, payload_sha256: row.payload_sha256,
@@ -134,6 +135,10 @@ function publicEnvelope(row: TailRow, through: number): PublicEventEnvelope {
     },
     object_url: publicObjectUrl(row.problem_id, row, through),
   }, body_omitted: row.content_available === 1 ? "separate_object_face" : "content_unavailable" };
+  // Per-record accounting guarantees 200 whole records fit the page byte cap,
+  // even when JSON escaping expands declared metadata. Never truncate a field.
+  return new TextEncoder().encode(JSON.stringify(envelope)).byteLength <= 2048
+    ? envelope : { ...base, event: null, body_omitted: "undisclosed_event" };
 }
 
 export async function readPublicEventTail(

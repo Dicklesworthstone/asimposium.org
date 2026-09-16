@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
+    "./event-tail": "./src/event-tail.ts",
     "./public-schemas": "./src/public-schemas.ts"
   },
   "scripts": {

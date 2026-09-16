@@ -22,7 +22,7 @@ const PathSchema = z.string().min(1).max(512).regex(/^\/p\/[^\s?#]+\/(?:events\.
 
 export const EventTailQuerySchema = z.object({
   since: CursorTextSchema.optional(),
-  limit: CursorTextSchema.refine((value) => Number(value) >= 1 && Number(value) <= EVENT_TAIL_MAX_EVENTS).optional(),
+  limit: z.string().regex(/^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$/).optional(),
   through: CursorTextSchema.optional(),
 }).strict().superRefine((query, context) => {
   if (query.through !== undefined && Number(query.through) < Number(query.since ?? 0))
@@ -36,7 +36,7 @@ export const PublicEventEnvelopeSchema = z.object({
   seq: CursorSchema.min(1),
   event: z.object({
     id: IdSchema,
-    type: z.string().max(96).regex(/^[a-z][a-z0-9.-]*$/),
+    type: z.string().max(96).regex(/^[a-z][a-z0-9._-]*$/),
     object_kind: z.string().max(32).regex(/^[a-z][a-z0-9-]*$/),
     object_id: IdSchema,
     object_version: CursorSchema.min(1),
