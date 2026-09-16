@@ -4,8 +4,11 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
 import {
-  LEDGER_MOVES_BOUNDARY, type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey,
+  type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey,
 } from "./ledger-moves.ts";
+import {
+  type HypothesisMoveSource, LIVE_MOVES_BOUNDARY, selectThirdAlternative,
+} from "./hypothesis-moves.ts";
 import type {
   MegaCommandsMoveProvider, ProblemMovesRequest, ProblemMovesResult,
   TriageMovesRequest, TriageMovesResult,
@@ -13,12 +16,15 @@ import type {
 
 export const TRIAGE_MAX_PROBLEMS = 4;
 export const TRIAGE_CONCURRENCY = 2;
-const TRIAGE_BOUNDARY = `${LEDGER_MOVES_BOUNDARY} Triage examines at most ${TRIAGE_MAX_PROBLEMS} assigned problems in ASCII ID order, two queue pages per problem; each problem has its own captured cursor.`;
+const TRIAGE_BOUNDARY = `${LIVE_MOVES_BOUNDARY} Triage examines at most ${TRIAGE_MAX_PROBLEMS} assigned problems in ASCII ID order, two queue pages per problem; each problem has its own captured cursor. Hypothesis selection examines at most three surviving routes plus lookahead at the membership read cursor.`;
 
 export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly authorize: typeof authorizeFellowWrite;
   readonly now: () => number;
   readonly firstClaimTemplate: () => MoveTemplate;
+  /** Production supplies the canonical hypothesis reader; optional only for
+   * isolated queue tests and partial deployments of the provider adapter. */
+  readonly hypotheses?: HypothesisMoveSource;
 }
 
 /** Permission hints use the exact same central policy as the writes, with
@@ -49,6 +55,32 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     const row = await db.prepare(MOVE_USAGE_SQL).bind(credential.credentialId).first<{ count: number }>();
     if (!row || !Number.isSafeInteger(row.count) || row.count < 0) throw new Error("MOVE_USAGE_UNAVAILABLE");
     return row.count;
+  }
+
+  /** Independent review needs stay first. A verified two-route frontier comes
+   * before starting a new claim. One unavailable source cannot erase valid
+   * recommendations from another, and no observer initiates a promote read. */
+  private async withHypotheses(
+    db: D1Database, problemId: string, cursor: number,
+    permissions: Record<string, boolean>,
+    selected: { moves: NextMoveCandidate[]; degraded: boolean },
+  ): Promise<{ moves: NextMoveCandidate[]; degraded: boolean }> {
+    const source = this.dependencies.hypotheses;
+    if (!source || !permissions.session_open || !permissions.promote) return selected;
+    try {
+      const extra = selectThirdAlternative(problemId, cursor,
+        await source.load(db, problemId, cursor), source.template);
+      return {
+        moves: extra.move === null ? selected.moves : [
+          ...selected.moves.filter(move => move.move !== "state-claim"),
+          extra.move,
+          ...selected.moves.filter(move => move.move === "state-claim"),
+        ],
+        degraded: selected.degraded || extra.degraded,
+      };
+    } catch {
+      return { moves: selected.moves, degraded: true };
+    }
   }
 
   private async problem(
@@ -90,39 +122,42 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
               schema: "/schemas/sessions.v1.json#/properties/workshop_push_request", type: "claim-draft" },
             note: "Read the latest problem formulation; it may have changed since selection. Reuse an owned session or open one. Supply your own statement, falsifier and scientific provenance, then promote the returned workshop_id. No public claim is created by this recommendation.",
           } },
-          selection_boundary: LEDGER_MOVES_BOUNDARY,
+          selection_boundary: LIVE_MOVES_BOUNDARY,
         };
-        return { items: [] as ReviewQueueItem[], moves: [move], degraded: false,
+        return { items: [] as ReviewQueueItem[],
+          ...await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, { moves: [move], degraded: false }),
           continuation: null, role, effectivePermissions };
       }
     }
     const result = await loadLedgerMoves(db, problemId, credential, effectivePermissions, this.dependencies);
-    return { ...result, role, effectivePermissions };
+    return { ...result,
+      ...await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, result),
+      role, effectivePermissions };
   }
 
   async nextMoves(request: ProblemMovesRequest): Promise<ProblemMovesResult> {
     const { db, credential, problemId } = request;
     if (!db || !credential || credential.fellowId !== request.fellowId) return {
       primaryMove: null, alternatives: [], degraded: true, degradedReason: "MOVES_UNAVAILABLE",
-      selectionBoundary: LEDGER_MOVES_BOUNDARY, effectivePermissions: { ...NO_PERMISSIONS },
+      selectionBoundary: LIVE_MOVES_BOUNDARY, effectivePermissions: { ...NO_PERMISSIONS },
     };
     try {
       const now = this.dependencies.now();
       if (!this.preflight(credential, problemId, now)) return {
-        primaryMove: null, alternatives: [], degraded: false, selectionBoundary: LEDGER_MOVES_BOUNDARY,
+        primaryMove: null, alternatives: [], degraded: false, selectionBoundary: LIVE_MOVES_BOUNDARY,
         effectivePermissions: { ...NO_PERMISSIONS },
       };
       const result = await this.problem(db, problemId, credential, await this.usage(db, credential), now);
       return {
         primaryMove: result.moves[0] ?? null, alternatives: result.moves.slice(1, 3),
         degraded: result.degraded, ...(result.degraded ? { degradedReason: "MOVES_PARTIAL" } : {}),
-        selectionBoundary: `${LEDGER_MOVES_BOUNDARY}${result.continuation ? ` Continue discovery: ${result.continuation}` : ""}`,
+        selectionBoundary: `${LIVE_MOVES_BOUNDARY}${result.continuation ? ` Continue discovery: ${result.continuation}` : ""}`,
         effectivePermissions: result.effectivePermissions,
       };
     } catch {
       // Never reflect SQL, exception messages, private IDs or credential details.
       return { primaryMove: null, alternatives: [], degraded: true, degradedReason: "MOVES_UNAVAILABLE",
-        selectionBoundary: LEDGER_MOVES_BOUNDARY, effectivePermissions: { ...NO_PERMISSIONS } };
+        selectionBoundary: LIVE_MOVES_BOUNDARY, effectivePermissions: { ...NO_PERMISSIONS } };
     }
   }
 
@@ -165,10 +200,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       // targets. Completion order of concurrent reads cannot change the winner.
       const first = rankReviewQueue(eligible)[0];
       return {
-        // Existing independent checks take precedence over starting another
-        // empty board. Empty-board ties retain deterministic problem order.
+        // Existing independent checks come first, then a two-route alternative,
+        // then an empty board. Cross-problem ties retain ASCII problem order.
         move: first ? moves.get(reviewTargetKey(first)) ?? null
-          : [...moves.values()].find(move => move.move === "state-claim") ?? null,
+          : [...moves.values()].find(move => move.move === "third-alternative")
+            ?? [...moves.values()].find(move => move.move === "state-claim") ?? null,
         degraded, ...(degraded ? { degradedReason: failed && moves.size === 0 ? "MOVES_UNAVAILABLE" : "MOVES_PARTIAL" } : {}),
         selectionBoundary: `${TRIAGE_BOUNDARY}${continuations.length ? ` Continue discovery: ${continuations.join(" ; ")}` : ""}`,
       };

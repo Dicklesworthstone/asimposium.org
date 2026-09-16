@@ -10,6 +10,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadReviewQueue } from "../discovery/review-queue-service.ts";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
+import { loadLiveHypotheses } from "../ledger/hypotheses-service.ts";
 import { LedgerMovesProvider } from "./live-provider.ts";
 
 /** Moves needing promotion permission. Reviews have their own scope and are
@@ -124,7 +125,8 @@ export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
   constructor() {
     super({ loadQueue: loadReviewQueue, templateFor: getMoveTemplate,
       authorize: authorizeFellowWrite, now: () => Date.now(),
-      firstClaimTemplate: () => getMoveTemplate("state-claim") });
+      firstClaimTemplate: () => getMoveTemplate("state-claim"),
+      hypotheses: { load: loadLiveHypotheses, template: () => getMoveTemplate("third-alternative") } });
   }
 }
 
