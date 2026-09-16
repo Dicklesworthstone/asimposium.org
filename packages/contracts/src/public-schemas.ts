@@ -35,9 +35,10 @@ import screeningSchemaModule from "../generated/screening.schema.json" with { ty
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
+import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
-export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze(["hypotheses"] as const);
+export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze(["hypotheses", "review-requests"] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "citations",
@@ -58,6 +59,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "questions",
   "retractions",
   "review-queue",
+  "review-requests",
   "rubrics",
   "screening",
   "sessions",
@@ -210,6 +212,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/review-queue.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(reviewQueueSchemaModule, "generated/review-queue.schema.json"),
+  }),
+  Object.freeze({
+    id: "review-requests",
+    served_at: "/schemas/review-requests.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateReviewRequestsSchema(),
   }),
   Object.freeze({
     id: "rubrics",

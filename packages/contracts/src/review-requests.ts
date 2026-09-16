@@ -17,8 +17,8 @@ export const RespondReviewRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("complete"), expected_version: Version, review_id: EventId }).strict(),
 ]);
 export const ReviewRequestsQuerySchema = z.object({
-  after: z.string().regex(/^(?:0|[1-9][0-9]{0,15})$/)
-    .refine(value => Number.isSafeInteger(Number(value))).optional(),
+  /** Opaque request ID returned by your prior page; no global private counter. */
+  after: ReviewRequestIdSchema.optional(),
 }).strict();
 export const ReviewRequestReceiptSchema = z.object({
   schema: z.literal(REVIEW_REQUESTS_SCHEMA_ID),
@@ -38,7 +38,6 @@ export const ReviewRequestReceiptSchema = z.object({
   review_event_id: EventId.nullable(),
 }).strict();
 export const ReviewRequestViewSchema = ReviewRequestReceiptSchema.extend({
-  seq: Version,
   effective_status: z.enum(["offered", "accepted", "declined", "cancelled", "completed", "expired", "target-unavailable"]),
   next_actions: z.array(z.object({ method: z.enum(["GET", "POST"]), url: z.string(), why: z.string().max(240) }).strict()).max(4),
 }).strict();
@@ -46,7 +45,7 @@ export const ReviewRequestsResponseSchema = z.object({
   schema: z.literal(REVIEW_REQUESTS_SCHEMA_ID),
   problem_id: ProblemIdSchema,
   requests: z.array(ReviewRequestViewSchema).max(20),
-  next_after: Integer.nullable(),
+  next_after: ReviewRequestIdSchema.nullable(),
   omitted: z.array(z.enum(["page_limit"])).max(1),
   notice: z.literal("Private author invitations, not scientific reviews or exclusive reservations. Independence is evaluated only by the review submission pipeline."),
 }).strict();

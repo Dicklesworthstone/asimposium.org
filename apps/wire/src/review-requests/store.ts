@@ -12,9 +12,9 @@ export interface RequestRecord extends ReviewRequestReceipt { seq: number; autho
 export interface RequestCommand {
   receipt: ReviewRequestReceipt;
   actor: FellowCredentialBinding;
-  role: "observer" | "contributor" | "steward";
+  role: "observer" | "contributor" | "steward" | "none";
   action: ReviewRequestAction;
-  scope: "promote" | "review";
+  scope: "promote" | "review" | "coordinate";
   cursor: number;
   authorSponsor: string;
   reviewerSponsor: string;
@@ -57,8 +57,10 @@ export async function readRequest(db: D1Database, problem: string, fellow: strin
   const row = await db.prepare(`${REQUEST_SELECT_SQL} AND r.request_id = ?`).bind(problem, fellow, fellow, id).first<Record<string, unknown>>();
   return row ? record(row) : null;
 }
-export async function listRequests(db: D1Database, problem: string, fellow: string, after: number): Promise<RequestRecord[]> {
-  const rows = await db.prepare(`${REQUEST_SELECT_SQL} AND r.seq > ? ORDER BY r.seq LIMIT 21`).bind(problem, fellow, fellow, after).all<Record<string, unknown>>();
+export async function listRequests(db: D1Database, problem: string, fellow: string, after?: string): Promise<RequestRecord[]> {
+  const boundary = after === undefined ? null : await readRequest(db, problem, fellow, after);
+  if (after !== undefined && boundary === null) throw new ReviewRequestError("NOT_FOUND");
+  const rows = await db.prepare(`${REQUEST_SELECT_SQL} AND r.seq > ? ORDER BY r.seq LIMIT 21`).bind(problem, fellow, fellow, boundary?.seq ?? 0).all<Record<string, unknown>>();
   return rows.results.map(record);
 }
 export function requestReceipt(row: RequestRecord): ReviewRequestReceipt {
@@ -85,22 +87,27 @@ export async function requestReplay(db: D1Database, protector: ReplayProtector, 
  * window against revocation, budget use, roster changes and content withdrawal.
  * It never computes review independence or modifies scientific events. */
 export const REQUEST_GUARD_SQL = `WITH input AS (SELECT ? AS j)
-SELECT CASE WHEN EXISTS (
+SELECT CASE WHEN (
+  SELECT (json_extract(j,'$.action') = 'offer' AND json_extract(j,'$.scope') = 'promote')
+    OR (json_extract(j,'$.action') = 'accept' AND json_extract(j,'$.scope') = 'review')
+    OR (json_extract(j,'$.action') IN ('decline','cancel','complete') AND json_extract(j,'$.scope') = 'coordinate') FROM input
+) AND EXISTS (
   SELECT 1 FROM input, fellow_tokens t JOIN enrollment_fellows f ON f.fellow_id = t.fellow_id
     AND f.sponsor_id = t.sponsor_id
-  JOIN problem_memberships m ON m.fellow_id = t.fellow_id AND m.problem_id = json_extract(j,'$.problem')
-  JOIN problems p ON p.id = m.problem_id
+  LEFT JOIN problem_memberships m ON m.fellow_id = t.fellow_id AND m.problem_id = json_extract(j,'$.problem')
+  JOIN problems p ON p.id = json_extract(j,'$.problem')
   WHERE t.credential_id = json_extract(j,'$.credential') AND t.token_hash = json_extract(j,'$.token_hash')
     AND t.fellow_id = json_extract(j,'$.actor') AND t.sponsor_id = json_extract(j,'$.sponsor')
     AND t.issued_at <= json_extract(j,'$.now') AND t.expires_at > json_extract(j,'$.now')
-    AND t.revoked_at IS NULL AND f.status = 'active' AND m.role = json_extract(j,'$.role')
+    AND t.revoked_at IS NULL AND (f.status = 'active' OR (json_extract(j,'$.scope') = 'coordinate' AND f.status = 'suspicious_review'))
+    AND (json_extract(j,'$.scope') = 'coordinate' OR m.role = json_extract(j,'$.role'))
     AND p.status <> 'private-draft' AND p.unlisted = 0
     AND (json_extract(j,'$.strict') = 0 OR p.public_seq = json_extract(j,'$.cursor'))
-    AND EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = json_extract(j,'$.scope'))
+    AND (json_extract(j,'$.scope') = 'coordinate' OR EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = json_extract(j,'$.scope')))
     AND (json_extract(j,'$.scope') <> 'promote' OR m.role <> 'observer')
     AND (json_extract(t.granted_resources_json,'$.problemBinding') IS NULL OR json_extract(t.granted_resources_json,'$.problemBinding') = p.id)
-    AND (json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') IS NULL OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') > json_extract(j,'$.now'))
-    AND (json_extract(t.granted_resources_json,'$.eventBudget') IS NULL OR
+    AND (json_extract(j,'$.scope') = 'coordinate' OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') IS NULL OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') > json_extract(j,'$.now'))
+    AND (json_extract(j,'$.scope') = 'coordinate' OR json_extract(t.granted_resources_json,'$.eventBudget') IS NULL OR
       (SELECT COUNT(*) FROM events WHERE writer_credential_id = t.credential_id) < json_extract(t.granted_resources_json,'$.eventBudget'))
     AND NOT EXISTS (SELECT 1 FROM enrollment_sponsor_security s WHERE s.sponsor_id = t.sponsor_id AND s.panic_at >= t.issued_at)
     AND NOT EXISTS (SELECT 1 FROM enrollment_fellow_security s WHERE s.fellow_id = t.fellow_id AND s.family_revoked_through >= t.issued_at)
@@ -148,7 +155,7 @@ export async function commitRequest(db: D1Database, protector: ReplayProtector, 
     (request_id,problem_id,claim_id,claim_version,claim_event_id,claim_payload_sha256,author_id,author_sponsor_id,reviewer_id,reviewer_sponsor_id,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(r.request_id,r.problem_id,r.claim_id,r.claim_version,r.claim_event_id,r.claim_payload_sha256,r.author_id,c.authorSponsor,r.reviewer_id,c.reviewerSponsor,r.created_at));
   const guard = JSON.stringify({ problem: r.problem_id, actor: c.actor.fellowId, sponsor: c.actor.sponsorId,
-    credential: c.actor.credentialId, token_hash: c.actor.tokenHash, now, role: c.role, scope: c.scope,
+    action: c.action, credential: c.actor.credentialId, token_hash: c.actor.tokenHash, now, role: c.role, scope: c.scope,
     strict: c.action === "offer" || c.action === "accept" ? 1 : 0, cursor: c.cursor,
     pins: c.pins, claim: r.claim_id, claim_version: r.claim_version, offer: c.action === "offer" ? 1 : 0,
     recipient_check: c.action === "offer" || c.action === "accept" ? 1 : 0,

@@ -90,7 +90,7 @@ async function fixture() {
     pins: [pin], idempotencyKey: "offer-1", requestDigest: "digest-1", eventId: "RRE-1",
   };
   function response(action: "accept" | "decline" = "accept"): RequestCommand {
-    return { ...offer, action, scope: "review", actor: { fellowId: REVIEWER, sponsorId: "usr_reviewer", credentialId: "cred-reviewer", tokenHash: "cred-reviewer-hash" } as RequestCommand["actor"],
+    return { ...offer, action, scope: action === "accept" ? "review" : "coordinate", actor: { fellowId: REVIEWER, sponsorId: "usr_reviewer", credentialId: "cred-reviewer", tokenHash: "cred-reviewer-hash" } as RequestCommand["actor"],
       receipt: { ...offer.receipt, version: 2, status: action === "accept" ? "accepted" : "declined", updated_at: NOW+1,
         expires_at: action === "accept" ? NOW+1+REVIEW_ACCEPTED_MS : offer.receipt.expires_at },
       idempotencyKey: action, requestDigest: action, eventId: `RRE-${action}` };
@@ -170,9 +170,9 @@ test("capacity is global to the recipient, and decline releases a slot",async()=
 test("own inbox history cannot be read by a third Fellow or after private visibility",async()=>{
   const f=await fixture();try {
     await commitRequest(f.db,f.crypto,f.offer);
-    assert.equal((await listRequests(f.db,"P-DEMO",AUTHOR,0)).length,1);
-    assert.equal((await listRequests(f.db,"P-DEMO",REVIEWER,0)).length,1);
-    assert.equal((await listRequests(f.db,"P-DEMO","F-stranger",0)).length,0);
+    assert.equal((await listRequests(f.db,"P-DEMO",AUTHOR)).length,1);
+    assert.equal((await listRequests(f.db,"P-DEMO",REVIEWER)).length,1);
+    assert.equal((await listRequests(f.db,"P-DEMO","F-stranger")).length,0);
     assert.equal(await readRequest(f.db,"P-DEMO","F-stranger",f.offer.receipt.request_id),null);
     const row=await readRequest(f.db,"P-DEMO",AUTHOR,f.offer.receipt.request_id);
     assert.deepEqual(requestReceipt(row!),f.offer.receipt);
@@ -233,12 +233,46 @@ test("accepted work completes through a verified review and notifies its author 
     f.sql.query("INSERT INTO event_content VALUES('EV-complete',?,?,NULL)").run(hash(body),body);
     f.sql.run("UPDATE problems SET public_seq=2");
     const pin=await readCompletionReview(f.db,"P-DEMO","C-1",1,REVIEWER,"R-1");
-    const command:RequestCommand={...f.response(),action:"complete",eventId:"RRE-complete",idempotencyKey:"complete",requestDigest:"complete",pins:[pin],cursor:2,
+    const command:RequestCommand={...f.response(),action:"complete",scope:"coordinate",eventId:"RRE-complete",idempotencyKey:"complete",requestDigest:"complete",pins:[pin],cursor:2,
       receipt:{...accepted,version:3,status:"completed",updated_at:NOW+2,review_event_id:pin.event_id}};
     const completed=await commitRequest(f.db,f.crypto,command);
     assert.equal(completed.status,"completed");assert.equal(completed.review_event_id,"EV-complete");
     assert.deepEqual(await commitRequest(f.db,f.crypto,command),completed);
     assert.equal(f.count("review_request_events"),3);assert.equal(f.count("fellow_inbox_notices"),3);
     assert.equal(f.count("events"),2);
+  }finally{f.sql.close();}
+});
+test("private opt-out survives exhausted scientific grants and lost membership, but not revocation",async()=>{
+  const f=await fixture();try {
+    await commitRequest(f.db,f.crypto,f.offer);
+    f.sql.query("UPDATE fellow_tokens SET granted_scopes_json='[]',granted_resources_json='{\"eventBudget\":0}' WHERE fellow_id=?").run(REVIEWER);
+    f.sql.query("DELETE FROM problem_memberships WHERE fellow_id=?").run(REVIEWER);
+    const decline={...f.response("decline"),role:"none" as const,pins:[]};
+    const receipt=await commitRequest(f.db,f.crypto,decline);
+    assert.equal(receipt.status,"declined");
+  }finally{f.sql.close();}
+  const f2=await fixture();try {
+    await commitRequest(f2.db,f2.crypto,f2.offer);
+    f2.sql.query("UPDATE fellow_tokens SET revoked_at=? WHERE fellow_id=?").run(NOW,REVIEWER);
+    await assert.rejects(commitRequest(f2.db,f2.crypto,f2.response("decline")),/CONFLICT/);
+    assert.equal(f2.count("review_request_events"),1);
+  }finally{f2.sql.close();}
+});
+test("private-coordination scope cannot be used to offer or accept a review",async()=>{
+  const f=await fixture();try {
+    await assert.rejects(commitRequest(f.db,f.crypto,{...f.offer,scope:"coordinate"}),/CONFLICT/);
+    await commitRequest(f.db,f.crypto,f.offer);
+    await assert.rejects(commitRequest(f.db,f.crypto,{...f.response(),scope:"coordinate"}),/CONFLICT/);
+    assert.equal(f.count("review_request_events"),1);
+  }finally{f.sql.close();}
+});
+test("private pagination resolves only a participant's own opaque request cursor",async()=>{
+  const f=await fixture();try {
+    await commitRequest(f.db,f.crypto,f.offer);
+    const id=f.offer.receipt.request_id;
+    assert.deepEqual(await listRequests(f.db,"P-DEMO",AUTHOR,id),[]);
+    await assert.rejects(listRequests(f.db,"P-DEMO","F-stranger",id),/NOT_FOUND/);
+    await assert.rejects(listRequests(f.db,"P-OTHER",AUTHOR,id),/NOT_FOUND/);
+    await assert.rejects(listRequests(f.db,"P-DEMO",AUTHOR,`RR-${"f".repeat(32)}`),/NOT_FOUND/);
   }finally{f.sql.close();}
 });
