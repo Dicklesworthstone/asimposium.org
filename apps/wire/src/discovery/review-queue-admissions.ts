@@ -21,33 +21,54 @@ export async function readReviewAdmissions(
   query: ReviewQueueQuery,
   snapshot?: ReviewQueueSnapshot,
 ): Promise<ReviewAdmission[]> {
-  if (snapshot !== undefined && (
-    snapshot.problemId !== query.problem || typeof snapshot.problemId !== "string" ||
-    /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.exec(snapshot.problemId)?.[0] !== snapshot.problemId ||
-    !Number.isSafeInteger(snapshot.through) || snapshot.through < 0
-  )) throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
+  if (
+    snapshot !== undefined &&
+    (snapshot.problemId !== query.problem ||
+      typeof snapshot.problemId !== "string" ||
+      /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.exec(snapshot.problemId)?.[0] !==
+        snapshot.problemId ||
+      !Number.isSafeInteger(snapshot.through) ||
+      snapshot.through < 0)
+  )
+    throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
 
   const after = parseReviewQueueAfter(query.after);
-  const bindings = [query.problem ?? null, query.problem ?? null,
-    after?.createdAt ?? "", after?.createdAt ?? "", after?.eventId ?? "",
-    REVIEW_QUEUE_PAGE_SIZE + 1];
+  const bindings = [
+    query.problem ?? null,
+    query.problem ?? null,
+    after?.createdAt ?? "",
+    after?.createdAt ?? "",
+    after?.eventId ?? "",
+    REVIEW_QUEUE_PAGE_SIZE + 1,
+  ];
   let rows: unknown;
   if (snapshot === undefined) {
-    rows = (await db.prepare(REVIEW_QUEUE_DISCOVERY_SQL).bind(...bindings)
-      .all<ReviewAdmission>()).results;
+    rows = (
+      await db
+        .prepare(REVIEW_QUEUE_DISCOVERY_SQL)
+        .bind(...bindings)
+        .all<ReviewAdmission>()
+    ).results;
   } else {
     // Capture current privacy and publication boundaries with the admissions.
     // A missing, hidden or future cut is unavailable, not an empty queue.
     const results = await db.batch([
       db.prepare(REVIEW_QUEUE_SNAPSHOT_HEAD_SQL).bind(snapshot.problemId),
-      db.prepare(REVIEW_QUEUE_SNAPSHOT_SQL)
+      db
+        .prepare(REVIEW_QUEUE_SNAPSHOT_SQL)
         .bind(snapshot.through, snapshot.problemId, snapshot.through, ...bindings),
     ]);
     const heads = results[0]?.results;
     const head = heads?.[0] as { id?: unknown; public_seq?: unknown } | undefined;
-    if (results.length !== 2 || !Array.isArray(heads) || heads.length !== 1 ||
-        head?.id !== snapshot.problemId || typeof head.public_seq !== "number" ||
-        !Number.isSafeInteger(head.public_seq) || head.public_seq < snapshot.through) {
+    if (
+      results.length !== 2 ||
+      !Array.isArray(heads) ||
+      heads.length !== 1 ||
+      head?.id !== snapshot.problemId ||
+      typeof head.public_seq !== "number" ||
+      !Number.isSafeInteger(head.public_seq) ||
+      head.public_seq < snapshot.through
+    ) {
       throw new Error("REVIEW_QUEUE_SNAPSHOT_UNAVAILABLE");
     }
     rows = results[1]?.results;
@@ -55,8 +76,16 @@ export async function readReviewAdmissions(
   if (!Array.isArray(rows) || rows.length > REVIEW_QUEUE_PAGE_SIZE + 1) {
     throw new Error("REVIEW_QUEUE_DISCOVERY_INVALID");
   }
-  if (snapshot !== undefined && rows.some(row => row === null || typeof row !== "object" ||
-      row.problem_id !== snapshot.problemId || row.cursor !== snapshot.through)) {
+  if (
+    snapshot !== undefined &&
+    rows.some(
+      (row) =>
+        row === null ||
+        typeof row !== "object" ||
+        row.problem_id !== snapshot.problemId ||
+        row.cursor !== snapshot.through,
+    )
+  ) {
     throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
   }
   return rows as ReviewAdmission[];

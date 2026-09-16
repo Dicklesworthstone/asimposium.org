@@ -164,17 +164,21 @@ export async function loadLedgerMoves(
   const cursors = new Set<string>();
   const identities = new Set<string>();
   for (let page = 0; page < MOVE_QUEUE_MAX_PAGES; page += 1) {
-    const queue = await dependencies.loadQueue(db, {
-      problem: problemId,
-      ...(after ? { after } : {}),
-    }, snapshot);
+    const queue = await dependencies.loadQueue(
+      db,
+      {
+        problem: problemId,
+        ...(after ? { after } : {}),
+      },
+      snapshot,
+    );
     if (
       queue.problem !== problemId ||
       queue.candidates.some((item) => item.problem_id !== problemId)
     ) {
       throw new Error("MOVE_QUEUE_SCOPE_MISMATCH");
     }
-    if (through !== undefined && queue.candidates.some(item => item.cursor !== through)) {
+    if (through !== undefined && queue.candidates.some((item) => item.cursor !== through)) {
       throw new Error("MOVE_QUEUE_SNAPSHOT_MISMATCH");
     }
     degraded ||= queue.omitted.some(

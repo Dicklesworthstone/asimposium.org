@@ -8,8 +8,8 @@ import {
 } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
-import type { Env } from "../env";
 import { loadReviewQueue } from "../discovery/review-queue-service";
+import type { Env } from "../env";
 import { loadProblemCitations } from "../ledger/citations";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import {
@@ -163,9 +163,14 @@ export async function readReviewQueuePack(
   cursor: number,
   reviewer: { sponsorId: string; fellowId: string },
 ): Promise<LedgerPackSection & { targets: string[] }> {
-  return readReviewSelectionPack(db, problemId, cursor, reviewer,
+  return readReviewSelectionPack(
+    db,
+    problemId,
+    cursor,
+    reviewer,
     { loadQueue: loadReviewQueue, templateFor: getMoveTemplate },
-    body => neutralizeUntrustedBody(body).text);
+    (body) => neutralizeUntrustedBody(body).text,
+  );
 }
 
 /** The first live selection uses the same queue as the dedicated profile.

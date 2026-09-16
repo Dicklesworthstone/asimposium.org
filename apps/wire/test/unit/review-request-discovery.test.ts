@@ -47,11 +47,13 @@ test("OpenAPI distinguishes creation receipts from participant reads", () => {
     `${origin}/schemas/review-requests.v1.json#/properties/receipt`,
   );
   const get = reviewRequestResponses(path, origin, "GET") as ResponseDoc;
+  assert.ok(get["200"]);
   assert.equal(
     get["200"].content["application/json"].schema.$ref,
     `${origin}/schemas/review-requests.v1.json#/properties/response`,
   );
   const one = reviewRequestResponses(`${path}/{requestId}`, origin, "GET") as ResponseDoc;
+  assert.ok(one["200"]);
   assert.equal(
     one["200"].content["application/json"].schema.$ref,
     `${origin}/schemas/review-requests.v1.json#/properties/view`,

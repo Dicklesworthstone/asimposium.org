@@ -12,8 +12,8 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { claimContentDigest } from "../krater/claim-version";
 import type { ScientificDisposition, ScientificRow } from "../ledger/scientific-disposition";
+import { type ReviewQueueSnapshot, readReviewAdmissions } from "./review-queue-admissions";
 import { rankReviewQueue, reviewNeed } from "./review-queue-selection";
-import { readReviewAdmissions, type ReviewQueueSnapshot } from "./review-queue-admissions";
 import {
   REVIEW_QUEUE_MAX_DEPENDENTS,
   REVIEW_QUEUE_MAX_SCOPE_BYTES,
