@@ -3454,9 +3454,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
         occupiedPort = s.port;
         listener = { port: occupiedPort, stop: () => s.stop(true) };
         break;
-      } catch {
-        continue;
-      }
+      } catch {}
     }
     if (!listener) throw new Error("could not occupy port for test");
     try {

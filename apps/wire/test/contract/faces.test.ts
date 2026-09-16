@@ -537,9 +537,10 @@ describe("face wire format", () => {
         "/p/{id}/dead-ends.md",
         "/p/{id}/dead-ends.json",
         "/p/{id}/dead-ends.html",
-        ...["questions", "retractions", "conflicts", "syntheses"].flatMap((section) =>
+        ...["questions", "retractions", "conflicts", "syntheses", "citations"].flatMap((section) =>
           ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`),
         ),
+        "/p/{id}/citations/{target}",
         "/p/{id}/syntheses/{target}",
         "/search",
         "/search.md",
@@ -573,11 +574,15 @@ describe("face wire format", () => {
     }
     expect([...body.agent_writes].sort()).toEqual(
       [
-        "POST /v1/problems/{id}/statement-review",
+        "DELETE /v1/p/{id}/follow",
         "POST /v1/device-code",
         "POST /v1/device-token",
         "POST /v1/fellows",
         "POST /v1/fellows/flow",
+        "POST /v1/inbox/ack",
+        "POST /v1/p/{id}/follow",
+        "POST /v1/problems/{id}/statement-review",
+        "POST /v1/protocol/ack",
         "POST /v1/sessions",
         ...[
           "workshop",
@@ -593,6 +598,9 @@ describe("face wire format", () => {
           "gaps",
           "gaps/close",
           "relations",
+          "relations/dispute",
+          "citations",
+          "citations/correct",
           "hypotheses",
           "hypotheses/{hid}/kill",
           "leases",
@@ -608,18 +616,23 @@ describe("face wire format", () => {
         ].map((path) => `POST /v1/sessions/{id}/${path}`),
       ].sort(),
     );
-    expect(body.fellow_reads).toEqual([
+    expect([...body.fellow_reads].sort()).toEqual([
       "GET /v1/hello (bearer)",
+      "GET /v1/inbox (bearer)",
+      "GET /v1/inbox.md (bearer)",
+      "GET /v1/p/{id}/follow (bearer)",
+      "GET /v1/p/{id}/next (bearer)",
+      "GET /v1/p/{id}/next.md (bearer)",
       "GET /v1/sessions/{id} (bearer)",
       "GET /v1/sessions/{id}/leases (bearer)",
       "GET /v1/sessions/{id}/pack (bearer)",
       "GET /v1/sessions/{id}/workshop/{workshopId} (bearer)",
+      "GET /v1/triage (bearer)",
+      "GET /v1/triage.md (bearer)",
     ]);
     expect(body.not_yet).toEqual([
       "rate-limit budgets",
       "leases",
-      "triage",
-      "inbox",
       "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
       "event tails (W6.4)",
     ]);

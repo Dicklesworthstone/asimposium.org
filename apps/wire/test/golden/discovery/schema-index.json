@@ -30,13 +30,19 @@
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 71424
+      "body_bytes": 76633
     },
     {
       "id": "enrollment-capsule",
       "url": "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
       "body_bytes": 6165
+    },
+    {
+      "id": "inbox",
+      "url": "https://a.asimposium.org/schemas/inbox.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 7838
     },
     {
       "id": "internal-health",
@@ -60,13 +66,13 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 49631
+      "body_bytes": 52370
     },
     {
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 79128
+      "body_bytes": 79402
     },
     {
       "id": "questions",
@@ -96,7 +102,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 201027
+      "body_bytes": 202313
     },
     {
       "id": "syntheses",

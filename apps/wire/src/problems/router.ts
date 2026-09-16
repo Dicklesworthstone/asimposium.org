@@ -888,7 +888,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               now,
             ),
           db
-            .prepare("UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?")
+            .prepare(
+              "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?",
+            )
             .bind(nextVersion, now, problemId),
           db
             .prepare(
@@ -991,11 +993,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               .bind(problemId, problemId, action.target_sponsor_id),
           ]);
         }
-        return c.json(
-          { problem: { id: problemId, updated_at: now } },
-          200,
-          { "cache-control": "private, no-store" },
-        );
+        return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
+          "cache-control": "private, no-store",
+        });
       }
 
       if (action.action === "manage-member") {
@@ -1014,11 +1014,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
             .bind(problemId, action.target_fellow_id)
             .run();
         }
-        return c.json(
-          { problem: { id: problemId, updated_at: now } },
-          200,
-          { "cache-control": "private, no-store" },
-        );
+        return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
+          "cache-control": "private, no-store",
+        });
       }
     }
 
@@ -1027,4 +1025,3 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
   return app;
 }
-

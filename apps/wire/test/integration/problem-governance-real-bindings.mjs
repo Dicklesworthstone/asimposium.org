@@ -7,7 +7,15 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
-export async function problemGovernanceJourney({ call, enroll, fixtures, env, worker, origin, sponsorCall }) {
+export async function problemGovernanceJourney({
+  call,
+  enroll,
+  fixtures,
+  env,
+  worker,
+  origin,
+  sponsorCall,
+}) {
   const sponsorA = "usr_sponsor_alpha";
   const sponsorB = "usr_sponsor_beta";
   const sponsorC = "usr_sponsor_gamma";
@@ -101,12 +109,7 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   );
 
   // Fellow 2 tries to open session on Problem 1 (mode is approval-required, Fellow 2 not a member)
-  const deniedSession = await call(
-    "/v1/sessions",
-    { problem_id: problem1Id },
-    fellow2Token,
-    403,
-  );
+  const deniedSession = await call("/v1/sessions", { problem_id: problem1Id }, fellow2Token, 403);
   assert.equal(deniedSession.code, "WRITE_REFUSED");
 
   // Sponsor A changes admission_mode to "open"
@@ -121,12 +124,7 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   assert.equal(setOpenRes.problem.admission_mode, "open");
 
   // Fellow 2 now successfully opens session
-  const openSessionRes = await call(
-    "/v1/sessions",
-    { problem_id: problem1Id },
-    fellow2Token,
-    201,
-  );
+  const openSessionRes = await call("/v1/sessions", { problem_id: problem1Id }, fellow2Token, 201);
   const session2Id = openSessionRes.session_id;
   assert.ok(session2Id);
 
@@ -141,12 +139,7 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   );
 
   // Fellow 3 tries to open session on archived problem -> refused 403
-  const archivedSession = await call(
-    "/v1/sessions",
-    { problem_id: problem1Id },
-    fellow3Token,
-    403,
-  );
+  const archivedSession = await call("/v1/sessions", { problem_id: problem1Id }, fellow3Token, 403);
   assert.equal(archivedSession.code, "WRITE_REFUSED");
 
   // Re-open admission_mode to "open"
@@ -406,9 +399,7 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   assert.notEqual(forkedProblemId, problem1Id);
 
   // Verify fork record in problem_forks
-  const forkRow = await env.DB.prepare(
-    "SELECT * FROM problem_forks WHERE problem_id = ?",
-  )
+  const forkRow = await env.DB.prepare("SELECT * FROM problem_forks WHERE problem_id = ?")
     .bind(forkedProblemId)
     .first();
   assert.ok(forkRow);
@@ -469,9 +460,7 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
   assert.equal(mergeRes.problem.canonical_problem_id, problem2Id);
 
   // Verify problem_merges table entry
-  const mergeRow = await env.DB.prepare(
-    "SELECT * FROM problem_merges WHERE problem_id = ?",
-  )
+  const mergeRow = await env.DB.prepare("SELECT * FROM problem_merges WHERE problem_id = ?")
     .bind(problem1Id)
     .first();
   assert.ok(mergeRow);
@@ -484,10 +473,7 @@ export async function problemGovernanceJourney({ call, enroll, fixtures, env, wo
     redirect: "manual",
   });
   assert.equal(rawRedirectFetch.status, 308);
-  assert.equal(
-    rawRedirectFetch.headers.get("location"),
-    `/v1/problems/${problem2Id}`,
-  );
+  assert.equal(rawRedirectFetch.headers.get("location"), `/v1/problems/${problem2Id}`);
 
   // Verify redirect=false allows inspecting merged problem
   const inspectMerged = await call(

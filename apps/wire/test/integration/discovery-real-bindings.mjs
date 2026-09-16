@@ -543,7 +543,8 @@ async function runDiscovery() {
       {
         citation_id: cit.citation_id,
         base_version: 1,
-        title: "On Computable Numbers, with an Application to the Entscheidungsproblem: A Correction",
+        title:
+          "On Computable Numbers, with an Application to the Entscheidungsproblem: A Correction",
         authors: ["Alan Turing"],
         locator_kind: "doi",
         locator: "10.1112/plms/s2-43.6.544",

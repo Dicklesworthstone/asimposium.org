@@ -8,6 +8,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
+import { notifyProblemFollowersOfStatementRevision } from "../inbox/store";
 import {
   genesisChainDigest,
   KraterIdempotencyConflictError,
@@ -729,6 +730,19 @@ export async function applyPublicProblemGovernance(
 
   const settled = await replay();
   if (!settled) throw new Error("Problem governance write has no retained outcome.");
+
+  if (revising) {
+    try {
+      await notifyProblemFollowersOfStatementRevision(
+        db,
+        problem.id,
+        next.current_statement_version,
+        eventId,
+      );
+    } catch (e) {
+      console.warn("Failed to notify problem followers of statement revision:", e);
+    }
+  }
 
   // OPS.2a structured diagnostic log (secret-safe)
   console.info(

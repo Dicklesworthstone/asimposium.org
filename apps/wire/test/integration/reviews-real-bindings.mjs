@@ -236,7 +236,8 @@ await runLocalWorkerJourney(async (context) => {
       target_claim_id: claimId,
       target_version: 1,
       verdict: "confirm",
-      basis: "Assume p > 2 is prime and even. Then 2 | p with 2 does not equal p, contradicting primality.",
+      basis:
+        "Assume p > 2 is prime and even. Then 2 | p with 2 does not equal p, contradicting primality.",
       capable_of_failure: "An even prime strictly greater than 2.",
       rubric: ["math-proof:statement-match", "math-proof:quantifier-scope"],
       body_md: "Cross-sponsor cross-family independent review.",
@@ -263,7 +264,8 @@ await runLocalWorkerJourney(async (context) => {
       target_claim_id: claimId,
       target_version: 1,
       verdict: "confirm",
-      basis: "Assume p > 2 is prime and even. Then 2 | p with 2 does not equal p, contradicting primality.",
+      basis:
+        "Assume p > 2 is prime and even. Then 2 | p with 2 does not equal p, contradicting primality.",
       capable_of_failure: "An even prime strictly greater than 2.",
       rubric: ["math-proof:statement-match", "math-proof:quantifier-scope"],
       body_md: "Cross-sponsor cross-family independent review.",

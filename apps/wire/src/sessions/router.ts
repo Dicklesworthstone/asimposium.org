@@ -1388,7 +1388,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       throw new ProblemArchivedError(problemId);
     }
 
-    if (problem.admission_mode === "approval-required" || problem.admission_mode === "invite-only") {
+    if (
+      problem.admission_mode === "approval-required" ||
+      problem.admission_mode === "invite-only"
+    ) {
       const membership = await db
         .prepare("SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
         .bind(problemId, binding.fellowId)
@@ -4784,6 +4787,45 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   }
 
+  async function verifyClientContextCursor(
+    db: D1Database,
+    problemId: string,
+    clientContextCursor: number | undefined,
+  ): Promise<Response | null> {
+    const query =
+      clientContextCursor === undefined
+        ? "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' ORDER BY seq DESC LIMIT 1"
+        : "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' AND seq > ? ORDER BY seq DESC LIMIT 1";
+
+    const stmt =
+      clientContextCursor === undefined
+        ? db.prepare(query).bind(problemId)
+        : db.prepare(query).bind(problemId, clientContextCursor);
+
+    const revised = await stmt.first<{ seq: number; object_version: number }>();
+    if (!revised) return null;
+
+    return validatedProblem({
+      status: 409,
+      code: "STATEMENT_REVISED_SINCE",
+      title: "Problem statement revised since context cursor",
+      detail: `The problem statement was revised at cursor ${revised.seq} (version ${revised.object_version}) after your context cursor ${clientContextCursor ?? 0}.`,
+      fixHint: `Re-orient with GET /p/${problemId}.md or check your /v1/inbox, then retry with the current cursor.`,
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/problem.v1.json",
+        example: {
+          client_context_cursor: revised.seq,
+        },
+        delta_pointer: `/p/${problemId}.md`,
+        problem_id: problemId,
+        client_context_cursor: clientContextCursor ?? 0,
+        revised_at_cursor: revised.seq,
+        statement_version: revised.object_version,
+      },
+    });
+  }
+
   // --- POST /v1/sessions/:id/promote -------------------------------------
   app.post("/v1/sessions/:id/promote", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -4884,6 +4926,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const clientContextCursor =
+      parsed.data.client_context_cursor ??
+      (c.req.header("asimp-client-context-cursor") !== undefined
+        ? Number(c.req.header("asimp-client-context-cursor"))
+        : undefined);
+    const cursorConflict = await verifyClientContextCursor(
+      db,
+      session.problem_id,
+      clientContextCursor,
+    );
+    if (cursorConflict !== null) return cursorConflict;
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -5668,6 +5722,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const clientContextCursor =
+      ("client_context_cursor" in submitted.data &&
+      typeof submitted.data.client_context_cursor === "number"
+        ? submitted.data.client_context_cursor
+        : undefined) ??
+      (c.req.header("asimp-client-context-cursor") !== undefined
+        ? Number(c.req.header("asimp-client-context-cursor"))
+        : undefined);
+    const cursorConflict = await verifyClientContextCursor(
+      db,
+      session.problem_id,
+      clientContextCursor,
+    );
+    if (cursorConflict !== null) return cursorConflict;
 
     // Authorization runs before every existence oracle below (the same
     // ordering promote fixed in yn9p): membership + scopes need only the
@@ -7248,6 +7317,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "No owned session on this problem has this id.",
           "Open a session on the problem being reviewed.",
         );
+      const clientContextCursor =
+        parsed.data.client_context_cursor ??
+        (c.req.header("asimp-client-context-cursor") !== undefined
+          ? Number(c.req.header("asimp-client-context-cursor"))
+          : undefined);
+      const cursorConflict = await verifyClientContextCursor(db, problemId, clientContextCursor);
+      if (cursorConflict !== null) return cursorConflict;
       const problem = await db
         .prepare(`SELECT status, current_statement_version, sponsor_id,
         created_by_fellow_id, unlisted FROM problems WHERE id = ?`)
@@ -7940,6 +8016,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
+
+    const clientContextCursor =
+      parsed.data.client_context_cursor ??
+      (c.req.header("asimp-client-context-cursor") !== undefined
+        ? Number(c.req.header("asimp-client-context-cursor"))
+        : undefined);
+    const cursorConflict = await verifyClientContextCursor(
+      db,
+      session.problem_id,
+      clientContextCursor,
+    );
+    if (cursorConflict !== null) return cursorConflict;
 
     return executeReviewCreate({
       c,
@@ -14187,6 +14275,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const problemId = c.req.param("id");
+    const clientContextCursor =
+      parsed.data.client_context_cursor ??
+      (c.req.header("asimp-client-context-cursor") !== undefined
+        ? Number(c.req.header("asimp-client-context-cursor"))
+        : undefined);
+    const cursorConflict = await verifyClientContextCursor(db, problemId, clientContextCursor);
+    if (cursorConflict !== null) return cursorConflict;
     const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
     if (!sessionResult.ok) return sessionResult.response;
     const { session, implicitCloseStatements } = sessionResult;
@@ -15344,14 +15439,20 @@ class ProblemArchivedError extends Error {
 }
 
 class AdmissionRequiredError extends Error {
-  constructor(readonly problemId: string, readonly mode: string) {
+  constructor(
+    readonly problemId: string,
+    readonly mode: string,
+  ) {
     super("problem admission requires approval or invitation");
     this.name = "AdmissionRequiredError";
   }
 }
 
 class WriterCapReachedError extends Error {
-  constructor(readonly problemId: string, readonly cap: number) {
+  constructor(
+    readonly problemId: string,
+    readonly cap: number,
+  ) {
     super("problem writer cap reached");
     this.name = "WriterCapReachedError";
   }

@@ -31,6 +31,8 @@ import {
   generateOpenApiDocument,
   generateSchemaIndexDocument,
   generateWellKnownDocument,
+  isSupportedProtocolVersion,
+  SUPPORTED_PROTOCOL_VERSIONS,
 } from "./discovery/discovery";
 import { createDiscoveryRoutes } from "./discovery/router";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
@@ -46,7 +48,10 @@ import type { Env } from "./env";
 import { validatedProblem as problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
+import { createInboxRouter } from "./inbox/router";
 import { createLedgerFaceRoutes } from "./ledger-face";
+import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
+import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createProblemRouter } from "./problems/router";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSearchRoutes } from "./search/router";
@@ -73,6 +78,8 @@ interface EnrollmentStack {
   readonly router: Hono;
   readonly sessionRouter?: Hono<{ Bindings: Env }>;
   readonly problemRouter?: Hono<{ Bindings: Env }>;
+  readonly megaCommandsRouter?: Hono<{ Bindings: Env }>;
+  readonly inboxRouter?: Hono<{ Bindings: Env }>;
 }
 
 /**
@@ -87,6 +94,7 @@ export interface CreateAppOptions {
   /** App-local clock seam for mounted lifecycle proofs; production uses the system clock. */
   readonly enrollmentClock?: EnrollmentClock;
   readonly screenPromotion?: PromotionScreener;
+  readonly megaCommandsMovesProvider?: MegaCommandsMoveProvider;
 }
 
 interface CachedEnrollmentStack {
@@ -96,6 +104,7 @@ interface CachedEnrollmentStack {
   readonly storeFactory: EnrollmentStoreFactory | undefined;
   readonly enrollmentClock: EnrollmentClock | undefined;
   readonly screenPromotion: PromotionScreener | undefined;
+  readonly megaCommandsMovesProvider: MegaCommandsMoveProvider | undefined;
   readonly stack: EnrollmentStack;
 }
 
@@ -115,6 +124,7 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/fellows/lifecycle",
   "/v1/hello",
   "/v1/operators/fellow-cap",
+  "/v1/protocol/ack",
   "/v1/sponsors/bootstrap",
   "/v1/sponsors/panic",
 ]);
@@ -209,7 +219,7 @@ const capabilitiesBody = (origin: string): string =>
       reads: DISCLOSED_OPERATIONS.filter((op) => op.method === "GET" && op.auth === "public").map(
         (op) => op.openApiPath,
       ),
-      agent_writes: DISCLOSED_OPERATIONS.filter((op) => op.method === "POST").map(
+      agent_writes: DISCLOSED_OPERATIONS.filter((op) => op.method !== "GET").map(
         (op) => `${op.method} ${op.openApiPath}`,
       ),
       fellow_reads: DISCLOSED_OPERATIONS.filter(
@@ -227,8 +237,6 @@ const capabilitiesBody = (origin: string): string =>
       not_yet: [
         "rate-limit budgets",
         "leases",
-        "triage",
-        "inbox",
         "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
         "event tails (W6.4)",
       ],
@@ -564,7 +572,8 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     cached.credentialKey === credentialKey &&
     cached.storeFactory === options.createEnrollmentStore &&
     cached.enrollmentClock === options.enrollmentClock &&
-    cached.screenPromotion === options.screenPromotion
+    cached.screenPromotion === options.screenPromotion &&
+    cached.megaCommandsMovesProvider === options.megaCommandsMovesProvider
   ) {
     return cached.stack;
   }
@@ -717,10 +726,36 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
         headers: { [ROUTER_MISS_HEADER]: "1" },
       }),
   );
+  const megaCommandsRouter = createMegaCommandsRouter({
+    service,
+    db: env.DB,
+    movesProvider: options.megaCommandsMovesProvider,
+    sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
+  });
+  megaCommandsRouter.notFound(
+    () =>
+      new Response(null, {
+        status: 404,
+        headers: { [ROUTER_MISS_HEADER]: "1" },
+      }),
+  );
+  const inboxRouter = createInboxRouter({
+    service,
+    db: env.DB,
+  });
+  inboxRouter.notFound(
+    () =>
+      new Response(null, {
+        status: 404,
+        headers: { [ROUTER_MISS_HEADER]: "1" },
+      }),
+  );
   const stack: EnrollmentStack = {
     router,
     sessionRouter,
     problemRouter,
+    megaCommandsRouter,
+    inboxRouter,
   };
   cached = {
     db: env.DB,
@@ -728,6 +763,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     storeFactory: options.createEnrollmentStore,
     enrollmentClock: options.enrollmentClock,
     screenPromotion: options.screenPromotion,
+    megaCommandsMovesProvider: options.megaCommandsMovesProvider,
     stack,
   };
   return stack;
@@ -735,6 +771,46 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
 
 export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+
+  // W6.6: Protocol version negotiation and deprecation headers.
+  app.use("*", async (c, next) => {
+    const requestedVersion = c.req.header("asimp-protocol-version");
+    if (requestedVersion !== undefined && !isSupportedProtocolVersion(requestedVersion)) {
+      return problem({
+        status: 400,
+        code: "UNSUPPORTED_PROTOCOL_VERSION",
+        title: "Unsupported protocol version",
+        detail: `The requested protocol version '${requestedVersion}' is not supported. Supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}.`,
+        fixHint:
+          "Send 'asimp-protocol-version: 0.2.0-draft' or omit the header to use the default.",
+        rule: "A5",
+        extensions: {
+          supported_versions: [...SUPPORTED_PROTOCOL_VERSIONS],
+          requested_version: requestedVersion,
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: {
+            headers: {
+              "asimp-protocol-version": "0.2.0-draft",
+            },
+          },
+        },
+      });
+    }
+
+    await next();
+
+    const version = requestedVersion ?? DISCOVERY_VERSION;
+    c.header("asimp-protocol-version", version);
+    if (version === "0.1.0") {
+      c.header("deprecation", "@1735689600");
+      c.header("sunset", "Wed, 31 Dec 2026 23:59:59 GMT");
+      c.header(
+        "link",
+        '<https://a.asimposium.org/protocol.md>; rel="sunset"; type="text/markdown"',
+        { append: true },
+      );
+    }
+  });
 
   for (const route of PUBLIC_TEXT_ROUTES) {
     app.on(["GET", "HEAD"], route.path, (c) =>
@@ -920,6 +996,53 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   app.route("/", createLedgerFaceRoutes());
   app.route("/", createSearchRoutes());
   app.route("/", createDiscoveryRoutes());
+
+  // The mega-commands (W6.2): triage and next move suggestions.
+  app.use("*", async (c, next) => {
+    const { pathname } = new URL(c.req.url);
+    if (
+      pathname !== "/v1/triage" &&
+      pathname !== "/v1/triage.md" &&
+      !/^\/v1\/p\/[^/]+\/next(?:\.md)?$/.test(pathname)
+    ) {
+      await next();
+      return;
+    }
+    const stack = enrollmentStack(c.env, options);
+    if (stack instanceof Response) return stack;
+    if (stack.megaCommandsRouter === undefined) {
+      await next();
+      return;
+    }
+    const response = await stack.megaCommandsRouter.fetch(c.req.raw, c.env);
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
+  });
+
+  // The inbox, notices, and problem follows (W6.3).
+  app.use("*", async (c, next) => {
+    const { pathname } = new URL(c.req.url);
+    if (
+      pathname !== "/v1/inbox" &&
+      pathname !== "/v1/inbox.md" &&
+      pathname !== "/v1/inbox/ack" &&
+      !/^\/v1\/(?:p|problems)\/[^/]+\/follow(?:\.(?:json|md))?$/.test(pathname)
+    ) {
+      await next();
+      return;
+    }
+    const stack = enrollmentStack(c.env, options);
+    if (stack instanceof Response) return stack;
+    if (stack.inboxRouter === undefined) {
+      await next();
+      return;
+    }
+    const response = await stack.inboxRouter.fetch(c.req.raw, c.env);
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
+  });
 
   // The session protocol (Fable §7) and the public cursor. The session router
   // shares the enrollment stack's service and replay protector so fellow

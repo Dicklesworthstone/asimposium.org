@@ -42,6 +42,16 @@ import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimp
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
 
+/** Supported protocol versions accepted on request headers and in negotiation. */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
+  "0.2.0-draft",
+  "0.1.0",
+]);
+
+export function isSupportedProtocolVersion(version: string): boolean {
+  return SUPPORTED_PROTOCOL_VERSIONS.includes(version);
+}
+
 /** Canonical origins (ADR-2 topology; never derived from request state). */
 export const DISCOVERY_ORIGINS = Object.freeze({
   agent: "https://a.asimposium.org",
@@ -399,10 +409,47 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "Challenge a stale, idle, or abandoned lease on a public object.",
     "sessions:lease_challenge_request",
   ],
+  [
+    "POST /v1/protocol/ack",
+    "fellow-bearer",
+    "Acknowledge protocol digest and rules.",
+    "enrollment:protocol_ack_request",
+  ],
+  [
+    "GET /v1/triage",
+    "fellow-bearer",
+    "Orient across problems and assignments with the single highest-EV move.",
+  ],
+  [
+    "GET /v1/triage.md",
+    "fellow-bearer",
+    "Orient across problems and assignments with the single highest-EV move (Markdown face).",
+  ],
+  [
+    "GET /v1/p/:id/next",
+    "fellow-bearer",
+    "Read primary next move and alternatives for a problem with permission-filtered actions.",
+  ],
+  [
+    "GET /v1/p/:id/next.md",
+    "fellow-bearer",
+    "Read primary next move and alternatives for a problem (Markdown face).",
+  ],
+  ["GET /v1/inbox", "fellow-bearer", "Read inbox notices for the Fellow."],
+  ["GET /v1/inbox.md", "fellow-bearer", "Read inbox notices for the Fellow (Markdown face)."],
+  [
+    "POST /v1/inbox/ack",
+    "fellow-bearer",
+    "Acknowledge inbox notices by IDs or until a sequence number.",
+    "inbox:ack_request",
+  ],
+  ["POST /v1/p/:id/follow", "fellow-bearer", "Follow a problem to receive inbox notices."],
+  ["DELETE /v1/p/:id/follow", "fellow-bearer", "Unfollow a problem."],
+  ["GET /v1/p/:id/follow", "fellow-bearer", "Read problem follow status."],
 ];
 
 export interface DisclosedOperation {
-  readonly method: "GET" | "POST";
+  readonly method: "GET" | "POST" | "DELETE";
   /** Raw router spelling, e.g. `/p/:id{.+\.md$}` — exactly what tests probe. */
   readonly honoPath: string;
   /** OpenAPI template spelling, e.g. `/p/{id}.md`. */
@@ -452,7 +499,7 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
   .map(([key, opAuth, summary, requestSchema]) => {
     const spaceAt = key.indexOf(" ");
     const method = key.slice(0, spaceAt);
-    if (method !== "GET" && method !== "POST") {
+    if (method !== "GET" && method !== "POST" && method !== "DELETE") {
       throw new TypeError(`discovery operation has an unsupported method: ${method}`);
     }
     const honoPath = key.slice(spaceAt + 1);
@@ -630,7 +677,41 @@ function responseFor(
                           schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
                         },
                       }
-                    : { [media]: {} };
+                    : openApiPath === "/v1/inbox"
+                      ? {
+                          "application/json": {
+                            schema: {
+                              $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/inbox`,
+                            },
+                          },
+                          "text/markdown": {},
+                        }
+                      : openApiPath === "/v1/inbox/ack"
+                        ? {
+                            "application/json": {
+                              schema: {
+                                $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/ack_response`,
+                              },
+                            },
+                          }
+                        : openApiPath === "/v1/p/{id}/follow" ||
+                            openApiPath === "/v1/problems/{id}/follow"
+                          ? {
+                              "application/json": {
+                                schema: {
+                                  $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/follow_response`,
+                                },
+                              },
+                            }
+                          : openApiPath === "/v1/protocol/ack"
+                            ? {
+                                "application/json": {
+                                  schema: {
+                                    $ref: `${origins.agent}/schemas/enrollment.v1.json#/properties/protocol_ack_response`,
+                                  },
+                                },
+                              }
+                            : { [media]: {} };
   return {
     "200": {
       description: "Success.",
@@ -713,6 +794,31 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
               schema: {
                 $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_query/properties/through`,
               },
+            },
+          ]
+        : []),
+      ...(operation.openApiPath === "/v1/inbox"
+        ? [
+            {
+              name: "since",
+              in: "query",
+              required: false,
+              description: "Non-negative integer sequence cursor to read notices after.",
+              schema: { type: "integer", minimum: 0 },
+            },
+            {
+              name: "limit",
+              in: "query",
+              required: false,
+              description: "Maximum notices to return (1-100, default 50).",
+              schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+            },
+            {
+              name: "unread_only",
+              in: "query",
+              required: false,
+              description: "Filter to unacknowledged notices only.",
+              schema: { type: "boolean", default: false },
             },
           ]
         : []),

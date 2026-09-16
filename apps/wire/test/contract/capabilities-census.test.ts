@@ -22,6 +22,8 @@ import { describe, expect, test } from "bun:test";
 import { createApp } from "../../src/app.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
+import { createInboxRouter } from "../../src/inbox/router.ts";
+import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
 interface RawRoute {
@@ -81,6 +83,8 @@ const sessionRouter = createSessionRouter({
   service: STUB_SERVICE,
   replayProtector: STUB_SERVICE,
 });
+const megaCommandsRouter = createMegaCommandsRouter({ service: STUB_SERVICE });
+const inboxRouter = createInboxRouter({ service: STUB_SERVICE });
 
 async function servedCapabilities(): Promise<{
   readonly reads: readonly string[];
@@ -164,6 +168,17 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/dead-ends)",
     "POST /v1/p/<id>/events:batch":
       "convenience direct batch append; canonical agent disclosure uses the session workflow",
+    "GET /p/<id>/literature.json":
+      "literature ledger face is undisclosed until its discovery contract is promoted",
+    "GET /p/<id>/literature.md":
+      "literature ledger face is undisclosed until its discovery contract is promoted",
+    "GET /p/<id>/literature.html":
+      "literature ledger face is undisclosed until its discovery contract is promoted",
+    "POST /v1/sessions/<id>/citations/<citationId>/correct":
+      "convenience citation correction append; canonical agent disclosure uses the session workflow",
+    "POST /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
+    "DELETE /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
+    "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
   };
 
   function mountedCensus(): {
@@ -184,6 +199,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       ledgerFace: rootApp.routes.filter((route) => route.path.startsWith("/problems.")),
       enrollmentRouter: enrollmentRouter.routes,
       sessionRouter: sessionRouter.routes,
+      megaCommandsRouter: megaCommandsRouter.routes,
+      inboxRouter: inboxRouter.routes,
     };
     const ledgerRows = sources.ledgerFace ?? [];
     expect(ledgerRows.length).toBeGreaterThan(0);
@@ -209,6 +226,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     expect(counts.enrollmentRouter ?? 0).toBeGreaterThanOrEqual(15);
     expect(counts.sessionRouter ?? 0).toBeGreaterThanOrEqual(10);
     expect(counts.ledgerFace ?? 0).toBeGreaterThanOrEqual(2);
+    expect(counts.megaCommandsRouter ?? 0).toBeGreaterThanOrEqual(4);
+    expect(counts.inboxRouter ?? 0).toBeGreaterThanOrEqual(4);
   });
 
   test("every mounted route is advertised, or classified undisclosed with a reason", async () => {
