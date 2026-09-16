@@ -72,8 +72,20 @@ export async function loadClaimBoard(
           return unavailable;
         }
         const value = result.data.claim_state;
+        const exact = result.data.items.find(
+          (item) => item.kind === "claim-detail" && item.id === `${value.claim_id}@${value.version}`,
+        );
+        // A digest excerpt need not be the statement version whose standing was
+        // computed. Never attach new standing to old text, or borrow an excerpt
+        // when the exact public statement has been withdrawn or omitted.
+        if (exact === undefined) return unavailable;
         return {
-          item: row.item,
+          item: {
+            ...row.item,
+            body: exact.body,
+            why_included: exact.why_included,
+            neutralized: exact.neutralized,
+          },
           href: snapshotHref(face.problem, `${value.claim_id}@${value.version}`, face.cursor),
           standing: {
             state: "ok",

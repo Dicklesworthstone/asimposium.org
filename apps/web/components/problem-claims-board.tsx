@@ -25,7 +25,8 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
         <>
           <p className="quiet">
             Standing and claim links use ledger snapshot {cursor}, not a mixture of current and
-            historical versions. Problem lifecycle is not scientific standing.
+            historical versions. Problem lifecycle is not scientific standing. These summaries
+            come from the linked canonical claim records, not the bounded problem digest.
           </p>
           {rows.length > CLAIM_BOARD_MAX_STANDING_READS && (
             <p className="quiet">
@@ -64,8 +65,8 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
                     </p>
                     {standing.value.stale && (
                       <p>
-                        Supporting material has changed or become unavailable. Do not read stale
-                        standing as a current verification.
+                        This record is marked stale. Inspect the latest source material before
+                        relying on its standing.
                       </p>
                     )}
                     {standing.sourceUnavailable && (
@@ -86,6 +87,11 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
                     No disposition is inferred from the statement or problem lifecycle.
                   </p>
                 )}
+                <p className="quiet">
+                  {standing.state === "ok"
+                    ? "Exact-version public claim record"
+                    : "Problem digest excerpt; exact-version standing is not shown"}
+                </p>
                 <pre>
                   <code>{item.body}</code>
                 </pre>

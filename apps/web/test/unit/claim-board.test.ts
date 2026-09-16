@@ -89,7 +89,7 @@ test("every standing and exact link uses the problem digest snapshot", async () 
   );
   assert.equal(rows[0]?.href, "/p/P-BOARD/claims/C-1%402?through=42");
   assert.equal(rows[0]?.standing.state, "ok");
-  assert.equal(rows[0]?.item.body, "Statement 1");
+  assert.equal(rows[0]?.item.body, "Published statement");
 });
 
 test("a 200-claim digest dispatches exactly eight reads and retains every row", async () => {
@@ -105,7 +105,7 @@ test("a 200-claim digest dispatches exactly eight reads and retains every row", 
   assert.equal(rows[199]?.href, "/p/P-BOARD/claims/C-200?through=42");
 });
 
-test("all bounded reads start together and out-of-order completion preserves ledger order", async () => {
+test("bounded parallel reads preserve ledger order after out-of-order completion", async () => {
   const pending: (() => void)[] = [];
   const loading = loadClaimBoard(problem(3), ORIGIN, async (_problem, target) => {
     await new Promise<void>((resolve) => pending.push(resolve));
@@ -222,5 +222,51 @@ for (const source of ["degraded", "content_unavailable"] as const) {
     const standing = rows[0]?.standing;
     assert.equal(standing?.state, "ok");
     if (standing?.state === "ok") assert.equal(standing.sourceUnavailable, true);
+  });
+}
+
+test("standing is paired with exact-version text, never an older digest excerpt", async () => {
+  const digest = problem(1);
+  const before = structuredClone(digest);
+  const data = claim("C-1");
+  const exact = data.items[0];
+  assert.ok(exact);
+  exact.body = "A revised statement with a different domain.";
+  exact.why_included = "The exact reviewed statement version";
+  data.claim_state.disposition = "corroborated";
+  data.claim_state.unchallenged = false;
+  data.claim_state.recorded_refutation_attempts = 1;
+  const rows = await loadClaimBoard(digest, ORIGIN, async () => ({
+    state: "ok",
+    origin: ORIGIN,
+    data,
+  }));
+  assert.equal(rows[0]?.standing.state, "ok");
+  assert.equal(rows[0]?.item.body, exact.body);
+  assert.equal(rows[0]?.item.why_included, exact.why_included);
+  assert.equal(rows[0]?.item.neutralized, exact.neutralized);
+  assert.equal(rows[0]?.href, "/p/P-BOARD/claims/C-1%402?through=42");
+  assert.deepEqual(digest, before);
+});
+
+for (const defect of ["missing", "wrong_version", "wrong_kind"] as const) {
+  test(`${defect} exact text cannot borrow digest prose to display a disposition`, async () => {
+    const data = claim("C-1");
+    const exact = data.items[0];
+    assert.ok(exact);
+    if (defect === "missing") {
+      data.items = [];
+      data.omitted.push({ reason: "content_unavailable" });
+    }
+    if (defect === "wrong_version") exact.id = "C-1@1";
+    if (defect === "wrong_kind") exact.kind = "claim-review";
+    const rows = await loadClaimBoard(problem(1), ORIGIN, async () => ({
+      state: "ok",
+      origin: ORIGIN,
+      data,
+    }));
+    assert.deepEqual(rows[0]?.standing, { state: "unavailable" });
+    assert.equal(rows[0]?.item.body, "Statement 1");
+    assert.equal(rows[0]?.href, "/p/P-BOARD/claims/C-1?through=42");
   });
 }
