@@ -11,6 +11,7 @@
     "./event-tail": "./src/event-tail.ts",
     "./hypotheses": "./src/hypotheses.ts",
     "./review-queue": "./src/review-queue.ts",
+    "./review-requests": "./src/review-requests.ts",
     "./public-schemas": "./src/public-schemas.ts"
   },
   "scripts": {
