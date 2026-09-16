@@ -17,10 +17,7 @@ import { execSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
-const REVIEWS_BINDINGS = resolve(
-  REPO_ROOT,
-  "apps/wire/test/integration/reviews-real-bindings.mjs",
-);
+const REVIEWS_BINDINGS = resolve(REPO_ROOT, "apps/wire/test/integration/reviews-real-bindings.mjs");
 
 function selectGenuineNode(): string {
   if (process.env.ASIMPOSIUM_NODE_BINARY) {
@@ -28,7 +25,10 @@ function selectGenuineNode(): string {
   }
   try {
     const whichOut = execSync("which -a node", { encoding: "utf8" });
-    for (const candidate of whichOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    for (const candidate of whichOut
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)) {
       const check = spawnSync(candidate, [
         "-e",
         "process.exit(!process.versions.bun && Number(process.versions.node.split('.')[0]) >= 18 ? 0 : 1)",

@@ -25,7 +25,10 @@ function selectGenuineNode(): string {
   }
   try {
     const whichOut = execSync("which -a node", { encoding: "utf8" });
-    for (const candidate of whichOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    for (const candidate of whichOut
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)) {
       const check = spawnSync(candidate, [
         "-e",
         "process.exit(!process.versions.bun && Number(process.versions.node.split('.')[0]) >= 18 ? 0 : 1)",
