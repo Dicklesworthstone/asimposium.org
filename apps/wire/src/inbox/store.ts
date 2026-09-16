@@ -10,6 +10,7 @@ import type {
   ProblemFollowResponse,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
   id?: string;
@@ -44,7 +45,13 @@ interface NoticeRow {
 function buildNoticeNextActions(
   noticeType: string,
   problemId?: string | null,
+  targetId?: string | null,
 ): EnrollmentNextAction[] {
+  const invitation = reviewInvitationLink(problemId, targetId);
+  if (noticeType === "review_request" && invitation !== null) {
+    return [{ action: "review", url: invitation,
+      reason: "Inspect the invitation's current state before accepting, declining or recording completion. This notice is not a scientific verdict." }];
+  }
   switch (noticeType) {
     case "sponsor_directive":
       return [
@@ -76,7 +83,7 @@ function buildNoticeNextActions(
 }
 
 function rowToItem(row: NoticeRow): InboxItem {
-  const nextActions = buildNoticeNextActions(row.notice_type, row.problem_id);
+  const nextActions = buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id);
   return {
     id: row.id,
     type: row.notice_type as InboxNoticeType,

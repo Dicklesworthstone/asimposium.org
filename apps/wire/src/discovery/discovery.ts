@@ -46,6 +46,7 @@ import {
 
 import { REVIEW_QUEUE_PUBLIC_READS, reviewQueueParameters, reviewQueueResponses } from "./review-queue-discovery";
 import { HYPOTHESES_PUBLIC_READS, hypothesesParameters, hypothesesResponses } from "./hypotheses-discovery";
+import { REVIEW_REQUEST_OPERATIONS, reviewRequestParameters, reviewRequestResponses } from "./review-requests-discovery";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
@@ -206,6 +207,7 @@ export type DiscoveryAuth =
 
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  ...REVIEW_REQUEST_OPERATIONS,
   [
     "POST /v1/problems/:id/statement-review",
     "fellow-bearer",
@@ -626,7 +628,10 @@ interface OpenApiOperation {
 function responseFor(
   openApiPath: string,
   origins: DiscoveryOrigins,
+  method: string,
 ): Readonly<Record<string, unknown>> {
+  const invitation = reviewRequestResponses(openApiPath, origins.agent, method);
+  if (invitation !== undefined) return invitation;
   const hypotheses = hypothesesResponses(openApiPath, origins.agent);
   if (hypotheses !== undefined) return hypotheses;
   const queue = reviewQueueResponses(openApiPath, origins.agent);
@@ -758,12 +763,13 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
   const base = {
     summary: operation.summary,
     tags: [operation.tag],
-    responses: responseFor(operation.openApiPath, origins),
+    responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
+      ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {
