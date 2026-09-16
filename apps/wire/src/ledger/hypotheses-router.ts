@@ -1,10 +1,10 @@
 import { PublicLedgerProblemIdSchema } from "@asimposium/contracts";
 import { HYPOTHESES_SCHEMA_ID, HypothesesQuerySchema } from "@asimposium/contracts/hypotheses";
-import { renderProjection } from "@asimposium/render";
+import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/render";
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
-import { hypothesesProjection, hypothesisResponse } from "./hypotheses-face";
+import { hypothesisResponse } from "./hypotheses-face";
 import { HypothesisReadError } from "./hypotheses-read";
 import { loadPublicHypotheses } from "./hypotheses-service";
 
@@ -42,7 +42,7 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
         const result = await loadPublicHypotheses(c.env.DB, problemId, query.data);
         if (result === null) return refusal("missing", c.req.method);
         const body = format === "json" ? JSON.stringify(result.face) :
-          renderProjection(hypothesesProjection(result.face), format === "html" ? "html-fragment" : "md").body;
+          format === "html" ? renderHypothesesHtml(result.face) : renderHypothesesMarkdown(result.face);
         return await hypothesisResponse(c.req.raw, body, format, result.face, result.unlisted);
       } catch (error) {
         return refusal(error instanceof HypothesisReadError && error.code === "CURSOR_INVALID" ? "query" : "unavailable", c.req.method);

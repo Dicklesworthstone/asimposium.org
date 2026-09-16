@@ -23,6 +23,7 @@ export {
   safeCodeSpan,
   safeInlineProse,
 } from "./discovery.ts";
+export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
 export {
   ERROR_TYPE_BASE,
   RenderContractError,

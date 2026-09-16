@@ -44,11 +44,8 @@ import {
   eventTailResponses,
 } from "./event-tail-discovery";
 
-import {
-  REVIEW_QUEUE_PUBLIC_READS,
-  reviewQueueParameters,
-  reviewQueueResponses,
-} from "./review-queue-discovery";
+import { REVIEW_QUEUE_PUBLIC_READS, reviewQueueParameters, reviewQueueResponses } from "./review-queue-discovery";
+import { HYPOTHESES_PUBLIC_READS, hypothesesParameters, hypothesesResponses } from "./hypotheses-discovery";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
@@ -147,6 +144,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
 const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   ...EVENT_TAIL_PUBLIC_READS,
   ...REVIEW_QUEUE_PUBLIC_READS,
+  ...HYPOTHESES_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -629,6 +627,8 @@ function responseFor(
   openApiPath: string,
   origins: DiscoveryOrigins,
 ): Readonly<Record<string, unknown>> {
+  const hypotheses = hypothesesResponses(openApiPath, origins.agent);
+  if (hypotheses !== undefined) return hypotheses;
   const queue = reviewQueueResponses(openApiPath, origins.agent);
   if (queue !== undefined) return queue;
   const tail = eventTailResponses(openApiPath, origins.agent);
@@ -763,6 +763,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     parameters: [
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
+      ...hypothesesParameters(operation.openApiPath, origins.agent),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {
