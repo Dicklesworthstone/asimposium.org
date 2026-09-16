@@ -6,8 +6,8 @@ import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import {
   getPublicSchema,
-  listPublicSchemas,
   INLINE_PUBLIC_SCHEMA_IDS,
+  listPublicSchemas,
   PUBLIC_SCHEMA_EXCLUSIONS,
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
@@ -133,7 +133,8 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   expect(listPublicSchemas().map((document) => document.id)).toEqual([...PUBLIC_SCHEMA_IDS]);
 
   for (const document of listPublicSchemas()) {
-    const generated = inline.get(document.id) ?? artifacts.get(`generated/${document.id}.schema.json`);
+    const generated =
+      inline.get(document.id) ?? artifacts.get(`generated/${document.id}.schema.json`);
     expect(generated).toBeDefined();
     if (generated === undefined) throw new Error(`Missing generated schema for ${document.id}`);
     expect(document.body).toBe(generated);
@@ -157,7 +158,8 @@ test("the public schema classification is pinned to approved served ids and excl
 test("checked-in generated schemas partition into file-backed served documents and reasoned exclusions", () => {
   const checkedIn = checkedInGeneratedSchemaPaths();
   const inlineIds: readonly string[] = INLINE_PUBLIC_SCHEMA_IDS;
-  const served = listPublicSchemas().filter(document => !inlineIds.includes(document.id))
+  const served = listPublicSchemas()
+    .filter((document) => !inlineIds.includes(document.id))
     .map((document) => `${document.id}${GENERATED_SCHEMA_SUFFIX}`);
   const exclusions = PUBLIC_SCHEMA_EXCLUSIONS.map(
     (exclusion) => `${exclusion.id}${GENERATED_SCHEMA_SUFFIX}`,

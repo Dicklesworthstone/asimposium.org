@@ -21,13 +21,6 @@ function refusal(kind: "query" | "unavailable", method: string): Response {
           extensions: {
             schema: `${REVIEW_QUEUE_SCHEMA_ID}#/properties/query`,
             example: { method: "GET", path: "/reviews.json?problem=P-DEMO" },
-            next_actions: [
-              {
-                method: "GET",
-                url: "/reviews.json",
-                why: "Restart public review discovery without advancing an invalid cursor.",
-              },
-            ],
           },
           headers: { "cache-control": "private, no-store" },
         })

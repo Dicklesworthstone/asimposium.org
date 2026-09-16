@@ -57,10 +57,8 @@ export function selectLedgerMoves(
   if (!permissions.session_open) return [];
   const candidates: NextMoveCandidate[] = [];
   const seen = new Set<string>();
-  for (const item of rankReviewQueue(items)) {
+  const eligible = items.filter((item) => {
     const key = reviewTargetKey(item);
-    if (seen.has(key)) continue;
-    seen.add(key);
     const move = item.need === "falsification-attempt" ? "add-refuter" : "review";
     if (move === "review") {
       if (
@@ -68,9 +66,19 @@ export function selectLedgerMoves(
         item.author_fellow_id === viewer.fellowId ||
         item.author_sponsor_id === viewer.sponsorId ||
         reviewed.has(key)
-      )
-        continue;
-    } else if (!permissions.promote) continue;
+      ) {
+        return false;
+      }
+    } else if (!permissions.promote) {
+      return false;
+    }
+    return true;
+  });
+  for (const item of rankReviewQueue(eligible)) {
+    const key = reviewTargetKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const move = item.need === "falsification-attempt" ? "add-refuter" : "review";
     const template = templateFor(move);
     if (template.availability !== "available" || template.move !== move) continue;
     const target = `${item.claim_id}@${item.version}`;

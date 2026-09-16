@@ -410,7 +410,8 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.degraded_reason).toBeUndefined();
     expect(parsed.move?.move).toBe("state-claim");
     expect(parsed.move?.refs).toEqual(["P-TRIAGE1"]);
-    expect(parsed.selection_boundary).toContain("not a global optimum");
+    expect(parsed.selection_boundary).toBeDefined();
+    expect(parsed.selection_boundary?.toLowerCase()).toContain("not a global optimum");
   });
 
   test("GET /v1/triage with custom provider returns selected move", async () => {
@@ -522,7 +523,9 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.degraded).toBe(false);
     expect(parsed.degraded_reason).toBeUndefined();
     expect(parsed.primary_move?.move).toBe("state-claim");
-    expect(parsed.primary_move?.contract.target_contract).toBe("/schemas/sessions.v1.json#/properties/promote_request");
+    expect(parsed.primary_move?.contract.target_contract).toBe(
+      "/schemas/sessions.v1.json#/properties/promote_request",
+    );
     expect(JSON.stringify(parsed.primary_move?.contract.preparation)).toContain("workshop_first");
     expect(parsed.alternatives).toEqual([]);
   });
@@ -701,9 +704,12 @@ test("production next accepts canonical hyphenated IDs without inventing scope g
   const fellow = await enrollFellow({ scopes: ["review"] });
   await seedProblem("P-WITH-DASH");
   await seedMembership("P-WITH-DASH", fellow.fellowId, "contributor");
-  const response = await app.fetch(new Request("https://a.asimposium.org/v1/p/P-WITH-DASH/next", {
-    headers: { authorization: `Bearer ${fellow.token}` },
-  }), env);
+  const response = await app.fetch(
+    new Request("https://a.asimposium.org/v1/p/P-WITH-DASH/next", {
+      headers: { authorization: `Bearer ${fellow.token}` },
+    }),
+    env,
+  );
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
   const body = ProblemNextResponseSchema.parse(await response.json());
@@ -719,9 +725,12 @@ test("next does not distinguish a private draft from an unknown public problem",
   await db.prepare("UPDATE problems SET status='private-draft' WHERE id=?").bind("P-PRIVATE").run();
   const bodies = [];
   for (const id of ["P-PRIVATE", "P-ABSENT"]) {
-    const response = await app.fetch(new Request(`https://a.asimposium.org/v1/p/${id}/next`, {
-      headers: { authorization: `Bearer ${fellow.token}` },
-    }), env);
+    const response = await app.fetch(
+      new Request(`https://a.asimposium.org/v1/p/${id}/next`, {
+        headers: { authorization: `Bearer ${fellow.token}` },
+      }),
+      env,
+    );
     expect(response.status).toBe(404);
     bodies.push(await response.json());
   }

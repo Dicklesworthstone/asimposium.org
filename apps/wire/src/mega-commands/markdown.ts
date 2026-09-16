@@ -31,9 +31,12 @@ export function renderProblemNextMarkdown(response: ProblemNextResponse): string
     lines.push(JSON.stringify(response.primary_move.contract, null, 2));
     lines.push("```", "");
   } else {
-    lines.push(response.degraded
-      ? "No move selected: readable discovery is incomplete or temporarily unavailable."
-      : "No eligible move found within the stated selection boundary and current permissions.", "");
+    lines.push(
+      response.degraded
+        ? "No move selected: readable discovery is incomplete or temporarily unavailable."
+        : "No eligible move found within the stated selection boundary and current permissions.",
+      "",
+    );
   }
   if (response.alternatives.length > 0) {
     lines.push("## Alternatives", "");
@@ -73,9 +76,12 @@ export function renderTriageMarkdown(response: TriageResponse): string {
     lines.push(JSON.stringify(response.move.contract, null, 2));
     lines.push("```", "");
   } else {
-    lines.push(response.degraded
-      ? "No triage move selected: readable discovery is incomplete or temporarily unavailable."
-      : "No eligible move found within the stated assignment and admission limits.", "");
+    lines.push(
+      response.degraded
+        ? "No triage move selected: readable discovery is incomplete or temporarily unavailable."
+        : "No eligible move found within the stated assignment and admission limits.",
+      "",
+    );
   }
   return lines.join("\n");
 }

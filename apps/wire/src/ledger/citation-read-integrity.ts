@@ -51,7 +51,7 @@ export async function verifiedCitationContent(
   }
 }
 
-const ADJACENT_REFERENCE_CHARACTER = /[\p{L}\p{N}\p{M}_/@%+\-]/u;
+const ADJACENT_REFERENCE_CHARACTER = /[\p{L}\p{N}\p{M}_/@%+-]/u;
 
 /**
  * Backlinks are mentions, not proof of use. Match a complete local citation ID,

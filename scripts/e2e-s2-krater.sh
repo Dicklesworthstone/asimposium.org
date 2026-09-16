@@ -229,6 +229,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/review-queue-model.ts
   packages/contracts/src/review-queue-artifact.ts
   packages/contracts/generated/review-queue.schema.json
+  packages/contracts/src/hypotheses.ts
+  packages/contracts/src/hypotheses-schema.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -300,6 +302,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/event-tail-http.ts
   apps/wire/src/ledger/event-tail-read.ts
   apps/wire/src/ledger/event-tail-router.ts
+  apps/wire/src/ledger/hypotheses-face.ts
+  apps/wire/src/ledger/hypotheses-read.ts
+  apps/wire/src/ledger/hypotheses-router.ts
+  apps/wire/src/ledger/hypotheses-service.ts
   apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
@@ -330,6 +336,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/inbox/store.ts
   apps/wire/src/mega-commands/ledger-moves.ts
   apps/wire/src/mega-commands/live-provider.ts
+  apps/wire/src/mega-commands/hypothesis-moves.ts
   apps/wire/src/mega-commands/markdown.ts
   apps/wire/src/mega-commands/provider.ts
   apps/wire/src/mega-commands/router.ts

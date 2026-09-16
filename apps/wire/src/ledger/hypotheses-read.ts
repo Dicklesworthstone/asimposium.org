@@ -11,9 +11,14 @@ export interface HypothesisDecoders {
   publication(value: unknown): PublicHypothesis["content"];
   kill(value: unknown): PublicHypothesis["kill"];
 }
-export interface HypothesisReadQuery { through?: number; after?: number }
+export interface HypothesisReadQuery {
+  through?: number;
+  after?: number;
+}
 export class HypothesisReadError extends Error {
-  constructor(readonly code: "CURSOR_INVALID" | "HYPOTHESES_UNAVAILABLE") { super(code); }
+  constructor(readonly code: "CURSOR_INVALID" | "HYPOTHESES_UNAVAILABLE") {
+    super(code);
+  }
 }
 export const HYPOTHESIS_HEAD_SQL = `SELECT id, public_seq,
   COALESCE(?, public_seq) AS cursor, unlisted
@@ -64,17 +69,30 @@ LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.paylo
 ORDER BY c.seq`;
 
 type Row = Record<string, unknown>;
-function unavailable(): never { throw new HypothesisReadError("HYPOTHESES_UNAVAILABLE"); }
+function unavailable(): never {
+  throw new HypothesisReadError("HYPOTHESES_UNAVAILABLE");
+}
 function sequence(value: unknown, minimum = 0): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
 }
 function envelope(row: Row, prefix = ""): PublicHypothesis["publication"] {
   const get = (key: string) => row[prefix + key];
-  const id = get("event_id"), seq = get("seq"), at = get("created_at"), hash = get("payload_sha256");
-  if (typeof id !== "string" || !ID.test(id) || !sequence(seq, 1) || typeof at !== "string" ||
-      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
-      !Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at ||
-      typeof hash !== "string" || !HASH.test(hash)) unavailable();
+  const id = get("event_id"),
+    seq = get("seq"),
+    at = get("created_at"),
+    hash = get("payload_sha256");
+  if (
+    typeof id !== "string" ||
+    !ID.test(id) ||
+    !sequence(seq, 1) ||
+    typeof at !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
+    !Number.isFinite(Date.parse(at)) ||
+    new Date(at).toISOString() !== at ||
+    typeof hash !== "string" ||
+    !HASH.test(hash)
+  )
+    unavailable();
   const identity = (key: string) => {
     const value = get(key);
     if (value !== null && (typeof value !== "string" || !ID.test(value))) unavailable();
@@ -85,42 +103,81 @@ function envelope(row: Row, prefix = ""): PublicHypothesis["publication"] {
     if (value !== null && (typeof value !== "string" || value.length > 256)) unavailable();
     return value as string | null;
   };
-  return { event_id: id, seq, created_at: at, payload_sha256: hash,
-    fellow_id: identity("fellow_id"), sponsor_id: identity("sponsor_id"), session_id: identity("session_id"),
-    model_self_declared: declaration("model_self_declared"), harness_self_declared: declaration("harness_self_declared") };
+  return {
+    event_id: id,
+    seq,
+    created_at: at,
+    payload_sha256: hash,
+    fellow_id: identity("fellow_id"),
+    sponsor_id: identity("sponsor_id"),
+    session_id: identity("session_id"),
+    model_self_declared: declaration("model_self_declared"),
+    harness_self_declared: declaration("harness_self_declared"),
+  };
 }
 async function verifiedContent(raw: unknown, expected: string): Promise<unknown> {
   if (typeof raw !== "string") return undefined;
   const bytes = new TextEncoder().encode(raw);
   if (bytes.length > HYPOTHESIS_CONTENT_BYTES) return undefined;
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (hex !== expected) return undefined;
-  try { return JSON.parse(raw); } catch { return undefined; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
 }
 
 /** liveOnly and limit are internal selection controls, never public query fields. */
 export async function readHypotheses(
-  db: D1Database, problemId: string, query: HypothesisReadQuery, decoders: HypothesisDecoders,
+  db: D1Database,
+  problemId: string,
+  query: HypothesisReadQuery,
+  decoders: HypothesisDecoders,
   selection: { liveOnly?: boolean; limit?: number } = {},
 ): Promise<{ face: HypothesesResponse; unlisted: boolean } | null> {
   const after = query.after ?? 0;
   const limit = selection.limit ?? HYPOTHESIS_PAGE_SIZE;
-  if (!/^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(problemId) ||
-      !sequence(after) || (query.through !== undefined && (!sequence(query.through) || query.through < after)))
+  if (
+    !/^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(problemId) ||
+    !sequence(after) ||
+    (query.through !== undefined && (!sequence(query.through) || query.through < after))
+  )
     throw new HypothesisReadError("CURSOR_INVALID");
   if (!sequence(limit, 1) || limit > HYPOTHESIS_PAGE_SIZE) unavailable();
   const through = query.through ?? null;
   const result = await db.batch([
     db.prepare(HYPOTHESIS_HEAD_SQL).bind(through, problemId),
-    db.prepare(HYPOTHESIS_ROWS_SQL).bind(through, problemId, through, after,
-      selection.liveOnly ? 1 : 0, limit + 1, HYPOTHESIS_CONTENT_BYTES, HYPOTHESIS_CONTENT_BYTES),
+    db
+      .prepare(HYPOTHESIS_ROWS_SQL)
+      .bind(
+        through,
+        problemId,
+        through,
+        after,
+        selection.liveOnly ? 1 : 0,
+        limit + 1,
+        HYPOTHESIS_CONTENT_BYTES,
+        HYPOTHESIS_CONTENT_BYTES,
+      ),
   ]);
-  if (result.length !== 2 || !Array.isArray(result[0]?.results) || !Array.isArray(result[1]?.results)) unavailable();
+  if (
+    result.length !== 2 ||
+    !Array.isArray(result[0]?.results) ||
+    !Array.isArray(result[1]?.results)
+  )
+    unavailable();
   const head = result[0].results[0] as Row | undefined;
   if (!head) return null;
-  if (result[0].results.length !== 1 || head.id !== problemId || !sequence(head.public_seq) ||
-      !sequence(head.cursor) || (head.unlisted !== 0 && head.unlisted !== 1)) unavailable();
+  if (
+    result[0].results.length !== 1 ||
+    head.id !== problemId ||
+    !sequence(head.public_seq) ||
+    !sequence(head.cursor) ||
+    (head.unlisted !== 0 && head.unlisted !== 1)
+  )
+    unavailable();
   const cursor = head.cursor;
   if (cursor > head.public_seq || after > cursor) throw new HypothesisReadError("CURSOR_INVALID");
   const rows = result[1].results as Row[];
@@ -131,23 +188,55 @@ export async function readHypotheses(
   let previous = after;
   for (const row of rows.slice(0, limit)) {
     const id = row.hypothesis_id;
-    if (row.problem_id !== problemId || typeof id !== "string" || !/^H-[0-9]{1,78}$/.test(id) || ids.has(id)) unavailable();
+    if (
+      row.problem_id !== problemId ||
+      typeof id !== "string" ||
+      !/^H-[0-9]{1,78}$/.test(id) ||
+      ids.has(id)
+    )
+      unavailable();
     ids.add(id);
-    const publication = envelope(row), last = envelope(row, "last_");
-    if (publication.seq <= previous || publication.seq > last.seq || last.seq > cursor) unavailable();
+    const publication = envelope(row),
+      last = envelope(row, "last_");
+    if (publication.seq <= previous || publication.seq > last.seq || last.seq > cursor)
+      unavailable();
     previous = publication.seq;
-    let status: PublicHypothesis["status"] = row.creations !== 1 || row.object_version !== 1 || row.last_version !== 1
-      ? "unavailable" : row.last_type === "hypothesis.killed" ? "killed"
-      : row.last_type === "hypothesis.created" && publication.event_id === last.event_id ? "active" : "unavailable";
-    const content = decoders.publication(await verifiedContent(row.payload_json, publication.payload_sha256));
-    let kill = status === "killed" ? decoders.kill(await verifiedContent(row.last_payload_json, last.payload_sha256)) : null;
-    if (kill !== null && kill.hypothesis_id !== id) { kill = null; status = "unavailable"; }
-    if (content === null || (status === "killed" && kill === null)) omissions.add("content_unavailable");
+    let status: PublicHypothesis["status"] =
+      row.creations !== 1 || row.object_version !== 1 || row.last_version !== 1
+        ? "unavailable"
+        : row.last_type === "hypothesis.killed"
+          ? "killed"
+          : row.last_type === "hypothesis.created" && publication.event_id === last.event_id
+            ? "active"
+            : "unavailable";
+    const content = decoders.publication(
+      await verifiedContent(row.payload_json, publication.payload_sha256),
+    );
+    let kill =
+      status === "killed"
+        ? decoders.kill(await verifiedContent(row.last_payload_json, last.payload_sha256))
+        : null;
+    if (kill !== null && kill.hypothesis_id !== id) {
+      kill = null;
+      status = "unavailable";
+    }
+    if (content === null || (status === "killed" && kill === null))
+      omissions.add("content_unavailable");
     if (status === "unavailable") omissions.add("lifecycle_unavailable");
     items.push({ hypothesis_id: id, status, publication, content, last_event: last, kill });
   }
   const next = rows.length > limit ? previous : null;
   if (next !== null) omissions.add("page_limit");
-  return { face: { schema: SCHEMA, problem_id: problemId, cursor, after, hypotheses: items,
-    next_after: next, omitted: [...omissions] }, unlisted: head.unlisted === 1 };
+  return {
+    face: {
+      schema: SCHEMA,
+      problem_id: problemId,
+      cursor,
+      after,
+      hypotheses: items,
+      next_after: next,
+      omitted: [...omissions],
+    },
+    unlisted: head.unlisted === 1,
+  };
 }

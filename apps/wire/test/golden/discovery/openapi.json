@@ -3083,6 +3083,35 @@
         "security": []
       }
     },
+    "/schemas/hypotheses.v1.json": {
+      "get": {
+        "summary": "Contract schema: hypotheses.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
     "/schemas/inbox.v1.json": {
       "get": {
         "summary": "Contract schema: inbox.",
