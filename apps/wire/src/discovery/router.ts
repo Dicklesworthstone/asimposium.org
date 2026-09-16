@@ -15,6 +15,7 @@ import { problem as problemDocument } from "../http/envelope";
 import { loadAreaDetail, loadAreasIndex } from "./areas-service";
 import { loadFellowCard } from "./fellow-service";
 import { loadNowStrip } from "./now-service";
+import { createReviewQueueRoutes } from "./review-queue-router";
 
 const DISCOVERY_CACHE_CONTROL = "public, max-age=60, s-maxage=60, stale-while-revalidate=120";
 // Cards include withdrawable scientific bodies; a shared cache must revalidate
@@ -79,6 +80,7 @@ function resolveFace(c: Context<{ Bindings: Env }>, forceFace?: FaceType): FaceT
 
 export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createReviewQueueRoutes());
 
   // 1. Areas index (/areas, /areas.json, /areas.md, /areas.html)
   async function handleAreas(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
@@ -241,7 +243,7 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
           "Copy next_contributions_before or next_reviews_before unchanged from the previous JSON page and URL-encode it, or omit that parameter for the latest history.",
         rule: "A5",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/discovery.v1.json#/properties/fellow_query",
+          schema: "https://a.asimposium.org/schemas/discovery.v1.json",
           example: { path: "/a/example-fellow.json", query: {} },
         },
       });

@@ -55,6 +55,11 @@ export {
 } from "./prepare.ts";
 export { MEDIA_TYPES, renderAllFaces, renderProjection } from "./render.ts";
 export {
+  renderReviewQueueHtml,
+  renderReviewQueueMarkdown,
+  reviewQueuePagePath,
+} from "./review-queue.ts";
+export {
   escapeHtml,
   type Fence,
   fenceFor,
