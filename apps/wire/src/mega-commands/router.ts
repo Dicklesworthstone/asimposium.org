@@ -1,6 +1,7 @@
 import {
   type ProblemAdmissionMode,
   ProblemAdmissionModeSchema,
+  ProblemIdSchema,
   type ProblemNextResponse,
   ProblemNextResponseSchema,
   type ProblemRole,
@@ -33,8 +34,6 @@ function bearerToken(request: Request): string | undefined {
   const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
   return match?.[1];
 }
-
-const PROBLEM_ID_REGEX = /^P-[A-Za-z0-9]{3,32}$/;
 
 export function createMegaCommandsRouter(
   options: MegaCommandsRouterOptions,
@@ -95,6 +94,7 @@ export function createMegaCommandsRouter(
       fellowId: auth.fellowId,
       assignments: hello.assignments ?? [],
       db,
+      credential: auth,
     });
 
     const response: TriageResponse = TriageResponseSchema.parse({
@@ -146,12 +146,12 @@ export function createMegaCommandsRouter(
       rawProblemId = rawProblemId.slice(0, -3);
     }
 
-    if (!PROBLEM_ID_REGEX.test(rawProblemId)) {
+    if (!ProblemIdSchema.safeParse(rawProblemId).success) {
       return problem({
         status: 404,
         code: "PROBLEM_NOT_FOUND",
         title: "Problem not found",
-        detail: `The problem identifier ${rawProblemId} is not a valid problem ID.`,
+        detail: "No public problem is available at this identifier.",
         fixHint: "Specify a valid problem identifier like P-4DSP.",
         rule: "A5",
         extensions: {
@@ -167,7 +167,7 @@ export function createMegaCommandsRouter(
 
     if (db !== undefined) {
       const problemRow = await db
-        .prepare("SELECT id, admission_mode FROM problems WHERE id = ?")
+        .prepare("SELECT id, admission_mode FROM problems WHERE id = ? AND status != 'private-draft'")
         .bind(problemId)
         .first<{ id: string; admission_mode: string | null }>();
 
@@ -176,7 +176,7 @@ export function createMegaCommandsRouter(
           status: 404,
           code: "PROBLEM_NOT_FOUND",
           title: "Problem not found",
-          detail: `The problem ${problemId} does not exist.`,
+          detail: "No public problem is available at this identifier.",
           fixHint: "Choose an existing problem from /problems.json.",
           rule: "A5",
           extensions: {
@@ -216,13 +216,14 @@ export function createMegaCommandsRouter(
       role,
       effectivePermissions,
       db,
+      credential: auth,
     });
 
     const response: ProblemNextResponse = ProblemNextResponseSchema.parse({
       problem_id: problemId,
       viewer: {
         role,
-        effective_permissions: effectivePermissions,
+        effective_permissions: movesResult.effectivePermissions ?? effectivePermissions,
       },
       primary_move: movesResult.primaryMove,
       alternatives: [...movesResult.alternatives],
