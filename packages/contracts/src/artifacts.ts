@@ -74,6 +74,7 @@ import {
   type SponsorPanicResponse,
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
+import { generatedEventTailArtifact } from "./event-tail-artifact.ts";
 import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardQuerySchema, FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
@@ -818,6 +819,7 @@ function generatedMovesTypes(): string {
 
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
+    generatedEventTailArtifact(),
     {
       relativePath: "generated/dead-ends.schema.json",
       content: formatJson({

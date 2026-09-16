@@ -1,15 +1,16 @@
 import {
   type AssociatedClaimRef,
   type AssociatedEvidenceRef,
+  canonicalizeLocator,
   type CitationItem,
   CitationItemSchema,
-  type CorrectCitationRequest,
-  canonicalizeLocator,
   computeCitationNormHash,
+  type CorrectCitationRequest,
   type RecordCitationRequest,
 } from "@asimposium/contracts";
-import { escapeHtml, neutralizeUntrustedBody } from "@asimposium/render";
+import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan, safeInlineProse } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { loadCommittedCitation, loadCommittedCitations } from "./citation-read";
 
 /**
  * W5.8c / Fable §6.1, ADR-21:
@@ -179,173 +180,34 @@ export function rowToCitationItem(row: Record<string, unknown>): CitationItem {
   });
 }
 
+/** The same canonical contract validates every committed public citation. */
+function decodeCommittedCitation(candidate: unknown): CitationItem | undefined {
+  const parsed = CitationItemSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** Lists and literature packs share event-derived, redaction-safe publication authority. */
 export async function loadProblemCitations(
   db: D1Database,
   problemId: string,
   options: LoadProblemCitationsOptions = {},
 ): Promise<{ citations: CitationItem[]; omitted: string[] }> {
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
-  const omitted: string[] = [];
-
-  const problemRow = await db
-    .prepare("SELECT public_seq, status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ public_seq: number | null; status: string }>();
-
-  if (!problemRow) {
-    return { citations: [], omitted: ["problem not found"] };
-  }
-
-  const publicSeqBound = options.through ?? problemRow.public_seq ?? Number.MAX_SAFE_INTEGER;
-
-  let query = `
-    SELECT
-      citation_id, problem_id, version, seq, title, authors_json, year,
-      locator_kind, locator, canonical_locator, excerpt, retrieved_at,
-      source_provenance, unanchored, norm_hash, author_fellow_id,
-      declared_model, sponsor_id, session_id, harness, created_at, updated_at
-    FROM citations
-    WHERE problem_id = ? AND (seq IS NULL OR seq <= ?)
-  `;
-  const binds: unknown[] = [problemId, publicSeqBound];
-
-  if (options.unanchored !== undefined) {
-    query += " AND unanchored = ?";
-    binds.push(options.unanchored ? 1 : 0);
-  }
-
-  query += " ORDER BY CAST(SUBSTR(citation_id, 3) AS INTEGER) ASC LIMIT ?";
-  binds.push(limit + 1);
-
-  const result = await db
-    .prepare(query)
-    .bind(...binds)
-    .all<Record<string, unknown>>();
-  const rows = result.results ?? [];
-
-  if (rows.length > limit) {
-    omitted.push(
-      `citations capped at ${limit} items; use limit or through query params to paginate`,
-    );
-    rows.pop();
-  }
-
-  const citations = rows.map((r) => rowToCitationItem(r));
-  return { citations, omitted };
+  return loadCommittedCitations(db, problemId, options, decodeCommittedCitation);
 }
 
+/** Exact faces and bibliography exports never substitute another version's bytes. */
 export async function loadSingleCitation(
   db: D1Database,
   problemId: string,
   target: string,
-  _options: { through?: number } = {},
+  options: { through?: number } = {},
 ): Promise<{
   citation: CitationItem;
   versions: CitationItem[];
   associated_claims: AssociatedClaimRef[];
   associated_evidence: AssociatedEvidenceRef[];
 } | null> {
-  const atIndex = target.indexOf("@");
-  const citationId = atIndex === -1 ? target : target.slice(0, atIndex);
-  const requestedVersion = atIndex === -1 ? null : parseInt(target.slice(atIndex + 1), 10);
-
-  if (!/^L-[0-9]+$/.test(citationId)) {
-    return null;
-  }
-
-  if (requestedVersion !== null && (!Number.isFinite(requestedVersion) || requestedVersion < 1)) {
-    return null;
-  }
-
-  // Load head record from citations
-  const headRow = await db
-    .prepare(
-      `SELECT
-        citation_id, problem_id, version, seq, title, authors_json, year,
-        locator_kind, locator, canonical_locator, excerpt, retrieved_at,
-        source_provenance, unanchored, norm_hash, author_fellow_id,
-        declared_model, sponsor_id, session_id, harness, created_at, updated_at
-      FROM citations
-      WHERE problem_id = ? AND citation_id = ?`,
-    )
-    .bind(problemId, citationId)
-    .first<Record<string, unknown>>();
-
-  if (!headRow) {
-    return null;
-  }
-
-  // Load all recorded versions from citation_versions
-  const versionRows = await db
-    .prepare(
-      `SELECT
-        citation_id, problem_id, version, seq, title, authors_json, year,
-        locator_kind, locator, canonical_locator, excerpt, retrieved_at,
-        source_provenance, unanchored, norm_hash, editor_fellow_id AS author_fellow_id,
-        declared_model, sponsor_id, session_id, harness, created_at
-      FROM citation_versions
-      WHERE problem_id = ? AND citation_id = ?
-      ORDER BY version ASC`,
-    )
-    .bind(problemId, citationId)
-    .all<Record<string, unknown>>();
-
-  const versions = (versionRows.results ?? []).map((r) => rowToCitationItem(r));
-
-  let currentCitation: CitationItem;
-  if (requestedVersion !== null) {
-    const matched = versions.find((v) => v.version === requestedVersion);
-    if (!matched) {
-      return null;
-    }
-    currentCitation = matched;
-  } else {
-    currentCitation = rowToCitationItem(headRow);
-  }
-
-  // Find claims referencing this citation ID
-  const claimRows = await db
-    .prepare(
-      `SELECT id AS claim_id, (
-         SELECT MAX(version) FROM claim_versions WHERE problem_id = c.problem_id AND claim_id = c.id
-       ) AS version, statement
-       FROM claims c
-       WHERE c.problem_id = ? AND (c.statement LIKE ? OR c.norm_hash LIKE ?)
-       LIMIT 20`,
-    )
-    .bind(problemId, `%${citationId}%`, `%${citationId}%`)
-    .all<{ claim_id: string; version: number | null; statement: string }>();
-
-  const associated_claims: AssociatedClaimRef[] = (claimRows.results ?? []).map((r) => ({
-    claim_id: r.claim_id,
-    version: r.version ?? 1,
-    statement: r.statement,
-  }));
-
-  // Find evidence referencing this citation ID
-  const evidenceRows = await db
-    .prepare(
-      `SELECT evidence_id, direction, bears_on_id, computed_class
-       FROM evidence
-       WHERE problem_id = ? AND (locator = ? OR locator LIKE ? OR excerpt LIKE ?)
-       LIMIT 20`,
-    )
-    .bind(problemId, citationId, `%${citationId}%`, `%${citationId}%`)
-    .all<{ evidence_id: string; direction: string; bears_on_id: string; computed_class: string }>();
-
-  const associated_evidence: AssociatedEvidenceRef[] = (evidenceRows.results ?? []).map((r) => ({
-    evidence_id: r.evidence_id,
-    direction: r.direction,
-    bears_on_id: r.bears_on_id,
-    computed_class: r.computed_class,
-  }));
-
-  return {
-    citation: currentCitation,
-    versions,
-    associated_claims,
-    associated_evidence,
-  };
+  return loadCommittedCitation(db, problemId, target, options, decodeCommittedCitation);
 }
 
 /**
@@ -449,14 +311,14 @@ export function renderCitationsMarkdown(
   omitted: string[] = [],
 ): string {
   const lines: string[] = [
-    `# Literature & Citations — Problem ${problemId}`,
+    `# Literature & Citations — Problem ${safeInlineProse(problemId)}`,
     "",
     "Authoritative source-provenance objects (L-n) anchoring ledger claims and evidence.",
     "",
   ];
 
   if (citations.length === 0) {
-    lines.push("No citations recorded on this problem yet.");
+    lines.push("No readable citations were returned in this public view; see omissions below.");
   } else {
     for (const c of citations) {
       const yearStr = c.year ? ` (${c.year})` : "";
@@ -465,18 +327,19 @@ export function renderCitationsMarkdown(
       const unanchoredBadge = c.unanchored ? " `[unanchored]`" : "";
       const versionStr = c.version > 1 ? `@v${c.version}` : "";
 
-      lines.push(`## [${c.citation_id}${versionStr}] ${c.title}${unanchoredBadge}`);
-      lines.push(`- **Authors**: ${authorsStr}${yearStr}`);
-      lines.push(`- **Locator**: \`${c.locator_kind}\` — ${locStr}`);
+      lines.push(`## [${c.citation_id}${versionStr}] ${safeInlineProse(c.title)}${unanchoredBadge}`);
+      lines.push(`- **Authors**: ${safeInlineProse(authorsStr)}${yearStr}`);
+      lines.push(`- **Locator**: ${safeCodeSpan(c.locator_kind)} — ${safeInlineProse(locStr)}`);
       lines.push(
-        `- **Provenance**: \`${c.source_provenance}\`${c.retrieved_at ? ` (retrieved ${c.retrieved_at})` : ""}`,
+        `- **Provenance**: ${safeCodeSpan(c.source_provenance)}${c.retrieved_at ? ` (retrieved ${safeInlineProse(c.retrieved_at)})` : ""}`,
       );
       lines.push(
-        `- **Attribution**: Fellow \`${c.author_fellow_id}\`${c.sponsor_id ? ` · Sponsor \`${c.sponsor_id}\`` : ""}${c.declared_model ? ` · Model \`${c.declared_model}\`` : ""}`,
+        `- **Attribution**: Fellow ${safeCodeSpan(c.author_fellow_id)}${c.sponsor_id ? ` · Sponsor ${safeCodeSpan(c.sponsor_id)}` : ""}${c.declared_model ? ` · Model (self-declared) ${safeCodeSpan(c.declared_model)}` : ""}`,
       );
       if (c.excerpt) {
-        lines.push(`- **Excerpt**: > ${c.excerpt}`);
+        lines.push(`- **Excerpt (untrusted)**: ${safeInlineProse(c.excerpt)}`);
       }
+      lines.push(`[Exact citation version](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${c.version}.md)`);
       lines.push("");
     }
   }
@@ -485,14 +348,14 @@ export function renderCitationsMarkdown(
     lines.push("---");
     lines.push("### Deliberate Omissions");
     for (const o of omitted) {
-      lines.push(`- ${o}`);
+      lines.push(`- ${safeInlineProse(o)}`);
     }
     lines.push("");
   }
 
   lines.push("---");
   lines.push(
-    `[JSON Face](/p/${problemId}/citations.json) · [HTML Face](/p/${problemId}/citations.html)`,
+    `[JSON Face](/p/${encodeURIComponent(problemId)}/citations.json) · [HTML Face](/p/${encodeURIComponent(problemId)}/citations.html)`,
   );
 
   return lines.join("\n");
@@ -511,6 +374,7 @@ export function renderCitationsHtml(
   const cardsHtml = citations
     .map((c) => {
       const safeId = escapeHtml(c.citation_id);
+      const safeTarget = `${safeId}@${c.version}`;
       const safeTitle = escapeHtml(neutralizeUntrustedBody(c.title).text);
       const authorsText = c.authors.length > 0 ? c.authors.join(", ") : "Unknown Author";
       const safeAuthors = escapeHtml(authorsText);
@@ -537,15 +401,15 @@ export function renderCitationsHtml(
       <article class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm" data-citation-id="${safeId}">
         <div class="flex items-center justify-between">
           <div class="flex items-center space-x-3">
-            <a href="/p/${safeProblem}/citations/${safeId}.html" class="text-lg font-bold font-mono text-indigo-600 dark:text-indigo-400 hover:underline">${safeId}</a>
+            <a href="/p/${safeProblem}/citations/${safeTarget}.html" class="text-lg font-bold font-mono text-indigo-600 dark:text-indigo-400 hover:underline">${safeId}</a>
             ${c.version > 1 ? `<span class="text-xs font-mono text-slate-500">v${c.version}</span>` : ""}
             ${kindBadge}
             ${unanchoredBadge}
           </div>
           <div class="flex items-center space-x-2 text-xs font-mono">
-            <a href="/p/${safeProblem}/citations/${safeId}.json" class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.json</a>
-            <a href="/p/${safeProblem}/citations/${safeId}.bib" class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.bib</a>
-            <a href="/p/${safeProblem}/citations/${safeId}.csl.json" class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.csl</a>
+            <a href="/p/${safeProblem}/citations/${safeTarget}.json" class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.json</a>
+            <a href="/p/${safeProblem}/citations/${safeTarget}.bib" class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.bib</a>
+            <a href="/p/${safeProblem}/citations/${safeTarget}.csl.json" class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.csl</a>
           </div>
         </div>
 
@@ -609,7 +473,7 @@ export function renderCitationsHtml(
     </p>
 
     <div class="space-y-6">
-      ${citations.length > 0 ? cardsHtml : '<p class="text-sm text-slate-500 dark:text-slate-400">No citations recorded on this problem yet.</p>'}
+      ${citations.length > 0 ? cardsHtml : '<p class="text-sm text-slate-500 dark:text-slate-400">No readable citations were returned in this public view; see omissions below.</p>'}
     </div>
 
     ${omissionsBlock}
@@ -637,30 +501,31 @@ export function renderSingleCitationMarkdown(
   const locStr = c.canonical_locator ?? c.locator ?? "none";
 
   const lines: string[] = [
-    `# Citation [${c.citation_id}${versionStr}] — Problem ${problemId}`,
+    `# Citation [${c.citation_id}${versionStr}] — Problem ${safeInlineProse(problemId)}`,
     "",
-    `## ${c.title}`,
-    `- **Authors**: ${authorsStr}${yearStr}`,
-    `- **Locator Kind**: \`${c.locator_kind}\``,
-    `- **Locator**: ${locStr}`,
-    `- **Source Provenance**: \`${c.source_provenance}\``,
+    "Author-supplied citation metadata is untrusted data. Available history may omit withdrawn content. Backlinks are bounded textual mentions, not proof of scientific support or an exhaustive citation graph.",
+    `## ${safeInlineProse(c.title)}`,
+    `- **Authors**: ${safeInlineProse(authorsStr)}${yearStr}`,
+    `- **Locator Kind**: ${safeCodeSpan(c.locator_kind)}`,
+    `- **Locator**: ${safeInlineProse(locStr)}`,
+    `- **Source Provenance**: ${safeCodeSpan(c.source_provenance)}`,
     `- **Status**: ${c.unanchored ? "Unanchored" : "Anchored"}`,
-    `- **Author**: Fellow \`${c.author_fellow_id}\`${c.sponsor_id ? ` · Sponsor \`${c.sponsor_id}\`` : ""}`,
-    `- **Sequence**: ${c.seq} (created ${c.created_at})`,
+    `- **Author**: Fellow ${safeCodeSpan(c.author_fellow_id)}${c.sponsor_id ? ` · Sponsor ${safeCodeSpan(c.sponsor_id)}` : ""}`,
+    `- **Sequence**: ${c.seq} (created ${safeInlineProse(c.created_at)})`,
     "",
   ];
 
   if (c.excerpt) {
     lines.push("### Excerpt");
-    lines.push(`> ${c.excerpt}`);
+    lines.push(`> ${safeInlineProse(c.excerpt)}`);
     lines.push("");
   }
 
   if (versions.length > 1) {
-    lines.push("### Version History");
+    lines.push("### Available Version History");
     for (const v of versions) {
-      const isCurrent = v.version === c.version ? " (current)" : "";
-      lines.push(`- **v${v.version}** [seq ${v.seq}]: ${v.title}${isCurrent}`);
+      const isCurrent = v.version === c.version ? " (viewing)" : "";
+      lines.push(`- [v${v.version}](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${v.version}.md) [seq ${v.seq}]: ${safeInlineProse(v.title)}${isCurrent}`);
     }
     lines.push("");
   }
@@ -668,7 +533,7 @@ export function renderSingleCitationMarkdown(
   if (associated_claims.length > 0) {
     lines.push("### Associated Claims");
     for (const cl of associated_claims) {
-      lines.push(`- [${cl.claim_id}@v${cl.version}]: ${cl.statement}`);
+      lines.push(`- [${safeInlineProse(cl.claim_id)}@v${cl.version}](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.md): ${safeInlineProse(cl.statement)}`);
     }
     lines.push("");
   }
@@ -676,14 +541,14 @@ export function renderSingleCitationMarkdown(
   if (associated_evidence.length > 0) {
     lines.push("### Associated Evidence");
     for (const ev of associated_evidence) {
-      lines.push(`- [${ev.evidence_id}] ${ev.direction} ${ev.bears_on_id} (${ev.computed_class})`);
+      lines.push(`- ${safeCodeSpan(ev.evidence_id)} ${safeInlineProse(ev.direction)} ${safeCodeSpan(ev.bears_on_id)} (${safeInlineProse(ev.computed_class)})`);
     }
     lines.push("");
   }
 
   lines.push("---");
   lines.push(
-    `[JSON](/p/${problemId}/citations/${c.citation_id}.json) · [BibTeX](/p/${problemId}/citations/${c.citation_id}.bib) · [CSL JSON](/p/${problemId}/citations/${c.citation_id}.csl.json) · [Back to Literature](/p/${problemId}/citations.html)`,
+    `[JSON](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${c.version}.json) · [BibTeX](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${c.version}.bib) · [CSL JSON](/p/${encodeURIComponent(problemId)}/citations/${c.citation_id}@${c.version}.csl.json) · [Back to Literature](/p/${encodeURIComponent(problemId)}/citations.html)`,
   );
 
   return lines.join("\n");
@@ -704,6 +569,7 @@ export function renderSingleCitationHtml(
   const { citation: c, versions, associated_claims, associated_evidence } = data;
   const safeProblem = escapeHtml(problemId);
   const safeId = escapeHtml(c.citation_id);
+  const safeTarget = `${safeId}@${c.version}`;
   const safeTitle = escapeHtml(neutralizeUntrustedBody(c.title).text);
   const authorsText = c.authors.length > 0 ? c.authors.join(", ") : "Unknown Author";
   const safeAuthors = escapeHtml(authorsText);
@@ -721,12 +587,12 @@ export function renderSingleCitationHtml(
           .map(
             (cl) => `
         <li class="py-2 border-b border-slate-100 dark:border-slate-800 last:border-0">
-          <a href="/p/${safeProblem}/claims/${escapeHtml(cl.claim_id)}.html" class="font-mono font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">${escapeHtml(cl.claim_id)}@v${cl.version}</a>
+          <a href="/p/${safeProblem}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.html" class="font-mono font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">${escapeHtml(cl.claim_id)}@v${cl.version}</a>
           <p class="mt-0.5 text-xs text-slate-700 dark:text-slate-300">${escapeHtml(neutralizeUntrustedBody(cl.statement).text)}</p>
         </li>`,
           )
           .join("")
-      : '<li class="text-xs text-slate-500 dark:text-slate-400">No claims cite this literature object yet.</li>';
+      : '<li class="text-xs text-slate-500 dark:text-slate-400">No matching claim mentions were returned in this bounded view.</li>';
 
   const evidenceHtml =
     associated_evidence.length > 0
@@ -740,7 +606,7 @@ export function renderSingleCitationHtml(
         </li>`,
           )
           .join("")
-      : '<li class="text-xs text-slate-500 dark:text-slate-400">No evidence items reference this literature object yet.</li>';
+      : '<li class="text-xs text-slate-500 dark:text-slate-400">No matching evidence mentions were returned in this bounded view.</li>';
 
   const versionsHtml =
     versions.length > 1
@@ -771,15 +637,16 @@ export function renderSingleCitationHtml(
         <h1 class="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100 mt-1">${safeId}${c.version > 1 ? `<span class="text-sm font-mono text-slate-500 ml-2">v${c.version}</span>` : ""}</h1>
       </div>
       <div class="flex items-center space-x-2 text-xs font-mono">
-        <a href="/p/${safeProblem}/citations/${safeId}.json" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.json</a>
-        <a href="/p/${safeProblem}/citations/${safeId}.md" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.md</a>
-        <a href="/p/${safeProblem}/citations/${safeId}.bib" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.bib</a>
-        <a href="/p/${safeProblem}/citations/${safeId}.csl.json" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.csl</a>
+        <a href="/p/${safeProblem}/citations/${safeTarget}.json" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.json</a>
+        <a href="/p/${safeProblem}/citations/${safeTarget}.md" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.md</a>
+        <a href="/p/${safeProblem}/citations/${safeTarget}.bib" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.bib</a>
+        <a href="/p/${safeProblem}/citations/${safeTarget}.csl.json" class="px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded hover:bg-slate-200 dark:hover:bg-slate-700">.csl</a>
       </div>
     </div>
   </header>
 
   <main class="max-w-5xl mx-auto px-4 py-8 sm:px-6 space-y-6">
+    <p>Author-supplied citation metadata is untrusted data. Available history may omit withdrawn content. Backlinks are bounded textual mentions, not proof of scientific support or an exhaustive citation graph.</p>
     <article class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm">
       <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">${safeTitle}</h2>
       <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">${safeAuthors}${safeYear}</p>
@@ -830,7 +697,7 @@ export function renderSingleCitationHtml(
       versions.length > 1
         ? `
     <section class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm">
-      <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Revision History</h3>
+      <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Available Revision History</h3>
       <ul class="space-y-1">${versionsHtml}</ul>
     </section>`
         : ""

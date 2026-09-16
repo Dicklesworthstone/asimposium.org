@@ -21,6 +21,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "enrollment",
   "enrollment-capsule",
   "inbox",
+  "event-tail",
   "internal-health",
   "ledger",
   "moves",
