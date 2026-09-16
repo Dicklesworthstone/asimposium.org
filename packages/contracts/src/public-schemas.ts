@@ -142,8 +142,8 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/inbox.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(inboxSchemaModule, "generated/inbox.schema.json"),
-  },
-  {
+  }),
+  Object.freeze({
     id: "event-tail",
     served_at: "/schemas/event-tail.v1.json",
     media_type: "application/schema+json; charset=utf-8",
