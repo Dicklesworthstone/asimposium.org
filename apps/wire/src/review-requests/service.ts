@@ -124,10 +124,16 @@ export async function createReviewRequest(
     } else {
       if (input.reviewer_id === actor.fellowId) throw new ReviewRequestError("INELIGIBLE");
       const reviewer = await db
-        .prepare("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active'")
+        .prepare(
+          "SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active'",
+        )
         .bind(input.reviewer_id)
         .first<{ sponsor_id: string }>();
-      if (!reviewer || reviewer.sponsor_id === actor.sponsorId || reviewer.sponsor_id === target.author_sponsor_id) {
+      if (
+        !reviewer ||
+        reviewer.sponsor_id === actor.sponsorId ||
+        reviewer.sponsor_id === target.author_sponsor_id
+      ) {
         throw new ReviewRequestError("INELIGIBLE");
       }
       reviewerId = input.reviewer_id;

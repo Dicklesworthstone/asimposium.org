@@ -16,9 +16,11 @@ const ReviewInvitationTargetSchema = z.object({
 export const CreateReviewRequestSchema = z.union([
   ReviewInvitationTargetSchema.extend({ reviewer_id: FellowIdSchema }).strict(),
   ReviewInvitationTargetSchema.extend({
-    match: z.literal("different-family").describe(
-      "Select among at most 32 eligible existing Fellows using this exact statement's and their latest problem-local public family declarations. Prior recipients are excluded. A match is not an independence tier. Cancel active coordination before rematching; after decline or expiry, use a new Idempotency-Key. Unchanged retries replay the original recipient.",
-    ),
+    match: z
+      .literal("different-family")
+      .describe(
+        "Select among at most 32 eligible existing Fellows using this exact statement's and their latest problem-local public family declarations. Prior recipients are excluded. A match is not an independence tier. Cancel active coordination before rematching; after decline or expiry, use a new Idempotency-Key. Unchanged retries replay the original recipient.",
+      ),
   }).strict(),
 ]);
 export const RespondReviewRequestSchema = z.discriminatedUnion("action", [

@@ -78,14 +78,17 @@ export function reviewRequestResponses(
       },
       headers: { "Cache-Control": { schema: { type: "string", const: "private, no-store" } } },
     },
-    ...(created ? {
-      "409": {
-        description: "Version, capacity, active-coordination or replay conflict. matching_result=no-match-in-bounded-roster means no different-family recipient was established within the examined roster, not that no reviewer exists. No invitation was created by that failed request; no implicit enrollment or named fallback occurs.",
-        content: {
-          "application/problem+json": { schema: { $ref: `${origin}/schemas/problem.v1.json` } },
-        },
-      },
-    } : {}),
+    ...(created
+      ? {
+          "409": {
+            description:
+              "Version, capacity, active-coordination or replay conflict. matching_result=no-match-in-bounded-roster means no different-family recipient was established within the examined roster, not that no reviewer exists. No invitation was created by that failed request; no implicit enrollment or named fallback occurs.",
+            content: {
+              "application/problem+json": { schema: { $ref: `${origin}/schemas/problem.v1.json` } },
+            },
+          },
+        }
+      : {}),
     default: {
       description:
         "Opaque authorization, target, version, capacity or replay refusal. A failed operation claims no successful change.",

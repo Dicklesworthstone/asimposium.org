@@ -343,6 +343,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/review-invitation-pack.ts
   apps/wire/src/sessions/review-invitation-pack-service.ts
   apps/wire/src/review-requests/model.ts
+  apps/wire/src/review-requests/matching.ts
+  apps/wire/src/review-requests/matching-service.ts
+  apps/wire/src/review-requests/matching-sql.ts
   apps/wire/src/review-requests/router.ts
   apps/wire/src/review-requests/service.ts
   apps/wire/src/review-requests/store.ts

@@ -12,7 +12,7 @@ import { type Context, Hono } from "hono";
 import { readBoundedRequestBody } from "../auth/http.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
-import { validatedProblem } from "../http/envelope.ts";
+import { problem } from "../http/envelope.ts";
 import { ReviewMatchNotFoundError } from "./matching.ts";
 import { REVIEW_REQUEST_PAGE_SIZE, ReviewRequestError } from "./model.ts";
 import { createReviewRequest, respondReviewRequest, reviewRequestView } from "./service.ts";
@@ -29,7 +29,7 @@ function refusal(
   method: string,
 ): Response {
   const contract = code === "schema";
-  const response = validatedProblem({
+  const response = problem({
     status: contract
       ? 400
       : code === "auth"
@@ -51,26 +51,28 @@ function refusal(
               ? "INTERNAL_ERROR"
               : "OBJECT_VERSION_CONFLICT",
     title: "Review invitation request was not accepted",
-    detail: code === "match"
-      ? "No different-family reviewer was established within the bounded eligible roster. No invitation was created; this does not establish that no reviewer exists."
-      : contract
-      ? "Use the strict JSON contract and one Idempotency-Key on writes. Read queries accept only one opaque after request ID from your preceding page."
-      : code === "auth"
-        ? "An active authorization for this operation was not established."
-        : code === "missing"
-          ? "No accessible review invitation resource exists here."
-          : code === "unavailable"
-            ? "The review invitation operation is temporarily unavailable. No successful change is claimed."
-            : "The request conflicts with a recorded decision, target version, eligibility, capacity, or replay key.",
-    fixHint: code === "match"
-      ? "Use a known eligible reviewer_id instead, or retry matching after the roster changes. Do not fabricate family declarations or enroll a Fellow implicitly."
-      : contract
-      ? "Read /schemas/review-requests.v1.json. Do not send scientific status or reviewer-tier fields."
-      : code === "auth"
-        ? "Use an active sponsor-approved credential with the required scope and problem membership."
-        : code === "unavailable"
-          ? "Retry the unchanged write with the same Idempotency-Key."
-          : "Refresh your invitation list. Respond using the current version, and never change a request under its existing Idempotency-Key.",
+    detail:
+      code === "match"
+        ? "No different-family reviewer was established within the bounded eligible roster. No invitation was created; this does not establish that no reviewer exists."
+        : contract
+          ? "Use the strict JSON contract and one Idempotency-Key on writes. Read queries accept only one opaque after request ID from your preceding page."
+          : code === "auth"
+            ? "An active authorization for this operation was not established."
+            : code === "missing"
+              ? "No accessible review invitation resource exists here."
+              : code === "unavailable"
+                ? "The review invitation operation is temporarily unavailable. No successful change is claimed."
+                : "The request conflicts with a recorded decision, target version, eligibility, capacity, or replay key.",
+    fixHint:
+      code === "match"
+        ? "Use a known eligible reviewer_id instead, or retry matching after the roster changes. Do not fabricate family declarations or enroll a Fellow implicitly."
+        : contract
+          ? "Read /schemas/review-requests.v1.json. Do not send scientific status or reviewer-tier fields."
+          : code === "auth"
+            ? "Use an active sponsor-approved credential with the required scope and problem membership."
+            : code === "unavailable"
+              ? "Retry the unchanged write with the same Idempotency-Key."
+              : "Refresh your invitation list. Respond using the current version, and never change a request under its existing Idempotency-Key.",
     ...(contract
       ? {
           rule: "A5" as const,
@@ -80,10 +82,14 @@ function refusal(
           },
         }
       : {}),
-    ...(code === "match" ? { extensions: {
-      schema: REVIEW_REQUESTS_SCHEMA_ID,
-      matching_result: "no-match-in-bounded-roster",
-    } } : {}),
+    ...(code === "match"
+      ? {
+          extensions: {
+            schema: REVIEW_REQUESTS_SCHEMA_ID,
+            matching_result: "no-match-in-bounded-roster",
+          },
+        }
+      : {}),
     headers: {
       "cache-control": "private, no-store",
       ...(code === "unavailable" ? { "retry-after": "5" } : {}),
