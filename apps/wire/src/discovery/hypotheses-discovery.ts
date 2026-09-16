@@ -1,5 +1,9 @@
-/** Exact public surfaces, shared by capability census and OpenAPI. */
+import { PROOF_GAPS_PUBLIC_READS, proofGapParameters, proofGapResponses } from "./proof-gaps-discovery";
+
+/** Exact public scientific-history surfaces, shared by capability census and
+ * OpenAPI. These readers share the pre-wildcard mount in hypotheses-router. */
 export const HYPOTHESES_PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
+  ...PROOF_GAPS_PUBLIC_READS,
   "GET /p/:id/hypotheses.json":
     "Committed hypothesis routes and recorded eliminations, with snapshot-pinned admission pagination and original attribution.",
   "GET /p/:id/hypotheses.md":
@@ -11,6 +15,8 @@ function owns(path: string): boolean {
   return /^\/p\/\{id\}\/hypotheses\.(?:json|md|html)$/.test(path);
 }
 export function hypothesesParameters(path: string, origin: string): readonly unknown[] {
+  const gaps = proofGapParameters(path, origin);
+  if (gaps !== undefined) return gaps;
   if (!owns(path)) return [];
   return ["through", "after"].map((name) => ({
     name,
@@ -27,6 +33,8 @@ export function hypothesesResponses(
   path: string,
   origin: string,
 ): Readonly<Record<string, unknown>> | undefined {
+  const gaps = proofGapResponses(path, origin);
+  if (gaps !== undefined) return gaps;
   if (!owns(path)) return undefined;
   const media = path.endsWith(".json")
     ? "application/json"
