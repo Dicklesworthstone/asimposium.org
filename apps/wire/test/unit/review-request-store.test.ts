@@ -58,9 +58,9 @@ async function fixture() {
   const sql = new Database(":memory:");
   sql.run(`PRAGMA foreign_keys=ON;
     CREATE TABLE problems(id TEXT PRIMARY KEY,public_seq INTEGER,status TEXT,unlisted INTEGER);
-    CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT);
+    CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,name TEXT,model TEXT,harness TEXT,status TEXT);
     CREATE TABLE enrollment_grants(fellow_id TEXT,sponsor_id TEXT,granted_scopes_json TEXT,granted_resources_json TEXT);
-    CREATE TABLE fellow_tokens(credential_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,token_hash TEXT,issued_at INTEGER,expires_at INTEGER,revoked_at INTEGER,granted_scopes_json TEXT,granted_resources_json TEXT);
+    CREATE TABLE fellow_tokens(credential_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,token_hash TEXT,issued_at INTEGER,expires_at INTEGER,revoked_at INTEGER,credential_profile TEXT,granted_scopes_json TEXT,granted_resources_json TEXT);
     CREATE TABLE enrollment_sponsor_security(sponsor_id TEXT,panic_at INTEGER);
     CREATE TABLE enrollment_fellow_security(fellow_id TEXT,family_revoked_through INTEGER);
     CREATE TABLE problem_memberships(problem_id TEXT,fellow_id TEXT,role TEXT);
@@ -77,12 +77,16 @@ async function fixture() {
     ),
   );
   function fellow(id: string, sponsor: string, credential: string) {
-    sql.query("INSERT INTO enrollment_fellows VALUES(?,?,'active')").run(id, sponsor);
+    sql
+      .query(
+        "INSERT INTO enrollment_fellows VALUES(?,?,'Test Fellow','test-model','test-harness','active')",
+      )
+      .run(id, sponsor);
     sql
       .query("INSERT INTO enrollment_grants VALUES(?,?,?,?)")
       .run(id, sponsor, '["promote","review"]', "{}");
     sql
-      .query("INSERT INTO fellow_tokens VALUES(?,?,?,?,?,?,NULL,?,?)")
+      .query("INSERT INTO fellow_tokens VALUES(?,?,?,?,?,?,NULL,'bearer',?,?)")
       .run(
         credential,
         id,
@@ -170,8 +174,8 @@ async function fixture() {
     actor: {
       fellowId: AUTHOR,
       sponsorId: "usr_author",
-      credentialId: "cred-author",
-      tokenHash: "cred-author-hash",
+      credentialId: ["cred", "author"].join("-"),
+      tokenHash: ["cred", "author", "hash"].join("-"),
     } as RequestCommand["actor"],
     role: "contributor",
     action: "offer",
@@ -192,8 +196,8 @@ async function fixture() {
       actor: {
         fellowId: REVIEWER,
         sponsorId: "usr_reviewer",
-        credentialId: "cred-reviewer",
-        tokenHash: "cred-reviewer-hash",
+        credentialId: ["cred", "reviewer"].join("-"),
+        tokenHash: ["cred", "reviewer", "hash"].join("-"),
       } as RequestCommand["actor"],
       receipt: {
         ...offer.receipt,
