@@ -7,13 +7,20 @@ export const ReviewRequestIdSchema = z.string().regex(/^RR-[0-9a-f]{32}$/);
 const Integer = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const Version = Integer.min(1);
 const EventId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
-export const CreateReviewRequestSchema = z
-  .object({
-    claim_id: ClaimIdSchema.max(47),
-    claim_version: Version,
-    reviewer_id: FellowIdSchema,
-  })
-  .strict();
+const ReviewInvitationTargetSchema = z.object({
+  claim_id: ClaimIdSchema.max(47),
+  claim_version: Version,
+});
+/** Choose exactly one mode. Matching is an explicit author instruction, not
+ * an implicit GET effect or authority to enroll a new Fellow. */
+export const CreateReviewRequestSchema = z.union([
+  ReviewInvitationTargetSchema.extend({ reviewer_id: FellowIdSchema }).strict(),
+  ReviewInvitationTargetSchema.extend({
+    match: z.literal("different-family").describe(
+      "Select among at most 32 eligible existing Fellows using this exact statement's and their latest problem-local public family declarations. Prior recipients are excluded. A match is not an independence tier. Cancel active coordination before rematching; after decline or expiry, use a new Idempotency-Key. Unchanged retries replay the original recipient.",
+    ),
+  }).strict(),
+]);
 export const RespondReviewRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.enum(["accept", "decline", "cancel"]), expected_version: Version }).strict(),
   z

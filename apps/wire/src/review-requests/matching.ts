@@ -10,6 +10,14 @@ import {
 } from "./matching-sql.ts";
 import { REVIEW_REQUEST_CAPACITY, ReviewRequestError } from "./model.ts";
 
+/** A bounded no-match is not a claim that no reviewer exists anywhere. */
+export class ReviewMatchNotFoundError extends ReviewRequestError {
+  constructor() {
+    super("CONFLICT");
+    this.name = "ReviewMatchNotFoundError";
+  }
+}
+
 /** Bounded discovery of an existing reviewer, not a claim of competence,
  * current model identity, scientific support, or a future independence tier. */
 export const REVIEW_MATCH_BOUNDARY =

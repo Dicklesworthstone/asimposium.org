@@ -5,7 +5,7 @@ import type { ReviewRequestTarget } from "../../src/review-requests/target.ts";
 import { selectReviewMatch, type ReviewMatchDependencies } from "../../src/review-requests/matching.ts";
 
 export const MATCH_AUTHOR = `F-${"A".repeat(26)}`;
-export const matchFellow = (n: number) => `F-${n.toString(16).padStart(26, "0")}`;
+export const matchFellow = (n: number) => `F-${n.toString(16).toUpperCase().padStart(26, "0")}`;
 export const matchHash = (s: string) => createHash("sha256").update(s).digest("hex");
 // This is a real SQLite query fixture, not a production enrollment/science
 // acceptance proof. Only schema decoding and central-policy decisions are
@@ -20,7 +20,7 @@ export const matchTestDependencies: ReviewMatchDependencies = {
   mayReview: () => true,
 };
 
-export function reviewMatchingFixture() {
+export function reviewMatchingFixture(now = 1_000_000) {
   const sqlite = new Database(":memory:");
   sqlite.exec(`
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
@@ -52,7 +52,6 @@ export function reviewMatchingFixture() {
       response_ciphertext TEXT,response_initialization_vector TEXT,expires_at INTEGER,PRIMARY KEY(fellow_id,idempotency_key));
     INSERT INTO problems VALUES('P-DEMO','active',0,1000),('P-OTHER','active',0,1000);
   `);
-  const now = 1_000_000;
   const calls: string[] = [];
   type Statement = { sql: string; args: unknown[]; bind(...args: unknown[]): Statement;
     all(): Promise<{ results: unknown[] }>; first(): Promise<unknown>; run(): Promise<{meta:{changes:number}}> };

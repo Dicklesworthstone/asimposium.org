@@ -7,6 +7,8 @@ import {
 } from "@asimposium/contracts/review-requests";
 import type { D1Database } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
+import { type ReviewMatch, ReviewMatchNotFoundError } from "./matching.ts";
+import { matchReviewRecipient } from "./matching-service.ts";
 import {
   effectiveReviewRequestStatus,
   mayCoordinateReviewRequest,
@@ -106,51 +108,71 @@ export async function createReviewRequest(
   const digest = await hashText(JSON.stringify({ problem, action: "offer", input }));
   const prior = await requestReplay(db, protector, actor.fellowId, key, digest, now);
   if (prior) return ReviewRequestReceiptSchema.parse(prior);
-  const target = await readReviewRequestTarget(db, problem, input.claim_id, input.claim_version);
-  if (target.author_id !== actor.fellowId || input.reviewer_id === actor.fellowId)
-    throw new ReviewRequestError("INELIGIBLE");
-  const reviewer = await db
-    .prepare("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active'")
-    .bind(input.reviewer_id)
-    .first<{ sponsor_id: string }>();
-  if (
-    !reviewer ||
-    reviewer.sponsor_id === actor.sponsorId ||
-    reviewer.sponsor_id === target.author_sponsor_id
-  ) {
-    throw new ReviewRequestError("INELIGIBLE");
+  try {
+    const target = await readReviewRequestTarget(db, problem, input.claim_id, input.claim_version);
+    // Never inspect another Fellow's eligible recipients before proving the
+    // requester authored this exact target. Matching does not delegate authorship.
+    if (target.author_id !== actor.fellowId) throw new ReviewRequestError("INELIGIBLE");
+    let match: ReviewMatch | null = null;
+    let reviewerId: string;
+    let reviewerSponsor: string;
+    if ("match" in input) {
+      match = await matchReviewRecipient(db, problem, target, actor.sponsorId, now);
+      if (match === null) throw new ReviewMatchNotFoundError();
+      reviewerId = match.reviewerId;
+      reviewerSponsor = match.reviewerSponsor;
+    } else {
+      if (input.reviewer_id === actor.fellowId) throw new ReviewRequestError("INELIGIBLE");
+      const reviewer = await db
+        .prepare("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active'")
+        .bind(input.reviewer_id)
+        .first<{ sponsor_id: string }>();
+      if (!reviewer || reviewer.sponsor_id === actor.sponsorId || reviewer.sponsor_id === target.author_sponsor_id) {
+        throw new ReviewRequestError("INELIGIBLE");
+      }
+      reviewerId = input.reviewer_id;
+      reviewerSponsor = reviewer.sponsor_id;
+    }
+    const receipt = ReviewRequestReceiptSchema.parse({
+      schema: REQUEST_SCHEMA,
+      request_id: freshRequestId("RR"),
+      problem_id: problem,
+      claim_id: input.claim_id,
+      claim_version: input.claim_version,
+      claim_event_id: target.pin.event_id,
+      claim_payload_sha256: target.pin.digest,
+      author_id: target.author_id,
+      reviewer_id: reviewerId,
+      version: 1,
+      status: "offered",
+      created_at: now,
+      updated_at: now,
+      expires_at: now + REVIEW_OFFER_MS,
+      review_event_id: null,
+    });
+    return await commitRequest(db, protector, {
+      receipt,
+      actor,
+      role: authority.role,
+      action: "offer",
+      scope: "promote",
+      cursor: target.cursor,
+      authorSponsor: target.author_sponsor_id,
+      reviewerSponsor,
+      pins: match === null ? [target.pin] : [target.pin, match.provenancePin],
+      ...(match === null ? {} : { match: match.eligibility }),
+      idempotencyKey: key,
+      requestDigest: digest,
+      eventId: freshRequestId("RRE"),
+    });
+  } catch (error) {
+    // A same-key winner can settle between the replay read and selection (or
+    // change the target's active-request check). Return that exact winner;
+    // never rematch a retry or cascade through alternate recipients here.
+    const raced = await requestReplay(db, protector, actor.fellowId, key, digest, now);
+    if (raced) return ReviewRequestReceiptSchema.parse(raced);
+    throw error;
   }
-  const receipt = ReviewRequestReceiptSchema.parse({
-    schema: REQUEST_SCHEMA,
-    request_id: freshRequestId("RR"),
-    problem_id: problem,
-    claim_id: input.claim_id,
-    claim_version: input.claim_version,
-    claim_event_id: target.pin.event_id,
-    claim_payload_sha256: target.pin.digest,
-    author_id: target.author_id,
-    reviewer_id: input.reviewer_id,
-    version: 1,
-    status: "offered",
-    created_at: now,
-    updated_at: now,
-    expires_at: now + REVIEW_OFFER_MS,
-    review_event_id: null,
-  });
-  return commitRequest(db, protector, {
-    receipt,
-    actor,
-    role: authority.role,
-    action: "offer",
-    scope: "promote",
-    cursor: target.cursor,
-    authorSponsor: target.author_sponsor_id,
-    reviewerSponsor: reviewer.sponsor_id,
-    pins: [target.pin],
-    idempotencyKey: key,
-    requestDigest: digest,
-    eventId: freshRequestId("RRE"),
-  });
 }
 export async function respondReviewRequest(
   db: D1Database,

@@ -13,6 +13,7 @@ import { readBoundedRequestBody } from "../auth/http.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
+import { ReviewMatchNotFoundError } from "./matching.ts";
 import { REVIEW_REQUEST_PAGE_SIZE, ReviewRequestError } from "./model.ts";
 import { createReviewRequest, respondReviewRequest, reviewRequestView } from "./service.ts";
 import { listRequests, REQUEST_NOTICE, type ReplayProtector, readRequest } from "./store.ts";
@@ -24,7 +25,7 @@ interface Options {
 }
 const PATH = "/v1/p/:problem/review-requests";
 function refusal(
-  code: "schema" | "auth" | "missing" | "conflict" | "replay" | "unavailable",
+  code: "schema" | "auth" | "missing" | "conflict" | "replay" | "unavailable" | "match",
   method: string,
 ): Response {
   const contract = code === "schema";
@@ -50,7 +51,9 @@ function refusal(
               ? "INTERNAL_ERROR"
               : "OBJECT_VERSION_CONFLICT",
     title: "Review invitation request was not accepted",
-    detail: contract
+    detail: code === "match"
+      ? "No different-family reviewer was established within the bounded eligible roster. No invitation was created; this does not establish that no reviewer exists."
+      : contract
       ? "Use the strict JSON contract and one Idempotency-Key on writes. Read queries accept only one opaque after request ID from your preceding page."
       : code === "auth"
         ? "An active authorization for this operation was not established."
@@ -59,7 +62,9 @@ function refusal(
           : code === "unavailable"
             ? "The review invitation operation is temporarily unavailable. No successful change is claimed."
             : "The request conflicts with a recorded decision, target version, eligibility, capacity, or replay key.",
-    fixHint: contract
+    fixHint: code === "match"
+      ? "Use a known eligible reviewer_id instead, or retry matching after the roster changes. Do not fabricate family declarations or enroll a Fellow implicitly."
+      : contract
       ? "Read /schemas/review-requests.v1.json. Do not send scientific status or reviewer-tier fields."
       : code === "auth"
         ? "Use an active sponsor-approved credential with the required scope and problem membership."
@@ -75,6 +80,10 @@ function refusal(
           },
         }
       : {}),
+    ...(code === "match" ? { extensions: {
+      schema: REVIEW_REQUESTS_SCHEMA_ID,
+      matching_result: "no-match-in-bounded-roster",
+    } } : {}),
     headers: {
       "cache-control": "private, no-store",
       ...(code === "unavailable" ? { "retry-after": "5" } : {}),
@@ -200,6 +209,7 @@ export function createReviewRequestRouter(options: Options): Hono<{ Bindings: En
       );
       return respond(c, ReviewRequestReceiptSchema.parse(result));
     } catch (error) {
+      if (error instanceof ReviewMatchNotFoundError) return refusal("match", c.req.method);
       const code = error instanceof ReviewRequestError ? error.code : "UNAVAILABLE";
       return refusal(
         code === "NOT_FOUND"
