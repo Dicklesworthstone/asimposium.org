@@ -1,22 +1,23 @@
-import type {
-  FellowLifecycleStatus,
-  HelloAssignment,
-  MoveKind,
-  NextMoveCandidate,
-  ProblemAdmissionMode,
-  ProblemRole,
+import {
+  type FellowLifecycleStatus,
+  getMoveTemplate,
+  type HelloAssignment,
+  type MoveKind,
+  type NextMoveCandidate,
+  type ProblemAdmissionMode,
+  type ProblemRole,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { loadReviewQueue } from "../discovery/review-queue-service.ts";
+import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
+import { LedgerMovesProvider } from "./live-provider.ts";
 
-/**
- * Moves that create, mutate, or promote ledger objects.
- * Observers and viewers without promote permission must NEVER be offered these moves (Axiom 6, Rule A2/A9).
- */
+/** Moves needing promotion permission. Reviews have their own scope and are
+ * permitted for observers by centralized Fellow authorization (Fable §9.3). */
 export const PROMOTION_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
   "sharpen-statement",
   "state-claim",
   "add-refuter",
-  "review",
   "third-alternative",
   "discriminate",
   "kill-or-stand",
@@ -38,12 +39,15 @@ export interface ProblemMovesRequest {
   readonly role: ProblemRole | "none";
   readonly effectivePermissions: Record<string, boolean>;
   readonly db?: D1Database;
+  /** Server-authenticated binding, never request JSON. */
+  readonly credential?: FellowCredentialBinding;
 }
 
 export interface TriageMovesRequest {
   readonly fellowId: string;
   readonly assignments: readonly HelloAssignment[];
   readonly db?: D1Database;
+  readonly credential?: FellowCredentialBinding;
 }
 
 export interface ProblemMovesResult {
@@ -52,6 +56,8 @@ export interface ProblemMovesResult {
   readonly degraded: boolean;
   readonly degradedReason?: string;
   readonly selectionBoundary?: string;
+  /** Production's current central-policy snapshot replaces coarse UI hints. */
+  readonly effectivePermissions?: Record<string, boolean>;
 }
 
 export interface TriageMovesResult {
@@ -66,11 +72,8 @@ export interface MegaCommandsMoveProvider {
   triageMove(request: TriageMovesRequest): Promise<TriageMovesResult>;
 }
 
-/**
- * Computes effective permissions for a Fellow viewing a problem.
- * Observers never get promote: true.
- * Paused/revoked Fellows get all write/session permissions false.
- */
+/** Coarse role hints for test providers. Production rechecks centralized
+ * authorization with the authenticated grant, current membership and usage. */
 export function computeViewerPermissions(input: {
   readonly fellowStatus: FellowLifecycleStatus;
   readonly role: ProblemRole | "none";
@@ -79,109 +82,52 @@ export function computeViewerPermissions(input: {
   readonly problemId: string;
 }): Record<string, boolean> {
   const { fellowStatus, role, admissionMode = "open", problemBinding, problemId } = input;
-
-  if (fellowStatus !== "active") {
-    return {
-      read: true,
-      session_open: false,
-      workshop_push: false,
-      promote: false,
-      review: false,
-    };
+  if (fellowStatus !== "active" ||
+      (problemBinding !== undefined && problemBinding !== problemId)) {
+    return { read: true, session_open: false, workshop_push: false, promote: false, review: false };
   }
-
-  if (problemBinding !== undefined && problemBinding !== problemId) {
-    return {
-      read: true,
-      session_open: false,
-      workshop_push: false,
-      promote: false,
-      review: false,
-    };
-  }
-
   const isMember = role !== "none";
-  const isObserver = role === "observer";
-  const canPromote = isMember && !isObserver;
-  const canOpenSession = isMember || admissionMode === "open";
-
   return {
     read: true,
-    session_open: canOpenSession,
+    session_open: isMember || admissionMode === "open",
     workshop_push: isMember,
-    promote: canPromote,
-    review: canPromote,
+    promote: isMember && role !== "observer",
+    review: isMember,
   };
 }
 
-/**
- * Deterministic candidate tie-breaker:
- * Sorts by move kind alphabetically, then why, then first ref.
- */
+/** Deterministic ordering for contract fixtures only; production ranks the
+ * canonical scientific needs, not the alphabetical spelling of move kinds. */
 export function compareCandidates(a: NextMoveCandidate, b: NextMoveCandidate): number {
   const moveCmp = a.move.localeCompare(b.move);
   if (moveCmp !== 0) return moveCmp;
   const whyCmp = a.why.localeCompare(b.why);
   if (whyCmp !== 0) return whyCmp;
-  const refA = a.refs[0] ?? "";
-  const refB = b.refs[0] ?? "";
-  return refA.localeCompare(refB);
+  return (a.refs[0] ?? "").localeCompare(b.refs[0] ?? "");
 }
 
-/**
- * Filters move candidates by the viewer's effective permissions.
- * Drops promote moves if promote: false.
- * Drops session-requiring moves if session_open: false.
- * Caps alternatives at 2.
- */
 export function filterMovesByPermissions(
   candidates: readonly NextMoveCandidate[],
   effectivePermissions: Record<string, boolean>,
 ): readonly NextMoveCandidate[] {
-  const canPromote = effectivePermissions.promote === true;
-  const canOpenSession = effectivePermissions.session_open === true;
-
   return candidates.filter((candidate) => {
-    if (PROMOTION_MOVE_KINDS.has(candidate.move) && !canPromote) {
-      return false;
-    }
-    if (candidate.move === "idle-close" && !canOpenSession) {
-      return false;
-    }
+    if (PROMOTION_MOVE_KINDS.has(candidate.move) && effectivePermissions.promote !== true) return false;
+    if (candidate.move === "review" && effectivePermissions.review !== true) return false;
+    if (effectivePermissions.session_open !== true) return false;
     return true;
   });
 }
 
-/**
- * Truthful production default (bead asimposiumorg-bbx):
- * Before W9.4 is installed, it must never fabricate a highest-value move.
- * Returns degraded: true with explicit reason.
- */
-export class TruthfulProductionMovesProvider implements MegaCommandsMoveProvider {
-  async nextMoves(_request: ProblemMovesRequest): Promise<ProblemMovesResult> {
-    return {
-      primaryMove: null,
-      alternatives: [],
-      degraded: true,
-      degradedReason: "W9_MOVES_ENGINE_NOT_INSTALLED",
-      selectionBoundary: "w6-envelope-only",
-    };
-  }
-
-  async triageMove(_request: TriageMovesRequest): Promise<TriageMovesResult> {
-    return {
-      move: null,
-      degraded: true,
-      degradedReason: "W9_MOVES_ENGINE_NOT_INSTALLED",
-      selectionBoundary: "w6-envelope-only",
-    };
+/** Real, bounded production selection. No fixture provider or alternate
+ * scientific evaluator is reachable from request data. */
+export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
+  constructor() {
+    super({ loadQueue: loadReviewQueue, templateFor: getMoveTemplate,
+      authorize: authorizeFellowWrite, now: () => Date.now() });
   }
 }
 
-/**
- * Contract fixture provider for unit/integration testing.
- * Provides pre-configured candidates while strictly enforcing permission filtering.
- */
+/** Contract fixture provider. Never the production default. */
 export class ContractFixtureMovesProvider implements MegaCommandsMoveProvider {
   constructor(
     private readonly fixtures: {
@@ -194,12 +140,9 @@ export class ContractFixtureMovesProvider implements MegaCommandsMoveProvider {
     const rawCandidates = this.fixtures.problemMoves?.[request.problemId] ?? [];
     const filtered = filterMovesByPermissions(rawCandidates, request.effectivePermissions);
     const sorted = [...filtered].sort(compareCandidates);
-    const primaryMove = sorted[0] ?? null;
-    const alternatives = sorted.slice(1, 3);
-
     return {
-      primaryMove,
-      alternatives,
+      primaryMove: sorted[0] ?? null,
+      alternatives: sorted.slice(1, 3),
       degraded: false,
       selectionBoundary: "contract-fixture-provider",
     };
@@ -207,32 +150,14 @@ export class ContractFixtureMovesProvider implements MegaCommandsMoveProvider {
 
   async triageMove(request: TriageMovesRequest): Promise<TriageMovesResult> {
     const candidate = this.fixtures.triageMoves?.[request.fellowId] ?? null;
-    if (candidate === null) {
-      return {
-        move: null,
-        degraded: false,
-        selectionBoundary: "contract-fixture-provider",
-      };
-    }
-
-    // Check candidate against assignments if candidate refs name a problem
+    if (candidate === null) return { move: null, degraded: false, selectionBoundary: "contract-fixture-provider" };
     const problemRef = candidate.refs.find((ref) => ref.startsWith("P-"));
     if (problemRef !== undefined) {
       const assignment = request.assignments.find((a) => a.problem_id === problemRef);
-      const isObserver = assignment?.role === "observer";
-      if (isObserver && PROMOTION_MOVE_KINDS.has(candidate.move)) {
-        return {
-          move: null,
-          degraded: false,
-          selectionBoundary: "contract-fixture-provider-permission-filtered",
-        };
+      if (assignment?.role === "observer" && PROMOTION_MOVE_KINDS.has(candidate.move)) {
+        return { move: null, degraded: false, selectionBoundary: "contract-fixture-provider-permission-filtered" };
       }
     }
-
-    return {
-      move: candidate,
-      degraded: false,
-      selectionBoundary: "contract-fixture-provider",
-    };
+    return { move: candidate, degraded: false, selectionBoundary: "contract-fixture-provider" };
   }
 }

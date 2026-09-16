@@ -44,6 +44,8 @@ import {
   eventTailResponses,
 } from "./event-tail-discovery";
 
+import { REVIEW_QUEUE_PUBLIC_READS, reviewQueueParameters, reviewQueueResponses } from "./review-queue-discovery";
+
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
 
@@ -140,6 +142,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
 /** One honest line per disclosed surface; omission here would be the lie. */
 const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   ...EVENT_TAIL_PUBLIC_READS,
+  ...REVIEW_QUEUE_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -598,6 +601,7 @@ export function generateWellKnownDocument(origins: DiscoveryOrigins = DISCOVERY_
       capabilities: "/capabilities",
       schema_index: "/schemas/index.json",
       problem_index: "/problems.json",
+      review_queue: "/reviews.json",
       cursor: "/cursor",
       enroll_capsule: "/join/<enrollment-id>",
       device_flow: ["/v1/device-code", "/v1/device-token"],
@@ -621,6 +625,8 @@ function responseFor(
   openApiPath: string,
   origins: DiscoveryOrigins,
 ): Readonly<Record<string, unknown>> {
+  const queue = reviewQueueResponses(openApiPath, origins.agent);
+  if (queue !== undefined) return queue;
   const tail = eventTailResponses(openApiPath, origins.agent);
   if (tail !== undefined) return tail;
   const media = openApiPath.endsWith(".md")
@@ -752,6 +758,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     "x-asimposium-auth": operation.auth,
     parameters: [
       ...eventTailParameters(operation.openApiPath, origins.agent),
+      ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {

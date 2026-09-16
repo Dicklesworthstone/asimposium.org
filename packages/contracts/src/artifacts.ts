@@ -74,6 +74,7 @@ import {
   type SponsorPanicResponse,
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
+import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
 import { generatedEventTailArtifact } from "./event-tail-artifact.ts";
 import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardQuerySchema, FellowCardResponseSchema } from "./fellow-card.ts";
@@ -820,6 +821,7 @@ function generatedMovesTypes(): string {
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     generatedEventTailArtifact(),
+    generatedReviewQueueArtifact(),
     {
       relativePath: "generated/dead-ends.schema.json",
       content: formatJson({

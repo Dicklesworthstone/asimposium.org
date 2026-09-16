@@ -28,6 +28,12 @@ import {
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
+import {
+  type ReviewQueueResponse,
+  ReviewQueueQuerySchema,
+  ReviewQueueResponseSchema,
+} from "@asimposium/contracts/review-queue";
+import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
 import { deadEndsMatchView } from "./dead-end-view";
 import { configuredStoaOrigin } from "./stoa";
 
@@ -344,6 +350,21 @@ export async function stoaFetchDeadEnds(
   );
   if (result.state !== "ok") return result;
   return deadEndsMatchView(problemId, result.data, includeSuperseded)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Anonymous review discovery shares the same bounded, uncached public-read seam. */
+export async function stoaFetchReviewQueue(
+  query: unknown = {},
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<ReviewQueueResponse>> {
+  const parsed = ReviewQueueQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const suffix = humanReviewQueuePath(parsed.data).slice("/reviews".length);
+  const result = await readPublic(`/reviews.json${suffix}`, stoaOrigin, ReviewQueueResponseSchema, 0);
+  if (result.state !== "ok") return result;
+  return reviewQueueMatchesQuery(parsed.data, result.data)
     ? result
     : { state: "unavailable", reason: "invalid_response" };
 }

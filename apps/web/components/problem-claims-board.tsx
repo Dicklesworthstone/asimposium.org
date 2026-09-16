@@ -21,6 +21,7 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
           ? "No readable public claims are available in this digest."
           : `${rows.length} public ${rows.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
       </p>
+      <p><Link href="/reviews" prefetch={false}>Find public work needing independent review</Link></p>
       {rows.length > 0 && (
         <>
           <p className="quiet">
