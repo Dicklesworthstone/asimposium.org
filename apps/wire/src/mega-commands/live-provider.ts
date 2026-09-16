@@ -3,12 +3,9 @@ import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
-import {
-  type HypothesisMoveSource,
-  selectThirdAlternative,
-} from "./hypothesis-moves.ts";
+import { GAP_MOVES_BOUNDARY, type GapMoveSource, withGapMove } from "./gap-moves.ts";
+import { type HypothesisMoveSource, selectThirdAlternative } from "./hypothesis-moves.ts";
 import { type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey } from "./ledger-moves.ts";
-import { type GapMoveSource, GAP_MOVES_BOUNDARY, withGapMove } from "./gap-moves.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -215,7 +212,12 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     let result: Awaited<ReturnType<typeof loadLedgerMoves>>;
     try {
       result = await loadLedgerMoves(
-        db, problemId, credential, effectivePermissions, this.dependencies, row.cursor,
+        db,
+        problemId,
+        credential,
+        effectivePermissions,
+        this.dependencies,
+        row.cursor,
       );
     } catch (error) {
       // A failing review source cannot erase independently readable gap work.
@@ -223,10 +225,24 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       if (!this.dependencies.gaps) throw error;
       result = { items: [], moves: [], degraded: true, continuation: null };
     }
-    const selected = await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, result);
+    const selected = await this.withHypotheses(
+      db,
+      problemId,
+      row.cursor,
+      effectivePermissions,
+      result,
+    );
     return {
       ...result,
-      ...(await withGapMove(db, problemId, row.cursor, now, effectivePermissions, selected, this.dependencies.gaps)),
+      ...(await withGapMove(
+        db,
+        problemId,
+        row.cursor,
+        now,
+        effectivePermissions,
+        selected,
+        this.dependencies.gaps,
+      )),
       role,
       effectivePermissions,
     };

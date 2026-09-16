@@ -6,8 +6,12 @@ import {
   hypothesesResponses,
 } from "../../src/discovery/hypotheses-discovery";
 
-test("the hypothesis census advertises only the three mounted public reading faces", () => {
+test("the scientific-history census advertises the mounted proof-gap and hypothesis public reading faces", () => {
   assert.deepEqual(Object.keys(HYPOTHESES_PUBLIC_READS), [
+    "GET /p/:id/gaps",
+    "GET /p/:id/gaps.json",
+    "GET /p/:id/gaps.md",
+    "GET /p/:id/gaps.html",
     "GET /p/:id/hypotheses.json",
     "GET /p/:id/hypotheses.md",
     "GET /p/:id/hypotheses.html",

@@ -1,7 +1,7 @@
 import { GapFileRequestSchema, GapTransitionRequestSchema } from "@asimposium/contracts";
-import { ProofGapsResponseSchema, type ProofGapsQuery } from "@asimposium/contracts/proof-gaps";
+import { type ProofGapsQuery, ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
 import type { D1Database } from "@cloudflare/workers-types";
-import { readProofGaps, type ProofGapDecoders } from "./proof-gaps-read.ts";
+import { type ProofGapDecoders, readProofGaps } from "./proof-gaps-read.ts";
 
 const decoders: ProofGapDecoders = {
   filed(value) {
@@ -23,7 +23,12 @@ const decoders: ProofGapDecoders = {
   },
 };
 
-export async function loadProofGaps(db: D1Database, problem: string, query: ProofGapsQuery = {}, unownedAt?: string) {
+export async function loadProofGaps(
+  db: D1Database,
+  problem: string,
+  query: ProofGapsQuery = {},
+  unownedAt?: string,
+) {
   const result = await readProofGaps(db, problem, query, decoders, unownedAt);
   return { ...result, face: ProofGapsResponseSchema.parse(result.face) };
 }

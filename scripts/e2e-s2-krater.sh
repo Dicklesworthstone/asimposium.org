@@ -232,6 +232,10 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/generated/review-queue.schema.json
   packages/contracts/src/hypotheses.ts
   packages/contracts/src/hypotheses-schema.ts
+  packages/contracts/src/review-requests.ts
+  packages/contracts/src/review-requests-artifact.ts
+  packages/contracts/src/proof-gaps.ts
+  packages/contracts/src/proof-gaps-schema.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -268,6 +272,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/discovery/review-queue-selection.ts
   apps/wire/src/discovery/review-queue-service.ts
   apps/wire/src/discovery/review-queue-sql.ts
+  apps/wire/src/discovery/review-queue-admissions.ts
+  apps/wire/src/discovery/review-requests-discovery.ts
+  apps/wire/src/discovery/proof-gaps-discovery.ts
   apps/wire/src/auth/canonical.ts
   apps/wire/src/auth/envelope.ts
   apps/wire/src/auth/http.ts
@@ -308,6 +315,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/hypotheses-read.ts
   apps/wire/src/ledger/hypotheses-router.ts
   apps/wire/src/ledger/hypotheses-service.ts
+  apps/wire/src/ledger/proof-gaps-face.ts
+  apps/wire/src/ledger/proof-gaps-read.ts
+  apps/wire/src/ledger/proof-gaps-router.ts
+  apps/wire/src/ledger/proof-gaps-service.ts
   apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
@@ -325,8 +336,17 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
+  apps/wire/src/sessions/router-core.ts
   apps/wire/src/sessions/quota.ts
   apps/wire/src/sessions/ledger-pack.ts
+  apps/wire/src/sessions/review-pack.ts
+  apps/wire/src/sessions/review-invitation-pack.ts
+  apps/wire/src/sessions/review-invitation-pack-service.ts
+  apps/wire/src/review-requests/model.ts
+  apps/wire/src/review-requests/router.ts
+  apps/wire/src/review-requests/service.ts
+  apps/wire/src/review-requests/store.ts
+  apps/wire/src/review-requests/target.ts
   apps/wire/src/split/policy.ts
   apps/wire/src/search/router.ts
   apps/wire/src/search/markdown.ts
@@ -336,9 +356,12 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/inbox/markdown.ts
   apps/wire/src/inbox/router.ts
   apps/wire/src/inbox/store.ts
+  apps/wire/src/inbox/review-invitation-link.ts
   apps/wire/src/mega-commands/ledger-moves.ts
   apps/wire/src/mega-commands/live-provider.ts
   apps/wire/src/mega-commands/hypothesis-moves.ts
+  apps/wire/src/mega-commands/gap-moves.ts
+  apps/wire/src/mega-commands/gap-moves-service.ts
   apps/wire/src/mega-commands/markdown.ts
   apps/wire/src/mega-commands/provider.ts
   apps/wire/src/mega-commands/router.ts

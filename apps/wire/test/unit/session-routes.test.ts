@@ -5629,7 +5629,7 @@ describe("session protocol routes", () => {
 
   test("PLANTED: session policy ordering is replay, target reads, policy, then mutation", () => {
     const routerSource = readFileSync(
-      resolve(import.meta.dir, "../../src/sessions/router.ts"),
+      resolve(import.meta.dir, "../../src/sessions/router-core.ts"),
       "utf8",
     );
     const openStart = routerSource.indexOf('app.post("/v1/sessions",');
@@ -8615,7 +8615,7 @@ describe("session protocol routes", () => {
     // denial sites route through the one shared builder and that no per-route
     // refusal body exists to drift back into.
     const routerSource = readFileSync(
-      resolve(import.meta.dir, "../../src/sessions/router.ts"),
+      resolve(import.meta.dir, "../../src/sessions/router-core.ts"),
       "utf8",
     );
     const workshopStart = routerSource.indexOf('app.post("/v1/sessions/:id/workshop"');

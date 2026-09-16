@@ -7,6 +7,7 @@ import {
   reviewTargetKey,
 } from "../mega-commands/ledger-moves";
 import type { ReviewInvitationPack } from "./review-invitation-pack";
+import { loadReviewInvitationPack } from "./review-invitation-pack-service";
 
 export interface ReviewPackSection {
   candidates: PackCandidate[];
@@ -135,9 +136,7 @@ export async function readReviewSelectionPack(
   try {
     const privateSection = await (invitations
       ? invitations()
-      : import("./review-invitation-pack-service").then((module) =>
-          module.loadReviewInvitationPack(db, problemId, reviewer.fellowId),
-        ));
+      : loadReviewInvitationPack(db, problemId, reviewer.fellowId));
     // The review-queue profile includes these private coordination records;
     // working packs consume only targets and retain their existing move path.
     // Invitations never reorder scientific targets or mint a review verdict.

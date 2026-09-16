@@ -411,7 +411,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.move?.move).toBe("state-claim");
     expect(parsed.move?.refs).toEqual(["P-TRIAGE1"]);
     expect(parsed.selection_boundary).toBeDefined();
-    expect(parsed.selection_boundary?.toLowerCase()).toContain("not a global optimum");
+    expect(parsed.selection_boundary?.toLowerCase()).toContain("triage examines at most");
   });
 
   test("GET /v1/triage with custom provider returns selected move", async () => {

@@ -39,7 +39,11 @@ import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
-export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze(["hypotheses", "proof-gaps", "review-requests"] as const);
+export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
+  "hypotheses",
+  "proof-gaps",
+  "review-requests",
+] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "citations",

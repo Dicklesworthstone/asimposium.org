@@ -131,7 +131,7 @@ test("a lost batch response recovers the committed match and does not send a sec
   const {f,c,p}=await prepared(); try {
     const db={prepare:f.db.prepare.bind(f.db),async batch(statements:Parameters<D1Database["batch"]>[0]){
       await f.db.batch(statements); throw new Error("lost response");
-    }} as D1Database;
+    }} as unknown as D1Database;
     assert.deepEqual(await commitRequest(db,p,c),c.receipt);
     assert.deepEqual(counts(f),[1,1,1,1]);
     assert.deepEqual(await commitRequest(f.db,p,c),c.receipt);

@@ -1,4 +1,8 @@
-import { PROOF_GAPS_PUBLIC_READS, proofGapParameters, proofGapResponses } from "./proof-gaps-discovery";
+import {
+  PROOF_GAPS_PUBLIC_READS,
+  proofGapParameters,
+  proofGapResponses,
+} from "./proof-gaps-discovery";
 
 /** Exact public scientific-history surfaces, shared by capability census and
  * OpenAPI. These readers share the pre-wildcard mount in hypotheses-router. */

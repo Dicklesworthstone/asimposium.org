@@ -1964,6 +1964,315 @@
         "security": []
       }
     },
+    "/p/{id}/gaps": {
+      "get": {
+        "summary": "Redirect to canonical gap-history Markdown, preserving query parameters.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "308": {
+            "description": "Canonical Markdown face with the original query.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Typed refusal for an invalid problem identifier."
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Captured public problem cursor. Later events are excluded; present-day visibility and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original filing sequence. Keep through unchanged and follow next_after. Eight admissions per page, including withheld records. Cannot be combined with target.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "description": "Exact G-n gap identifier. Reads one recorded obligation directly without walking earlier pages. Cannot be combined with after.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/target"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/gaps.html": {
+      "get": {
+        "summary": "HTML reading face of the same gap snapshot, including unavailable content and recorded settlements.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Recorded gap history at one cursor. Closed-by is a recorded reference, not a verified deduction. Unlisted reads are private; unavailable content is explicit.",
+            "content": {
+              "text/html": {}
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "description": "Canonical and next URLs retain the exact snapshot and selected representation.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged after current content and privacy checks; no body."
+          },
+          "default": {
+            "description": "Typed refusal. Do not advance a saved cursor on failure.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Captured public problem cursor. Later events are excluded; present-day visibility and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original filing sequence. Keep through unchanged and follow next_after. Eight admissions per page, including withheld records. Cannot be combined with target.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "description": "Exact G-n gap identifier. Reads one recorded obligation directly without walking earlier pages. Cannot be combined with after.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/target"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/gaps.json": {
+      "get": {
+        "summary": "Committed proof obligations and recorded settlements, with exact targets, original attribution and snapshot pagination.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Recorded gap history at one cursor. Closed-by is a recorded reference, not a verified deduction. Unlisted reads are private; unavailable content is explicit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/response"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "description": "Canonical and next URLs retain the exact snapshot and selected representation.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged after current content and privacy checks; no body."
+          },
+          "default": {
+            "description": "Typed refusal. Do not advance a saved cursor on failure.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Captured public problem cursor. Later events are excluded; present-day visibility and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original filing sequence. Keep through unchanged and follow next_after. Eight admissions per page, including withheld records. Cannot be combined with target.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "description": "Exact G-n gap identifier. Reads one recorded obligation directly without walking earlier pages. Cannot be combined with after.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/target"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
+    "/p/{id}/gaps.md": {
+      "get": {
+        "summary": "Proof obligations and settlement history as fenced canonical Markdown. Closure is not independent verification.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Recorded gap history at one cursor. Closed-by is a recorded reference, not a verified deduction. Unlisted reads are private; unavailable content is explicit.",
+            "content": {
+              "text/markdown": {}
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "description": "Canonical and next URLs retain the exact snapshot and selected representation.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged after current content and privacy checks; no body."
+          },
+          "default": {
+            "description": "Typed refusal. Do not advance a saved cursor on failure.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Captured public problem cursor. Later events are excluded; present-day visibility and content withdrawal still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive original filing sequence. Keep through unchanged and follow next_after. Eight admissions per page, including withheld records. Cannot be combined with target.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/after"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "description": "Exact G-n gap identifier. Reads one recorded obligation directly without walking earlier pages. Cannot be combined with after.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/proof-gaps.v1.json#/properties/query/properties/target"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/p/{id}/hypotheses.html": {
       "get": {
         "summary": "HTML reading face of the same hypothesis snapshot, including withdrawn-content notices.",
@@ -3509,6 +3818,35 @@
     "/schemas/problems.v1.json": {
       "get": {
         "summary": "Contract schema: problems.",
+        "tags": [
+          "schema-documents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [],
+        "security": []
+      }
+    },
+    "/schemas/proof-gaps.v1.json": {
+      "get": {
+        "summary": "Contract schema: proof-gaps.",
         "tags": [
           "schema-documents"
         ],
