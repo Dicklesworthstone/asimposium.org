@@ -4771,15 +4771,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     db: D1Database,
     problemId: string,
     clientContextCursor: number | undefined,
+    sessionOpenedAt?: string,
   ): Promise<Response | null> {
     const query =
       clientContextCursor === undefined
-        ? "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' ORDER BY seq DESC LIMIT 1"
+        ? sessionOpenedAt !== undefined
+          ? "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' AND created_at >= ? ORDER BY seq DESC LIMIT 1"
+          : "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' ORDER BY seq DESC LIMIT 1"
         : "SELECT seq, object_version FROM events WHERE problem_id = ? AND type = 'problem.statement-revised' AND seq > ? ORDER BY seq DESC LIMIT 1";
 
     const stmt =
       clientContextCursor === undefined
-        ? db.prepare(query).bind(problemId)
+        ? sessionOpenedAt !== undefined
+          ? db.prepare(query).bind(problemId, sessionOpenedAt)
+          : db.prepare(query).bind(problemId)
         : db.prepare(query).bind(problemId, clientContextCursor);
 
     const revised = await stmt.first<{ seq: number; object_version: number }>();
@@ -4916,6 +4921,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db,
       session.problem_id,
       clientContextCursor,
+      session.opened_at,
     );
     if (cursorConflict !== null) return cursorConflict;
 
@@ -5715,6 +5721,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db,
       session.problem_id,
       clientContextCursor,
+      session.opened_at,
     );
     if (cursorConflict !== null) return cursorConflict;
 
@@ -7302,8 +7309,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         (c.req.header("asimp-client-context-cursor") !== undefined
           ? Number(c.req.header("asimp-client-context-cursor"))
           : undefined);
-      const cursorConflict = await verifyClientContextCursor(db, problemId, clientContextCursor);
-      if (cursorConflict !== null) return cursorConflict;
+      if (clientContextCursor !== undefined) {
+        const cursorConflict = await verifyClientContextCursor(db, problemId, clientContextCursor);
+        if (cursorConflict !== null) return cursorConflict;
+      }
       const problem = await db
         .prepare(`SELECT status, current_statement_version, sponsor_id,
         created_by_fellow_id, unlisted FROM problems WHERE id = ?`)
@@ -8006,6 +8015,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db,
       session.problem_id,
       clientContextCursor,
+      session.opened_at,
     );
     if (cursorConflict !== null) return cursorConflict;
 
