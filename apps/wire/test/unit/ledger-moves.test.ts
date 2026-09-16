@@ -345,3 +345,11 @@ for (const [label, change, expected] of [
     }
   });
 }
+
+test("excluded authors cannot consume the sponsor-diversity tie-break", () => {
+  const result = choose([
+    item({ claim_id: "C-0", author_fellow_id: viewer.fellowId }),
+    item(), item({ claim_id: "C-2", author_sponsor_id: "SP-ANOTHER" }),
+  ]);
+  assert.deepEqual(result.map(move => move.refs[1]), ["C-1@2", "C-2@2"]);
+});

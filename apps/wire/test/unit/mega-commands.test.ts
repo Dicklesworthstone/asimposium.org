@@ -388,7 +388,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsedReplay.acknowledged).toBe(true);
   });
 
-  test("GET /v1/triage returns hello + highest-EV move (degraded without W9)", async () => {
+  test("GET /v1/triage returns hello and a real first-claim move for an empty board", async () => {
     const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
     const fellow = await enrollFellow();
     await seedProblem("P-TRIAGE1", "Triage Problem");
@@ -406,9 +406,11 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
 
     expect(parsed.hello.fellow.fellow_id).toBe(fellow.fellowId);
     expect(parsed.hello.assignments?.length).toBe(1);
-    expect(parsed.degraded).toBe(true);
-    expect(parsed.degraded_reason).toBe("W9_MOVES_ENGINE_NOT_INSTALLED");
-    expect(parsed.move).toBeNull();
+    expect(parsed.degraded).toBe(false);
+    expect(parsed.degraded_reason).toBeUndefined();
+    expect(parsed.move?.move).toBe("state-claim");
+    expect(parsed.move?.refs).toEqual(["P-TRIAGE1"]);
+    expect(parsed.selection_boundary).toContain("not a global optimum");
   });
 
   test("GET /v1/triage with custom provider returns selected move", async () => {
@@ -497,7 +499,7 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(body.code).toBe("PROBLEM_NOT_FOUND");
   });
 
-  test("GET /v1/p/:id/next returns degraded status with TruthfulProductionMovesProvider", async () => {
+  test("GET /v1/p/:id/next production default returns a workshop-first claim contract", async () => {
     const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
     const fellow = await enrollFellow();
     await seedProblem("P-PROD1", "Production Moves Problem");
@@ -517,9 +519,11 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(parsed.viewer.role).toBe("contributor");
     expect(parsed.viewer.effective_permissions.promote).toBe(true);
     expect(parsed.viewer.effective_permissions.workshop_push).toBe(true);
-    expect(parsed.degraded).toBe(true);
-    expect(parsed.degraded_reason).toBe("W9_MOVES_ENGINE_NOT_INSTALLED");
-    expect(parsed.primary_move).toBeNull();
+    expect(parsed.degraded).toBe(false);
+    expect(parsed.degraded_reason).toBeUndefined();
+    expect(parsed.primary_move?.move).toBe("state-claim");
+    expect(parsed.primary_move?.contract.target_contract).toBe("/schemas/sessions.v1.json#/properties/promote_request");
+    expect(JSON.stringify(parsed.primary_move?.contract.preparation)).toContain("workshop_first");
     expect(parsed.alternatives).toEqual([]);
   });
 
@@ -569,11 +573,11 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     const parsed = ProblemNextResponseSchema.parse(data);
 
     expect(parsed.viewer.role).toBe("observer");
-    // Observers have promote: false and review: false
+    // Observers cannot promote claims, but may review under their review scope.
     expect(parsed.viewer.effective_permissions.promote).toBe(false);
-    expect(parsed.viewer.effective_permissions.review).toBe(false);
+    expect(parsed.viewer.effective_permissions.review).toBe(true);
 
-    // Promotion moves (state-claim, review) MUST be filtered out!
+    // Claim-promotion moves MUST be filtered out; review is a separate effect.
     if (parsed.primary_move !== null) {
       expect(PROMOTION_MOVE_KINDS.has(parsed.primary_move.move)).toBe(false);
     }
@@ -581,9 +585,10 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
       expect(PROMOTION_MOVE_KINDS.has(alt.move)).toBe(false);
     }
 
-    // Only idle-close should remain
+    // Alphabetical fixture ordering keeps idle-close first, review second.
     expect(parsed.primary_move?.move).toBe("idle-close");
-    expect(parsed.alternatives.length).toBe(0);
+    expect(parsed.alternatives.length).toBe(1);
+    expect(parsed.alternatives[0]?.move).toBe("review");
   });
 
   test("GET /v1/p/:id/next preserves promotion moves for contributor role and caps alternatives at 2", async () => {
@@ -689,4 +694,36 @@ describe("W6.2 Mega-Commands (hello, triage, next)", () => {
     expect(md).toContain("## Primary Move: sharpen-statement");
     expect(md).toContain("Sharpen hypotheses.");
   });
+});
+
+test("production next accepts canonical hyphenated IDs without inventing scope grants", async () => {
+  const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
+  const fellow = await enrollFellow({ scopes: ["review"] });
+  await seedProblem("P-WITH-DASH");
+  await seedMembership("P-WITH-DASH", fellow.fellowId, "contributor");
+  const response = await app.fetch(new Request("https://a.asimposium.org/v1/p/P-WITH-DASH/next", {
+    headers: { authorization: `Bearer ${fellow.token}` },
+  }), env);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  const body = ProblemNextResponseSchema.parse(await response.json());
+  expect(body.viewer.effective_permissions.promote).toBe(false);
+  expect(body.viewer.effective_permissions.review).toBe(true);
+  expect(body.primary_move).toBeNull();
+});
+
+test("next does not distinguish a private draft from an unknown public problem", async () => {
+  const { app, env, enrollFellow, seedProblem, db } = await createTestHarness();
+  const fellow = await enrollFellow();
+  await seedProblem("P-PRIVATE");
+  await db.prepare("UPDATE problems SET status='private-draft' WHERE id=?").bind("P-PRIVATE").run();
+  const bodies = [];
+  for (const id of ["P-PRIVATE", "P-ABSENT"]) {
+    const response = await app.fetch(new Request(`https://a.asimposium.org/v1/p/${id}/next`, {
+      headers: { authorization: `Bearer ${fellow.token}` },
+    }), env);
+    expect(response.status).toBe(404);
+    bodies.push(await response.json());
+  }
+  expect(bodies[0]).toEqual(bodies[1]);
 });

@@ -9,6 +9,7 @@
     ".": "./src/index.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
     "./event-tail": "./src/event-tail.ts",
+    "./hypotheses": "./src/hypotheses.ts",
     "./review-queue": "./src/review-queue.ts",
     "./public-schemas": "./src/public-schemas.ts"
   },

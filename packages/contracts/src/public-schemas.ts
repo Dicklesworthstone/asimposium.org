@@ -1,9 +1,10 @@
 /**
  * Public, versioned JSON Schema documents.
  *
- * The Zod definitions remain the source of truth. This registry imports only
- * the artifacts produced by `bun run generate`, as exact text, so a Worker
- * response cannot drift from the files checked by the contract gate.
+ * Zod is the source of truth. Existing generated artifacts are imported as
+ * exact text. Explicit inline schemas are generated once from their Zod source
+ * at startup, without a second checked-in JSON copy; both paths are covered by
+ * the public-schema registry census and byte-parity tests.
  */
 
 /// <reference path="./assets.d.ts" />
@@ -33,6 +34,10 @@ import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
+import { generateHypothesesSchema } from "./hypotheses-schema.ts";
+
+/** Deliberate, closed inventory of source-generated schemas without file copies. */
+export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze(["hypotheses"] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "citations",
@@ -43,6 +48,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment",
   "enrollment-capsule",
   "event-tail",
+  "hypotheses",
   "inbox",
   "internal-health",
   "ledger",
@@ -63,8 +69,8 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
  *
  * Keep an explicit reason beside every exclusion. The unit contract test reads
  * the checked-in generated directory and requires it to be partitioned by this
- * list plus the served registry, so adding a schema cannot silently disappear
- * from the public-surface decision.
+ * list plus the file-backed served registry. Inline schemas are separately
+ * pinned to the closed inventory above and their canonical generator.
  */
 export const PUBLIC_SCHEMA_EXCLUSIONS = Object.freeze([
   Object.freeze({
@@ -144,6 +150,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/event-tail.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(eventTailSchemaModule, "generated/event-tail.schema.json"),
+  }),
+  Object.freeze({
+    id: "hypotheses",
+    served_at: "/schemas/hypotheses.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateHypothesesSchema(),
   }),
   Object.freeze({
     id: "inbox",
