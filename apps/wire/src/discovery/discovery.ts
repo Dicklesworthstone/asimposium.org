@@ -44,7 +44,11 @@ import {
   eventTailResponses,
 } from "./event-tail-discovery";
 
-import { REVIEW_QUEUE_PUBLIC_READS, reviewQueueParameters, reviewQueueResponses } from "./review-queue-discovery";
+import {
+  REVIEW_QUEUE_PUBLIC_READS,
+  reviewQueueParameters,
+  reviewQueueResponses,
+} from "./review-queue-discovery";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
