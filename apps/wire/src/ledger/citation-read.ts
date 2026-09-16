@@ -241,6 +241,7 @@ export async function loadCommittedCitation(
     }
   }
   if (citation === undefined) return null;
+  const citationVersion = citation.version;
 
   const associated_claims: AssociatedClaimRef[] = [];
   const associated_evidence: AssociatedEvidenceRef[] = [];
@@ -248,12 +249,17 @@ export async function loadCommittedCitation(
     const payload = await verifiedCitationContent(problemId, row);
     if (payload === undefined || !Number.isSafeInteger(row.object_version) || row.object_version < 1) continue;
     const includes = (value: unknown) => typeof value === "string" &&
-      mentionsCitation(value, citationId, citation.version, requestedVersion === undefined);
+      mentionsCitation(value, citationId, citationVersion, requestedVersion === undefined);
+    // The writer commits source provenance as a nested object. Top-level
+    // locator lookalikes are not the published evidence source contract.
+    const source = payload.source;
+    const provenance = typeof source === "object" && source !== null && !Array.isArray(source)
+      ? source as Readonly<Record<string, unknown>> : undefined;
     if (row.object_kind === "claim" && associated_claims.length < MENTION_LIMIT && includes(payload.statement)) {
       associated_claims.push({ claim_id: row.object_id, version: row.object_version, statement: payload.statement as string });
     } else if (
       row.object_kind === "evidence" && associated_evidence.length < MENTION_LIMIT &&
-      (includes(payload.locator) || includes(payload.excerpt)) &&
+      provenance !== undefined && (includes(provenance.locator) || includes(provenance.excerpt)) &&
       typeof payload.direction === "string" && typeof payload.bears_on_id === "string" &&
       typeof payload.computed_class === "string"
     ) {

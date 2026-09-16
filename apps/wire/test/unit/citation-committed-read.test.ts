@@ -190,7 +190,7 @@ test("backlink content is digest-verified and redaction-safe, including evidence
   try {
     await event(1, "L-1", 1, citation());
     await event(2, "C-1", 1, { statement: "[L-1@1] CLAIM_CANARY" }, "claim");
-    await event(3, "E-1", 1, { locator: "L-1@1", direction: "support", bears_on_id: "C-1", computed_class: "argument" }, "evidence");
+    await event(3, "E-1", 1, { source: { kind: "retrieved", locator: "L-1@1" }, direction: "support", bears_on_id: "C-1", computed_class: "argument" }, "evidence");
     const visible = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
     assert.equal(visible?.associated_claims.length, 1);
     assert.equal(visible?.associated_evidence.length, 1);
@@ -200,6 +200,20 @@ test("backlink content is digest-verified and redaction-safe, including evidence
     assert.equal(hidden?.associated_claims.length, 0);
     assert.equal(hidden?.associated_evidence.length, 0);
     assert.ok(!JSON.stringify(hidden).includes("CLAIM_CANARY"));
+  } finally { sqlite.close(); }
+});
+
+test("evidence backlinks use the committed nested source, not top-level lookalikes", async () => {
+  const { sqlite, db, event } = fixture();
+  try {
+    await event(1, "L-1", 1, citation());
+    const base = { direction: "support", bears_on_id: "C-1", computed_class: "argument" };
+    await event(2, "E-1", 1, { ...base, source: { kind: "retrieved", excerpt: "See L-1@1." } }, "evidence");
+    await event(3, "E-2", 1, { ...base, locator: "L-1@1", source: { kind: "retrieved", locator: "L-10@1" } }, "evidence");
+    await event(4, "E-3", 1, { ...base, excerpt: "L-1@1", source: null }, "evidence");
+    await event(5, "E-4", 1, { ...base, locator: "L-1@1", source: ["L-1@1"] }, "evidence");
+    const result = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.deepEqual(result?.associated_evidence.map((entry) => entry.evidence_id), ["E-1"]);
   } finally { sqlite.close(); }
 });
 
