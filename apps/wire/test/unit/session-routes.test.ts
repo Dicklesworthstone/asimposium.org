@@ -3619,6 +3619,97 @@ describe("session protocol routes", () => {
     );
   }, 60000);
 
+  test("question withdrawal screens reason before publication and replays without rescreening", async () => {
+    let hold = true;
+    let screens = 0;
+    const f = await fixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "question-withdraw") {
+          screens++;
+          if (hold)
+            return {
+              decision: "quarantine",
+              coarse_category: "dual-use-boundary",
+              provider_status: "ok",
+            };
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    const post = (path: string, body: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await post(
+      "/v1/sessions",
+      { problem_id: "P-4DSP", intent: "explore" },
+      "withdraw-open",
+    );
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const asked = await post(
+      `/v1/sessions/${session.session_id}/questions`,
+      {
+        body_md: "Which finite covering establishes the compactness argument?",
+      },
+      "withdraw-ask",
+    );
+    expect(asked.status).toBe(201);
+    const question = (await asked.json()) as { question_id: string };
+    const path = `/v1/sessions/${session.session_id}/questions/${question.question_id}/withdraw`;
+    const body = { reason: "The finite covering was established independently." };
+    const snapshot = async () => ({
+      cursor: await f.db
+        .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>(),
+      events: await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+      contents: await f.db
+        .prepare("SELECT COUNT(*) AS n FROM event_content")
+        .first<{ n: number }>(),
+      question: await f.db
+        .prepare("SELECT status FROM questions WHERE question_id = ?")
+        .bind(question.question_id)
+        .first<{ status: string }>(),
+    });
+    const before = await snapshot();
+    const held = await post(path, body, "withdraw-held");
+    expect(held.status).toBe(202);
+    expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
+    expect(await snapshot()).toEqual(before);
+    hold = false;
+    const passed = await post(path, body, "withdraw-pass");
+    expect(passed.status).toBe(200);
+    const response = await passed.json();
+    expect(response).toMatchObject({ question_id: question.question_id, status: "withdrawn" });
+    const after = await snapshot();
+    const replay = await post(path, body, "withdraw-pass");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(response);
+    expect(await snapshot()).toEqual(after);
+    expect(screens).toBe(2);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'question.withdrawn'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    expect(
+      await f.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.type = 'question.withdrawn'",
+        )
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    const changed = await post(
+      path,
+      { reason: "A different withdrawal explanation." },
+      "withdraw-pass",
+    );
+    expect(changed.status).toBe(409);
+    expect(await snapshot()).toEqual(after);
+  });
+
   test("P7: a quarantined ingress holds with zero public effect (asimposiumorg-b9y9)", async () => {
     const { call, db } = await fixture({
       screenPromotion: async () => ({

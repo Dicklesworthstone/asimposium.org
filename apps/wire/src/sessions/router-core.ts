@@ -712,6 +712,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     synthesize: ["synthesize", SynthesizeResponseSchema],
     "dead-ends": ["dead_end", RecordDeadEndResponseSchema],
     questions: ["ask_question", AskQuestionResponseSchema],
+    "questions/withdraw": ["withdraw_question", WithdrawQuestionResponseSchema],
     retract: ["retract", RetractResponseSchema],
     conflicts: ["conflicts", NormalizeConflictResponseSchema],
     "conflicts/resolve": ["resolve_conflict", ResolveConflictResponseSchema],
@@ -1043,6 +1044,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "citations"
           | "correct_citation"
           | "challenge_lease"
+          | "withdraw_question"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1065,11 +1067,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly db: Env["DB"];
         readonly scope: Extract<
           ReplayScope,
-          | "lease_question"
-          | "answer_question"
-          | "withdraw_question"
-          | "acquire_lease"
-          | "release_lease"
+          "lease_question" | "answer_question" | "acquire_lease" | "release_lease"
         >;
         readonly principal: string;
         readonly target: string;
@@ -10590,6 +10588,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    const publication = {
+      question_id: questionId,
+      reason: parsed.data.reason ?? "Question withdrawn by author",
+    };
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "questions/withdraw",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "question-withdraw",
+        statement: JSON.stringify(publication),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("withdraw_question", claimToken);
@@ -10607,10 +10632,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectKind: "question",
           objectId: questionId,
           objectVersion: 1,
-          payloadJson: canonicalJson({
-            question_id: questionId,
-            reason: parsed.data.reason ?? "Question withdrawn by author",
-          }),
+          payloadJson: canonicalJson(publication),
           createdAt,
           attribution: {
             fellowId: auth.binding.fellowId,
@@ -10644,6 +10666,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          screening,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             WithdrawQuestionResponseSchema.parse({
               ok: true,
@@ -10678,9 +10702,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
