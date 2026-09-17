@@ -276,3 +276,39 @@ test("changing targets cancels the old probe and cannot refresh a newly navigate
   pending.resolve(new Response(null, { headers: { etag: '"late-change"' } })); await settle();
   assert.equal(f.refreshes(), 0); assert.equal(f.last()?.status, "current"); f.watch.stop();
 });
+
+
+test("quiet-cursor reconciliation observes changed resources without inventing a public append", async () => {
+  const f = fixture(); await f.start(); f.tags.set(PATH, '"withdrawal-without-append"');
+  await f.clock.advance(50_000); assert.equal(f.refreshes(), 0);
+  await f.clock.advance(10_000); assert.equal(f.refreshes(), 1);
+  assert.equal(f.calls.filter((call) => call.init.method === "HEAD").length, 2);
+  f.watch.stop();
+});
+
+test("a newly private or removed resource is re-read even while the global cursor stays unchanged", async () => {
+  const f = fixture(); await f.start();
+  f.handler((call) => call.init.method === "HEAD" ? new Response(null, { status: 404 }) : undefined);
+  await f.clock.advance(60_000);
+  assert.equal(f.refreshes(), 1); assert.equal(f.last()?.status, "refreshing"); f.watch.stop();
+});
+
+test("periodic checks are bounded and do not refresh or announce an unchanged view", async () => {
+  const f = fixture(); await f.start(); await f.clock.advance(180_000);
+  assert.equal(f.calls.filter((call) => call.init.method === "HEAD").length, 4);
+  assert.equal(f.calls.filter((call) => call.url.pathname === "/cursor").length, 19);
+  assert.equal(f.refreshes(), 0); assert.equal(f.states.length, 2); f.watch.stop();
+});
+
+test("discovery pagination and negative-evidence history remain the same view on every refresh", async () => {
+  for (const path of ["/now.json?before=opaque%3Acursor",
+    "/reviews.json?problem=P-DEMO&after=opaque%3Acursor",
+    "/p/P-DEMO/dead-ends.json?include_superseded=true"]) {
+    const f = fixture([{ path, etag: '"old"' }]); await f.start();
+    f.tags.set(path, '"changed"'); f.cursor(2); await f.clock.advance(10_000);
+    assert.equal(f.refreshes(), 1);
+    assert.ok(f.calls.filter((call) => call.init.method === "HEAD")
+      .every((call) => `${call.url.pathname}${call.url.search}` === path));
+    f.watch.stop();
+  }
+});

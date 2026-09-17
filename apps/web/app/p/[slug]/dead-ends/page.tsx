@@ -4,6 +4,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { deadEndRetryLabel } from "@/lib/dead-end-view";
 import { stoaFetchDeadEnds } from "@/lib/public-ledger";
 
@@ -86,6 +88,7 @@ export default async function DeadEndsPage(props: DeadEndsPageProps) {
             Preserve what failed, the scope of the check, and what would justify trying again.
           </p>
         </header>
+        <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
         <div className="loop" role="note">
           These are published negative results, not blanket refutations. A recorded retry
           condition is not a claim that the condition has fired. This latest public view is read

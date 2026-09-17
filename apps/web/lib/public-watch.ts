@@ -11,6 +11,9 @@ import {
   validPublicWatchTargets,
 } from "@asimposium/contracts/public-watch";
 
+/** Reconcile visibility/redaction even when no public append moves the cursor. */
+export const PUBLIC_WATCH_RECONCILE_POLLS = 6;
+
 export type PublicWatchStatus =
   | "checking" | "current" | "refreshing" | "update-available" | "paused" | "unavailable";
 export interface PublicWatchState {
@@ -156,7 +159,8 @@ export interface PublicWatchOptions {
 }
 
 /** One cursor poller per rendered view, not one poller per claim card.
- * Unchanged global cursors cause no face request or route refresh. Changes
+ * Between bounded withdrawal reconciliations, unchanged global cursors cause
+ * no face request or route refresh. Changes
  * probe the exact rendered resources by HEAD/ETag, stopping at the first
  * mismatch. A refreshed server manifest is the ONLY acknowledgment; failed
  * refreshes cannot silently advance past unseen data. */
@@ -175,6 +179,7 @@ export class PublicLedgerWatch {
   private cursorValue: number | undefined;
   private cursorEtag: string | undefined;
   private checkedCursor: number | undefined;
+  private quietPolls = 0;
   private pendingChange: string | undefined;
   private refreshAttempts = 0;
   private failures = 0;
@@ -273,7 +278,10 @@ export class PublicLedgerWatch {
       if (cursor === undefined) throw new WatchReadError("invalid_response");
       // Inequality, not >: cache rollback/reset is a reason to revalidate, not
       // a reason to suppress updates until an old high-water mark is reached.
-      if (this.forceProbe || cursor !== this.checkedCursor || this.pendingChange !== undefined) {
+      this.quietPolls++;
+      if (this.forceProbe || cursor !== this.checkedCursor || this.pendingChange !== undefined ||
+        this.quietPolls >= PUBLIC_WATCH_RECONCILE_POLLS) {
+        this.quietPolls = 0;
         let changed: string | undefined;
         for (const target of this.targets) {
           const probe = await read(this.runtime, `${this.options.origin}${target.path}`, "HEAD", target.etag, controller.signal);

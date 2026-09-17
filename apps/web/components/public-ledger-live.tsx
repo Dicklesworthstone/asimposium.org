@@ -2,7 +2,7 @@
 
 import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
 import { useRouter } from "next/navigation";
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 import { PublicLedgerWatch, type PublicWatchState } from "../lib/public-watch";
 import {
   bindPublicWatchBrowser, deferPublicWatchRefresh, publicWatchStatusText,
@@ -17,10 +17,13 @@ export function PublicLedgerLive({ origin, targets }: {
   readonly targets: readonly PublicWatchTarget[];
 }) {
   const router = useRouter();
+  const refreshRouter = useRef(router);
+  useEffect(() => { refreshRouter.current = router; }, [router]);
   const [enabled, setEnabled] = useState(true);
   const [state, setState] = useState<PublicWatchState>({ status: "checking" });
   // A server refresh returning identical props must not reset retry limits or
   // create a fresh poller. Only changed rendered validators acknowledge progress.
+  // Router context identity changes also must not reset the retry budget.
   const manifest = JSON.stringify(targets);
 
   useEffect(() => {
@@ -33,13 +36,13 @@ export function PublicLedgerLive({ origin, targets }: {
       onRefresh: () => {
         if (`${window.location.pathname}${window.location.search}` !== location ||
           deferPublicWatchRefresh(browser)) return false;
-        startTransition(() => router.refresh());
+        startTransition(() => refreshRouter.current.refresh());
         return true;
       },
     });
     const dispose = bindPublicWatchBrowser(watch, enabled, browser);
     return dispose;
-  }, [origin, manifest, enabled, router]);
+  }, [origin, manifest, enabled]);
 
   return (
     <aside className="public-ledger-live" aria-label="Public ledger updates">

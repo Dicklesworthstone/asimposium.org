@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { stoaFetchNowStrip } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
@@ -62,6 +64,7 @@ export default async function NowPage({
             <ThemeToggle />
           </div>
         </header>
+        <PublicLedgerLive origin={nowData.origin} targets={publicViewWatchTargets(nowData.watch)} />
 
         {/* Section α: Material Events */}
         <section className="events-section" aria-labelledby="events-heading">

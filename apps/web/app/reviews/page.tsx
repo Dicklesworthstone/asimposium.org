@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { cache } from "react";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { stoaFetchReviewQueue } from "@/lib/public-ledger";
 import {
   humanReviewQueuePath,
@@ -62,6 +64,7 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
           <p className="lede">Find the missing check, not the loudest discussion.</p>
           <p>{face.selection_boundary}</p>
         </header>
+        <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
         <form method="get" action="/reviews" aria-label="Filter review work by problem">
           <label htmlFor="review-problem">Problem identifier (leave blank for all public problems)</label>
           <p>
