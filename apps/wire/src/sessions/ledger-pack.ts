@@ -9,14 +9,13 @@ import {
 } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
-import { loadReviewQueue } from "../discovery/review-queue-service";
 import type { Env } from "../env";
 import { loadProblemCitations } from "../ledger/citations";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
-import { loadFormalRecords } from "../ledger/formal-records-service";
-import { loadProofGaps } from "../ledger/proof-gaps-service";
+import { scientificIndependence } from "../ledger/review-independence";
 import {
   checkedScientificPayload,
+  readScientificProvenance,
   recordedReviewIndependence,
   ScientificInputError,
 } from "../ledger/scientific-checks";
@@ -26,8 +25,7 @@ import {
   type ScientificDisposition,
   type ScientificRow,
 } from "../ledger/scientific-disposition";
-import { readFormalPack } from "./formal-pack";
-import { readReviewSelectionPack } from "./review-pack";
+import { loadReviewInvitationPack } from "./review-invitation-pack-service";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -44,6 +42,13 @@ interface ProvenanceRow {
   harness: string | null;
   content_available: number;
   payload_json?: string | null;
+}
+
+interface GapRow extends ProvenanceRow {
+  obligation: string;
+  closes_what: string;
+  target_claim_id: string;
+  target_version: number;
 }
 
 interface KilledRow extends ProvenanceRow {
@@ -159,23 +164,196 @@ export interface ReviewQueueReviewer {
   provenance?: ScientificProvenance | null;
 }
 
-/** Working packs and the review-queue profile use the same canonical needs
- * and exact-version reviewer exclusions as next/triage. Never substitute a
- * chronological head scan or a prospective tier inferred from caller hints. */
+/** Non-author public claim heads without the reviewer's recorded review,
+ * ordered by head sequence. The review-queue profile surfaces these candidates;
+ * working packs consume the first target for move recommendation. */
 export async function readReviewQueuePack(
   db: Env["DB"],
   problemId: string,
   cursor: number,
   reviewer: ReviewQueueReviewer,
 ): Promise<LedgerPackSection & { targets: string[] }> {
-  return readReviewSelectionPack(
-    db,
-    problemId,
-    cursor,
-    reviewer,
-    { loadQueue: loadReviewQueue, templateFor: getMoveTemplate },
-    (body) => neutralizeUntrustedBody(body).text,
-  );
+  const result = await db
+    .prepare(`
+    WITH claim_heads AS (
+      SELECT object_id, MAX(seq) AS head_seq,
+        MIN(CASE WHEN type = 'claim.created' AND object_version = 1 THEN seq END) AS author_seq
+      FROM events WHERE problem_id = ? AND seq <= ? AND object_kind = 'claim'
+        AND type IN ('claim.created', 'claim.revised')
+      GROUP BY object_id
+    )
+    SELECT h.object_id || '@' || h.object_version AS id,
+      v.kind, v.statement, v.falsifier, h.id AS event_id, h.seq,
+      a.actor_fellow_id AS fellow_id, a.actor_sponsor_id AS sponsor_id,
+      a.actor_session_id AS session_id, a.model_string_self_declared AS model,
+      a.harness, a.id AS author_event_id, c.payload_json, h.payload_sha256,
+      (c.event_id IS NOT NULL AND c.redacted_at IS NULL
+       AND ac.event_id IS NOT NULL AND ac.redacted_at IS NULL) AS content_available
+    FROM claim_heads pins JOIN events h ON h.problem_id = ? AND h.seq = pins.head_seq
+    JOIN claim_versions v
+      ON v.problem_id = h.problem_id AND v.claim_id = h.object_id AND v.version = h.object_version
+    JOIN events a ON a.problem_id = h.problem_id AND a.seq = pins.author_seq
+    LEFT JOIN event_content c ON c.event_id = h.id AND c.payload_sha256 = h.payload_sha256
+    LEFT JOIN event_content ac ON ac.event_id = a.id AND ac.payload_sha256 = a.payload_sha256
+    WHERE a.actor_fellow_id <> ?
+      AND EXISTS (SELECT 1 FROM problems p WHERE p.id = h.problem_id
+        AND p.status <> 'private-draft' AND h.seq <= p.public_seq)
+      AND NOT EXISTS (SELECT 1 FROM retractions r JOIN events re
+        ON re.problem_id = r.problem_id AND re.object_id = r.retraction_id
+          AND re.object_kind = 'retraction' AND re.type = 'object.retracted'
+          AND re.seq = r.seq AND re.actor_fellow_id = a.actor_fellow_id
+        WHERE r.problem_id = h.problem_id AND r.target_object = h.object_id AND re.seq <= ?)
+      AND NOT EXISTS (SELECT 1 FROM reviews r JOIN events re ON re.id = r.source_event_id
+        AND re.problem_id = r.problem_id AND re.object_id = r.review_id
+        AND re.object_kind = 'review' AND re.type = 'review.created' AND re.seq = r.source_seq
+        WHERE r.problem_id = h.problem_id AND r.target_claim_id = h.object_id
+          AND r.target_version = h.object_version AND r.reviewer_fellow_id = ? AND re.seq <= ?)
+    ORDER BY h.seq ASC, h.object_id ASC LIMIT ?
+  `)
+    .bind(
+      problemId,
+      cursor,
+      problemId,
+      reviewer.fellowId,
+      cursor,
+      reviewer.fellowId,
+      cursor,
+      LEDGER_PACK_CANDIDATE_LIMIT + 1,
+    )
+    .all<
+      ProvenanceRow & {
+        kind: string;
+        statement: string;
+        falsifier: string | null;
+        author_event_id: string;
+        payload_sha256: string;
+      }
+    >();
+  const section: LedgerPackSection & { targets: string[] } = {
+    candidates: [],
+    omitted: [],
+    targets: [],
+  };
+  if (result.results.length > LEDGER_PACK_CANDIDATE_LIMIT)
+    section.omitted.push({ reason: "candidate_limit", detail: "eligible-reviews" });
+  for (const [index, row] of result.results.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
+    if (
+      !row.content_available ||
+      !row.payload_json ||
+      !PublicClaimTargetSchema.safeParse(row.id).success ||
+      row.sponsor_id === null ||
+      row.model === null ||
+      row.harness === null
+    ) {
+      section.omitted.push({ reason: "content_unavailable", detail: `eligible-reviews:${row.id}` });
+      continue;
+    }
+    let statement: string;
+    let authorProvenance: ScientificProvenance | null = null;
+    try {
+      const payload = await checkedScientificPayload({
+        payload_json: row.payload_json,
+        payload_sha256: row.payload_sha256,
+      });
+      const [claimId, versionText] = row.id.split("@");
+      const version = Number(versionText);
+      if (
+        payload.claim_id !== claimId ||
+        typeof payload.statement !== "string" ||
+        (version > 1 && payload.base_version !== version - 1)
+      )
+        throw new ScientificInputError("Review candidate content does not match its version.");
+      statement = payload.statement;
+      if (payload.scientific_provenance) {
+        authorProvenance = readScientificProvenance(payload.scientific_provenance);
+      }
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      section.omitted.push({ reason: "content_unavailable", detail: `eligible-reviews:${row.id}` });
+      continue;
+    }
+    const reviewerProvenance =
+      reviewer.provenance ??
+      (reviewer.modelFamily
+        ? readScientificProvenance({
+            model_family_self_declared: reviewer.modelFamily,
+            ...(reviewer.methodBasis
+              ? {
+                  method: {
+                    category: "deductive",
+                    procedure: reviewer.methodBasis,
+                    evidence: [],
+                  },
+                }
+              : {}),
+          })
+        : null);
+    const body = JSON.stringify({
+      problem: problemId,
+      target: row.id,
+      kind: row.kind,
+      statement,
+      falsifier: row.falsifier,
+      prospective_independence_tier: scientificIndependence(
+        {
+          sponsorId: row.sponsor_id,
+          provenance: authorProvenance,
+        },
+        {
+          sponsorId: reviewer.sponsorId,
+          provenance: reviewerProvenance,
+        },
+        [],
+      ),
+      independence_note:
+        "Family is self-declared; method evidence is checked at review submission. Model version and harness do not establish independence.",
+      author_fellow: row.fellow_id,
+      author_sponsor: row.sponsor_id,
+      author_session: row.session_id,
+      author_event: row.author_event_id,
+      author_model_self_declared: row.model,
+      author_harness_self_declared: row.harness,
+      version_event: row.event_id,
+      version_seq: row.seq,
+    });
+    if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
+      section.omitted.push({ reason: "item_too_large", detail: `eligible-reviews:${row.id}` });
+      continue;
+    }
+    section.targets.push(row.id);
+    section.candidates.push({
+      kind: "review-candidate",
+      id: row.id,
+      scope: "ledger",
+      untrusted: true,
+      tokens: 1,
+      body,
+      why_included:
+        "non-author public version without this Fellow's recorded review at the pack cursor; tier is prospective, not quality or write permission",
+      stable_prefix: 3 + index,
+    });
+  }
+  if (result.results.length === 0)
+    section.candidates.push({
+      kind: "standing-context",
+      id: "SYS-review-queue-empty",
+      scope: "system",
+      untrusted: false,
+      tokens: 1,
+      body: "No non-author public claim versions without your recorded review are available at this cursor. This is a queue baseline, not a statement about scientific support.",
+      why_included: "state the reviewer-specific queue baseline",
+      stable_prefix: 3,
+    });
+  try {
+    const privateSection = await loadReviewInvitationPack(db, problemId, reviewer.fellowId);
+    return {
+      ...section,
+      candidates: [...privateSection.candidates, ...section.candidates],
+      omitted: [...section.omitted, ...privateSection.omitted],
+    };
+  } catch {
+    return section;
+  }
 }
 
 /** The first live selection uses the same queue as the dedicated profile.
@@ -604,18 +782,42 @@ export async function readLedgerPackSection(
   cursor: number,
   profile: PackProfile,
 ): Promise<LedgerPackSection> {
-  if (profile === "formal") {
-    return readFormalPack(db, problemId, cursor, {
-      records: loadFormalRecords,
-      gaps: loadProofGaps,
-      neutralize: (body) => neutralizeUntrustedBody(body).text,
-    });
-  }
   let rows: ProvenanceRow[];
   let kind: string;
   let section: string;
   let describeRow: (row: ProvenanceRow) => string;
-  if (profile === "graveyard") {
+  if (profile === "formal") {
+    kind = "proof-gap";
+    section = "proof-gaps";
+    const result = await db
+      .prepare(`
+      SELECT g.gap_id AS id, g.obligation, g.closes_what,
+             g.target_claim_id, g.target_version,
+             e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
+             e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
+             e.model_string_self_declared AS model, e.harness,
+             (c.event_id IS NOT NULL AND c.redacted_at IS NULL) AS content_available
+      FROM proof_gaps g JOIN events e
+        ON e.problem_id = g.problem_id AND e.object_id = g.gap_id
+       AND e.object_kind = 'gap' AND e.type = 'gap.filed'
+      LEFT JOIN event_content c ON c.event_id = e.id
+      WHERE g.problem_id = ? AND e.seq <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM events closed
+          WHERE closed.problem_id = e.problem_id AND closed.object_id = e.object_id
+            AND closed.object_kind = 'gap' AND closed.type IN ('gap.closed-by', 'gap.withdrawn')
+            AND closed.seq > e.seq AND closed.seq <= ?
+        )
+      ORDER BY e.seq ASC, e.id ASC LIMIT ?
+    `)
+      .bind(problemId, cursor, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1)
+      .all<GapRow>();
+    rows = result.results;
+    describeRow = (value) => {
+      const row = value as GapRow;
+      return `Open gap ${row.id} in ${row.target_claim_id}@${row.target_version}\nObligation: ${row.obligation}\nCloses: ${row.closes_what}`;
+    };
+  } else if (profile === "graveyard") {
     kind = "killed-hypothesis";
     section = "killed-hypotheses";
     const result = await db

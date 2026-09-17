@@ -236,6 +236,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/review-requests-artifact.ts
   packages/contracts/src/proof-gaps.ts
   packages/contracts/src/proof-gaps-schema.ts
+  packages/contracts/src/formal-records.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -322,6 +323,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/proof-gaps-read.ts
   apps/wire/src/ledger/proof-gaps-router.ts
   apps/wire/src/ledger/proof-gaps-service.ts
+  apps/wire/src/ledger/formal-records.ts
+  apps/wire/src/ledger/formal-records-http.ts
+  apps/wire/src/ledger/formal-records-service.ts
   apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
@@ -342,6 +346,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/router-core.ts
   apps/wire/src/sessions/quota.ts
   apps/wire/src/sessions/ledger-pack.ts
+  apps/wire/src/sessions/formal-pack.ts
   apps/wire/src/sessions/review-pack.ts
   apps/wire/src/sessions/review-invitation-pack.ts
   apps/wire/src/sessions/review-invitation-pack-service.ts
@@ -422,6 +427,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/faces/json.ts
   packages/render/src/faces/markdown.ts
   packages/render/src/review-queue.ts
+  packages/render/src/formal-records.ts
   package.json
   bun.lock
   apps/wire/package.json

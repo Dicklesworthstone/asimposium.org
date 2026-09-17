@@ -170,15 +170,18 @@ export async function readFormalPack(
           seen.add(gap.gap_id);
           previous = gap.filing.seq;
         }
-        for (const gap of face.gaps)
-          gapItem(
-            gapSection,
-            problem,
-            cursor,
-            gap,
-            dependencies.neutralize,
-            10 + gapSection.candidates.length,
-          );
+        for (const gap of face.gaps) {
+          if (gap.status === "open") {
+            gapItem(
+              gapSection,
+              problem,
+              cursor,
+              gap,
+              dependencies.neutralize,
+              10 + gapSection.candidates.length,
+            );
+          }
+        }
         for (const reason of face.omitted.filter((reason) => reason !== "page_limit"))
           gapSection.omitted.push({ reason, detail: "formal: proof-gap history" });
         if (face.next_after === null) return;
