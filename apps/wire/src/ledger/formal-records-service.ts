@@ -1,6 +1,7 @@
 import { EvidenceRequestSchema, ReviewRequestSchema } from "@asimposium/contracts";
+import { FORMAL_RECORDS_SCHEMA_ID, type FormalRecordsQuery, FormalRecordsResponseSchema } from "@asimposium/contracts/formal-records";
 import type { D1Database } from "@cloudflare/workers-types";
-import { type FormalRecordDecoders, readFormalRecords } from "./formal-records.ts";
+import { type FormalRecordDecoders, readFormalRecords, readFormalRecordResource } from "./formal-records.ts";
 
 /** Writer envelopes add allocated IDs and computed bookkeeping. Decode only
  * the existing request fields, never reinterpret a stored class as a verdict.
@@ -28,4 +29,21 @@ const decoders: FormalRecordDecoders = {
 };
 export function loadFormalRecords(db: D1Database, problem: string, cursor: number, after = 0) {
   return readFormalRecords(db, problem, cursor, decoders, after);
+}
+
+/** Full public reads use the same decoded records as the formal session pack;
+ * unlike pack summaries, exact source bodies are not subject to its 18k cap. */
+export async function loadFormalRecordResource(
+  db: D1Database, problem: string, query: FormalRecordsQuery,
+) {
+  const result = await readFormalRecordResource(db, problem, query, decoders);
+  return {
+    unlisted: result.unlisted,
+    face: FormalRecordsResponseSchema.parse({
+      schema: FORMAL_RECORDS_SCHEMA_ID,
+      problem_id: result.problem_id, cursor: result.cursor, after: result.after,
+      target: result.target, next_after: result.next_after,
+      records: result.records, omitted: result.omitted,
+    }),
+  };
 }

@@ -14,7 +14,7 @@ import type { FiredDeadEndTriggerRow } from "../../src/ledger/dead-ends.ts";
 function source(payload: object) {
   const text=JSON.stringify(payload), digest=createHash("sha256").update(text).digest("hex");
   return {prepare:()=>({bind(){return this;}}),async batch(){return [
-    {results:[{id:"P-DEMO",public_seq:10,status:"active"}]},
+    {results:[{id:"P-DEMO",public_seq:10,status:"active",unlisted:0}]},
     {results:[{event_id:"EV-2",object_id:"E-2",seq:2,event_type:"evidence.created",object_version:1,
       payload_sha256:digest,payload_json:text,fellow_id:"F-author",sponsor_id:"usr-author",session_id:"S-author",
       model_string_self_declared:"declared",harness:"harness",created_at:"2026-09-01T00:00:00.000Z"}]},

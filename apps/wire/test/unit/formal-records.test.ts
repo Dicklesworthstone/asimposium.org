@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { EvidenceRequest, ReviewRequest } from "@asimposium/contracts";
-import { FORMAL_RECORD_MAX_BYTES, formalRecordPayload, readFormalRecords, type FormalRecordDecoders } from "../../src/ledger/formal-records.ts";
+import { FORMAL_RECORD_MAX_BYTES, formalRecordPayload, readFormalRecords, readFormalRecordResource, type FormalRecordDecoders } from "../../src/ledger/formal-records.ts";
 
 // Actual SQLite and digest checks. These deliberately small decoder fixtures
 // are NOT proof of the production Zod adapter or scientific evaluator.
@@ -24,12 +24,12 @@ const artifact = (version = 1) => ({
 });
 function fixture() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT);
+  sqlite.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,object_id TEXT,
       object_version INTEGER,payload_sha256 TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,
       model_string_self_declared TEXT,harness TEXT,created_at TEXT,UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
-    INSERT INTO problems VALUES('P-DEMO',100,'active'),('P-OTHER',100,'active');`);
+    INSERT INTO problems VALUES('P-DEMO',100,'active',0),('P-OTHER',100,'active',0);`);
   const statements: string[] = [];
   function prepare(sql: string) {
     return { sql, args: [] as unknown[], bind(...args: unknown[]) { this.args=args; return this; },
@@ -140,6 +140,72 @@ test("UTF-8 byte bound is enforced, not merely character count",async()=>{
 test("invalid cursor input is refused before any database read",async()=>{
   const f=fixture();try{
     for(const [cursor,after] of [[-1,0],[2,3],[1.5,0],[NaN,0],[2,-1]])await assert.rejects(f.read(cursor,after),/QUERY/);
+    assert.equal(f.statements.length,0);
+  }finally{f.sqlite.close();}
+});
+
+test("exact full reads find large artifacts beyond the bounded pack admissions",async()=>{
+  const f=fixture();try{
+    for(let i=1;i<=20;i++)f.publish(i,{kind:"argument",body_md:"Ordinary ledger work."});
+    const large={...artifact(),body_md:"A".repeat(30000),formal_artifact:{...artifact().formal_artifact,source:"-- original source\n"+"x".repeat(40000)}};
+    f.publish(21,large);
+    const exact=await readFormalRecordResource(f.db,"P-DEMO",{target:"E-21"},decoders);
+    assert.equal(exact.records.length,1);assert.deepEqual(exact.records[0]?.content,large);
+    assert.equal(exact.target,"E-21");assert.equal(exact.cursor,100);assert.equal(exact.next_after,null);
+  }finally{f.sqlite.close();}
+});
+test("an unlisted full read carries authoritative private-cache metadata",async()=>{
+  const f=fixture();try{
+    f.publish(1,artifact());f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+    assert.equal((await readFormalRecordResource(f.db,"P-DEMO",{target:"E-1"},decoders)).unlisted,true);
+  }finally{f.sqlite.close();}
+});
+test("unlisting between the initial head and snapshot read prevents shared caching",async()=>{
+  const f=fixture();try{
+    f.publish(1,artifact());
+    const changed={prepare:f.db.prepare.bind(f.db),async batch(statements:Parameters<D1Database["batch"]>[0]){
+      f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+      return f.db.batch(statements);
+    }} as D1Database;
+    const resource=await readFormalRecordResource(changed,"P-DEMO",{},decoders);
+    assert.equal(resource.unlisted,true);
+  }finally{f.sqlite.close();}
+});
+test("missing and nonformal exact targets are not found, not a misleading formal result",async()=>{
+  const f=fixture();try{
+    f.publish(1,{kind:"argument",body_md:"Ordinary work."});
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-1"},decoders),/not-found/);
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-99"},decoders),/not-found/);
+    f.sqlite.query("UPDATE problems SET status='private-draft' WHERE id='P-DEMO'").run();
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-1"},decoders),/not-found/);
+  }finally{f.sqlite.close();}
+});
+test("ambiguous immutable object identity fails instead of choosing an arbitrary version",async()=>{
+  const f=fixture();try{
+    f.publish(1,artifact(),{object:"E-1"});f.publish(2,artifact(),{object:"E-1"});
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-1"},decoders),/unavailable/);
+  }finally{f.sqlite.close();}
+});
+test("exact reads cannot substitute a future or cross-problem record",async()=>{
+  const f=fixture();try{
+    f.publish(9,artifact(),{object:"E-9"});f.publish(3,artifact(),{problem:"P-OTHER",object:"E-3"});
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{through:8,target:"E-9"},decoders),/not-found/);
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-3"},decoders),/not-found/);
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{through:101,target:"E-9"},decoders),/query/);
+  }finally{f.sqlite.close();}
+});
+test("withdrawn full reads retain an omission rather than serving previously readable bytes",async()=>{
+  const f=fixture();try{
+    const id=f.publish(1,artifact());f.sqlite.query("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(id);
+    const result=await readFormalRecordResource(f.db,"P-DEMO",{through:1,target:"E-1"},decoders);
+    assert.equal(result.records.length,0);assert.deepEqual(result.omitted,["content_unavailable"]);
+    assert.equal(result.target,"E-1");
+  }finally{f.sqlite.close();}
+});
+test("target and after are exclusive even when after is zero",async()=>{
+  const f=fixture();try{
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-1",after:0},decoders),/query/);
+    await assert.rejects(readFormalRecordResource(f.db,"P-DEMO",{target:"E-1\n"},decoders),/query/);
     assert.equal(f.statements.length,0);
   }finally{f.sqlite.close();}
 });
