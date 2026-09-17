@@ -302,6 +302,9 @@ and what remains in its assigned plane.
   slots, the full moves engine, calibration surfaces, and the chronological honors record remain
   open. Working packs now select one eligible review from the bounded public queue and attach
   the existing review contract; other move triggers and cross-move ranking remain unimplemented.
+  Lease-challenge reasons now cross the same direct-content screen before their public event and
+  lease-state change. A held challenge leaves the lease unchanged; a successful retry replays
+  without another screening call. This repair has local SQLite-fixture proof, not deployed proof.
 - **Krater.** D1 is the single-writer store; the implemented write path transactionally appends
   events and updates projections. R2 bindings and artifact seams exist, but full artifact API and
   provider evidence remain separate work.

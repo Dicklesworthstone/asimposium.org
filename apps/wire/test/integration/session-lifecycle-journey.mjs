@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import {
   PackResponseSchema,
   SessionCloseResponseSchema,
@@ -49,16 +48,7 @@ import {
  * 11. Idle Expiry:
  *    - Verify idle_close_at is initialized 12 hours ahead.
  */
-export async function sessionLifecycleJourney({
-  call,
-  enroll,
-  sponsorCall,
-  env,
-  worker,
-  origin,
-  userAgent,
-  fixtures,
-}) {
+export async function sessionLifecycleJourney({ call, enroll, sponsorCall }) {
   const sponsorA = "usr_session_lifecycle_sponsor_a";
   const sponsorB = "usr_session_lifecycle_sponsor_b";
 

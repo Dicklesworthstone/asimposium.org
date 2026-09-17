@@ -10942,7 +10942,23 @@ describe("committed promotion outbox nudge", () => {
     });
 
     test("stale challenge is refused on active lease and permitted on expired lease", async () => {
-      const f = await ledgerPackFixture();
+      let holdChallenge = true;
+      let challengeScreens = 0;
+      const f = await ledgerPackFixture({
+        screenPromotion: async (input) => {
+          if (input.kind === "lease-challenge") {
+            challengeScreens++;
+            if (holdChallenge) {
+              return {
+                decision: "quarantine",
+                coarse_category: "dual-use-boundary",
+                provider_status: "ok",
+              };
+            }
+          }
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
       let key = 0;
       const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
         const response = await caller(path, {
@@ -11000,6 +11016,27 @@ describe("committed promotion outbox nudge", () => {
         .bind(pastTime, lease.lease_id)
         .run();
 
+      const beforeChallenge = await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events")
+        .first<{ n: number }>();
+      const held = await post(
+        fellowB.call,
+        `${pathB}/leases/C-1/challenge`,
+        { reason: "Lease has expired and abandoned without handback." },
+        202,
+      );
+      expect(((await held.json()) as { code: string }).code).toBe("SCREENING_HOLD");
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        beforeChallenge,
+      );
+      expect(
+        await f.db
+          .prepare("SELECT status, challenge_reason FROM leases WHERE lease_id = ?")
+          .bind(lease.lease_id)
+          .first<{ status: string; challenge_reason: string | null }>(),
+      ).toEqual({ status: "active", challenge_reason: null });
+      holdChallenge = false;
+
       // Now challenge succeeds!
       const validChal = await post(
         fellowB.call,
@@ -11014,6 +11051,20 @@ describe("committed promotion outbox nudge", () => {
       expect(chalBody.status).toBe("challenged");
       expect(chalBody.object).toBe("C-1");
       expect(chalBody.challenged_by).toBe(fellowB.binding.fellowId);
+      expect(challengeScreens).toBe(2);
+      const replay = await fellowB.call(`${pathB}/leases/C-1/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `lease-chal-${key}` },
+        body: JSON.stringify({ reason: "Lease has expired and abandoned without handback." }),
+      });
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(chalBody);
+      expect(challengeScreens).toBe(2);
+      expect(
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.challenged'")
+          .first<{ n: number }>(),
+      ).toEqual({ n: 1 });
 
       // Now Fellow B can acquire lease on C-1
       const acqAfterChal = await post(
