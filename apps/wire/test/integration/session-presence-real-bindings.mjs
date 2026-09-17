@@ -231,6 +231,75 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   ]);
   assert.deepEqual(afterConcurrent[3], afterPulse[3]);
 
+  // An expired lease remains unchanged while screening holds the challenge.
+  const challenger = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "explore" },
+    fellowBToken,
+    201,
+  );
+  await env.DB.prepare("UPDATE leases SET leased_until = ? WHERE lease_id = ?")
+    .bind("2000-01-01T00:00:00.000Z", objectLease.lease.lease_id)
+    .run();
+  const challengePath = `/v1/sessions/${challenger.session_id}/leases/${questionId}/challenge`;
+  const challengeBody = { reason: "The lease expired without a completed boundary check." };
+  const challengeSnapshot = async () => {
+    const results = await env.DB.batch([
+      env.DB.prepare("SELECT status, challenge_reason FROM leases WHERE lease_id = ?").bind(
+        objectLease.lease.lease_id,
+      ),
+      env.DB.prepare("SELECT id, type FROM events WHERE problem_id = ? ORDER BY seq").bind(
+        problemId,
+      ),
+      env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problemId),
+      env.DB.prepare(
+        "SELECT s.event_id FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? ORDER BY e.seq",
+      ).bind(problemId),
+    ]);
+    return results.map((result) => result.results);
+  };
+  const beforeChallenge = await challengeSnapshot();
+  const beforeChallengeScreens = await fixtures.screeningCalls();
+  await fixtures.setScreenMode("quarantine");
+  const held = await call(
+    challengePath,
+    challengeBody,
+    fellowBToken,
+    202,
+    "presence-challenge-held",
+  );
+  assert.equal(held.code, "SCREENING_HOLD");
+  assert.deepEqual(await challengeSnapshot(), beforeChallenge);
+  assert.equal(await fixtures.screeningCalls(), beforeChallengeScreens + 1);
+
+  await fixtures.setScreenMode("pass");
+  const challenged = await call(
+    challengePath,
+    challengeBody,
+    fellowBToken,
+    200,
+    "presence-challenge-pass",
+  );
+  assert.equal(challenged.status, "challenged");
+  assert.equal(challenged.lease_id, objectLease.lease.lease_id);
+  assert.equal(challenged.ok, true);
+  const afterChallenge = await challengeSnapshot();
+  assert.deepEqual(afterChallenge[0], [
+    { status: "challenged", challenge_reason: challengeBody.reason },
+  ]);
+  assert.deepEqual(afterChallenge[1].slice(0, -1), beforeChallenge[1]);
+  const challengeEvent = afterChallenge[1].at(-1);
+  assert.equal(challengeEvent.type, "lease.challenged");
+  assert.deepEqual(afterChallenge[2], [{ public_seq: beforeChallenge[2][0].public_seq + 1 }]);
+  assert.deepEqual(afterChallenge[3], [...beforeChallenge[3], { event_id: challengeEvent.id }]);
+  assert.equal(await fixtures.screeningCalls(), beforeChallengeScreens + 2);
+  assert.deepEqual(
+    await call(challengePath, challengeBody, fellowBToken, 200, "presence-challenge-pass"),
+    challenged,
+  );
+  assert.deepEqual(await challengeSnapshot(), afterChallenge);
+  assert.equal(await fixtures.screeningCalls(), beforeChallengeScreens + 2);
+
   // 10. Close session and verify subsequent heartbeat rejection (409 SESSION_CLOSED)
   const closeRes = await call(
     `/v1/sessions/${sessionIdA}/close`,
@@ -317,6 +386,7 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     exact_replays: 4,
     concurrent_same_key_requests: 3,
     atomic_races: ["close", "revoke", "pause", "release"],
+    lease_challenge_screening: ["held-without-publication", "pass-with-provenance", "exact-replay"],
     session_id: sessionIdA,
     problem_id: problemId,
     question_id: questionId,
