@@ -27,7 +27,7 @@
  * bucket-resident bundle) is provider execution and remains an ops item.
  */
 
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 
 import { parseProblemExport, verifyProblemExportChain } from "./export.ts";
 import { genesisChainDigest } from "./krater.ts";
@@ -77,72 +77,81 @@ export async function restoreProblemExport(db: D1Database, ndjson: string): Prom
     refused("an export with no events carries no restorable problem state");
   }
 
-  // The chain-head trigger requires a v2-complete problem head at the exact
-  // event being inserted, so the head row advances one event at a time.
-  await db
-    .prepare(
-      "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES (?, 0, ?, ?, ?, 2)",
-    )
-    .bind(problemId, first.createdAt, first.createdAt, await genesisChainDigest(problemId))
-    .run();
-  await db
-    .prepare(
-      "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES (?, 'complete', 0, ?, 2)",
-    )
-    .bind(problemId, last.createdAt)
-    .run();
+  // Prepare every write before committing; semantic refusal and database
+  // failures must leave the target unchanged. D1 executes batch in order
+  // and rolls it back if any statement fails.
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES (?, 0, ?, ?, ?, 2)",
+      )
+      .bind(problemId, first.createdAt, first.createdAt, await genesisChainDigest(problemId)),
+  ];
+  statements.push(
+    db
+      .prepare(
+        "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES (?, 'complete', 0, ?, 2)",
+      )
+      .bind(problemId, last.createdAt),
+  );
 
   let nextCheckpoint = 0;
   for (const event of events) {
-    await db
-      .prepare("UPDATE problems SET public_seq = ?, chain_digest = ?, updated_at = ? WHERE id = ?")
-      .bind(event.seq, event.chainDigest, event.createdAt, problemId)
-      .run();
-    await db
-      .prepare(
-        "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness, writer_credential_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .bind(
-        event.eventId,
-        problemId,
-        event.seq,
-        event.type,
-        event.objectKind,
-        event.objectId,
-        event.objectVersion,
-        event.payloadSha256,
-        event.rowDigest,
-        event.chainDigest,
-        event.createdAt,
-        event.actorFellowId,
-        event.actorSponsorId,
-        event.actorSessionId,
-        event.modelStringSelfDeclared,
-        event.harness,
-        event.writerCredentialId,
-      )
-      .run();
-    await db
-      .prepare(
-        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
-      )
-      .bind(event.eventId, event.payloadSha256, event.payloadJson)
-      .run();
+    statements.push(
+      db
+        .prepare(
+          "UPDATE problems SET public_seq = ?, chain_digest = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(event.seq, event.chainDigest, event.createdAt, problemId),
+    );
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared, harness, writer_credential_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          event.eventId,
+          problemId,
+          event.seq,
+          event.type,
+          event.objectKind,
+          event.objectId,
+          event.objectVersion,
+          event.payloadSha256,
+          event.rowDigest,
+          event.chainDigest,
+          event.createdAt,
+          event.actorFellowId,
+          event.actorSponsorId,
+          event.actorSessionId,
+          event.modelStringSelfDeclared,
+          event.harness,
+          event.writerCredentialId,
+        ),
+    );
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+        )
+        .bind(event.eventId, event.payloadSha256, event.payloadJson),
+    );
 
     const checkpoint = checkpoints[nextCheckpoint];
     if (checkpoint && checkpoint.checkpointSeq === event.seq) {
-      await db
-        .prepare(
-          "INSERT INTO integrity_checkpoints (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version, checkpoint_mode, created_at) VALUES (?, ?, ?, ?, 1, 'unsigned-v0', ?)",
-        )
-        .bind(
-          problemId,
-          checkpoint.checkpointSeq,
-          checkpoint.rootChainDigest,
-          checkpoint.checkpointDigest,
-          event.createdAt,
-        )
-        .run();
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO integrity_checkpoints (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version, checkpoint_mode, created_at) VALUES (?, ?, ?, ?, 1, 'unsigned-v0', ?)",
+          )
+          .bind(
+            problemId,
+            checkpoint.checkpointSeq,
+            checkpoint.rootChainDigest,
+            checkpoint.checkpointDigest,
+            event.createdAt,
+          ),
+      );
       nextCheckpoint += 1;
     }
 
@@ -160,14 +169,23 @@ export async function restoreProblemExport(db: D1Database, ndjson: string): Prom
       if (typeof statement !== "string") {
         refused(`claim event ${event.eventId} payload does not carry a statement`);
       }
-      await db
-        .prepare(
-          "INSERT OR IGNORE INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(event.objectId, problemId, statement, event.payloadSha256, event.seq, event.createdAt)
-        .run();
+      statements.push(
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            event.objectId,
+            problemId,
+            statement,
+            event.payloadSha256,
+            event.seq,
+            event.createdAt,
+          ),
+      );
     }
   }
+  await db.batch(statements);
 
   return {
     restored: problemId,
