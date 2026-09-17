@@ -9,9 +9,12 @@ import {
 } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
+import { loadReviewQueue } from "../discovery/review-queue-service";
 import type { Env } from "../env";
 import { loadProblemCitations } from "../ledger/citations";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
+import { loadFormalRecords } from "../ledger/formal-records-service";
+import { loadProofGaps } from "../ledger/proof-gaps-service";
 import {
   checkedScientificPayload,
   recordedReviewIndependence,
@@ -23,9 +26,6 @@ import {
   type ScientificDisposition,
   type ScientificRow,
 } from "../ledger/scientific-disposition";
-import { loadReviewQueue } from "../discovery/review-queue-service";
-import { loadFormalRecords } from "../ledger/formal-records-service";
-import { loadProofGaps } from "../ledger/proof-gaps-service";
 import { readFormalPack } from "./formal-pack";
 import { readReviewSelectionPack } from "./review-pack";
 
@@ -169,9 +169,12 @@ export async function readReviewQueuePack(
   reviewer: ReviewQueueReviewer,
 ): Promise<LedgerPackSection & { targets: string[] }> {
   return readReviewSelectionPack(
-    db, problemId, cursor, reviewer,
+    db,
+    problemId,
+    cursor,
+    reviewer,
     { loadQueue: loadReviewQueue, templateFor: getMoveTemplate },
-    body => neutralizeUntrustedBody(body).text,
+    (body) => neutralizeUntrustedBody(body).text,
   );
 }
 
@@ -234,16 +237,23 @@ export function workingRetryDeadEndMove(
       refs: [trigger.dead_end_id],
       contract: {
         ...template,
-        description: "Investigate the changed condition privately before publishing an actual result. Only the original author may supersede the old dead end.",
+        description:
+          "Investigate the changed condition privately before publishing an actual result. Only the original author may supersede the old dead end.",
         target_contract: "/schemas/sessions.v1.json#/properties/workshop_push_request",
-        request: { method: "POST", path: "/v1/sessions/{id}/workshop", auth: "fellow-bearer", idempotency_key_required: true },
+        request: {
+          method: "POST",
+          path: "/v1/sessions/{id}/workshop",
+          auth: "fellow-bearer",
+          idempotency_key_required: true,
+        },
         required_fields: ["type", "title", "body_md"],
         prefilled_hints: { type: "scratch" },
       },
       selection_boundary:
         "Recorded firing only, not a claim that its condition still holds. Use next/triage for current verified retry selection. No result, failure explanation, evidence or supersession is supplied; other Fellows publish distinct findings and cite the original.",
     }),
-    why_included: "private investigation of a recorded retry condition, without fabricating its outcome",
+    why_included:
+      "private investigation of a recorded retry condition, without fabricating its outcome",
     stable_prefix: 31,
   };
 }
@@ -598,7 +608,7 @@ export async function readLedgerPackSection(
     return readFormalPack(db, problemId, cursor, {
       records: loadFormalRecords,
       gaps: loadProofGaps,
-      neutralize: body => neutralizeUntrustedBody(body).text,
+      neutralize: (body) => neutralizeUntrustedBody(body).text,
     });
   }
   let rows: ProvenanceRow[];

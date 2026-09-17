@@ -17,25 +17,34 @@ function path(face: FormalRecordsResponse, format: keyof typeof MEDIA, after = f
  * data representation, never HTML. A new content withdrawal changes its ETag;
  * callers cannot validate a prior response without first rereading the source. */
 export async function formalRecordResponse(
-  request: Request, body: string, format: keyof typeof MEDIA,
-  face: FormalRecordsResponse, unlisted: boolean,
+  request: Request,
+  body: string,
+  format: keyof typeof MEDIA,
+  face: FormalRecordsResponse,
+  unlisted: boolean,
 ): Promise<Response> {
   const bytes = new TextEncoder().encode(body);
-  if (bytes.byteLength > FORMAL_READ_MAX_RESPONSE_BYTES) throw new Error("FORMAL_READ_RESPONSE_TOO_LARGE");
+  if (bytes.byteLength > FORMAL_READ_MAX_RESPONSE_BYTES)
+    throw new Error("FORMAL_READ_RESPONSE_TOO_LARGE");
   const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
-    .map(byte => byte.toString(16).padStart(2, "0")).join("");
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
   const etag = `"formal-${format}-${digest}"`;
   const headers = new Headers({
     "content-type": MEDIA[format],
     "cache-control": unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
     "x-content-type-options": "nosniff",
     "content-location": path(face, format),
-    "link": `<${schema}>; rel="describedby"; type="application/schema+json"${face.next_after === null ? "" : `, <${path(face, format, face.next_after)}>; rel="next"`}`,
-    "etag": etag,
+    link: `<${schema}>; rel="describedby"; type="application/schema+json"${face.next_after === null ? "" : `, <${path(face, format, face.next_after)}>; rel="next"`}`,
+    etag: etag,
   });
-  if (format === "html") headers.set("content-security-policy", "default-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  if (format === "html")
+    headers.set(
+      "content-security-policy",
+      "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    );
   const conditional = request.headers.get("if-none-match");
-  const unchanged = conditional?.split(",").some(value => {
+  const unchanged = conditional?.split(",").some((value) => {
     const tag = value.trim();
     return tag === "*" || tag.replace(/^W\//, "") === etag;
   });
