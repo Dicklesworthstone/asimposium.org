@@ -15,6 +15,7 @@ import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
+import { authenticatedFollowPrincipal } from "./follow-principal.ts";
 import { renderInboxMarkdown } from "./markdown.ts";
 import {
   ackInboxNotices,
@@ -71,29 +72,15 @@ export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings:
   async function authenticatePrincipal(
     request: Request,
   ): Promise<{ principalId: string } | Response> {
-    const sponsorHeader = request.headers.get("x-sponsor-id");
-    const token = bearerToken(request);
-
-    if (token && token.startsWith("asimp_sp_")) {
-      return { principalId: token };
-    }
-    if (sponsorHeader && (!token || token === sponsorHeader)) {
-      return { principalId: sponsorHeader };
-    }
-
-    if (token) {
-      const binding = await options.service.credentialBinding(token);
-      if (binding) {
-        return { principalId: binding.fellowId };
-      }
-    }
+    const principalId = await authenticatedFollowPrincipal(request, options.service);
+    if (principalId !== undefined) return { principalId };
 
     return problem({
       status: 401,
       code: "FELLOW_TOKEN_INVALID",
       title: "Authentication required",
       detail: "Valid principal credentials are required to manage problem follows.",
-      fixHint: "Provide an Authorization bearer token for an active fellow or sponsor.",
+      fixHint: "Provide an Authorization bearer token for an active Fellow.",
     });
   }
 
