@@ -160,7 +160,12 @@ test("the public schema registry serves exact artifact or canonical inline-gener
 
 test("the public schema classification is pinned to approved served ids and exclusions", () => {
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
-  expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual(["formalization-friction", "hypotheses", "proof-gaps", "review-requests"]);
+  expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
+    "formalization-friction",
+    "hypotheses",
+    "proof-gaps",
+    "review-requests",
+  ]);
   expect(Object.isFrozen(INLINE_PUBLIC_SCHEMA_IDS)).toBe(true);
   expect(PUBLIC_SCHEMA_EXCLUSIONS).toEqual(EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS);
   expect(Object.isFrozen(PUBLIC_SCHEMA_IDS)).toBe(true);
