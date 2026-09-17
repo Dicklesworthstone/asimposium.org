@@ -3,6 +3,8 @@ import type {
   ProblemFaceResponse,
   PublicClaimState,
 } from "@asimposium/contracts";
+import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
+import { publicViewWatchTargets } from "./public-watch-view";
 import type { PublicRead } from "./public-ledger";
 
 /** One parallel batch, never one unbounded request per claim in a problem digest. */
@@ -20,6 +22,7 @@ export type ClaimBoardReader = (
 export interface ClaimBoardRow {
   readonly item: ClaimItem;
   readonly href: string;
+  readonly watch?: PublicWatchTarget;
   readonly standing:
     | {
         readonly state: "ok";
@@ -80,6 +83,7 @@ export async function loadClaimBoard(
         // when the exact public statement has been withdrawn or omitted.
         if (exact === undefined) return unavailable;
         return {
+          ...(result.watch === undefined ? {} : { watch: result.watch }),
           item: {
             ...row.item,
             body: exact.body,
@@ -102,4 +106,16 @@ export async function loadClaimBoard(
     }),
   );
   return [...enriched, ...rows.slice(CLAIM_BOARD_MAX_STANDING_READS)];
+}
+
+/** One view watch covers the digest and every enriched claim, including each
+ * claim's original through pin. Failed enrichment disables partial liveness;
+ * deliberately unloaded rows are already covered by the digest itself. */
+export function claimBoardWatchTargets(
+  digest: PublicWatchTarget | undefined,
+  rows: readonly ClaimBoardRow[],
+): readonly PublicWatchTarget[] {
+  return publicViewWatchTargets(digest, ...rows
+    .filter((row) => row.standing.state !== "not_loaded")
+    .map((row) => row.watch));
 }
