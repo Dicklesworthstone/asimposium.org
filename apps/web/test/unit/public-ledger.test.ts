@@ -690,6 +690,16 @@ describe("public read failure boundaries and recovery", () => {
     expect(cancelled).toBe(true);
   });
 
+  test("an abort-ignoring hung fetch still resolves to timeout at the deadline", async () => {
+    setMockFetch(
+      (_input, init) =>
+        new Promise<Response>(() => {
+          void (init as RequestInit | undefined)?.signal;
+        }),
+    );
+    expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "timeout" });
+  });
+
   test("real HTTP outage recovers to a verified empty view; a redirect is never followed", async () => {
     let mode: "outage" | "empty" | "redirect" = "outage";
     let redirectHits = 0;

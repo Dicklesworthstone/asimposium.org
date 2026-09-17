@@ -69,14 +69,18 @@ async function readPublic<T>(
   const controller = new AbortController();
   let expired = false;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  // The deadline races the fetch itself so an abort-ignoring implementation
+  // cannot hold the caller past the configured timeout.
+  const deadline = Promise.withResolvers<never>();
   const timer = setTimeout(() => {
     expired = true;
     controller.abort();
     // Cancel pending body reads as well as the connection, including cached response streams.
     void reader?.cancel().catch(() => undefined);
+    deadline.reject(new Error("read_deadline"));
   }, PUBLIC_LEDGER_TIMEOUT_MS);
   try {
-    const response = await fetch(`${origin}${path}`, {
+    const pending = fetch(`${origin}${path}`, {
       method: "GET",
       headers: { accept: "application/json", "user-agent": PUBLIC_READ_USER_AGENT },
       credentials: "omit",
@@ -84,6 +88,19 @@ async function readPublic<T>(
       signal: controller.signal,
       next: { revalidate },
     });
+    // A late response from an abort-ignoring fetch must not leak its body
+    // after the caller has already returned timeout.
+    void pending.then(
+      (late) => {
+        if (expired) void late.body?.cancel().catch(() => undefined);
+      },
+      () => undefined,
+    );
+    const response = await Promise.race([pending, deadline.promise]);
+    if (expired) {
+      void response.body?.cancel().catch(() => undefined);
+      return { state: "unavailable", reason: "timeout" };
+    }
     if (response.status !== 200 && !(response.status === 404 && missingCode)) {
       void response.body?.cancel().catch(() => undefined);
       return { state: "unavailable", reason: "http" };
