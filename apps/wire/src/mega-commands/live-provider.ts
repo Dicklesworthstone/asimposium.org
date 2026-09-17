@@ -6,7 +6,6 @@ import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollmen
 import { GAP_MOVES_BOUNDARY, type GapMoveSource, withGapMove } from "./gap-moves.ts";
 import { type HypothesisMoveSource, selectThirdAlternative } from "./hypothesis-moves.ts";
 import { type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey } from "./ledger-moves.ts";
-import { RETRY_MOVES_BOUNDARY, type RetryMoveSource, withRetryMove } from "./retry-moves.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -14,6 +13,7 @@ import type {
   TriageMovesRequest,
   TriageMovesResult,
 } from "./provider.ts";
+import { RETRY_MOVES_BOUNDARY, type RetryMoveSource, withRetryMove } from "./retry-moves.ts";
 
 const LIVE_MOVES_BOUNDARY = `ledger-needs-v4: review, add-refuter, close-gap, retry-dead-end, third-alternative and first-claim moves. Review needs remain first; unowned proof obligations and changed retry conditions precede new exploration. ${GAP_MOVES_BOUNDARY} ${RETRY_MOVES_BOUNDARY}`;
 
@@ -52,14 +52,18 @@ const NO_PERMISSIONS = {
 export class LedgerMovesProvider implements MegaCommandsMoveProvider {
   constructor(private readonly dependencies: LiveMovesDependencies) {}
 
-  private preflight(credential: FellowCredentialBinding, problemId: string, now: number): boolean {
+  private preflight(
+    fellowBinding: FellowCredentialBinding,
+    problemId: string,
+    now: number,
+  ): boolean {
     // The unscoped session admission policy also checks lifecycle, expiry and
     // problem binding, before any existence-sensitive read. Scope checks below
     // happen through the same policy with actual membership and usage.
     return (
       this.dependencies.authorize({
         effect: "session.open",
-        credential,
+        credential: fellowBinding,
         target: { kind: "session-admission", problemId },
         usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
         now,
@@ -67,11 +71,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     );
   }
 
-  private async usage(db: D1Database, credential: FellowCredentialBinding): Promise<number> {
-    if (credential.grantedResources.eventBudget === undefined) return 0;
+  private async usage(db: D1Database, fellowBinding: FellowCredentialBinding): Promise<number> {
+    if (fellowBinding.grantedResources.eventBudget === undefined) return 0;
     const row = await db
       .prepare(MOVE_USAGE_SQL)
-      .bind(credential.credentialId)
+      .bind(fellowBinding.credentialId)
       .first<{ count: number }>();
     if (!row || !Number.isSafeInteger(row.count) || row.count < 0)
       throw new Error("MOVE_USAGE_UNAVAILABLE");
@@ -116,13 +120,13 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
   private async problem(
     db: D1Database,
     problemId: string,
-    credential: FellowCredentialBinding,
+    fellowBinding: FellowCredentialBinding,
     eventsRecorded: number,
     now: number,
   ) {
     const row = await db
       .prepare(MOVE_MEMBERSHIP_SQL)
-      .bind(credential.fellowId, problemId)
+      .bind(fellowBinding.fellowId, problemId)
       .first<{ role: string; cursor: number; has_claims: number }>();
     const role: ProblemRole | "none" =
       row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
@@ -146,13 +150,14 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       membershipRole: role,
     };
     const allowed = (effect: "promote" | "review" | "workshop.push") =>
-      this.dependencies.authorize({ effect, credential, target, usage, now }).decision === "allow";
+      this.dependencies.authorize({ effect, credential: fellowBinding, target, usage, now })
+        .decision === "allow";
     const effectivePermissions = {
       read: true,
       session_open:
         this.dependencies.authorize({
           effect: "session.open",
-          credential,
+          credential: fellowBinding,
           target: { kind: "session-admission", problemId },
           usage,
           now,
@@ -199,13 +204,27 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
           },
           selection_boundary: LIVE_MOVES_BOUNDARY,
         };
-        const selected = await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, {
-          moves: [move], degraded: false,
-        });
+        const selected = await this.withHypotheses(
+          db,
+          problemId,
+          row.cursor,
+          effectivePermissions,
+          {
+            moves: [move],
+            degraded: false,
+          },
+        );
         return {
           items: [] as ReviewQueueItem[],
-          ...(await withRetryMove(db, problemId, row.cursor, credential.fellowId,
-            effectivePermissions, selected, this.dependencies.retries)),
+          ...(await withRetryMove(
+            db,
+            problemId,
+            row.cursor,
+            fellowBinding.fellowId,
+            effectivePermissions,
+            selected,
+            this.dependencies.retries,
+          )),
           continuation: null,
           role,
           effectivePermissions,
@@ -217,7 +236,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       result = await loadLedgerMoves(
         db,
         problemId,
-        credential,
+        fellowBinding,
         effectivePermissions,
         this.dependencies,
         row.cursor,
@@ -234,20 +253,34 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       effectivePermissions,
       result,
     );
-    const withGaps = await withGapMove(db, problemId, row.cursor, now,
-      effectivePermissions, selected, this.dependencies.gaps);
+    const withGaps = await withGapMove(
+      db,
+      problemId,
+      row.cursor,
+      now,
+      effectivePermissions,
+      selected,
+      this.dependencies.gaps,
+    );
     return {
       ...result,
-      ...(await withRetryMove(db, problemId, row.cursor, credential.fellowId,
-        effectivePermissions, withGaps, this.dependencies.retries)),
+      ...(await withRetryMove(
+        db,
+        problemId,
+        row.cursor,
+        fellowBinding.fellowId,
+        effectivePermissions,
+        withGaps,
+        this.dependencies.retries,
+      )),
       role,
       effectivePermissions,
     };
   }
 
   async nextMoves(request: ProblemMovesRequest): Promise<ProblemMovesResult> {
-    const { db, credential, problemId } = request;
-    if (!db || !credential || credential.fellowId !== request.fellowId)
+    const { db, credential: fellowBinding, problemId } = request;
+    if (!db || !fellowBinding || fellowBinding.fellowId !== request.fellowId)
       return {
         primaryMove: null,
         alternatives: [],
@@ -258,7 +291,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       };
     try {
       const now = this.dependencies.now();
-      if (!this.preflight(credential, problemId, now))
+      if (!this.preflight(fellowBinding, problemId, now))
         return {
           primaryMove: null,
           alternatives: [],
@@ -269,8 +302,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       const result = await this.problem(
         db,
         problemId,
-        credential,
-        await this.usage(db, credential),
+        fellowBinding,
+        await this.usage(db, fellowBinding),
         now,
       );
       return {
@@ -295,8 +328,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
   }
 
   async triageMove(request: TriageMovesRequest): Promise<TriageMovesResult> {
-    const { db, credential } = request;
-    if (!db || !credential || credential.fellowId !== request.fellowId)
+    const { db, credential: fellowBinding } = request;
+    if (!db || !fellowBinding || fellowBinding.fellowId !== request.fellowId)
       return {
         move: null,
         degraded: true,
@@ -306,11 +339,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     try {
       const now = this.dependencies.now();
       const problems = [...new Set(request.assignments.map((assignment) => assignment.problem_id))]
-        .filter((id) => this.preflight(credential, id, now))
+        .filter((id) => this.preflight(fellowBinding, id, now))
         .sort();
       if (problems.length === 0)
         return { move: null, degraded: false, selectionBoundary: TRIAGE_BOUNDARY };
-      const eventsRecorded = await this.usage(db, credential);
+      const eventsRecorded = await this.usage(db, fellowBinding);
       const selected = problems.slice(0, TRIAGE_MAX_PROBLEMS);
       const results: Array<Awaited<ReturnType<LedgerMovesProvider["problem"]>> | null> =
         selected.map(() => null);
@@ -323,7 +356,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
             const id = selected[position];
             if (id === undefined) break;
             try {
-              results[position] = await this.problem(db, id, credential, eventsRecorded, now);
+              results[position] = await this.problem(db, id, fellowBinding, eventsRecorded, now);
             } catch {
               failed = true;
             }

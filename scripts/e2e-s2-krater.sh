@@ -301,6 +301,9 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/relations.ts
   apps/wire/src/ledger/synthesis.ts
   apps/wire/src/ledger/dead-ends.ts
+  apps/wire/src/ledger/dead-end-retries.ts
+  apps/wire/src/ledger/dead-end-retry-science.ts
+  apps/wire/src/ledger/dead-end-retry-service.ts
   apps/wire/src/ledger/questions.ts
   apps/wire/src/ledger/retractions.ts
   apps/wire/src/ledger/conflicts.ts
@@ -365,6 +368,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/mega-commands/hypothesis-moves.ts
   apps/wire/src/mega-commands/gap-moves.ts
   apps/wire/src/mega-commands/gap-moves-service.ts
+  apps/wire/src/mega-commands/retry-moves.ts
+  apps/wire/src/mega-commands/retry-moves-service.ts
   apps/wire/src/mega-commands/markdown.ts
   apps/wire/src/mega-commands/provider.ts
   apps/wire/src/mega-commands/router.ts

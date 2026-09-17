@@ -12,7 +12,11 @@ export interface SearchPageQuery {
 
 /** Preserve the complete query on every human/agent continuation link. */
 export function searchQueryString(query: SearchPageQuery): string {
-  const params = new URLSearchParams({ q: query.q, kind: query.kind ?? "all", limit: String(query.limit ?? 20) });
+  const params = new URLSearchParams({
+    q: query.q,
+    kind: query.kind ?? "all",
+    limit: String(query.limit ?? 20),
+  });
   if (query.cursor !== undefined) params.set("cursor", query.cursor);
   return params.toString();
 }
