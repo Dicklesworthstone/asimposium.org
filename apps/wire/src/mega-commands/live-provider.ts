@@ -6,6 +6,7 @@ import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollmen
 import { GAP_MOVES_BOUNDARY, type GapMoveSource, withGapMove } from "./gap-moves.ts";
 import { type HypothesisMoveSource, selectThirdAlternative } from "./hypothesis-moves.ts";
 import { type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey } from "./ledger-moves.ts";
+import { RETRY_MOVES_BOUNDARY, type RetryMoveSource, withRetryMove } from "./retry-moves.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -14,7 +15,7 @@ import type {
   TriageMovesResult,
 } from "./provider.ts";
 
-const LIVE_MOVES_BOUNDARY = `ledger-needs-v3: review, add-refuter, close-gap, third-alternative and first-claim moves. Review needs remain first; unowned proof obligations precede new exploration. ${GAP_MOVES_BOUNDARY}`;
+const LIVE_MOVES_BOUNDARY = `ledger-needs-v4: review, add-refuter, close-gap, retry-dead-end, third-alternative and first-claim moves. Review needs remain first; unowned proof obligations and changed retry conditions precede new exploration. ${GAP_MOVES_BOUNDARY} ${RETRY_MOVES_BOUNDARY}`;
 
 export const TRIAGE_MAX_PROBLEMS = 4;
 export const TRIAGE_CONCURRENCY = 2;
@@ -28,6 +29,7 @@ export interface LiveMovesDependencies extends LedgerMovesDependencies {
    * isolated queue tests and partial deployments of the provider adapter. */
   readonly hypotheses?: HypothesisMoveSource;
   readonly gaps?: GapMoveSource;
+  readonly retries?: RetryMoveSource;
 }
 
 /** Permission hints use the exact same central policy as the writes, with
@@ -197,12 +199,13 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
           },
           selection_boundary: LIVE_MOVES_BOUNDARY,
         };
+        const selected = await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, {
+          moves: [move], degraded: false,
+        });
         return {
           items: [] as ReviewQueueItem[],
-          ...(await this.withHypotheses(db, problemId, row.cursor, effectivePermissions, {
-            moves: [move],
-            degraded: false,
-          })),
+          ...(await withRetryMove(db, problemId, row.cursor, credential.fellowId,
+            effectivePermissions, selected, this.dependencies.retries)),
           continuation: null,
           role,
           effectivePermissions,
@@ -220,9 +223,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         row.cursor,
       );
     } catch (error) {
-      // A failing review source cannot erase independently readable gap work.
-      // Preserve the existing error behavior when no gap source is installed.
-      if (!this.dependencies.gaps) throw error;
+      // A failing review source cannot erase independently readable gap/retry work.
+      if (!this.dependencies.gaps && !this.dependencies.retries) throw error;
       result = { items: [], moves: [], degraded: true, continuation: null };
     }
     const selected = await this.withHypotheses(
@@ -232,17 +234,12 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       effectivePermissions,
       result,
     );
+    const withGaps = await withGapMove(db, problemId, row.cursor, now,
+      effectivePermissions, selected, this.dependencies.gaps);
     return {
       ...result,
-      ...(await withGapMove(
-        db,
-        problemId,
-        row.cursor,
-        now,
-        effectivePermissions,
-        selected,
-        this.dependencies.gaps,
-      )),
+      ...(await withRetryMove(db, problemId, row.cursor, credential.fellowId,
+        effectivePermissions, withGaps, this.dependencies.retries)),
       role,
       effectivePermissions,
     };
@@ -348,11 +345,12 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       // targets. Completion order of concurrent reads cannot change the winner.
       const first = rankReviewQueue(eligible)[0];
       return {
-        // Existing independent checks come first, then unowned gaps and alternatives,
-        // then an empty board. Cross-problem ties retain ASCII problem order.
+        // Independent checks, unowned gaps, reactivated routes, new exploration.
+        // Cross-problem ties retain ASCII problem order.
         move: first
           ? (moves.get(reviewTargetKey(first)) ?? null)
           : ([...moves.values()].find((move) => move.move === "close-gap") ??
+            [...moves.values()].find((move) => move.move === "retry-dead-end") ??
             [...moves.values()].find((move) => move.move === "third-alternative") ??
             [...moves.values()].find((move) => move.move === "state-claim") ??
             null),

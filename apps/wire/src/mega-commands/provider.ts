@@ -13,6 +13,7 @@ import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollmen
 import { loadLiveHypotheses } from "../ledger/hypotheses-service.ts";
 import { loadProofGapMove } from "./gap-moves-service.ts";
 import { LedgerMovesProvider } from "./live-provider.ts";
+import { loadDeadEndRetryMove } from "./retry-moves-service.ts";
 
 /** Moves needing promotion permission. Reviews have their own scope and are
  * permitted for observers by centralized Fellow authorization (Fable §9.3). */
@@ -131,6 +132,7 @@ export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
       now: () => Date.now(),
       firstClaimTemplate: () => getMoveTemplate("state-claim"),
       gaps: { load: loadProofGapMove },
+      retries: { load: loadDeadEndRetryMove },
       hypotheses: {
         load: loadLiveHypotheses,
         template: () => getMoveTemplate("third-alternative"),
