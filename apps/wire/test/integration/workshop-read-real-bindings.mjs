@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { WorkshopObjectResponseSchema } from "@asimposium/contracts";
+import { ProblemNextResponseSchema, WorkshopObjectResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 const cliMode = process.argv[2] === "cli";
@@ -68,8 +68,9 @@ await runLocalWorkerJourney(
     const pathFor = (draft, context = session) =>
       `/v1/sessions/${context.session_id}/workshop/${draft.workshop_id}`;
     let cliReads = 0;
+    let cliNextReads = 0;
     const cliStatuses = { 200: 0, 400: 0, 401: 0, 404: 0, 500: 0 };
-    async function verifyCli(path, credential, status, body) {
+    async function verifyCli(path, credential, status, body, nextProbe) {
       // A real loopback HTTP bridge forwards unchanged GETs to the actual
       // Worker. Rust maps only its test origin here; production stays HTTPS.
       let requests = 0;
@@ -110,6 +111,7 @@ await runLocalWorkerJourney(
           token: credential,
           status,
           body,
+          ...nextProbe,
         };
         const { stdout, stderr } = await execute(
           process.env.ASIMP_WORKSHOP_TEST_BINARY,
@@ -132,8 +134,12 @@ await runLocalWorkerJourney(
           "CLI request must cross the exact authorized HTTP bridge",
         );
         assert.equal(requests, 1);
-        cliReads++;
-        cliStatuses[status]++;
+        if (nextProbe) {
+          cliNextReads++;
+        } else {
+          cliReads++;
+          cliStatuses[status]++;
+        }
       } finally {
         bridge.closeAllConnections();
         await new Promise((resolve, reject) =>
@@ -175,6 +181,34 @@ await runLocalWorkerJourney(
     const eventsBefore = await env.DB.prepare("SELECT COUNT(*) AS n FROM events").first();
     const publicBefore = await env.PUBLIC_ARTIFACTS.list();
     const privateBefore = await env.ARTIFACTS.list();
+    const next = ProblemNextResponseSchema.parse(
+      await call(`/v1/p/${problem}/next`, undefined, token),
+    );
+    assert.equal(next.problem_id, problem);
+    if (cliMode) {
+      for (const [problemId, json, credential, status] of [
+        [problem, true, token, 200],
+        [problem, false, token, 200],
+        ["P-NEXT-MISSING", true, token, 404],
+        [problem, true, "asimp_ag_invalid", 401],
+      ]) {
+        const path = `/v1/p/${problemId}/next${json ? "" : ".md"}`;
+        const response = await worker.fetch(`${origin}${path}`, {
+          headers: { authorization: `Bearer ${credential}`, "User-Agent": userAgent },
+        });
+        const body = await response.text();
+        assert.equal(response.status, status, `next response digest=${sha(body)}`);
+        if (status === 200) {
+          assert.equal(response.headers.get("cache-control"), "private, no-store");
+          if (json) {
+            assert.equal(ProblemNextResponseSchema.parse(JSON.parse(body)).problem_id, problem);
+          }
+        }
+        for (const privateBody of bodies) assert.ok(!body.includes(privateBody));
+        await verifyCli(path, credential, status, body, { problem: problemId, json });
+      }
+      assert.equal(cliNextReads, 4);
+    }
     const etags = [];
     for (const [index, draft] of drafts.entries()) {
       const result = await read(pathFor(draft), token);
@@ -458,6 +492,7 @@ await runLocalWorkerJourney(
         ...(cliMode
           ? {
               cli_reads: cliReads,
+              cli_next_reads: cliNextReads,
               cli_statuses: cliStatuses,
               cli_transport:
                 "production Rust dispatcher and bearer HTTP reader via explicit loopback origin mapping",

@@ -47,6 +47,20 @@ the stored revision number to recover its immutable earlier body. The Worker
 validates the version and checks current authorization on every read; an old
 revision does not bypass a revoked credential or private problem access.
 
+Read one problem's recommended move without opening a session or executing it:
+
+```bash
+asimp next P-4DSP
+asimp next P-4DSP --json
+```
+
+This authenticated read prints `/v1/p/P-4DSP/next.md`, or the complete JSON face
+at `/v1/p/P-4DSP/next` with `--json`. The Worker selects the primary move and
+up to two alternatives under current permissions. Null moves, degradation and
+selection-boundary disclosures are preserved; the CLI does not invent work or
+claim a recommendation grants permission. It sends no write or automatic retry.
+These are source commands, not proof that a deployed Worker serves the route.
+
 ## Session writes
 
 Renew an open session and its active leases during long work:
@@ -241,9 +255,11 @@ ASIMP_WORKSHOP_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
   node apps/wire/test/integration/workshop-read-real-bindings.mjs cli
 ```
 
-This runs 25 CLI-dispatched HTTP reads: thirteen complete responses and twelve
-contract, access, or storage refusals, including immutable revisions,
-closed/resumed sessions and D1/R2 bodies. The
-journey supplies actual local bindings and maps only the test HTTPS origin to
-a loopback HTTP bridge. It does not verify production TLS, Google approval, or
-the deployed Worker revision. A missing executable or zero executed tests fails.
+This runs 29 CLI-dispatched HTTP reads: twenty-five workshop reads (thirteen
+complete responses and twelve contract, access, or storage refusals) plus four
+`next` move reads over the JSON and Markdown faces, including a missing-problem
+404 and an invalid-credential 401. Workshop reads cover immutable revisions,
+closed/resumed sessions and D1/R2 bodies. The journey supplies actual local
+bindings and maps only the test HTTPS origin to a loopback HTTP bridge. It does
+not verify production TLS, Google approval, or the deployed Worker revision. A
+missing executable or zero executed tests fails.

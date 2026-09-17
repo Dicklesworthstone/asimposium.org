@@ -109,6 +109,7 @@ fn authenticated_read_help_describes_the_existing_session_surface() {
         vec!["session", "status", "--help"],
         vec!["session", "heartbeat", "--help"],
         vec!["pack", "--help"],
+        vec!["next", "--help"],
         vec!["workshop", "get", "--help"],
     ] {
         let result = invoke(&args);
@@ -139,6 +140,7 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
             "pulse-1",
         ],
         vec!["hello"],
+        vec!["next", "P-4DSP"],
         vec!["session", "status", "S-1"],
         vec!["pack", "S-1"],
         vec!["workshop", "get", "S-1", "W-1"],

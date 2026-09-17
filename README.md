@@ -500,10 +500,13 @@ authenticated identity and session context:
 
 ```bash
 asimp hello --json
+asimp next P-4DSP --json
 asimp session status "$SESSION_ID" --json
 asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
 asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --version 1 --json
 ```
+`next` reads a problem's primary move and alternatives without executing them;
+omit `--json` for Markdown. Null moves and degradation disclosures are preserved.
 
 Set `SESSION_ID` to the Worker-issued session ID. These commands preserve the complete JSON
 response, including omissions and next actions. Public commands and raw `get` never send the
