@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { gzipSync } from "node:zlib";
+import { deflateRawSync, gzipSync } from "node:zlib";
 import { test } from "bun:test";
 import {
   artifactSha256, inspectArtifact, ArtifactInspectionError,
 } from "../../src/krater/artifact-inspection.ts";
+
+import { deflateMemberEnd } from "../../src/krater/artifact-deflate.ts";
 
 const utf8 = (value: string) => new TextEncoder().encode(value);
 const inspect = async (bytes: Uint8Array, encoding: "text" | "lake-archive" = "text") =>
@@ -119,4 +121,43 @@ test("hidden trailing archive members and non-zero padding are refused", async (
 
 test("expansion bombs stop before complete materialization", async () => {
   await refuses(gzipSync(Buffer.alloc(8 * 1024 * 1024)), "ARTIFACT_ARCHIVE_INVALID", true);
+});
+
+test("concatenated gzip members cannot conceal later header metadata", async () => {
+  const good=archive([{name:"Main.lean",body:"theorem sample : True := by trivial\n"}]);
+  const empty=gzipSync(Buffer.alloc(0));const named=Buffer.from(empty);named[3]=8;
+  const secretHeader=Buffer.concat([named.subarray(0,10),Buffer.from("sk_live_"+"x".repeat(25)+"\0"),empty.subarray(10)]);
+  for(const composite of [Buffer.concat([good,secretHeader]),Buffer.concat([empty,secretHeader,good]),
+    Buffer.concat([good,secretHeader,good]),Buffer.concat([good,Buffer.alloc(8)])]) {
+    await refuses(composite,"ARTIFACT_ARCHIVE_INVALID",true);
+  }
+});
+
+test("stored, fixed and dynamic DEFLATE framing agrees with native gzip across source fixtures", async () => {
+  let seed=17;
+  const sample=(n:number)=>Array.from({length:n},()=>{seed=(seed*1664525+1013904223)>>>0;return String.fromCharCode(65+((seed>>>16)%26)) + " ";}).join("");
+  for(const size of [1,10,100,1000,10_000,100_000]) {
+    const data=tar([{name:"Main.lean",body:sample(size)}]);
+    for(const options of [{level:0},{level:1},{level:6},{level:9},{level:6,strategy:4}]) {
+      const compressed=gzipSync(data,options);
+      const result=await inspect(compressed,"lake-archive");
+      assert.equal(result.expandedBytes,data.length);assert.equal(result.members,1);
+    }
+  }
+});
+
+test("framing counts native raw DEFLATE output without decoding or accepting trailing members", () => {
+  let seed=7;
+  for(let i=0;i<100;i++) {
+    const body=Buffer.alloc(i*997);
+    for(let j=0;j<body.length;j++){seed=(seed*1664525+1013904223)>>>0;body[j]=(seed>>>16)%(i%3===0?256:7);}
+    const compressed=deflateRawSync(body,{level:i%10,strategy:i%5});
+    assert.deepEqual(deflateMemberEnd(compressed,0,compressed.length,body.length),{end:compressed.length,expanded:body.length});
+    const withSuffix=Buffer.concat([compressed,Buffer.from("opaque trailing metadata")]);
+    assert.equal(deflateMemberEnd(withSuffix,0,withSuffix.length,body.length).end,compressed.length);
+    if(body.length>0)assert.throws(()=>deflateMemberEnd(compressed,0,compressed.length,body.length-1));
+  }
+  for(const invalid of [new Uint8Array([7]),new Uint8Array([1,1,0,0,0]),new Uint8Array([3])]) {
+    assert.throws(()=>deflateMemberEnd(invalid,0,invalid.length,1024));
+  }
 });

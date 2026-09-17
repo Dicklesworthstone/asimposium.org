@@ -53,7 +53,7 @@ const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g,
   character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 const utf8 = new TextEncoder();
 async function hmac(key: Uint8Array, value: string): Promise<Uint8Array> {
-  const imported = await crypto.subtle.importKey("raw", key,
+  const imported = await crypto.subtle.importKey("raw", key.slice().buffer as ArrayBuffer,
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", imported, utf8.encode(value)));
 }
@@ -98,4 +98,14 @@ export async function presignArtifactPut(
     expires_at: instant + ARTIFACT_PUT_TTL_SECONDS * 1000,
     headers: { "content-type": "application/octet-stream", "content-length": String(size), "if-none-match": "*" },
   };
+}
+
+/** Match the private-cas role declared in infra/environments.toml. A swapped
+ * public-delivery bucket must never receive uninspected signed uploads. Local
+ * bindings have no real S3 endpoint and cannot mint remote upload grants. */
+export function artifactSigningForOrigin(value: string | undefined, origin: string | undefined): ArtifactSigningConfig | undefined {
+  const expected = origin === "https://a.asimposium.org" ? "asimposium-artifacts-prod"
+    : origin === "https://a-staging.asimposium.org" ? "asimposium-artifacts-staging" : undefined;
+  const parsed = artifactSigningConfig(value);
+  return parsed !== undefined && expected !== undefined && parsed.bucket === expected ? parsed : undefined;
 }

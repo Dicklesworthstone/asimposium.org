@@ -102,6 +102,7 @@ export async function declareArtifact(
   db: D1Database, codec: ArtifactReplayCodec, signing: ArtifactSigningConfig,
   actor: ArtifactActor, input: ArtifactDeclaration, idempotencyKey: string,
   clock: () => number = Date.now,
+  authorizeNew?: (problemId: string) => Promise<void>,
 ): Promise<ArtifactCreated> {
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey) ||
     !/^[a-f0-9]{64}$/.test(input.sha256) || !Number.isSafeInteger(input.size) || input.size < 1 ||
@@ -131,6 +132,7 @@ export async function declareArtifact(
     const session = await db.prepare("SELECT problem_id FROM sessions WHERE session_id = ? AND fellow_id = ?")
       .bind(input.sessionId, actor.fellowId).first<{ problem_id: string }>();
     if (!session) return fail("NOT_FOUND");
+    await authorizeNew?.(session.problem_id);
     const createdAt = clock();
     const uploadId = id();
     const put = await presignArtifactPut(signing, uploadId, input.size, createdAt);
@@ -219,6 +221,7 @@ async function putVerifiedBytes(bucket: R2Bucket, key: string, bytes: Uint8Array
 export async function completeArtifact(
   db: D1Database, bucket: R2Bucket, actor: ArtifactActor, uploadId: string,
   clock: () => number = Date.now,
+  authorizeNew?: (manifest: ArtifactManifest) => Promise<void>,
 ): Promise<ArtifactManifest> {
   const row = await readArtifactManifest(db, actor, uploadId, clock());
   if (row.state === "verified") return row;
@@ -230,6 +233,7 @@ export async function completeArtifact(
     return fail("EXPIRED");
   }
   if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+  await authorizeNew?.(row);
   const token = crypto.randomUUID().replaceAll("-", "");
   try {
     const leased = await db.prepare(`UPDATE artifact_uploads SET lease_token = ?, lease_until = ?, updated_at = ?

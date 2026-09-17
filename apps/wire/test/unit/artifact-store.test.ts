@@ -1,3 +1,5 @@
+import { handleArtifactHttp, artifactRoute, type ArtifactHttpOptions } from "../../src/krater/artifact-http.ts";
+import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
@@ -5,7 +7,7 @@ import { test } from "bun:test";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import {
   ArtifactUploadError, declareArtifact, completeArtifact, readArtifactManifest,
-  readVerifiedArtifact, type ArtifactActor, type ArtifactReplayCodec,
+  readVerifiedArtifact, type ArtifactActor, type ArtifactReplayCodec, type ArtifactDeclaration,
 } from "../../src/krater/artifact-store.ts";
 import { artifactSha256 } from "../../src/krater/artifact-inspection.ts";
 import { artifactStagingKey } from "../../src/krater/artifact-presign.ts";
@@ -38,7 +40,7 @@ async function fixture() {
     CREATE TABLE public_cursor (cursor INTEGER);
     INSERT INTO public_cursor VALUES (7);
     INSERT INTO problems VALUES ('P-DEMO', 'private-draft', 1);`);
-  for (const [fellow, credential, session] of [["fellow-a", "token-a", "S-a"], ["fellow-b", "token-b", "S-b"]]) {
+  for (const [fellow, credential, session] of [["fellow-a", "token-a", `S-${"A".repeat(26)}`], ["fellow-b", "token-b", `S-${"B".repeat(26)}`]] as const) {
     sql.query("INSERT INTO enrollment_fellows VALUES (?, 'usr_a', 'active')").run(fellow);
     sql.query(`INSERT INTO fellow_tokens VALUES (?, ?, 'usr_a', '["upload-artifacts"]', '{}', ?, ?, NULL, 'bearer')`)
       .run(credential, fellow, NOW - 10000, NOW + 7 * 86400000);
@@ -94,7 +96,7 @@ async function fixture() {
   } as unknown as R2Bucket;
   let instant = NOW;
   const clock = () => instant;
-  const declaration = { sessionId: "S-a", sha256: await artifactSha256(bytes), size: bytes.length, encoding: "text" as const };
+  const declaration: ArtifactDeclaration = { sessionId: `S-${"A".repeat(26)}`, sha256: await artifactSha256(bytes), size: bytes.length, encoding: "text" as const };
   const create = (key = "request-1", input = declaration, who = actor, settings = config) =>
     declareArtifact(db, codec, settings, who, input, key, clock);
   const complete = (id: string, who = actor) => completeArtifact(db, bucket, who, id, clock);
@@ -182,7 +184,7 @@ test("Fellow rotation and another Fellow cannot reset grant or sponsor budgets",
     f.sql.exec("INSERT INTO fellow_tokens SELECT 'rotated', fellow_id, sponsor_id, granted_scopes_json, granted_resources_json, issued_at, expires_at, NULL, credential_profile FROM fellow_tokens WHERE credential_id = 'token-a'");
     await assert.rejects(f.create("request-2", f.declaration, {...actor,credentialId:"rotated"}), failure("BUDGET"));
     const cap = {...config,sponsorDailyBytes:bytes.length};
-    await assert.rejects(f.create("other-1", {...f.declaration,sessionId:"S-b"}, other,cap), failure("BUDGET"));
+    await assert.rejects(f.create("other-1", {...f.declaration,sessionId:`S-${"B".repeat(26)}`}, other,cap), failure("BUDGET"));
   });
 });
 
@@ -249,7 +251,7 @@ test("concurrent verification has one terminal transition and safely retries bus
 
 test("same verified bytes dedupe without exposing another Fellow's manifest", async () => {
   await using(async f => {
-    const a=await f.create(); const b=await f.create("other",{...f.declaration,sessionId:"S-b"},other);
+    const a=await f.create(); const b=await f.create("other",{...f.declaration,sessionId:`S-${"B".repeat(26)}`},other);
     f.objects.set(artifactStagingKey(a.upload_id),bytes); f.objects.set(artifactStagingKey(b.upload_id),bytes);
     await f.complete(a.upload_id); await f.complete(b.upload_id,other);
     assert.equal(f.writes.length,1);
@@ -330,5 +332,206 @@ test("database constraints refuse incomplete verification and one-sided leases",
     f.sql.exec(`UPDATE artifact_uploads SET lease_token = '${"a".repeat(32)}', lease_until = ${NOW+1000}`);
     assert.throws(()=>f.sql.exec(`UPDATE artifact_uploads SET state='verified',content_type='text/plain; charset=utf-8',lease_token=NULL,lease_until=NULL`));
     assert.equal(f.rows()[0]?.state,"presigned"); assert.ok(a.upload_id);
+  });
+});
+
+function http(f: Awaited<ReturnType<typeof fixture>>, token = "valid-test-token") {
+  let authentications = 0;
+  const options: ArtifactHttpOptions = {db:f.db,bucket:f.bucket,codec:f.codec,signing:config,clock:f.clock, authenticate:async presented => {
+    authentications++;
+    if (presented !== "valid-test-token") return undefined;
+    const c=f.sql.query("SELECT * FROM fellow_tokens WHERE credential_id='token-a'").get() as Record<string,unknown>;
+    const fellow=f.sql.query("SELECT status FROM enrollment_fellows WHERE fellow_id='fellow-a'").get() as {status:string};
+    return {...actor,grantedScopes:JSON.parse(String(c.granted_scopes_json)),grantedResources:JSON.parse(String(c.granted_resources_json)),
+      issuedAt:Number(c.issued_at),expiresAt:Number(c.expires_at),credentialProfile:"bearer",fellowStatus:fellow.status,
+      ...(c.revoked_at===null?{}:{revokedAt:Number(c.revoked_at)})} as FellowCredentialBinding;
+  }};
+  const raw = async (request: Request, settings: ArtifactHttpOptions = options) => {
+    const response = await handleArtifactHttp(request, settings);
+    assert.ok(response); return response;
+  };
+  const call = async (path: string, method = "GET", body?: unknown, extra: Record<string,string> = {}) => raw(
+    new Request(`https://a.asimposium.org${path}`, {
+      method, headers: {authorization:`Bearer ${token}`, "content-type":"application/json", "idempotency-key":"http-manifest-1", ...extra},
+      ...(body === undefined ? {} : {body:JSON.stringify(body)}),
+    }));
+  const manifest = () => ({session_id:f.declaration.sessionId,sha256:f.declaration.sha256,
+    size_bytes:f.declaration.size,encoding:f.declaration.encoding});
+  return {call,raw,options,manifest,authentications:()=>authentications};
+}
+
+test("HTTP completes manifest → PUT bytes → verification → private download and exact replay", async () => {
+  await using(async f => {
+    const h=http(f); const created=await h.call("/v1/artifacts","POST",h.manifest());
+    assert.equal(created.status,201); const receipt=await created.json() as {upload_id:string;status_path:string;complete_path:string};
+    assert.equal(created.headers.get("cache-control"),"private, no-store");
+    assert.deepEqual(await (await h.call("/v1/artifacts","POST",h.manifest())).json(),receipt);
+    f.objects.set(artifactStagingKey(receipt.upload_id),bytes);
+    const done=await h.call(receipt.complete_path,"POST",{}); assert.equal(done.status,200);
+    const metadata=await done.json() as {content_path:string;verification:string;state:string};
+    assert.equal(metadata.verification,"bytes-only"); assert.equal(metadata.state,"verified");
+    assert.deepEqual(await (await h.call(receipt.complete_path,"POST",{})).json(),metadata);
+    const status=await h.call(receipt.status_path); assert.deepEqual(await status.json(),metadata);
+    const download=await h.call(metadata.content_path); assert.equal(download.status,200);
+    assert.deepEqual(new Uint8Array(await download.arrayBuffer()),bytes);
+    assert.equal(download.headers.get("access-control-allow-origin"),null);
+    assert.match(download.headers.get("content-disposition")??"",/^attachment;/);
+    assert.equal(download.headers.get("content-security-policy"),"sandbox; default-src 'none'");
+    assert.equal(f.rows().length,1); assert.equal(f.audit().length,2);
+    assert.equal(h.authentications(),6);
+  });
+});
+
+test("metadata never returns the signed capability, credential, ciphertext or verifier lease", async () => {
+  await using(async f => {
+    const h=http(f); const response=await h.call("/v1/artifacts","POST",h.manifest());
+    const created=await response.json() as {status_path:string};
+    const read=await h.call(created.status_path); const text=await read.text();
+    for(const secret of ["X-Amz-","token-a","replay_ciphertext","replay_iv","lease_token","usr_a"]) assert.ok(!text.includes(secret));
+  });
+});
+
+test("forged identities in headers, cookies and JSON cannot obtain an upload", async () => {
+  await using(async f => {
+    const h=http(f,"forged-token");
+    assert.equal((await h.call("/v1/artifacts","POST",h.manifest(),{"x-sponsor-id":"usr_a",cookie:"token=valid-test-token"})).status,401);
+    assert.equal(f.rows().length,0);
+    const valid=http(f);
+    assert.equal((await valid.call("/v1/artifacts","POST",{...valid.manifest(),fellow_id:"fellow-b"})).status,422);
+    assert.equal(f.rows().length,0);
+  });
+});
+
+test("HTTP scope and current grant gates run before capability issuance", async () => {
+  await using(async f => {
+    f.sql.exec(`UPDATE fellow_tokens SET granted_scopes_json='[]';UPDATE enrollment_grants SET granted_scopes_json='[]'`);
+    const h=http(f); assert.equal((await h.call("/v1/artifacts","POST",h.manifest())).status,401); assert.equal(f.rows().length,0);
+  });
+  await using(async f => {
+    f.grant({artifactBudgetBytes:bytes.length});
+    const h=http(f); assert.equal((await h.call("/v1/artifacts","POST",h.manifest())).status,201);
+    assert.equal((await h.call("/v1/artifacts","POST",h.manifest())).status,201);
+    assert.equal((await h.call("/v1/artifacts","POST",h.manifest(),{"idempotency-key":"new-key"})).status,401);
+  });
+});
+
+test("HTTP refuses query credentials, unsupported methods, media types and shape changes", async () => {
+  await using(async f => {
+    const h=http(f);
+    assert.equal((await h.call("/v1/artifacts?token=secret","POST",h.manifest())).status,400);
+    assert.equal((await h.call("/v1/artifacts")).status,405);
+    assert.equal((await h.call("/v1/artifacts","POST",h.manifest(),{"content-type":"text/plain"})).status,415);
+    assert.equal((await h.call("/v1/artifacts","POST",h.manifest(),{"idempotency-key":""})).status,400);
+    assert.equal((await h.call("/v1/artifacts","POST",{...h.manifest(),size_bytes:"40"})).status,422);
+    assert.equal(f.rows().length,0);
+  });
+});
+
+test("unknown and another Fellow's upload share the same opaque refusal", async () => {
+  await using(async f => {
+    const otherReceipt=await f.create("other",{...f.declaration,sessionId:`S-${"B".repeat(26)}`},other);
+    const h=http(f); const forbidden=await h.call(`/v1/artifacts/${otherReceipt.upload_id}`);
+    const absent=await h.call(`/v1/artifacts/AU-${"e".repeat(32)}`);
+    assert.equal(forbidden.status,401); assert.equal(await forbidden.text(),await absent.text());
+  });
+});
+
+test("HTTP content failures disclose neither patterns nor uploaded bytes and retain private state", async () => {
+  await using(async f => {
+    const content=new TextEncoder().encode("sk_live_"+"x".repeat(30));
+    const receipt=await f.create("bad",{...f.declaration,sha256:await artifactSha256(content),size:content.length});
+    f.objects.set(artifactStagingKey(receipt.upload_id),content);
+    const response=await http(f).call(`/v1/artifacts/${receipt.upload_id}/complete`,"POST",{});
+    assert.equal(response.status,403); const text=await response.text();
+    for(const value of ["sk_live_","SECRET_SHAPED","pattern","example","schema"]) assert.ok(!text.includes(value));
+    assert.equal(f.rows()[0]?.state,"quarantined"); assert.equal(f.writes.length,0);
+  });
+});
+
+test("HTTP completion cannot change a digest or publish bytes and requires a stable key", async () => {
+  await using(async f => {
+    const a=await f.create(); const h=http(f); const path=`/v1/artifacts/${a.upload_id}/complete`;
+    assert.equal((await h.call(path,"POST",{publish:true})).status,422);
+    assert.equal((await h.call(path,"POST",{}, {"idempotency-key":""})).status,400);
+    assert.equal(f.rows()[0]?.state,"presigned"); assert.equal(f.writes.length,0);
+  });
+});
+
+test("HTTP reports expired completion without expiring a previously verified download", async () => {
+  await using(async f => {
+    const a=await f.create(); const h=http(f); f.now(NOW+86400000);
+    const view=await (await h.call(`/v1/artifacts/${a.upload_id}`)).json() as {state:string};
+    assert.equal(view.state,"expired"); assert.equal(f.audit().length,1);
+    assert.equal((await h.call(`/v1/artifacts/${a.upload_id}/complete`,"POST",{})).status,410);
+  });
+  await using(async f => {
+    const a=await f.create();f.objects.set(artifactStagingKey(a.upload_id),bytes);await f.complete(a.upload_id);
+    f.now(NOW+86400000);
+    assert.equal((await http(f).call(`/v1/artifacts/${a.upload_id}/content`)).status,200);
+  });
+});
+
+test("router claims only its canonical private paths", () => {
+  assert.equal(artifactRoute("/v1/artifacts")?.operation,"declare");
+  for(const path of ["/cursor","/v1/inbox","/v1/artifacts/../private","/v1/artifacts/AU-abc",`/v1/artifacts/AU-${"a".repeat(32)}/content/extra`])
+    assert.equal(artifactRoute(path),undefined);
+});
+
+function manifestRequest(body: BodyInit, headers: Record<string, string> = {}): Request {
+  return new Request("https://a.asimposium.org/v1/artifacts", {
+    method: "POST", body, duplex: "half",
+    headers: {authorization:"Bearer valid-test-token","content-type":"application/json",
+      "idempotency-key":"body-test",...headers},
+  } as RequestInit);
+}
+
+test("manifest ingress refuses malformed JSON and UTF-8 without retaining upload bytes", async () => {
+  await using(async f => {
+    const h=http(f);
+    for (const body of ["{incomplete",new Uint8Array([0xff,0xfe]),"[]"]) {
+      const response=await h.raw(manifestRequest(body));
+      assert.ok([400,422].includes(response.status));
+    }
+    assert.equal(f.rows().length,0);
+  });
+});
+
+test("oversized and rejected manifest streams are cancelled rather than left uploading", async () => {
+  await using(async f => {
+    const h=http(f);
+    for (const mode of ["oversize","unauthorized","declared-large","compressed"] as const) {
+      let cancelled=0;
+      const stream=new ReadableStream<Uint8Array>({start(controller) {
+        if(mode==="oversize")controller.enqueue(new Uint8Array(8193));
+      },cancel(){cancelled++;}});
+      const headers=mode==="unauthorized"?{authorization:"Bearer wrong"}:
+        mode==="declared-large"?{"content-length":"999999"}:
+        mode==="compressed"?{"content-encoding":"gzip"}:{};
+      const response=await h.raw(manifestRequest(stream,headers));
+      assert.equal(response.status,mode==="unauthorized"?401:400);
+      assert.equal(cancelled,1);
+    }
+    assert.equal(f.rows().length,0);
+  });
+});
+
+test("a parked manifest stream reaches its deadline and releases the reader", async () => {
+  await using(async f => {
+    const h=http(f);let cancelled=0;
+    const stream=new ReadableStream<Uint8Array>({cancel(){cancelled++;}});
+    const result=await h.raw(manifestRequest(stream));
+    assert.equal(result.status,400);assert.equal(cancelled,1);assert.equal(stream.locked,false);
+    assert.equal(f.rows().length,0);
+  });
+}, 15000);
+
+test("disabled issuance and operational failures remain private and do not mint capabilities", async () => {
+  await using(async f => {
+    const h=http(f);const {signing: _signing,...withoutSigning}=h.options;
+    const request=()=>manifestRequest(JSON.stringify(h.manifest()));
+    assert.equal((await h.raw(request(),withoutSigning)).status,503);
+    const response=await h.raw(request(),{...h.options,authenticate:async()=>{throw new Error("PRIVATE-CONFIG-SENTINEL");}});
+    assert.equal(response.status,503);assert.ok(!(await response.text()).includes("PRIVATE-CONFIG-SENTINEL"));
+    assert.equal(f.rows().length,0);
   });
 });

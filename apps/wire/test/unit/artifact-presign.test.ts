@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import { test } from "bun:test";
-import { artifactSigningConfig, artifactStagingKey, presignArtifactPut } from "../../src/krater/artifact-presign.ts";
+import { artifactSigningConfig, artifactStagingKey, presignArtifactPut, artifactSigningForOrigin } from "../../src/krater/artifact-presign.ts";
 
 const config = { accountId: "a".repeat(32), bucket: "asimp-private", accessKeyId: "b".repeat(32),
   secretAccessKey: "c".repeat(64), sponsorDailyBytes: 1024 ** 3, fellowDailyManifests: 100 };
@@ -61,4 +61,17 @@ test("a digest or user filename cannot become a writable CAS key", async () => {
     assert.throws(() => artifactStagingKey(value));
     await assert.rejects(presignArtifactPut(config, value, 10, now));
   }
+});
+
+test("production and staging issuance pin the private-cas role, never public delivery", () => {
+  const production={...config,bucket:"asimposium-artifacts-prod"};
+  const staging={...config,bucket:"asimposium-artifacts-staging"};
+  assert.deepEqual(artifactSigningForOrigin(JSON.stringify(production),"https://a.asimposium.org"),production);
+  assert.deepEqual(artifactSigningForOrigin(JSON.stringify(staging),"https://a-staging.asimposium.org"),staging);
+  assert.equal(artifactSigningForOrigin(JSON.stringify(production),"https://a-staging.asimposium.org"),undefined);
+  for(const bucket of ["asimposium-public-prod","asimposium-public-staging","asimposium-artifacts-local","other-bucket"]) {
+    assert.equal(artifactSigningForOrigin(JSON.stringify({...config,bucket}),"https://a.asimposium.org"),undefined);
+  }
+  assert.equal(artifactSigningForOrigin(JSON.stringify(production),"http://127.0.0.1:8787"),undefined);
+  assert.equal(artifactSigningForOrigin(undefined,"https://a.asimposium.org"),undefined);
 });

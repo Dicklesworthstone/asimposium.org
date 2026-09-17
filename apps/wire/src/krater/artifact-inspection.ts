@@ -1,3 +1,4 @@
+import { deflateMemberEnd } from "./artifact-deflate.ts";
 import {
   archiveMemberPathIsSafe,
   bodyLooksSecretShaped,
@@ -39,7 +40,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 const HEX = /^[a-f0-9]{64}$/;
 
 export async function artifactSha256(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -175,7 +176,7 @@ async function inspectTar(input: ExpandedReader): Promise<number> {
   }
 }
 
-function gzipMetadata(bytes: Uint8Array): void {
+function gzipMetadata(bytes: Uint8Array): number {
   if (bytes.length < 18 || bytes[0] !== 0x1f || bytes[1] !== 0x8b || bytes[2] !== 8) return badArchive();
   const flags = bytes[3] ?? 0;
   // Unknown binary FEXTRA fields are not a source tree. Name/comment fields
@@ -189,12 +190,24 @@ function gzipMetadata(bytes: Uint8Array): void {
     text(bytes.subarray(offset, end));
     offset = end + 1;
   }
-  if (offset + ((flags & 2) !== 0 ? 2 : 0) + 8 > bytes.length) return badArchive();
+  offset += (flags & 2) !== 0 ? 2 : 0;
+  if (offset + 8 > bytes.length) return badArchive();
+  return offset;
 }
 
 async function inspectGzip(bytes: Uint8Array): Promise<{ members: number; expandedBytes: number }> {
-  gzipMetadata(bytes);
+  const start = gzipMetadata(bytes);
   const cap = Math.min(MAX_ARTIFACT_EXPANDED_BYTES, bytes.length * MAX_ARCHIVE_EXPANSION_RATIO);
+  // The first DEFLATE stream must end immediately before the sole gzip
+  // trailer. Later members (including empty ones carrying metadata) are not
+  // accepted even when the host DecompressionStream silently concatenates.
+  let expanded: number;
+  try {
+    const frame = deflateMemberEnd(bytes, start, bytes.length - 8, cap);
+    const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(bytes.length - 4, true);
+    if (frame.end !== bytes.length - 8 || frame.expanded !== size) return badArchive();
+    expanded = frame.expanded;
+  } catch { return badArchive(); }
   const source = new ReadableStream<Uint8Array>({ start(controller) {
     controller.enqueue(bytes); controller.close();
   } });
@@ -202,6 +215,7 @@ async function inspectGzip(bytes: Uint8Array): Promise<{ members: number; expand
   const input = new ExpandedReader(reader, cap);
   try {
     const members = await inspectTar(input);
+    if (input.consumed !== expanded) return badArchive();
     return { members, expandedBytes: input.consumed };
   } catch (error) {
     void reader.cancel().catch(() => undefined);
