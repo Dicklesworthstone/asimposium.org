@@ -10,6 +10,14 @@ import type {
   ProblemFollowResponse,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import {
+  FOLLOW_DELETE_SQL,
+  FOLLOW_INSERT_SQL,
+  FOLLOW_RECIPIENTS_SQL,
+  FOLLOW_STATUS_SQL,
+  INBOX_UNACKNOWLEDGED_SQL,
+  VISIBLE_INBOX_NOTICE_SQL,
+} from "./follow-access.ts";
 import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
@@ -194,7 +202,7 @@ export async function getInboxNotices(
            impact_kind, caused_by_event_id, target_id, acknowledged_at,
            expires_at, created_at
     FROM fellow_inbox_notices
-    WHERE fellow_id = ?
+    WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL}
   `;
   const binds: (string | number)[] = [fellowId];
 
@@ -222,9 +230,7 @@ export async function getInboxNotices(
 
   // Total unacknowledged count for this fellow
   const unackRow = await db
-    .prepare(
-      "SELECT COUNT(*) AS unack FROM fellow_inbox_notices WHERE fellow_id = ? AND acknowledged_at IS NULL",
-    )
+    .prepare(INBOX_UNACKNOWLEDGED_SQL)
     .bind(fellowId)
     .first<{ unack: number }>();
   const unacknowledgedCount = unackRow?.unack ?? 0;
@@ -260,12 +266,13 @@ export async function ackInboxNotices(
       WHERE fellow_id = ?
         AND id IN (${placeholders})
         AND acknowledged_at IS NULL
+        AND ${VISIBLE_INBOX_NOTICE_SQL}
     `;
     const result = await db
       .prepare(updateSql)
       .bind(now, fellowId, ...request.notice_ids)
       .run();
-    acknowledgedCount = result.meta?.changes ?? request.notice_ids.length;
+    acknowledgedCount = result.meta?.changes ?? 0;
   } else if (request.until_seq !== undefined) {
     const updateSql = `
       UPDATE fellow_inbox_notices
@@ -273,6 +280,7 @@ export async function ackInboxNotices(
       WHERE fellow_id = ?
         AND seq <= ?
         AND acknowledged_at IS NULL
+        AND ${VISIBLE_INBOX_NOTICE_SQL}
     `;
     const result = await db.prepare(updateSql).bind(now, fellowId, request.until_seq).run();
     acknowledgedCount = result.meta?.changes ?? 0;
@@ -280,9 +288,7 @@ export async function ackInboxNotices(
 
   // Check remaining unacknowledged count
   const unackRow = await db
-    .prepare(
-      "SELECT COUNT(*) AS unack FROM fellow_inbox_notices WHERE fellow_id = ? AND acknowledged_at IS NULL",
-    )
+    .prepare(INBOX_UNACKNOWLEDGED_SQL)
     .bind(fellowId)
     .first<{ unack: number }>();
   const unacknowledgedCount = unackRow?.unack ?? 0;
@@ -306,37 +312,27 @@ export async function ackInboxNotices(
   };
 }
 
+interface FollowStatusRow {
+  problem_id: string;
+  created_at: number | null;
+}
+
 export async function followProblem(
   db: D1Database,
   principalId: string,
   problemId: string,
   now: number = Date.now(),
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  // Check problem exists
-  const problemRow = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
+  // D1 batch is one transaction: visibility cannot change between the guarded
+  // mutation and its receipt. A denied target is indistinguishable from absent.
+  const results = await db.batch<FollowStatusRow>([
+    db.prepare(FOLLOW_INSERT_SQL).bind(principalId, now, problemId, principalId),
+    db.prepare(FOLLOW_STATUS_SQL).bind(principalId, problemId, principalId),
+  ]);
+  const row = results[1]?.results[0];
+  if (!row) return { notFound: true };
+  if (row.created_at === null) throw new Error("Follow mutation produced no durable receipt.");
 
-  if (!problemRow) {
-    return { notFound: true };
-  }
-
-  await db
-    .prepare(
-      `INSERT INTO problem_follows (principal_id, problem_id, created_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT (principal_id, problem_id) DO NOTHING`,
-    )
-    .bind(principalId, problemId, now)
-    .run();
-
-  const followRow = await db
-    .prepare("SELECT created_at FROM problem_follows WHERE principal_id = ? AND problem_id = ?")
-    .bind(principalId, problemId)
-    .first<{ created_at: number }>();
-
-  // OPS.2a structured diagnostic log
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
@@ -352,7 +348,7 @@ export async function followProblem(
     response: {
       problem_id: problemId,
       following: true,
-      followed_at: followRow?.created_at ?? now,
+      followed_at: row.created_at,
     },
   };
 }
@@ -363,22 +359,14 @@ export async function unfollowProblem(
   problemId: string,
   now: number = Date.now(),
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  // Check problem exists
-  const problemRow = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
+  const results = await db.batch<FollowStatusRow>([
+    db.prepare(FOLLOW_DELETE_SQL).bind(principalId, problemId, principalId),
+    db.prepare(FOLLOW_STATUS_SQL).bind(principalId, problemId, principalId),
+  ]);
+  const row = results[1]?.results[0];
+  if (!row) return { notFound: true };
+  if (row.created_at !== null) throw new Error("Unfollow mutation left a durable follow.");
 
-  if (!problemRow) {
-    return { notFound: true };
-  }
-
-  await db
-    .prepare("DELETE FROM problem_follows WHERE principal_id = ? AND problem_id = ?")
-    .bind(principalId, problemId)
-    .run();
-
-  // OPS.2a structured diagnostic log
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
@@ -404,26 +392,16 @@ export async function getProblemFollowStatus(
   principalId: string,
   problemId: string,
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  // Check problem exists
-  const problemRow = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
-
-  if (!problemRow) {
-    return { notFound: true };
-  }
-
-  const followRow = await db
-    .prepare("SELECT created_at FROM problem_follows WHERE principal_id = ? AND problem_id = ?")
-    .bind(principalId, problemId)
-    .first<{ created_at: number }>();
-
+  const row = await db
+    .prepare(FOLLOW_STATUS_SQL)
+    .bind(principalId, problemId, principalId)
+    .first<FollowStatusRow>();
+  if (!row) return { notFound: true };
   return {
     response: {
       problem_id: problemId,
-      following: followRow !== null && followRow !== undefined,
-      followed_at: followRow ? followRow.created_at : null,
+      following: row.created_at !== null,
+      followed_at: row.created_at,
     },
   };
 }
@@ -435,19 +413,11 @@ export async function notifyProblemFollowersOfStatementRevision(
   causedByEventId: string,
 ): Promise<void> {
   const rows = await db
-    .prepare(
-      `SELECT DISTINCT principal_id FROM (
-         SELECT principal_id FROM problem_follows WHERE problem_id = ?
-         UNION
-         SELECT fellow_id AS principal_id FROM problem_memberships WHERE problem_id = ?
-       ) WHERE principal_id IS NOT NULL`,
-    )
-    .bind(problemId, problemId)
+    .prepare(FOLLOW_RECIPIENTS_SQL)
+    .bind(problemId)
     .all<{ principal_id: string }>();
 
-  const fellows = (rows.results ?? [])
-    .map((r) => r.principal_id)
-    .filter((id) => typeof id === "string" && !id.startsWith("asimp_sp_"));
+  const fellows = (rows.results ?? []).map((row) => row.principal_id);
 
   for (const fellowId of fellows) {
     await createInboxNotice(db, {
