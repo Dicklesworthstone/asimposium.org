@@ -23,6 +23,7 @@ import {
   inboxNoticeId,
   INSERT_INBOX_NOTICE_ONCE_SQL,
 } from "./notice-write.ts";
+import { ledgerNoticeActions } from "./ledger-notice-actions.ts";
 import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
@@ -102,7 +103,10 @@ function buildNoticeNextActions(
 }
 
 function rowToItem(row: NoticeRow): InboxItem {
-  const nextActions = buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id);
+  const nextActions = [
+    ...buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id),
+    ...ledgerNoticeActions(row.notice_type, row.problem_id, row.target_id, row.impact_kind),
+  ];
   return {
     id: row.id,
     type: row.notice_type as InboxNoticeType,

@@ -99,7 +99,7 @@ async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
     const target = `${payload.target_claim_id}@${payload.target_version}`;
     return {
       targetClaim: payload.target_claim_id, noticeType: "object_critique",
-      targetId: job.object_id, createdAt,
+      targetId: target, createdAt,
       title: `Review recorded for ${target}`,
       detail: `Review ${job.object_id} addresses ${target} on ${job.problem_id}. Read the public review and current claim state. This notice does not certify the claim or assert a disposition change.`,
     };
@@ -151,7 +151,9 @@ async function deliveryStatements(
         AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n
           WHERE n.fellow_id = f.fellow_id AND n.problem_id = e.problem_id
             AND n.notice_type = ? AND n.caused_by_event_id = e.id
-            AND n.target_id IS ? AND n.impact_kind IS NULL)
+            AND (n.target_id IS ? OR
+              (n.notice_type = 'object_critique' AND n.target_id = e.object_id))
+            AND n.impact_kind IS NULL)
       ON CONFLICT (id) DO NOTHING`)
       .bind(id, template.noticeType, template.title, template.detail, template.targetId,
         template.createdAt, fellowId, job.id, token, template.targetClaim,
@@ -210,11 +212,25 @@ export async function deliverInboxEvents(
         result.quarantined += invalid.meta.changes;
         continue;
       }
-      const candidates = await db.prepare(`SELECT f.fellow_id
-        FROM enrollment_fellows f JOIN events e ON e.id = ?
-        JOIN problems p ON p.id = e.problem_id
-        WHERE p.status <> 'private-draft' AND ${RECIPIENT_SQL}
-          AND f.fellow_id > ? ORDER BY f.fellow_id LIMIT ?`)
+      const candidates = await db.prepare(`WITH source AS (
+          SELECT id, problem_id, type, seq, created_at, actor_fellow_id FROM events WHERE id = ?
+        ), candidates AS (
+          SELECT author.actor_fellow_id AS fellow_id FROM source e JOIN events author
+            ON author.problem_id = e.problem_id AND author.type = 'claim.created'
+              AND author.object_kind = 'claim' AND author.object_version = 1
+              AND author.object_id = ? AND author.seq < e.seq
+          WHERE e.type = 'review.created' AND author.actor_fellow_id <> e.actor_fellow_id
+          UNION
+          SELECT pf.principal_id FROM source e JOIN problem_follows pf ON pf.problem_id = e.problem_id
+          WHERE e.type = 'problem.statement-revised'
+            AND pf.created_at <= CAST(unixepoch(e.created_at, 'subsec') * 1000 AS INTEGER)
+          UNION
+          SELECT m.fellow_id FROM source e JOIN problem_memberships m ON m.problem_id = e.problem_id
+          WHERE e.type = 'problem.statement-revised' AND m.joined_at <= e.created_at
+        )
+        SELECT f.fellow_id FROM candidates c JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id
+        CROSS JOIN source e JOIN problems p ON p.id = e.problem_id
+        WHERE p.status <> 'private-draft' AND f.fellow_id > ? ORDER BY f.fellow_id LIMIT ?`)
         .bind(job.event_id, template.targetClaim, job.after_fellow_id,
           INBOX_DELIVERY_RECIPIENT_LIMIT + 1).all<{ fellow_id: string }>();
       const recipients = candidates.results.slice(0, INBOX_DELIVERY_RECIPIENT_LIMIT)
