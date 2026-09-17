@@ -18,6 +18,7 @@ import {
   INBOX_UNACKNOWLEDGED_SQL,
   VISIBLE_INBOX_NOTICE_SQL,
 } from "./follow-access.ts";
+import { INSERT_INBOX_NOTICE_SQL } from "./notice-write.ts";
 import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
@@ -124,29 +125,14 @@ export async function createInboxNotice(
     input.id ??
     `NOT-${now.toString(36)}-${crypto.randomUUID().replace(/-/g, "").substring(0, 8).toUpperCase()}`;
 
-  // Compute next monotonic seq for this fellow
-  const seqRow = await db
-    .prepare(
-      "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM fellow_inbox_notices WHERE fellow_id = ?",
-    )
-    .bind(input.fellowId)
-    .first<{ next_seq: number }>();
-  const seq = seqRow?.next_seq ?? 1;
-
-  await db
-    .prepare(
-      `INSERT INTO fellow_inbox_notices (
-         id, fellow_id, problem_id, notice_type, seq, title, detail,
-         impact_kind, caused_by_event_id, target_id, acknowledged_at,
-         expires_at, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-    )
+  const receipt = await db
+    .prepare(INSERT_INBOX_NOTICE_SQL)
     .bind(
       id,
       input.fellowId,
       input.problemId ?? null,
       input.noticeType,
-      seq,
+      input.fellowId,
       input.title,
       input.detail ?? null,
       input.impactKind ?? null,
@@ -155,7 +141,11 @@ export async function createInboxNotice(
       input.expiresAt ?? null,
       now,
     )
-    .run();
+    .first<{ seq: number }>();
+  if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) {
+    throw new Error("Inbox notice insertion produced no valid cursor receipt.");
+  }
+  const seq = receipt.seq;
 
   // OPS.2a structured diagnostic log
   console.info(
