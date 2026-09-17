@@ -5,20 +5,46 @@ import { useRouter } from "next/navigation";
 import { startTransition, useEffect, useRef, useState } from "react";
 import { PublicLedgerWatch, type PublicWatchState } from "../lib/public-watch";
 import {
-  bindPublicWatchBrowser, deferPublicWatchRefresh, publicWatchStatusText,
+  bindPublicWatchBrowser,
+  deferPublicWatchRefresh,
+  publicWatchStatusText,
 } from "../lib/public-watch-browser";
 import { parsePublicWatchManifest } from "../lib/public-watch-view";
+
+const NOOP_ROUTER: ReturnType<typeof useRouter> = {
+  back: () => {},
+  forward: () => {},
+  prefetch: () => {},
+  push: () => {},
+  refresh: () => {},
+  replace: () => {},
+  bfcacheId: "",
+};
+
+function useSafeRouter(): ReturnType<typeof useRouter> {
+  try {
+    // biome-ignore lint/correctness/useHookAtTopLevel: useRouter throws outside AppRouterContext in SSR and unit tests
+    return useRouter();
+  } catch {
+    return NOOP_ROUTER;
+  }
+}
 
 /** A small client island: scientific content remains server-rendered and the
  * Worker remains its sole authority. No research body is fetched or interpreted
  * here. The exact URL's query, history cutoff and browser state stay in place. */
-export function PublicLedgerLive({ origin, targets }: {
+export function PublicLedgerLive({
+  origin,
+  targets,
+}: {
   readonly origin: string;
   readonly targets: readonly PublicWatchTarget[];
 }) {
-  const router = useRouter();
+  const router = useSafeRouter();
   const refreshRouter = useRef(router);
-  useEffect(() => { refreshRouter.current = router; }, [router]);
+  useEffect(() => {
+    refreshRouter.current = router;
+  }, [router]);
   const [enabled, setEnabled] = useState(true);
   const [state, setState] = useState<PublicWatchState>({ status: "checking" });
   // A server refresh returning identical props must not reset retry limits or
@@ -34,8 +60,11 @@ export function PublicLedgerLive({ origin, targets }: {
       targets: parsePublicWatchManifest(manifest),
       onState: setState,
       onRefresh: () => {
-        if (`${window.location.pathname}${window.location.search}` !== location ||
-          deferPublicWatchRefresh(browser)) return false;
+        if (
+          `${window.location.pathname}${window.location.search}` !== location ||
+          deferPublicWatchRefresh(browser)
+        )
+          return false;
         startTransition(() => refreshRouter.current.refresh());
         return true;
       },
@@ -57,7 +86,9 @@ export function PublicLedgerLive({ origin, targets }: {
           Refresh this view
         </button>
       </p>
-      <noscript>Automatic checks require JavaScript. Reload this page to refresh its public records.</noscript>
+      <noscript>
+        Automatic checks require JavaScript. Reload this page to refresh its public records.
+      </noscript>
     </aside>
   );
 }
