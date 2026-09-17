@@ -169,7 +169,11 @@ describe("follow and inbox visibility is current authority, not a subscription",
       notice(db, "account", "fellow-b", null, 3);
       notice(db, "public", "fellow-b", "P-PUBLIC", 4);
       notice(db, "unlisted", "fellow-b", "P-UNLISTED", 5);
-      expect(visible(db, "fellow-b").map((row) => row.id)).toEqual(["account", "public", "unlisted"]);
+      expect(visible(db, "fellow-b").map((row) => row.id)).toEqual([
+        "account",
+        "public",
+        "unlisted",
+      ]);
       expect(unacknowledged(db, "fellow-b")).toBe(3);
     });
   });
@@ -211,11 +215,14 @@ describe("follow and inbox visibility is current authority, not a subscription",
       notice(db, "hidden", "fellow-b", "P-PRIVATE", 1);
       notice(db, "other-fellow", "fellow-a", "P-PUBLIC", 1);
       notice(db, "visible", "fellow-b", "P-PUBLIC", 2);
-      const result = db.query(`UPDATE fellow_inbox_notices SET acknowledged_at = 100
+      const result = db
+        .query(`UPDATE fellow_inbox_notices SET acknowledged_at = 100
         WHERE fellow_id = ? AND id IN (?, ?, ?) AND acknowledged_at IS NULL AND ${VISIBLE_INBOX_NOTICE_SQL}`)
         .run("fellow-b", "hidden", "other-fellow", "visible");
       expect(result.changes).toBe(1);
-      expect(db.query("SELECT id FROM fellow_inbox_notices WHERE acknowledged_at = 100").all()).toEqual([{ id: "visible" }]);
+      expect(
+        db.query("SELECT id FROM fellow_inbox_notices WHERE acknowledged_at = 100").all(),
+      ).toEqual([{ id: "visible" }]);
       expect(unacknowledged(db, "fellow-b")).toBe(0);
       expect(unacknowledged(db, "fellow-a")).toBe(1);
     });
@@ -225,11 +232,14 @@ describe("follow and inbox visibility is current authority, not a subscription",
     fixture((db) => {
       notice(db, "hidden", "fellow-b", "P-PRIVATE", 1);
       notice(db, "visible", "fellow-b", null, 2);
-      const result = db.query(`UPDATE fellow_inbox_notices SET acknowledged_at = ?
+      const result = db
+        .query(`UPDATE fellow_inbox_notices SET acknowledged_at = ?
         WHERE fellow_id = ? AND seq <= ? AND acknowledged_at IS NULL AND ${VISIBLE_INBOX_NOTICE_SQL}`)
         .run(100, "fellow-b", 100);
       expect(result.changes).toBe(1);
-      expect(db.query("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = 'hidden'").get()).toEqual({ acknowledged_at: null });
+      expect(
+        db.query("SELECT acknowledged_at FROM fellow_inbox_notices WHERE id = 'hidden'").get(),
+      ).toEqual({ acknowledged_at: null });
     });
   });
 });

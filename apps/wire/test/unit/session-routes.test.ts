@@ -3349,9 +3349,9 @@ describe("session protocol routes", () => {
     }
   });
 
-  test("P7 census: every mounted ledger ingress screens at the centralized boundary (asimposiumorg-b9y9)", async () => {
+  test("P7: original nine ingress kinds reach the screening boundary (asimposiumorg-b9y9)", async () => {
     const seen: { kind: string; statement: string; falsifier: string | null }[] = [];
-    // The setup stages pass; every screened public ingress under test is
+    // The setup stages pass; the screened public ingress kinds under test are
     // rejected with a deterministic decision fixture; this is not live-provider evidence.
     const passKinds = ["conjecture", "hypotheses", "gaps"];
     const base = await fixture({
@@ -3595,8 +3595,8 @@ describe("session protocol routes", () => {
     expect(killed.status, await killed.clone().text()).toBe(403);
     await expectNoPublicEffect("hypothesis-kill", killBefore);
 
-    // Every screened kind crossed the boundary exactly once with its exact
-    // candidate bytes; the pass-lane kinds are present too.
+    // The original nine kinds must reach the boundary, including pass-lane setup.
+    // This fixed scenario does not enumerate all currently mounted write routes.
     const seenKinds = seen.map((entry) => entry.kind);
     for (const kind of [
       "conjecture",

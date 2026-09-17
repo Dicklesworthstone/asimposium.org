@@ -59,9 +59,9 @@ describe("follow identity comes only from the Fellow credential authority", () =
   ]) {
     test(`malformed bearer framing is refused before lookup: ${header}`, async () => {
       const { service, calls } = authority();
-      expect(
-        await authenticatedFollowPrincipal(request({ authorization: header }), service),
-      ).toBe(undefined);
+      expect(await authenticatedFollowPrincipal(request({ authorization: header }), service)).toBe(
+        undefined,
+      );
       expect(calls).toEqual([]);
     });
   }

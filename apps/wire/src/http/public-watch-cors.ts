@@ -4,8 +4,11 @@ const EXPOSE = "ETag, Retry-After, X-Robots-Tag";
 
 function eligible(request: Request): boolean {
   const url = new URL(request.url);
-  return publicWatchPath(`${url.pathname}${url.search}`) !== undefined &&
-    !request.headers.has("authorization") && !request.headers.has("cookie");
+  return (
+    publicWatchPath(`${url.pathname}${url.search}`) !== undefined &&
+    !request.headers.has("authorization") &&
+    !request.headers.has("cookie")
+  );
 }
 
 /** Public, credentialless GET/HEAD only. This is not a general API CORS policy:
@@ -21,7 +24,9 @@ export async function publicWatchFetch(
     const method = request.headers.get("access-control-request-method");
     if (!request.headers.has("origin") || (method !== "GET" && method !== "HEAD")) return next();
     const names = (request.headers.get("access-control-request-headers") ?? "")
-      .split(",").map((name) => name.trim().toLowerCase()).filter(Boolean);
+      .split(",")
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean);
     if (names.some((name) => name !== "if-none-match" && name !== "accept")) {
       return new Response(null, { status: 403, headers: { "cache-control": "no-store" } });
     }
@@ -38,8 +43,12 @@ export async function publicWatchFetch(
     });
   }
   const response = await next();
-  if ((request.method !== "GET" && request.method !== "HEAD") ||
-    response.status < 200 || response.headers.has("set-cookie")) return response;
+  if (
+    (request.method !== "GET" && request.method !== "HEAD") ||
+    response.status < 200 ||
+    response.headers.has("set-cookie")
+  )
+    return response;
   const headers = new Headers(response.headers);
   headers.set("access-control-allow-origin", "*");
   headers.set("access-control-expose-headers", EXPOSE);
@@ -48,6 +57,8 @@ export async function publicWatchFetch(
   // Public 404/410/429 responses must remain observable by a paused/retrying
   // browser, rather than being misreported as an opaque network failure.
   return new Response(response.body, {
-    status: response.status, statusText: response.statusText, headers,
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
 }

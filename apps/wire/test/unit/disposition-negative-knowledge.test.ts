@@ -106,11 +106,8 @@ describe("negative scientific findings outrank apparent progress", () => {
   test("ordinary reduction remains bookkeeping on an uncontested claim", () => {
     expect(apply("open", { kind: "reduced-to", target_claim_id: "C-2" })).toBe("reduced-to");
     expect(
-      evaluateClaimTransition(
-        "disputed",
-        { kind: "reduced-to", target_claim_id: " " },
-        supported,
-      ).allowed,
+      evaluateClaimTransition("disputed", { kind: "reduced-to", target_claim_id: " " }, supported)
+        .allowed,
     ).toBe(false);
   });
 

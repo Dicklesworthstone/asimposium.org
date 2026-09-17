@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { D1Database } from "@cloudflare/workers-types";
 import { resolve } from "node:path";
+import type { D1Database } from "@cloudflare/workers-types";
 import { KraterOutboxDrainer as enrollmentHarnessDrainer } from "../../src/enrollment/local-d1-worker";
 import { REQUIRED_BINDINGS } from "../../src/env";
 import worker, { KraterOutboxDrainer as productionDrainer } from "../../src/index";

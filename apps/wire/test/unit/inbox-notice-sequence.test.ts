@@ -21,16 +21,33 @@ function fixture(run: (db: Database) => void) {
 }
 
 function insert(db: Database, id: string, fellow = "fellow-a", now = 100): number {
-  const row = db.query(INSERT_INBOX_NOTICE_SQL).get(
-    id, fellow, "P-DEMO", "statement_revision", fellow, "Statement revised",
-    "Read the new version", null, "E-synthetic", null, null, now,
-  ) as { seq: number };
+  const row = db
+    .query(INSERT_INBOX_NOTICE_SQL)
+    .get(
+      id,
+      fellow,
+      "P-DEMO",
+      "statement_revision",
+      fellow,
+      "Statement revised",
+      "Read the new version",
+      null,
+      "E-synthetic",
+      null,
+      null,
+      now,
+    ) as { seq: number };
   return row.seq;
 }
 
 function nextLegacyCursor(db: Database, fellow = "fellow-a") {
-  return (db.query("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM fellow_inbox_notices WHERE fellow_id = ?")
-    .get(fellow) as { seq: number }).seq;
+  return (
+    db
+      .query(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM fellow_inbox_notices WHERE fellow_id = ?",
+      )
+      .get(fellow) as { seq: number }
+  ).seq;
 }
 
 describe("atomic inbox notice allocation", () => {
@@ -38,10 +55,19 @@ describe("atomic inbox notice allocation", () => {
     fixture((db) => {
       expect(insert(db, "N-1")).toBe(1);
       expect(db.query("SELECT * FROM fellow_inbox_notices WHERE id = ?").get("N-1")).toEqual({
-        id: "N-1", fellow_id: "fellow-a", problem_id: "P-DEMO", notice_type: "statement_revision",
-        seq: 1, title: "Statement revised", detail: "Read the new version", impact_kind: null,
-        caused_by_event_id: "E-synthetic", target_id: null, acknowledged_at: null,
-        expires_at: null, created_at: 100,
+        id: "N-1",
+        fellow_id: "fellow-a",
+        problem_id: "P-DEMO",
+        notice_type: "statement_revision",
+        seq: 1,
+        title: "Statement revised",
+        detail: "Read the new version",
+        impact_kind: null,
+        caused_by_event_id: "E-synthetic",
+        target_id: null,
+        acknowledged_at: null,
+        expires_at: null,
+        created_at: 100,
       });
     });
   });
@@ -65,11 +91,19 @@ describe("atomic inbox notice allocation", () => {
         (id, fellow_id, notice_type, seq, title, created_at) VALUES (?, 'fellow-a', 'statement_revision', ?, 'old writer', 1)`);
       oldInsert.run("legacy-a", first);
       oldInsert.run("legacy-b", second);
-      const page = db.query("SELECT id, seq FROM fellow_inbox_notices WHERE fellow_id = ? ORDER BY seq, id LIMIT 1")
+      const page = db
+        .query(
+          "SELECT id, seq FROM fellow_inbox_notices WHERE fellow_id = ? ORDER BY seq, id LIMIT 1",
+        )
         .get("fellow-a") as { seq: number };
-      expect(db.query("SELECT id FROM fellow_inbox_notices WHERE fellow_id = ? AND seq > ?")
-        .all("fellow-a", page.seq)).toEqual([]);
-      expect(db.query("SELECT COUNT(*) AS total FROM fellow_inbox_notices").get()).toEqual({ total: 2 });
+      expect(
+        db
+          .query("SELECT id FROM fellow_inbox_notices WHERE fellow_id = ? AND seq > ?")
+          .all("fellow-a", page.seq),
+      ).toEqual([]);
+      expect(db.query("SELECT COUNT(*) AS total FROM fellow_inbox_notices").get()).toEqual({
+        total: 2,
+      });
     });
   });
 
@@ -79,8 +113,11 @@ describe("atomic inbox notice allocation", () => {
       expect(nextLegacyCursor(db)).toBe(1);
       expect(insert(db, "N-1")).toBe(1);
       expect(insert(db, "N-2")).toBe(2);
-      expect(db.query("SELECT id FROM fellow_inbox_notices WHERE fellow_id = ? AND seq > ? ORDER BY seq")
-        .all("fellow-a", 1)).toEqual([{ id: "N-2" }]);
+      expect(
+        db
+          .query("SELECT id FROM fellow_inbox_notices WHERE fellow_id = ? AND seq > ? ORDER BY seq")
+          .all("fellow-a", 1),
+      ).toEqual([{ id: "N-2" }]);
     });
   });
 
@@ -90,8 +127,14 @@ describe("atomic inbox notice allocation", () => {
       insert(db, "legacy-b");
       db.exec("UPDATE fellow_inbox_notices SET seq = 7");
       expect(insert(db, "N-new")).toBe(8);
-      expect(db.query("SELECT id, seq FROM fellow_inbox_notices WHERE id LIKE 'legacy-%' ORDER BY id")
-        .all()).toEqual([{ id: "legacy-a", seq: 7 }, { id: "legacy-b", seq: 7 }]);
+      expect(
+        db
+          .query("SELECT id, seq FROM fellow_inbox_notices WHERE id LIKE 'legacy-%' ORDER BY id")
+          .all(),
+      ).toEqual([
+        { id: "legacy-a", seq: 7 },
+        { id: "legacy-b", seq: 7 },
+      ]);
     });
   });
 
@@ -114,7 +157,9 @@ describe("atomic inbox notice allocation", () => {
       }
       expect(failed).toBe(true);
       expect(insert(db, "N-2")).toBe(2);
-      expect(db.query("SELECT COUNT(*) AS total FROM fellow_inbox_notices").get()).toEqual({ total: 2 });
+      expect(db.query("SELECT COUNT(*) AS total FROM fellow_inbox_notices").get()).toEqual({
+        total: 2,
+      });
     });
   });
 
@@ -125,7 +170,9 @@ describe("atomic inbox notice allocation", () => {
       expect(insert(db, "rolled-back")).toBe(2);
       db.exec("ROLLBACK");
       expect(insert(db, "N-2")).toBe(2);
-      expect(db.query("SELECT id FROM fellow_inbox_notices WHERE id = 'rolled-back'").get()).toBe(null);
+      expect(db.query("SELECT id FROM fellow_inbox_notices WHERE id = 'rolled-back'").get()).toBe(
+        null,
+      );
     });
   });
 
@@ -135,7 +182,10 @@ describe("atomic inbox notice allocation", () => {
       let since = 0;
       const seen: string[] = [];
       for (;;) {
-        const page = db.query("SELECT id, seq FROM fellow_inbox_notices WHERE fellow_id = ? AND seq > ? ORDER BY seq LIMIT 7")
+        const page = db
+          .query(
+            "SELECT id, seq FROM fellow_inbox_notices WHERE fellow_id = ? AND seq > ? ORDER BY seq LIMIT 7",
+          )
           .all("fellow-a", since) as { id: string; seq: number }[];
         if (page.length === 0) break;
         seen.push(...page.map((row) => row.id));
@@ -151,8 +201,9 @@ describe("atomic inbox notice allocation", () => {
       const id = "N-'; DROP TABLE fellow_inbox_notices; --";
       expect(insert(db, id, "fellow-'quoted")).toBe(1);
       expect(insert(db, "N-normal")).toBe(1);
-      expect(db.query("SELECT fellow_id FROM fellow_inbox_notices WHERE id = ?").get(id))
-        .toEqual({ fellow_id: "fellow-'quoted" });
+      expect(db.query("SELECT fellow_id FROM fellow_inbox_notices WHERE id = ?").get(id)).toEqual({
+        fellow_id: "fellow-'quoted",
+      });
     });
   });
 });

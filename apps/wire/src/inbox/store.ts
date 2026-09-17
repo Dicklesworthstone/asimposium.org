@@ -18,12 +18,12 @@ import {
   INBOX_UNACKNOWLEDGED_SQL,
   VISIBLE_INBOX_NOTICE_SQL,
 } from "./follow-access.ts";
+import { ledgerNoticeActions } from "./ledger-notice-actions.ts";
 import {
   INBOX_NOTICE_RECEIPT_SQL,
-  inboxNoticeId,
   INSERT_INBOX_NOTICE_ONCE_SQL,
+  inboxNoticeId,
 } from "./notice-write.ts";
-import { ledgerNoticeActions } from "./ledger-notice-actions.ts";
 import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
@@ -134,29 +134,33 @@ export async function createInboxNotice(
   // replay returns the original text, timestamp, expiry and acknowledgment;
   // it cannot turn an already-read notice back into a fresh unread item.
   const results = await db.batch<NoticeRow>([
-    db.prepare(INSERT_INBOX_NOTICE_ONCE_SQL).bind(
-      id,
-      input.fellowId,
-      input.problemId ?? null,
-      input.noticeType,
-      input.fellowId,
-      input.title,
-      input.detail ?? null,
-      input.impactKind ?? null,
-      input.causedByEventId ?? null,
-      input.targetId ?? null,
-      input.expiresAt ?? null,
-      now,
-    ),
-    db.prepare(INBOX_NOTICE_RECEIPT_SQL).bind(
-      input.fellowId,
-      input.problemId ?? null,
-      input.noticeType,
-      input.impactKind ?? null,
-      input.causedByEventId ?? null,
-      input.targetId ?? null,
-      id,
-    ),
+    db
+      .prepare(INSERT_INBOX_NOTICE_ONCE_SQL)
+      .bind(
+        id,
+        input.fellowId,
+        input.problemId ?? null,
+        input.noticeType,
+        input.fellowId,
+        input.title,
+        input.detail ?? null,
+        input.impactKind ?? null,
+        input.causedByEventId ?? null,
+        input.targetId ?? null,
+        input.expiresAt ?? null,
+        now,
+      ),
+    db
+      .prepare(INBOX_NOTICE_RECEIPT_SQL)
+      .bind(
+        input.fellowId,
+        input.problemId ?? null,
+        input.noticeType,
+        input.impactKind ?? null,
+        input.causedByEventId ?? null,
+        input.targetId ?? null,
+        id,
+      ),
   ]);
   const receipt = results[1]?.results[0];
   if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) {

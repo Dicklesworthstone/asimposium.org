@@ -222,12 +222,7 @@ describe("claim machine: the full legal transition table", () => {
       ["reduced-to", { kind: "author-withdrawal" }, EMPTY_CLAIM_CONTEXT, "withdrawn"],
       // reduced-to is bookkeeping, from any live state, with a target.
       ["open", { kind: "reduced-to", target_claim_id: "C-2" }, EMPTY_CLAIM_CONTEXT, "reduced-to"],
-      [
-        "disputed",
-        { kind: "reduced-to", target_claim_id: "C-2" },
-        EMPTY_CLAIM_CONTEXT,
-        "disputed",
-      ],
+      ["disputed", { kind: "reduced-to", target_claim_id: "C-2" }, EMPTY_CLAIM_CONTEXT, "disputed"],
       // a supporting review that finds the statement defective routes to malformed.
       [
         "open",

@@ -69,43 +69,78 @@ async function sha256(value: string): Promise<string> {
 
 async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
   if (
-    !ID.test(job.event_id) || !ID.test(job.problem_id) || !ID.test(job.object_id) ||
-    !Number.isSafeInteger(job.object_version) || job.object_version < 1 ||
-    job.payload_json === null || !/^[a-f0-9]{64}$/.test(job.payload_sha256) ||
+    !ID.test(job.event_id) ||
+    !ID.test(job.problem_id) ||
+    !ID.test(job.object_id) ||
+    !Number.isSafeInteger(job.object_version) ||
+    job.object_version < 1 ||
+    job.payload_json === null ||
+    !/^[a-f0-9]{64}$/.test(job.payload_sha256) ||
     new TextEncoder().encode(job.payload_json).byteLength > MAX_SOURCE_BYTES ||
-    await sha256(job.payload_json) !== job.payload_sha256
-  ) return null;
+    (await sha256(job.payload_json)) !== job.payload_sha256
+  )
+    return null;
   const createdAt = Date.parse(job.created_at);
-  if (!Number.isSafeInteger(createdAt) || createdAt <= 0 ||
-    new Date(createdAt).toISOString() !== job.created_at) return null;
+  if (
+    !Number.isSafeInteger(createdAt) ||
+    createdAt <= 0 ||
+    new Date(createdAt).toISOString() !== job.created_at
+  )
+    return null;
   let payload: unknown;
-  try { payload = JSON.parse(job.payload_json); } catch { return null; }
+  try {
+    payload = JSON.parse(job.payload_json);
+  } catch {
+    return null;
+  }
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
 
-  if (job.type === "problem.statement-revised" && job.object_kind === "problem" &&
-    job.object_id === job.problem_id) {
+  if (
+    job.type === "problem.statement-revised" &&
+    job.object_kind === "problem" &&
+    job.object_id === job.problem_id
+  ) {
     return {
-      targetClaim: null, noticeType: "statement_revision", targetId: null, createdAt,
+      targetClaim: null,
+      noticeType: "statement_revision",
+      targetId: null,
+      createdAt,
       title: `Problem ${job.problem_id} statement revised (version ${job.object_version})`,
       detail: `The statement for problem ${job.problem_id} was revised to version ${job.object_version}. Re-orient before submitting further writes.`,
     };
   }
   const fields = payload as Record<string, unknown>;
   const isReview = job.type === "review.created" && job.object_kind === "review";
-  const isEvidence = job.type === "evidence.created" && job.object_kind === "evidence" &&
+  const isEvidence =
+    job.type === "evidence.created" &&
+    job.object_kind === "evidence" &&
     fields.bears_on_kind === "claim";
-  if ((!isReview && !isEvidence) || job.actor_fellow_id === null ||
-    !ID.test(job.actor_fellow_id)) return null;
+  if ((!isReview && !isEvidence) || job.actor_fellow_id === null || !ID.test(job.actor_fellow_id))
+    return null;
   const claimId = isReview ? fields.target_claim_id : fields.bears_on_id;
   const version = isReview ? fields.target_version : fields.bears_on_version;
-  if (typeof claimId !== "string" || !/^C-[1-9][0-9]*$/.test(claimId) ||
-    !Number.isSafeInteger(Number(claimId.slice(2))) || typeof version !== "number" ||
-    !Number.isSafeInteger(version) || version < 1) return null;
-  if (isEvidence && fields.direction !== "supports" && fields.direction !== "refutes" &&
-    fields.direction !== "informs") return null;
+  if (
+    typeof claimId !== "string" ||
+    !/^C-[1-9][0-9]*$/.test(claimId) ||
+    !Number.isSafeInteger(Number(claimId.slice(2))) ||
+    typeof version !== "number" ||
+    !Number.isSafeInteger(version) ||
+    version < 1
+  )
+    return null;
+  if (
+    isEvidence &&
+    fields.direction !== "supports" &&
+    fields.direction !== "refutes" &&
+    fields.direction !== "informs"
+  )
+    return null;
   const target = `${claimId}@${version}`;
   return {
-    targetClaim: claimId, noticeType: "object_critique", targetId: target, createdAt,
+    targetClaim: claimId,
+    noticeType: "object_critique",
+    targetId: target,
+    createdAt,
     title: `${isReview ? "Review" : "Evidence"} recorded for ${target}`,
     detail: isReview
       ? `Review ${job.object_id} addresses ${target} on ${job.problem_id}. Read the public review and current claim state. This notice does not certify the claim or assert a disposition change.`
@@ -125,24 +160,33 @@ async function deliveryStatements(
   now: number,
 ): Promise<D1PreparedStatement[]> {
   const token = crypto.randomUUID();
-  const statements = [db.prepare(`UPDATE inbox_event_deliveries SET claim_token = ?
+  const statements = [
+    db
+      .prepare(`UPDATE inbox_event_deliveries SET claim_token = ?
     WHERE id = ? AND state = 'pending' AND after_fellow_id = ?
       AND EXISTS (SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
         JOIN problems p ON p.id = e.problem_id
         WHERE e.id = inbox_event_deliveries.event_id AND e.id = ?
           AND c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
           AND c.payload_sha256 = ? AND c.payload_json = ? AND p.status <> 'private-draft')`)
-    .bind(token, job.id, job.after_fellow_id, job.event_id, job.payload_sha256, job.payload_json)];
+      .bind(token, job.id, job.after_fellow_id, job.event_id, job.payload_sha256, job.payload_json),
+  ];
   for (const fellowId of recipients) {
     const input: NoticeCreateInput = {
-      fellowId, problemId: job.problem_id, noticeType: template.noticeType,
-      targetId: template.targetId, causedByEventId: job.event_id,
-      title: template.title, detail: template.detail,
+      fellowId,
+      problemId: job.problem_id,
+      noticeType: template.noticeType,
+      targetId: template.targetId,
+      causedByEventId: job.event_id,
+      title: template.title,
+      detail: template.detail,
     };
     const id = await inboxNoticeId(input);
     // Recognize existing causal notices, including legacy random IDs and the
     // synchronous statement-revision producer. Never reset an acknowledgment.
-    statements.push(db.prepare(`INSERT INTO fellow_inbox_notices
+    statements.push(
+      db
+        .prepare(`INSERT INTO fellow_inbox_notices
       (id, fellow_id, problem_id, notice_type, seq, title, detail, impact_kind,
        caused_by_event_id, target_id, acknowledged_at, expires_at, created_at)
       SELECT ?, f.fellow_id, e.problem_id, ?,
@@ -161,15 +205,35 @@ async function deliveryStatements(
               (n.notice_type = 'object_critique' AND n.target_id = e.object_id))
             AND n.impact_kind IS NULL)
       ON CONFLICT (id) DO NOTHING`)
-      .bind(id, template.noticeType, template.title, template.detail, template.targetId,
-        template.createdAt, fellowId, job.id, token, template.targetClaim,
-        template.noticeType, template.targetId));
+        .bind(
+          id,
+          template.noticeType,
+          template.title,
+          template.detail,
+          template.targetId,
+          template.createdAt,
+          fellowId,
+          job.id,
+          token,
+          template.targetClaim,
+          template.noticeType,
+          template.targetId,
+        ),
+    );
   }
-  statements.push(db.prepare(`UPDATE inbox_event_deliveries
+  statements.push(
+    db
+      .prepare(`UPDATE inbox_event_deliveries
     SET after_fellow_id = ?, state = ?, claim_token = NULL, updated_at = ?, failure_code = NULL
     WHERE id = ? AND state = 'pending' AND claim_token = ?`)
-    .bind(recipients.at(-1) ?? job.after_fellow_id, hasMore ? "pending" : "delivered", now,
-      job.id, token));
+      .bind(
+        recipients.at(-1) ?? job.after_fellow_id,
+        hasMore ? "pending" : "delivered",
+        now,
+        job.id,
+        token,
+      ),
+  );
   return statements;
 }
 
@@ -183,7 +247,8 @@ export async function deliverInboxEvents(
 ): Promise<InboxDeliveryResult> {
   const now = options.now ?? Date.now();
   if (!Number.isSafeInteger(now) || now <= 0) throw new Error("INBOX_DELIVERY_CLOCK_INVALID");
-  const jobs = await db.prepare(`SELECT q.id, q.event_id, q.after_fellow_id,
+  const jobs = await db
+    .prepare(`SELECT q.id, q.event_id, q.after_fellow_id,
       e.problem_id, e.type, e.object_kind, e.object_id, e.object_version, e.payload_sha256,
       e.actor_fellow_id, e.created_at, p.status AS problem_status, c.redacted_at,
       CASE WHEN c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
@@ -191,34 +256,45 @@ export async function deliverInboxEvents(
     FROM inbox_event_deliveries q JOIN events e ON e.id = q.event_id
     JOIN problems p ON p.id = e.problem_id LEFT JOIN event_content c ON c.event_id = e.id
     WHERE q.state = 'pending' ORDER BY q.updated_at, q.id LIMIT ?`)
-    .bind(MAX_SOURCE_BYTES, INBOX_DELIVERY_JOB_LIMIT).all<DeliveryJob>();
+    .bind(MAX_SOURCE_BYTES, INBOX_DELIVERY_JOB_LIMIT)
+    .all<DeliveryJob>();
   const result: InboxDeliveryResult = {
-    examined: jobs.results.length, notices: 0, completed: 0, suppressed: 0, quarantined: 0, failed: 0,
+    examined: jobs.results.length,
+    notices: 0,
+    completed: 0,
+    suppressed: 0,
+    quarantined: 0,
+    failed: 0,
   };
   for (const job of jobs.results) {
     try {
       if (job.problem_status === "private-draft" || job.redacted_at !== null) {
-        const suppressed = await db.prepare(`UPDATE inbox_event_deliveries
+        const suppressed = await db
+          .prepare(`UPDATE inbox_event_deliveries
           SET state = 'suppressed', updated_at = ?, failure_code = 'SOURCE_WITHDRAWN'
           WHERE id = ? AND state = 'pending' AND after_fellow_id = ?
             AND EXISTS (SELECT 1 FROM events e JOIN problems p ON p.id = e.problem_id
               LEFT JOIN event_content c ON c.event_id = e.id
               WHERE e.id = inbox_event_deliveries.event_id
                 AND (p.status = 'private-draft' OR c.redacted_at IS NOT NULL))`)
-          .bind(now, job.id, job.after_fellow_id).run();
+          .bind(now, job.id, job.after_fellow_id)
+          .run();
         result.suppressed += suppressed.meta.changes;
         continue;
       }
       const template = await templateFor(job);
       if (template === null) {
-        const invalid = await db.prepare(`UPDATE inbox_event_deliveries
+        const invalid = await db
+          .prepare(`UPDATE inbox_event_deliveries
           SET state = 'quarantined', updated_at = ?, failure_code = 'SOURCE_INVALID'
           WHERE id = ? AND state = 'pending' AND after_fellow_id = ?`)
-          .bind(now, job.id, job.after_fellow_id).run();
+          .bind(now, job.id, job.after_fellow_id)
+          .run();
         result.quarantined += invalid.meta.changes;
         continue;
       }
-      const candidates = await db.prepare(`WITH source AS (
+      const candidates = await db
+        .prepare(`WITH source AS (
           SELECT id, problem_id, type, seq, created_at, actor_fellow_id FROM events WHERE id = ?
         ), candidates AS (
           SELECT author.actor_fellow_id AS fellow_id FROM source e JOIN events author
@@ -237,12 +313,20 @@ export async function deliverInboxEvents(
         SELECT f.fellow_id FROM candidates c JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id
         CROSS JOIN source e JOIN problems p ON p.id = e.problem_id
         WHERE p.status <> 'private-draft' AND f.fellow_id > ? ORDER BY f.fellow_id LIMIT ?`)
-        .bind(job.event_id, template.targetClaim, job.after_fellow_id,
-          INBOX_DELIVERY_RECIPIENT_LIMIT + 1).all<{ fellow_id: string }>();
-      const recipients = candidates.results.slice(0, INBOX_DELIVERY_RECIPIENT_LIMIT)
+        .bind(
+          job.event_id,
+          template.targetClaim,
+          job.after_fellow_id,
+          INBOX_DELIVERY_RECIPIENT_LIMIT + 1,
+        )
+        .all<{ fellow_id: string }>();
+      const recipients = candidates.results
+        .slice(0, INBOX_DELIVERY_RECIPIENT_LIMIT)
         .map((row) => row.fellow_id);
       const hasMore = candidates.results.length > INBOX_DELIVERY_RECIPIENT_LIMIT;
-      const committed = await db.batch(await deliveryStatements(db, job, template, recipients, hasMore, now));
+      const committed = await db.batch(
+        await deliveryStatements(db, job, template, recipients, hasMore, now),
+      );
       if (committed.at(-1)?.meta.changes === 1) {
         result.notices += committed.slice(1, -1).reduce((sum, row) => sum + row.meta.changes, 0);
         if (!hasMore) result.completed++;
@@ -254,10 +338,14 @@ export async function deliverInboxEvents(
       // Rotate a poison storage failure behind other pending jobs. A global
       // outage may also prevent this update; the original durable job remains.
       try {
-        await db.prepare(`UPDATE inbox_event_deliveries SET updated_at = ?
+        await db
+          .prepare(`UPDATE inbox_event_deliveries SET updated_at = ?
           WHERE id = ? AND state = 'pending' AND after_fellow_id = ?`)
-          .bind(now, job.id, job.after_fellow_id).run();
-      } catch { /* Retry from durable state on the next scheduled pass. */ }
+          .bind(now, job.id, job.after_fellow_id)
+          .run();
+      } catch {
+        /* Retry from durable state on the next scheduled pass. */
+      }
     }
   }
   return result;
