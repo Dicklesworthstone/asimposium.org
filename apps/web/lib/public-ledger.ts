@@ -1,5 +1,8 @@
 import "server-only";
 
+import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
+import { publicReadWatch } from "./public-watch-view";
+
 import {
   type AreaDetailResponse,
   AreaDetailResponseSchema,
@@ -42,7 +45,7 @@ export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
 const PUBLIC_READ_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 
 export type PublicRead<T> =
-  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true }
+  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true; readonly watch?: PublicWatchTarget }
   | { readonly state: "not_found"; readonly origin: string }
   | {
       readonly state: "unavailable";
@@ -158,6 +161,7 @@ async function readPublic<T>(
           state: "ok",
           data: parsed.data,
           origin,
+          ...publicReadWatch(path, response.headers),
           ...(/(?:^|[,\s])(?:noindex|none)(?:$|[,\s])/i.test(
             response.headers.get("x-robots-tag") ?? "",
           )

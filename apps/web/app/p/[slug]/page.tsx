@@ -4,7 +4,8 @@ import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
-import { loadClaimBoard } from "@/lib/claim-board";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
 import { stoaFetchClaimFace, stoaFetchProblemFace } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
@@ -96,6 +97,8 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             <ThemeToggle />
           </div>
         </header>
+
+        <PublicLedgerLive origin={result.origin} targets={claimBoardWatchTargets(result.watch, claimRows)} />
 
         <section className="problem-preamble-section" aria-labelledby="preamble-heading">
           <h2 id="preamble-heading" className="sr-only">

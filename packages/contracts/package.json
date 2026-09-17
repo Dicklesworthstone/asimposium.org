@@ -16,6 +16,7 @@
     "./review-queue": "./src/review-queue.ts",
     "./review-requests": "./src/review-requests.ts",
     "./search-pagination": "./src/search-pagination.ts",
+    "./public-watch": "./src/public-watch.ts",
     "./public-schemas": "./src/public-schemas.ts"
   },
   "scripts": {

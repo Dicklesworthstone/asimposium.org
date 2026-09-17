@@ -10,6 +10,20 @@ import type {
   ProblemFollowResponse,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import {
+  FOLLOW_DELETE_SQL,
+  FOLLOW_INSERT_SQL,
+  FOLLOW_RECIPIENTS_SQL,
+  FOLLOW_STATUS_SQL,
+  INBOX_UNACKNOWLEDGED_SQL,
+  VISIBLE_INBOX_NOTICE_SQL,
+} from "./follow-access.ts";
+import {
+  INBOX_NOTICE_RECEIPT_SQL,
+  inboxNoticeId,
+  INSERT_INBOX_NOTICE_ONCE_SQL,
+} from "./notice-write.ts";
+import { ledgerNoticeActions } from "./ledger-notice-actions.ts";
 import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
@@ -89,7 +103,10 @@ function buildNoticeNextActions(
 }
 
 function rowToItem(row: NoticeRow): InboxItem {
-  const nextActions = buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id);
+  const nextActions = [
+    ...buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id),
+    ...ledgerNoticeActions(row.notice_type, row.problem_id, row.target_id, row.impact_kind),
+  ];
   return {
     id: row.id,
     type: row.notice_type as InboxNoticeType,
@@ -112,33 +129,17 @@ export async function createInboxNotice(
   input: NoticeCreateInput,
 ): Promise<InboxItem> {
   const now = input.createdAt ?? Date.now();
-  const id =
-    input.id ??
-    `NOT-${now.toString(36)}-${crypto.randomUUID().replace(/-/g, "").substring(0, 8).toUpperCase()}`;
-
-  // Compute next monotonic seq for this fellow
-  const seqRow = await db
-    .prepare(
-      "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM fellow_inbox_notices WHERE fellow_id = ?",
-    )
-    .bind(input.fellowId)
-    .first<{ next_seq: number }>();
-  const seq = seqRow?.next_seq ?? 1;
-
-  await db
-    .prepare(
-      `INSERT INTO fellow_inbox_notices (
-         id, fellow_id, problem_id, notice_type, seq, title, detail,
-         impact_kind, caused_by_event_id, target_id, acknowledged_at,
-         expires_at, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-    )
-    .bind(
+  const id = await inboxNoticeId(input);
+  // Read the durable row in the same transaction as the guarded insert. A
+  // replay returns the original text, timestamp, expiry and acknowledgment;
+  // it cannot turn an already-read notice back into a fresh unread item.
+  const results = await db.batch<NoticeRow>([
+    db.prepare(INSERT_INBOX_NOTICE_ONCE_SQL).bind(
       id,
       input.fellowId,
       input.problemId ?? null,
       input.noticeType,
-      seq,
+      input.fellowId,
       input.title,
       input.detail ?? null,
       input.impactKind ?? null,
@@ -146,38 +147,37 @@ export async function createInboxNotice(
       input.targetId ?? null,
       input.expiresAt ?? null,
       now,
-    )
-    .run();
+    ),
+    db.prepare(INBOX_NOTICE_RECEIPT_SQL).bind(
+      input.fellowId,
+      input.problemId ?? null,
+      input.noticeType,
+      input.impactKind ?? null,
+      input.causedByEventId ?? null,
+      input.targetId ?? null,
+      id,
+    ),
+  ]);
+  const receipt = results[1]?.results[0];
+  if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) {
+    throw new Error("Inbox notice insertion produced no valid cursor receipt.");
+  }
 
-  // OPS.2a structured diagnostic log
+  // OPS.2a structured diagnostic log; replay is not a newly created notice.
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
-      stage: "inbox-notice-created",
-      notice_id: id,
+      stage: results[0]?.results.length ? "inbox-notice-created" : "inbox-notice-replayed",
+      notice_id: receipt.id,
       fellow_id: input.fellowId,
       notice_type: input.noticeType,
-      seq,
+      seq: receipt.seq,
       caused_by_event_id: input.causedByEventId ?? null,
       timestamp: now,
     }),
   );
 
-  return rowToItem({
-    id,
-    fellow_id: input.fellowId,
-    problem_id: input.problemId ?? null,
-    notice_type: input.noticeType,
-    seq,
-    title: input.title,
-    detail: input.detail ?? null,
-    impact_kind: input.impactKind ?? null,
-    caused_by_event_id: input.causedByEventId ?? null,
-    target_id: input.targetId ?? null,
-    acknowledged_at: null,
-    expires_at: input.expiresAt ?? null,
-    created_at: now,
-  });
+  return rowToItem(receipt);
 }
 
 export async function getInboxNotices(
@@ -194,7 +194,7 @@ export async function getInboxNotices(
            impact_kind, caused_by_event_id, target_id, acknowledged_at,
            expires_at, created_at
     FROM fellow_inbox_notices
-    WHERE fellow_id = ?
+    WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL}
   `;
   const binds: (string | number)[] = [fellowId];
 
@@ -222,9 +222,7 @@ export async function getInboxNotices(
 
   // Total unacknowledged count for this fellow
   const unackRow = await db
-    .prepare(
-      "SELECT COUNT(*) AS unack FROM fellow_inbox_notices WHERE fellow_id = ? AND acknowledged_at IS NULL",
-    )
+    .prepare(INBOX_UNACKNOWLEDGED_SQL)
     .bind(fellowId)
     .first<{ unack: number }>();
   const unacknowledgedCount = unackRow?.unack ?? 0;
@@ -260,12 +258,13 @@ export async function ackInboxNotices(
       WHERE fellow_id = ?
         AND id IN (${placeholders})
         AND acknowledged_at IS NULL
+        AND ${VISIBLE_INBOX_NOTICE_SQL}
     `;
     const result = await db
       .prepare(updateSql)
       .bind(now, fellowId, ...request.notice_ids)
       .run();
-    acknowledgedCount = result.meta?.changes ?? request.notice_ids.length;
+    acknowledgedCount = result.meta?.changes ?? 0;
   } else if (request.until_seq !== undefined) {
     const updateSql = `
       UPDATE fellow_inbox_notices
@@ -273,6 +272,7 @@ export async function ackInboxNotices(
       WHERE fellow_id = ?
         AND seq <= ?
         AND acknowledged_at IS NULL
+        AND ${VISIBLE_INBOX_NOTICE_SQL}
     `;
     const result = await db.prepare(updateSql).bind(now, fellowId, request.until_seq).run();
     acknowledgedCount = result.meta?.changes ?? 0;
@@ -280,9 +280,7 @@ export async function ackInboxNotices(
 
   // Check remaining unacknowledged count
   const unackRow = await db
-    .prepare(
-      "SELECT COUNT(*) AS unack FROM fellow_inbox_notices WHERE fellow_id = ? AND acknowledged_at IS NULL",
-    )
+    .prepare(INBOX_UNACKNOWLEDGED_SQL)
     .bind(fellowId)
     .first<{ unack: number }>();
   const unacknowledgedCount = unackRow?.unack ?? 0;
@@ -306,37 +304,27 @@ export async function ackInboxNotices(
   };
 }
 
+interface FollowStatusRow {
+  problem_id: string;
+  created_at: number | null;
+}
+
 export async function followProblem(
   db: D1Database,
   principalId: string,
   problemId: string,
   now: number = Date.now(),
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  // Check problem exists
-  const problemRow = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
+  // D1 batch is one transaction: visibility cannot change between the guarded
+  // mutation and its receipt. A denied target is indistinguishable from absent.
+  const results = await db.batch<FollowStatusRow>([
+    db.prepare(FOLLOW_INSERT_SQL).bind(principalId, now, problemId, principalId),
+    db.prepare(FOLLOW_STATUS_SQL).bind(principalId, problemId, principalId),
+  ]);
+  const row = results[1]?.results[0];
+  if (!row) return { notFound: true };
+  if (row.created_at === null) throw new Error("Follow mutation produced no durable receipt.");
 
-  if (!problemRow) {
-    return { notFound: true };
-  }
-
-  await db
-    .prepare(
-      `INSERT INTO problem_follows (principal_id, problem_id, created_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT (principal_id, problem_id) DO NOTHING`,
-    )
-    .bind(principalId, problemId, now)
-    .run();
-
-  const followRow = await db
-    .prepare("SELECT created_at FROM problem_follows WHERE principal_id = ? AND problem_id = ?")
-    .bind(principalId, problemId)
-    .first<{ created_at: number }>();
-
-  // OPS.2a structured diagnostic log
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
@@ -352,7 +340,7 @@ export async function followProblem(
     response: {
       problem_id: problemId,
       following: true,
-      followed_at: followRow?.created_at ?? now,
+      followed_at: row.created_at,
     },
   };
 }
@@ -363,22 +351,14 @@ export async function unfollowProblem(
   problemId: string,
   now: number = Date.now(),
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  // Check problem exists
-  const problemRow = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
+  const results = await db.batch<FollowStatusRow>([
+    db.prepare(FOLLOW_DELETE_SQL).bind(principalId, problemId, principalId),
+    db.prepare(FOLLOW_STATUS_SQL).bind(principalId, problemId, principalId),
+  ]);
+  const row = results[1]?.results[0];
+  if (!row) return { notFound: true };
+  if (row.created_at !== null) throw new Error("Unfollow mutation left a durable follow.");
 
-  if (!problemRow) {
-    return { notFound: true };
-  }
-
-  await db
-    .prepare("DELETE FROM problem_follows WHERE principal_id = ? AND problem_id = ?")
-    .bind(principalId, problemId)
-    .run();
-
-  // OPS.2a structured diagnostic log
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
@@ -404,26 +384,16 @@ export async function getProblemFollowStatus(
   principalId: string,
   problemId: string,
 ): Promise<{ notFound?: boolean; response?: ProblemFollowResponse }> {
-  // Check problem exists
-  const problemRow = await db
-    .prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ id: string }>();
-
-  if (!problemRow) {
-    return { notFound: true };
-  }
-
-  const followRow = await db
-    .prepare("SELECT created_at FROM problem_follows WHERE principal_id = ? AND problem_id = ?")
-    .bind(principalId, problemId)
-    .first<{ created_at: number }>();
-
+  const row = await db
+    .prepare(FOLLOW_STATUS_SQL)
+    .bind(principalId, problemId, principalId)
+    .first<FollowStatusRow>();
+  if (!row) return { notFound: true };
   return {
     response: {
       problem_id: problemId,
-      following: followRow !== null && followRow !== undefined,
-      followed_at: followRow ? followRow.created_at : null,
+      following: row.created_at !== null,
+      followed_at: row.created_at,
     },
   };
 }
@@ -435,19 +405,11 @@ export async function notifyProblemFollowersOfStatementRevision(
   causedByEventId: string,
 ): Promise<void> {
   const rows = await db
-    .prepare(
-      `SELECT DISTINCT principal_id FROM (
-         SELECT principal_id FROM problem_follows WHERE problem_id = ?
-         UNION
-         SELECT fellow_id AS principal_id FROM problem_memberships WHERE problem_id = ?
-       ) WHERE principal_id IS NOT NULL`,
-    )
-    .bind(problemId, problemId)
+    .prepare(FOLLOW_RECIPIENTS_SQL)
+    .bind(problemId)
     .all<{ principal_id: string }>();
 
-  const fellows = (rows.results ?? [])
-    .map((r) => r.principal_id)
-    .filter((id) => typeof id === "string" && !id.startsWith("asimp_sp_"));
+  const fellows = (rows.results ?? []).map((row) => row.principal_id);
 
   for (const fellowId of fellows) {
     await createInboxNotice(db, {

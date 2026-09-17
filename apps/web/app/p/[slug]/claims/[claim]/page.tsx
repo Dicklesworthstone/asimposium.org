@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 
 interface ClaimPageProps {
@@ -65,6 +67,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
           <h1>{exact}</h1>
           <p className="lede">{face.preamble}</p>
         </header>
+        <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
         <section aria-labelledby="standing-heading">
           <h2 id="standing-heading">Computed standing</h2>
           <p data-disposition={state.disposition}>
