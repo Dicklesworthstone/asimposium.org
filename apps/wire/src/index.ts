@@ -1,6 +1,7 @@
 import type { ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 import { createApp } from "./app";
 import type { Env } from "./env";
+import { publicWatchFetch } from "./http/public-watch-cors";
 import { deliverInboxEvents } from "./inbox/event-delivery";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireIdleSessions } from "./sessions/idle";
@@ -15,7 +16,7 @@ const app = createApp();
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
-    return app.fetch(request, env, ctx);
+    return publicWatchFetch(request, () => app.fetch(request, env, ctx));
   },
   async scheduled(
     _controller: ScheduledController,
