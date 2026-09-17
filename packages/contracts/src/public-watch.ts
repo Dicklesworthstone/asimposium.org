@@ -26,9 +26,7 @@ export function parsePublicWatchCursor(value: string): number | undefined {
 export function publicWatchEtag(value: string | null | undefined): string | undefined {
   // Current canonical faces issue strong digest tags. Refuse weak tags, lists,
   // control bytes and wildcard validators rather than manufacturing a match.
-  return typeof value === "string" && /^"[A-Za-z0-9._:-]{1,160}"$/.test(value)
-    ? value
-    : undefined;
+  return typeof value === "string" && /^"[A-Za-z0-9._:-]{1,160}"$/.test(value) ? value : undefined;
 }
 
 /** The transport is deliberately restricted to the two Stoa deployments and
@@ -42,11 +40,24 @@ export function publicWatchOrigin(value: string): boolean {
   if (!local) return false;
   const port = Number(local[1]);
   if (port > 65_535 || port === 80) return false;
-  try { return new URL(value).origin === value; } catch { return false; }
+  try {
+    return new URL(value).origin === value;
+  } catch {
+    return false;
+  }
 }
 
 /** Closed read-only allowlist, also used for CORS. In particular no /v1,
- * enrollment, workshop, inbox, signed sponsor route or arbitrary URL qualifies.
+ * enrollment, workshop, inbox, signed sponsor route or arbitrary URL qualifies. */
+function hasControlCharacters(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Verify a public watch path and classify its target kind.
  * Queries remain byte-for-byte intact: historical pins and opaque pagination
  * must not be silently converted into a live head by the watcher. */
 export function publicWatchPath(path: string): "cursor" | "face" | undefined {
@@ -55,14 +66,24 @@ export function publicWatchPath(path: string): "cursor" | "face" | undefined {
   let decoded: string;
   try {
     url = new URL(path, "https://public-watch.invalid");
-    if (url.origin !== "https://public-watch.invalid" || url.hash ||
-      `${url.pathname}${url.search}` !== path) return undefined;
+    if (
+      url.origin !== "https://public-watch.invalid" ||
+      url.hash ||
+      `${url.pathname}${url.search}` !== path
+    )
+      return undefined;
     decoded = decodeURIComponent(url.pathname);
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
   const query = url.searchParams;
   const entries = [...query.entries()];
-  if (new Set(entries.map(([key]) => key)).size !== entries.length ||
-    entries.some(([, value]) => value.length === 0 || value.length > 1_024 || /[\x00-\x1f\x7f]/.test(value))) {
+  if (
+    new Set(entries.map(([key]) => key)).size !== entries.length ||
+    entries.some(
+      ([, value]) => value.length === 0 || value.length > 1_024 || hasControlCharacters(value),
+    )
+  ) {
     return undefined;
   }
   if (decoded === "/cursor") return entries.length === 0 ? "cursor" : undefined;
@@ -72,9 +93,12 @@ export function publicWatchPath(path: string): "cursor" | "face" | undefined {
   const deadEnds = /^\/p\/([^/]+)\/dead-ends\.json$/.exec(decoded);
   if (problem && PROBLEM.test(problem[1] ?? "")) {
     permitted = [];
-  } else if (claim && PROBLEM.test(claim[1] ?? "") &&
+  } else if (
+    claim &&
+    PROBLEM.test(claim[1] ?? "") &&
     Number.isSafeInteger(Number(claim[2])) &&
-    (claim[3] === undefined || Number.isSafeInteger(Number(claim[3])))) {
+    (claim[3] === undefined || Number.isSafeInteger(Number(claim[3])))
+  ) {
     permitted = ["through"];
     const through = query.get("through");
     if (through !== null && parsePublicWatchCursor(through) === undefined) return undefined;
@@ -99,15 +123,22 @@ export function publicWatchPath(path: string): "cursor" | "face" | undefined {
 }
 
 export function validPublicWatchTargets(targets: readonly PublicWatchTarget[]): boolean {
-  return targets.length > 0 && targets.length <= PUBLIC_WATCH_MAX_TARGETS &&
+  return (
+    targets.length > 0 &&
+    targets.length <= PUBLIC_WATCH_MAX_TARGETS &&
     new Set(targets.map((target) => target.path)).size === targets.length &&
-    targets.every((target) => publicWatchPath(target.path) === "face" &&
-      publicWatchEtag(target.etag) !== undefined);
+    targets.every(
+      (target) =>
+        publicWatchPath(target.path) === "face" && publicWatchEtag(target.etag) !== undefined,
+    )
+  );
 }
 
 /** Retry-After delays are bounded; malformed hints never create a hot loop. */
 export function publicWatchRetryAfter(value: string | null): number | undefined {
   if (value === null || !POSITIVE_INTEGER.test(value) || value.length > 6) return undefined;
-  return Math.min(PUBLIC_WATCH_MAX_BACKOFF_MS,
-    Math.max(PUBLIC_WATCH_INTERVAL_MS, Number(value) * 1_000));
+  return Math.min(
+    PUBLIC_WATCH_MAX_BACKOFF_MS,
+    Math.max(PUBLIC_WATCH_INTERVAL_MS, Number(value) * 1_000),
+  );
 }

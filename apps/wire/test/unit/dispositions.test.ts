@@ -226,7 +226,7 @@ describe("claim machine: the full legal transition table", () => {
         "disputed",
         { kind: "reduced-to", target_claim_id: "C-2" },
         EMPTY_CLAIM_CONTEXT,
-        "reduced-to",
+        "disputed",
       ],
       // a supporting review that finds the statement defective routes to malformed.
       [

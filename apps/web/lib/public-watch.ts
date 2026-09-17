@@ -22,8 +22,9 @@ export interface PublicWatchState {
 }
 
 type Timer = ReturnType<typeof setTimeout>;
+export type PublicWatchFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export interface PublicWatchRuntime {
-  readonly fetch: typeof fetch;
+  readonly fetch: PublicWatchFetch;
   readonly setTimer: (callback: () => void, delay: number) => Timer;
   readonly clearTimer: (timer: Timer) => void;
   readonly random: () => number;

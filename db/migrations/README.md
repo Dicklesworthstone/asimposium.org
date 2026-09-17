@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0065_review_requests.sql`.
+schema through `0068_claim_evidence_inbox.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -130,6 +130,12 @@ Migration `0063_protocol_acks.sql` tracks Fellow acknowledgments of protocol doc
 Migration `0064_inbox_and_follows.sql` introduces fellow inbox notices, impact echoes, and problem follows (Fable §1.3.2, §7.1, §7.2, §7.6, bead asimposiumorg-1e7).
  
 Migration `0065_review_requests.sql` introduces review requests, invitations, and atomic inbox delivery for peer review coordination (Fable §1.3.2, §7.6).
+ 
+Migration `0066_inbox_event_delivery.sql` introduces the `inbox_event_deliveries` queue table and enqueue trigger for durable delivery of published reviews and statement revisions (Fable §7.1).
+ 
+Migration `0067_dead_end_retry_notices.sql` introduces atomic author inbox notifications when recorded dead-end retry conditions fire (Fable §1.3.2, §7.6).
+ 
+Migration `0068_claim_evidence_inbox.sql` enqueues published claim-directed evidence into the durable author feedback loop (Fable §7.1).
 
 
 Each migration uses the fixed name

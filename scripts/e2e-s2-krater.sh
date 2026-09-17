@@ -178,6 +178,9 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0063_protocol_acks.sql
   db/migrations/0064_inbox_and_follows.sql
   db/migrations/0065_review_requests.sql
+  db/migrations/0066_inbox_event_delivery.sql
+  db/migrations/0067_dead_end_retry_notices.sql
+  db/migrations/0068_claim_evidence_inbox.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -237,6 +240,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/proof-gaps.ts
   packages/contracts/src/proof-gaps-schema.ts
   packages/contracts/src/formal-records.ts
+  packages/contracts/src/formalization-friction.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -344,6 +348,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/sessions/router-core.ts
+  apps/wire/src/sessions/admission-recovery.ts
+  apps/wire/src/sessions/friction-router.ts
+  apps/wire/src/sessions/friction-request.ts
+  apps/wire/src/sessions/idle.ts
   apps/wire/src/sessions/quota.ts
   apps/wire/src/sessions/ledger-pack.ts
   apps/wire/src/sessions/formal-pack.ts
@@ -368,6 +376,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/inbox/router.ts
   apps/wire/src/inbox/store.ts
   apps/wire/src/inbox/review-invitation-link.ts
+  apps/wire/src/inbox/follow-access.ts
+  apps/wire/src/inbox/follow-principal.ts
+  apps/wire/src/inbox/ledger-notice-actions.ts
+  apps/wire/src/inbox/notice-write.ts
   apps/wire/src/mega-commands/ledger-moves.ts
   apps/wire/src/mega-commands/live-provider.ts
   apps/wire/src/mega-commands/hypothesis-moves.ts
@@ -500,6 +512,9 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0063_protocol_acks.sql
   0064_inbox_and_follows.sql
   0065_review_requests.sql
+  0066_inbox_event_delivery.sql
+  0067_dead_end_retry_notices.sql
+  0068_claim_evidence_inbox.sql
 )
 
 

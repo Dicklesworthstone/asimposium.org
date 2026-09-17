@@ -23,7 +23,12 @@ export async function recoverIdleSessionSlots(
   ) {
     return;
   }
-  const fellowId = await authenticatedFollowPrincipal(request, authority);
+  let fellowId: string | undefined;
+  try {
+    fellowId = await authenticatedFollowPrincipal(request, authority);
+  } catch {
+    return;
+  }
   if (fellowId === undefined) return;
   await expireIdleSessions(db, { fellowId });
 }

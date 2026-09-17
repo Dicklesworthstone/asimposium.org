@@ -108,6 +108,9 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0063_protocol_acks.sql"
   "0064_inbox_and_follows.sql"
   "0065_review_requests.sql"
+  "0066_inbox_event_delivery.sql"
+  "0067_dead_end_retry_notices.sql"
+  "0068_claim_evidence_inbox.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

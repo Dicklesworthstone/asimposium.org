@@ -50,7 +50,7 @@ test("private, signed and bearer route traffic remains byte-for-byte untouched",
 });
 
 test("credential-bearing requests and cookie-setting responses are not made public by CORS", async () => {
-  for (const headers of [{ authorization: "Bearer private" }, { cookie: "session=private" }]) {
+  for (const headers of [{ authorization: "Bearer private" }, { cookie: "session=private" }] as Array<Record<string, string>>) {
     const original = new Response("private");
     assert.equal(await publicWatchFetch(request("/cursor", { headers }), () => original), original);
   }
