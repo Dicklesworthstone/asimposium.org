@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env.ts";
 import { createReviewRequestRouter } from "../review-requests/router.ts";
+import { createFrictionRouter } from "./friction-router.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
   type SessionRouterOptions,
@@ -11,7 +12,9 @@ import {
 export * from "./router-core.ts";
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  const ledger = createLedgerSessionRouter(options);
   app.route("/", createReviewRequestRouter(options));
-  app.route("/", createLedgerSessionRouter(options));
+  app.route("/", createFrictionRouter(ledger));
+  app.route("/", ledger);
   return app;
 }

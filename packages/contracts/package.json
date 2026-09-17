@@ -10,6 +10,7 @@
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
     "./event-tail": "./src/event-tail.ts",
     "./formal-records": "./src/formal-records.ts",
+    "./formalization-friction": "./src/formalization-friction.ts",
     "./hypotheses": "./src/hypotheses.ts",
     "./proof-gaps": "./src/proof-gaps.ts",
     "./review-queue": "./src/review-queue.ts",
