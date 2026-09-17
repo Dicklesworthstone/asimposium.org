@@ -10,6 +10,7 @@ import {
 /** Byte verification is not proof checking. No uploaded program is executed. */
 export type ArtifactEncoding = "text" | "lake-archive";
 export type ArtifactInspectionCode =
+  | "ARTIFACT_PUBLICATION_TOO_LARGE"
   | "ARTIFACT_TOO_LARGE"
   | "ARTIFACT_TYPE_FORBIDDEN"
   | "ARTIFACT_SECRET_SHAPED"
@@ -44,7 +45,7 @@ export async function artifactSha256(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function text(bytes: Uint8Array): void {
+function text(bytes: Uint8Array): string {
   let body: string;
   try { body = decoder.decode(bytes); } catch {
     throw new ArtifactInspectionError("ARTIFACT_TYPE_FORBIDDEN");
@@ -55,6 +56,7 @@ function text(bytes: Uint8Array): void {
     throw new ArtifactInspectionError("ARTIFACT_TYPE_FORBIDDEN");
   }
   if (bodyLooksSecretShaped(body)) throw new ArtifactInspectionError("ARTIFACT_SECRET_SHAPED");
+  return body;
 }
 
 const badArchive = (): never => { throw new ArtifactInspectionError("ARTIFACT_ARCHIVE_INVALID"); };
@@ -125,7 +127,9 @@ class ExpandedReader {
 /** Conservative portable USTAR source trees only. PAX/GNU extensions, links,
  * sparse files, devices, embedded binaries and executable extraction tricks
  * are refused, not handed to a system tar command. */
-async function inspectTar(input: ExpandedReader): Promise<number> {
+type TextCollector = (value: Readonly<Record<string, string>>) => void;
+
+async function inspectTar(input: ExpandedReader, collect?: TextCollector): Promise<number> {
   let members = 0;
   const names = new Map<string, boolean>();
   const requiredDirectories = new Set<string>();
@@ -154,8 +158,9 @@ async function inspectTar(input: ExpandedReader): Promise<number> {
     const prefix = field(header.subarray(345, 500));
     const name = field(header.subarray(0, 100));
     // Metadata is uploaded material too. It must not carry a token or address.
-    for (const value of [prefix, name, field(header.subarray(265, 297)),
-      field(header.subarray(297, 329))]) text(new TextEncoder().encode(value));
+    const user = field(header.subarray(265, 297));
+    const group = field(header.subarray(297, 329));
+    for (const value of [prefix, name, user, group]) text(new TextEncoder().encode(value));
     if (!zero(header.subarray(500))) return badArchive();
     const key = path(prefix === "" ? name : `${prefix}/${name}`, directory);
     if (names.has(key) || (!directory && requiredDirectories.has(key))) return badArchive();
@@ -170,13 +175,14 @@ async function inspectTar(input: ExpandedReader): Promise<number> {
     if ((directory && size !== 0) || size > MAX_ARTIFACT_BYTES) return badArchive();
     const body = await input.take(size);
     if (body === undefined) return badArchive();
-    if (!directory) text(body);
+    const memberText = directory ? "" : text(body);
+    collect?.({ kind: directory ? "directory" : "file", prefix, name, user, group, text: memberText });
     const padding = await input.take((BLOCK - size % BLOCK) % BLOCK);
     if (padding === undefined || !zero(padding)) return badArchive();
   }
 }
 
-function gzipMetadata(bytes: Uint8Array): number {
+function gzipMetadata(bytes: Uint8Array, collect?: TextCollector): number {
   if (bytes.length < 18 || bytes[0] !== 0x1f || bytes[1] !== 0x8b || bytes[2] !== 8) return badArchive();
   const flags = bytes[3] ?? 0;
   // Unknown binary FEXTRA fields are not a source tree. Name/comment fields
@@ -187,7 +193,8 @@ function gzipMetadata(bytes: Uint8Array): number {
     if ((flags & bit) === 0) continue;
     const end = bytes.indexOf(0, offset);
     if (end < 0 || end - offset > 1024) return badArchive();
-    text(bytes.subarray(offset, end));
+    const value = text(bytes.subarray(offset, end));
+    collect?.({ kind: bit === 8 ? "gzip-name" : "gzip-comment", text: value });
     offset = end + 1;
   }
   offset += (flags & 2) !== 0 ? 2 : 0;
@@ -195,8 +202,8 @@ function gzipMetadata(bytes: Uint8Array): number {
   return offset;
 }
 
-async function inspectGzip(bytes: Uint8Array): Promise<{ members: number; expandedBytes: number }> {
-  const start = gzipMetadata(bytes);
+async function inspectGzip(bytes: Uint8Array, collect?: TextCollector): Promise<{ members: number; expandedBytes: number }> {
+  const start = gzipMetadata(bytes, collect);
   const cap = Math.min(MAX_ARTIFACT_EXPANDED_BYTES, bytes.length * MAX_ARCHIVE_EXPANSION_RATIO);
   // The first DEFLATE stream must end immediately before the sole gzip
   // trailer. Later members (including empty ones carrying metadata) are not
@@ -214,7 +221,7 @@ async function inspectGzip(bytes: Uint8Array): Promise<{ members: number; expand
   const reader = source.pipeThrough(new DecompressionStream("gzip")).getReader();
   const input = new ExpandedReader(reader, cap);
   try {
-    const members = await inspectTar(input);
+    const members = await inspectTar(input, collect);
     if (input.consumed !== expanded) return badArchive();
     return { members, expandedBytes: input.consumed };
   } catch (error) {
@@ -231,6 +238,15 @@ export async function inspectArtifact(
   encoding: ArtifactEncoding,
   expectedSha256: string,
 ): Promise<InspectedArtifact> {
+  return inspectArtifactInternal(bytes, encoding, expectedSha256);
+}
+
+async function inspectArtifactInternal(
+  bytes: Uint8Array,
+  encoding: ArtifactEncoding,
+  expectedSha256: string,
+  collect?: TextCollector,
+): Promise<InspectedArtifact> {
   const cap = encoding === "lake-archive" ? MAX_LAKE_ARCHIVE_BYTES : MAX_ARTIFACT_BYTES;
   if (bytes.byteLength === 0 || bytes.byteLength > cap) throw new ArtifactInspectionError("ARTIFACT_TOO_LARGE");
   // A caller retaining the input view cannot race hashing against inspection.
@@ -239,13 +255,43 @@ export async function inspectArtifact(
   if (!HEX.test(expectedSha256) || sha256 !== expectedSha256)
     throw new ArtifactInspectionError("ARTIFACT_DIGEST_MISMATCH");
   if (encoding === "text") {
-    text(bytes);
+    const body = text(bytes);
+    collect?.({ kind: "text", text: body });
     return { sha256, size: bytes.length, contentType: "text/plain; charset=utf-8",
       disposition: "attachment", members: 1, expandedBytes: bytes.length };
   }
   if (encoding !== "lake-archive") return badArchive();
-  const { members, expandedBytes } = await inspectGzip(bytes);
+  const { members, expandedBytes } = await inspectGzip(bytes, collect);
   if (members === 0) return badArchive();
   return { sha256, size: bytes.length, contentType: "application/gzip",
     disposition: "attachment", members, expandedBytes };
+}
+
+/** Whole-document screening only. Larger private uploads remain valid, but
+ * cannot be published through a provider that cannot inspect their full text.
+ * This bound includes UTF-8, JSON escaping, filenames and archive metadata. */
+export const MAX_ARTIFACT_PUBLICATION_SCREEN_BYTES = 64 * 1024;
+export interface PublicationInspection {
+  readonly artifact: InspectedArtifact;
+  /** Ephemeral private classifier input: never persist or log this string. */
+  readonly screeningBody: string;
+  readonly screeningSha256: string;
+}
+
+export async function inspectArtifactForPublication(
+  bytes: Uint8Array, encoding: ArtifactEncoding, expectedSha256: string,
+): Promise<PublicationInspection> {
+  const prefix = `{"schema":"artifact-publication-screen-v1","encoding":${JSON.stringify(encoding)},"items":[`;
+  const parts: string[] = [];
+  const encoder = new TextEncoder();
+  let size = encoder.encode(prefix).length + 2;
+  const artifact = await inspectArtifactInternal(bytes, encoding, expectedSha256, value => {
+    const serialized = JSON.stringify(value);
+    size += encoder.encode(serialized).length + (parts.length === 0 ? 0 : 1);
+    if (size > MAX_ARTIFACT_PUBLICATION_SCREEN_BYTES)
+      throw new ArtifactInspectionError("ARTIFACT_PUBLICATION_TOO_LARGE");
+    parts.push(serialized);
+  });
+  const screeningBody = `${prefix}${parts.join(",")}]}`;
+  return { artifact, screeningBody, screeningSha256: await artifactSha256(encoder.encode(screeningBody)) };
 }
