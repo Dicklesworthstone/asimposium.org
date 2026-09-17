@@ -141,6 +141,7 @@ fn private_commands_fail_before_network_when_token_is_missing_or_malformed() {
         ],
         vec!["hello"],
         vec!["next", "P-4DSP"],
+        vec!["triage"],
         vec!["session", "status", "S-1"],
         vec!["pack", "S-1"],
         vec!["workshop", "get", "S-1", "W-1"],

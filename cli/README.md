@@ -61,6 +61,18 @@ selection-boundary disclosures are preserved; the CLI does not invent work or
 claim a recommendation grants permission. It sends no write or automatic retry.
 These are source commands, not proof that a deployed Worker serves the route.
 
+Read your Fellow overview and the Worker's selected move across assignments:
+
+```bash
+asimp triage
+asimp triage --json
+```
+
+`triage` requires `ASIMP_TOKEN` and reads `/v1/triage.md` by default or
+`/v1/triage` with `--json`. It preserves the full overview, null moves and
+degradation/selection-boundary disclosures without executing recommendations,
+opening sessions or sending writes. Selection remains the Worker's responsibility.
+
 ## Session writes
 
 Renew an open session and its active leases during long work:

@@ -38,6 +38,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read your overview and recommended move without executing it (ASIMP_TOKEN required).
+    Triage {
+        /// Print the complete JSON face instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read a problem's recommended move without executing it (ASIMP_TOKEN required).
     Next {
         /// Problem ID from the Worker, e.g. P-4DSP.
@@ -336,6 +342,7 @@ impl Command {
             self,
             Self::Hello { .. }
                 | Self::Next { .. }
+                | Self::Triage { .. }
                 | Self::Session { .. }
                 | Self::Pack { .. }
                 | Self::Workshop { .. }
@@ -1060,6 +1067,10 @@ pub fn run_cli_with_fetch(
 
     let (path, label) = match &cli.command {
         Command::Hello { .. } => ("/v1/hello".to_string(), "hello".to_string()),
+        Command::Triage { json } => (
+            if *json { "/v1/triage" } else { "/v1/triage.md" }.to_string(),
+            "triage".to_string(),
+        ),
         Command::Next { problem, json } => {
             if !safe_session_segment(problem) {
                 return input_error(
@@ -1204,6 +1215,15 @@ pub fn run_cli_with_fetch(
                     }
                     _ => {
                         "Retry the same read later; inspect asimp capabilities on the same --origin if it remains unavailable.\n"
+                    }
+                }
+            } else if matches!(&cli.command, Command::Triage { .. }) {
+                match status {
+                    401 | 403 => {
+                        "Check that ASIMP_TOKEN is an active sponsor-approved Fellow credential with asimp hello.\n"
+                    }
+                    _ => {
+                        "Check asimp capabilities on the same --origin; retry this read later if the service is unavailable.\n"
                     }
                 }
             } else if cli.command.requires_token() {
@@ -2598,6 +2618,16 @@ mod tests {
                 "/v1/p/P-4DSP/next.md",
                 "# Next move\n\n## Review\n\nContract: read C-1@2 before reviewing.\n\nSelection boundary: bounded public queue.\n",
             ),
+            (
+                vec!["triage", "--json"],
+                "/v1/triage",
+                "{\"hello\":{\"next_actions\":[]},\"move\":null,\"degraded\":true,\"degraded_reason\":\"unavailable\"}\n",
+            ),
+            (
+                vec!["triage"],
+                "/v1/triage.md",
+                "# Triage\n\nNo eligible move.\n\nSelection boundary: bounded assignments.\n",
+            ),
         ] {
             let cli = Cli::try_parse_from(
                 [vec!["asimp", "--origin", "https://example.test"], args].concat(),
@@ -2906,6 +2936,7 @@ mod tests {
         for args in [
             vec!["hello"],
             vec!["next", "P-4DSP"],
+            vec!["triage"],
             vec!["session", "status", "S-1"],
             vec!["pack", "S-1"],
             vec!["workshop", "get", "S-1", "W-1"],
