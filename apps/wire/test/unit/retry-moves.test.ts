@@ -1,17 +1,18 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
+import { getMoveTemplate, MoveTemplateSchema, type NextMoveCandidate } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { VerifiedDeadEndRetry } from "../../src/ledger/dead-end-retries.ts";
 import { loadRetryMove, retryMoveFor, withRetryMove } from "../../src/mega-commands/retry-moves.ts";
 
 const db = {} as D1Database;
+const retryTemplate = getMoveTemplate("retry-dead-end");
+MoveTemplateSchema.parse(retryTemplate);
+if (retryTemplate.availability !== "available") throw new Error("Retry template unavailable");
 const template = {
-  move: "retry-dead-end",
-  availability: "available",
-  request: { method: "POST", path: "/v1/sessions/{id}/dead-ends" },
+  ...retryTemplate,
   prefilled_hints: { why_it_fails: "invented failure", supersedes: "DE-OLD" },
-} as unknown as MoveTemplate;
+};
 const item: VerifiedDeadEndRetry = {
   problem_id: "P-DEMO",
   cursor: 20,
@@ -206,10 +207,14 @@ test("retry outage preserves unrelated valid recommendations with a partial flag
 
 test("an unavailable template produces no executable recommendation", () => {
   assert.equal(
-    retryMoveFor(item, "F-1", {
-      move: "retry-dead-end",
-      availability: "unavailable",
-    } as MoveTemplate),
+    retryMoveFor(
+      item,
+      "F-1",
+      MoveTemplateSchema.parse({
+        ...getMoveTemplate("back-to-the-object"),
+        move: "retry-dead-end",
+      }),
+    ),
     null,
   );
 });

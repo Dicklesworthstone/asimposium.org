@@ -1,8 +1,17 @@
 import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { HelloAssignment, MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
-import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
+import {
+  getMoveTemplate,
+  type HelloAssignment,
+  type NextMoveCandidate,
+} from "@asimposium/contracts";
+import {
+  REVIEW_QUEUE_BOUNDARY,
+  REVIEW_QUEUE_SCHEMA_ID,
+  type ReviewQueueItem,
+  ReviewQueueResponseSchema,
+} from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import {
@@ -14,8 +23,6 @@ import { retryMoveFor } from "../../src/mega-commands/retry-moves.ts";
 // Actual provider, ranking helpers and SQLite membership/history/usage queries.
 // Authorization decisions and scientific source outputs are explicit fixtures;
 // these are not full enrollment, evaluator, route or migration-lineage tests.
-const template = (move: string) =>
-  ({ move, availability: "available", prefilled_hints: {} }) as MoveTemplate;
 const plainMove = (move: NextMoveCandidate["move"], problem = "P-DEMO"): NextMoveCandidate => ({
   move,
   refs: [problem, move === "close-gap" ? "G-2" : "C-1@1"],
@@ -70,8 +77,8 @@ function fixture() {
   const queue: ReviewQueueItem[] = [];
   const deps: { -readonly [K in keyof LiveMovesDependencies]: LiveMovesDependencies[K] } = {
     now: () => 100,
-    firstClaimTemplate: () => template("state-claim"),
-    templateFor: template,
+    firstClaimTemplate: () => getMoveTemplate("state-claim"),
+    templateFor: getMoveTemplate,
     authorize(input) {
       const role = "membershipRole" in input.target ? input.target.membershipRole : undefined;
       const restricted =
@@ -86,13 +93,17 @@ function fixture() {
       >;
     },
     async loadQueue(_db, query) {
-      return {
+      const candidates = queue.filter((item) => item.problem_id === query.problem);
+      return ReviewQueueResponseSchema.parse({
         problem: query.problem,
-        candidates: queue.filter((item) => item.problem_id === query.problem),
+        candidates,
         next_after: null,
         omitted: [],
-        schema: "https://a.asimposium.org/schemas/review-queue.v1.json",
-      } as unknown as Awaited<ReturnType<LiveMovesDependencies["loadQueue"]>>;
+        schema: REVIEW_QUEUE_SCHEMA_ID,
+        policy: "review-discovery-v1",
+        scanned: candidates.length,
+        selection_boundary: REVIEW_QUEUE_BOUNDARY,
+      });
     },
     retries: {
       async load(_db, problem, cursor, fellow) {
@@ -115,7 +126,7 @@ function fixture() {
               firing: { event_id: "FIRING", seq: 3, payload_sha256: "b".repeat(64) },
             },
             fellow,
-            template("retry-dead-end"),
+            getMoveTemplate("retry-dead-end"),
           ),
         };
       },
@@ -136,12 +147,19 @@ function fixture() {
       cursor: 20,
       claim_id: `C-${n}`,
       version: 1,
+      kind: "conjecture",
+      statement: "Every object in the finite domain has the stated property.",
+      falsifier: "An object in the domain without the property.",
+      disposition: "open",
+      best_recorded_tier: "none",
+      dependents_capped: false,
+      read_url: `/p/${encodeURIComponent(problem)}/claims/C-${n}@1.md?through=20`,
       author_fellow_id: "F-AUTHOR",
       author_sponsor_id: "usr_author",
       need: "independent-review",
       direct_dependents: 1,
       created_at: "2026-01-01T00:00:00.000Z",
-    } as ReviewQueueItem);
+    });
   }
   const request = (problemId = "P-DEMO") => ({
     db,
