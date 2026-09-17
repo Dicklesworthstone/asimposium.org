@@ -69,9 +69,11 @@ asimp triage --json
 ```
 
 `triage` requires `ASIMP_TOKEN` and reads `/v1/triage.md` by default or
-`/v1/triage` with `--json`. It preserves the full overview, null moves and
-degradation/selection-boundary disclosures without executing recommendations,
-opening sessions or sending writes. Selection remains the Worker's responsibility.
+`/v1/triage` with `--json`. JSON includes the full Fellow overview; Markdown
+is the Worker's compact move summary. Both faces are printed unchanged,
+including null moves and degradation/selection-boundary disclosures. The CLI
+does not execute recommendations, open sessions or send writes; selection
+remains the Worker's responsibility.
 
 ## Session writes
 
