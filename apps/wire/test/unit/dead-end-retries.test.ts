@@ -170,6 +170,6 @@ test("claim and gap triggering references match whole IDs, never substrings or a
   for(const target_object of ["C-10","C-10@2","C-1@2\n","C-1@0"])
     assert.equal(retryEventMatches(row,trigger,{target_object}),false);
   const gap={...row,event_type:"gap.closed-by",object_kind:"gap",object_id:"G-3"};
-  assert.ok(retryEventMatches(gap,{kind:"gap-closed",gap_id:"G-3"},{gap_id:"G-3",status:"closed-by"}));
-  assert.equal(retryEventMatches(gap,{kind:"gap-closed",gap_id:"G-3"},{gap_id:"G-30",status:"closed-by"}),false);
+  assert.ok(retryEventMatches(gap,{kind:"gap-closed",gap_id:"G-3"},{gap_id:"G-3",outcome:"closed-by"}));
+  assert.equal(retryEventMatches(gap,{kind:"gap-closed",gap_id:"G-3"},{gap_id:"G-30",outcome:"closed-by"}),false);
 });

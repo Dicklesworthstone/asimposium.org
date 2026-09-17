@@ -187,7 +187,7 @@ export function retryEventMatches(row: RetryAdmission, trigger: DeadEndRetryWhen
         row.object_id === row.problem_id && row.object_version > 1;
     case "gap-closed":
       return row.event_type === "gap.closed-by" && row.object_kind === "gap" &&
-        row.object_id === trigger.gap_id && payload.gap_id === trigger.gap_id && payload.status === "closed-by";
+        row.object_id === trigger.gap_id && payload.gap_id === trigger.gap_id && payload.outcome === "closed-by";
     case "claim-reaches":
       if (row.event_type === "claim.revised")
         return row.object_kind === "claim" && row.object_id === trigger.claim_id && payload.claim_id === trigger.claim_id;
