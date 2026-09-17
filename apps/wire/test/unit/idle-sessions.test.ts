@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
 import { expireIdleSessions, IDLE_SESSION_SWEEP_LIMIT } from "../../src/sessions/idle.ts";
+import { recoverIdleSessionSlots } from "../../src/sessions/admission-recovery.ts";
 
 const NOW = Date.parse("2026-09-17T12:00:00.000Z");
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
@@ -230,6 +231,78 @@ describe("idle sessions release abandoned work slots", () => {
       }
       expect(f.batches()).toBe(0);
       expect(f.closed("S-one")).toBe(null);
+    });
+  });
+});
+
+// Admission uses the same transaction, not a second cleanup implementation.
+describe("session-open recovery", () => {
+  const authority = {
+    async credentialBinding(token: string) {
+      return token === "approved" ? { fellowId: "fellow-a" } : undefined;
+    },
+  };
+  const request = (headers: Record<string, string> = {}, method = "POST", path = "/v1/sessions") =>
+    new Request(`https://a.asimposium.org${path}`, {
+      method,
+      headers: { "idempotency-key": "recovery-1", ...headers },
+      ...(method === "POST" ? { body: '{"problem_id":"P-DEMO"}' } : {}),
+    });
+
+  test("a returning Fellow recovers expired slots immediately without consuming the body", async () => {
+    await withFixture(async (f) => {
+      f.add("S-one", "2000-01-02T00:00:00.000Z");
+      f.add("S-other", "2000-01-02T00:00:00.000Z", "fellow-b");
+      const req = request({ authorization: "Bearer approved", "x-sponsor-id": "fellow-b" });
+      await recoverIdleSessionSlots(req, f.db, authority);
+      expect(f.closed("S-one") === null).toBe(false);
+      expect(f.closed("S-other")).toBe(null);
+      expect(req.bodyUsed).toBe(false);
+      expect(await req.text()).toBe('{"problem_id":"P-DEMO"}');
+      f.add("S-new", "9999-12-31T00:00:00.000Z");
+    });
+  });
+
+  const unverifiedHeaders: Record<string, string>[] = [
+    { "x-sponsor-id": "fellow-a" },
+    { cookie: "session=fellow-a" },
+    { authorization: "Bearer asimp_sp_fellow-a" },
+    { authorization: "Bearer revoked" },
+  ];
+  for (const headers of unverifiedHeaders) {
+    test(`unverified admission does not trigger maintenance: ${JSON.stringify(headers)}`, async () => {
+      await withFixture(async (f) => {
+        f.add("S-one", "2000-01-02T00:00:00.000Z");
+        await recoverIdleSessionSlots(request(headers), f.db, authority);
+        expect(f.closed("S-one")).toBe(null);
+        expect(f.batches()).toBe(0);
+      });
+    });
+  }
+
+  test("unrelated routes, reads and malformed idempotency keys do not trigger maintenance", async () => {
+    await withFixture(async (f) => {
+      f.add("S-one", "2000-01-02T00:00:00.000Z");
+      for (const req of [
+        request({ authorization: "Bearer approved" }, "GET"),
+        request({ authorization: "Bearer approved" }, "POST", "/v1/sessions/S-one/heartbeat"),
+        request({ authorization: "Bearer approved", "idempotency-key": "" }),
+      ]) {
+        await recoverIdleSessionSlots(req, f.db, authority);
+      }
+      expect(f.batches()).toBe(0);
+    });
+  });
+
+  test("recovery failures propagate without consuming the request or partially closing", async () => {
+    await withFixture(async (f) => {
+      f.add("S-one", "2000-01-02T00:00:00.000Z");
+      f.fail(2);
+      const req = request({ authorization: "Bearer approved" });
+      await expect(recoverIdleSessionSlots(req, f.db, authority)).rejects.toThrow("planted batch failure");
+      expect(f.closed("S-one")).toBe(null);
+      expect(f.rows("fellow_inbox_notices")).toEqual([]);
+      expect(req.bodyUsed).toBe(false);
     });
   });
 });
