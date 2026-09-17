@@ -43,3 +43,6 @@ export async function artifactFetch(
     return artifactUnavailable();
   }
 }
+
+/** Share the existing lifecycle-aware authority; publication never trusts a caller identity hint. */
+export { authority as artifactAuthority };
