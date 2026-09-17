@@ -34,12 +34,14 @@ import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
+import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
+  "formalization-friction",
   "hypotheses",
   "proof-gaps",
   "review-requests",
@@ -54,6 +56,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment",
   "enrollment-capsule",
   "event-tail",
+  "formalization-friction",
   "hypotheses",
   "inbox",
   "internal-health",
@@ -158,6 +161,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/event-tail.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(eventTailSchemaModule, "generated/event-tail.schema.json"),
+  }),
+  Object.freeze({
+    id: "formalization-friction",
+    served_at: "/schemas/formalization-friction.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateFrictionSchema(),
   }),
   Object.freeze({
     id: "hypotheses",
