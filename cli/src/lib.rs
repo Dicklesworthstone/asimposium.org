@@ -1147,7 +1147,9 @@ pub fn run_cli_with_fetch(
         }
     };
 
-    let transport_hint = if cli.command.requires_token() {
+    let transport_hint = if matches!(&cli.command, Command::Search { .. }) {
+        "Run asimp capabilities with the same --origin to inspect this Worker's deployed surface.\n"
+    } else if cli.command.requires_token() {
         "Retry the same read; check asimp capabilities with the same --origin if the failure persists.\n"
     } else {
         ""
@@ -2961,6 +2963,9 @@ mod tests {
             assert!(output.stdout.is_empty());
             assert!(output.stderr.starts_with("asimp: /search.md"));
             assert!(!output.stderr.contains("QUERY_CANARY_7f2"));
+            if expected_code == 2 {
+                assert!(output.stderr.contains("asimp capabilities"));
+            }
         }
         let invalid = Cli {
             origin: Some("http://example.test".to_string()),
