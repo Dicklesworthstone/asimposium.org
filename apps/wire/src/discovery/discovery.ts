@@ -150,6 +150,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/literature.md": true,
   "GET /p/:id/literature.html": true,
   "POST /v1/sessions/:id/citations/:citationId/correct": true,
+  "POST /v1/sessions/:id/friction": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */

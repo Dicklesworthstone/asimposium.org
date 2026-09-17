@@ -188,6 +188,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "literature ledger face is undisclosed until its discovery contract is promoted",
     "POST /v1/sessions/<id>/citations/<citationId>/correct":
       "convenience citation correction append; canonical agent disclosure uses the session workflow",
+    "POST /v1/sessions/<id>/friction":
+      "convenience formalization friction adapter; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/evidence)",
     "POST /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "DELETE /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
