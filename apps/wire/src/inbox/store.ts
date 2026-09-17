@@ -18,7 +18,11 @@ import {
   INBOX_UNACKNOWLEDGED_SQL,
   VISIBLE_INBOX_NOTICE_SQL,
 } from "./follow-access.ts";
-import { INSERT_INBOX_NOTICE_SQL } from "./notice-write.ts";
+import {
+  INBOX_NOTICE_RECEIPT_SQL,
+  inboxNoticeId,
+  INSERT_INBOX_NOTICE_ONCE_SQL,
+} from "./notice-write.ts";
 import { reviewInvitationLink } from "./review-invitation-link.ts";
 
 export interface NoticeCreateInput {
@@ -121,13 +125,12 @@ export async function createInboxNotice(
   input: NoticeCreateInput,
 ): Promise<InboxItem> {
   const now = input.createdAt ?? Date.now();
-  const id =
-    input.id ??
-    `NOT-${now.toString(36)}-${crypto.randomUUID().replace(/-/g, "").substring(0, 8).toUpperCase()}`;
-
-  const receipt = await db
-    .prepare(INSERT_INBOX_NOTICE_SQL)
-    .bind(
+  const id = await inboxNoticeId(input);
+  // Read the durable row in the same transaction as the guarded insert. A
+  // replay returns the original text, timestamp, expiry and acknowledgment;
+  // it cannot turn an already-read notice back into a fresh unread item.
+  const results = await db.batch<NoticeRow>([
+    db.prepare(INSERT_INBOX_NOTICE_ONCE_SQL).bind(
       id,
       input.fellowId,
       input.problemId ?? null,
@@ -140,42 +143,37 @@ export async function createInboxNotice(
       input.targetId ?? null,
       input.expiresAt ?? null,
       now,
-    )
-    .first<{ seq: number }>();
+    ),
+    db.prepare(INBOX_NOTICE_RECEIPT_SQL).bind(
+      input.fellowId,
+      input.problemId ?? null,
+      input.noticeType,
+      input.impactKind ?? null,
+      input.causedByEventId ?? null,
+      input.targetId ?? null,
+      id,
+    ),
+  ]);
+  const receipt = results[1]?.results[0];
   if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) {
     throw new Error("Inbox notice insertion produced no valid cursor receipt.");
   }
-  const seq = receipt.seq;
 
-  // OPS.2a structured diagnostic log
+  // OPS.2a structured diagnostic log; replay is not a newly created notice.
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
-      stage: "inbox-notice-created",
-      notice_id: id,
+      stage: results[0]?.results.length ? "inbox-notice-created" : "inbox-notice-replayed",
+      notice_id: receipt.id,
       fellow_id: input.fellowId,
       notice_type: input.noticeType,
-      seq,
+      seq: receipt.seq,
       caused_by_event_id: input.causedByEventId ?? null,
       timestamp: now,
     }),
   );
 
-  return rowToItem({
-    id,
-    fellow_id: input.fellowId,
-    problem_id: input.problemId ?? null,
-    notice_type: input.noticeType,
-    seq,
-    title: input.title,
-    detail: input.detail ?? null,
-    impact_kind: input.impactKind ?? null,
-    caused_by_event_id: input.causedByEventId ?? null,
-    target_id: input.targetId ?? null,
-    acknowledged_at: null,
-    expires_at: input.expiresAt ?? null,
-    created_at: now,
-  });
+  return rowToItem(receipt);
 }
 
 export async function getInboxNotices(
