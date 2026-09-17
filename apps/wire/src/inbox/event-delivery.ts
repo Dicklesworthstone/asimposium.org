@@ -44,7 +44,7 @@ export interface InboxDeliveryResult {
 
 /** Correlates with e (source event) and f (candidate Fellow). Memberships and
  * follows are routing preferences, never grants. Do not send an old revision
- * to a subscription created after it; removal is rechecked at commit. Review
+ * to a subscription created after it; removal is rechecked at commit. Claim
  * authorship comes from the immutable creation event, not today's sponsor. */
 const RECIPIENT_SQL = `(
   (e.type = 'problem.statement-revised' AND (
@@ -54,7 +54,7 @@ const RECIPIENT_SQL = `(
     OR EXISTS (SELECT 1 FROM problem_memberships m
       WHERE m.problem_id = e.problem_id AND m.fellow_id = f.fellow_id
         AND m.joined_at <= e.created_at)
-  )) OR (e.type = 'review.created' AND f.fellow_id <> e.actor_fellow_id
+  )) OR (e.type IN ('review.created', 'evidence.created') AND f.fellow_id <> e.actor_fellow_id
     AND EXISTS (SELECT 1 FROM events author
       WHERE author.problem_id = e.problem_id AND author.type = 'claim.created'
         AND author.object_kind = 'claim' AND author.object_version = 1
@@ -90,21 +90,27 @@ async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
       detail: `The statement for problem ${job.problem_id} was revised to version ${job.object_version}. Re-orient before submitting further writes.`,
     };
   }
-  if (job.type === "review.created" && job.object_kind === "review" &&
-    job.actor_fellow_id !== null && ID.test(job.actor_fellow_id) &&
-    "target_claim_id" in payload && typeof payload.target_claim_id === "string" &&
-    /^C-[1-9][0-9]*$/.test(payload.target_claim_id) && payload.target_claim_id.length <= 60 &&
-    "target_version" in payload && typeof payload.target_version === "number" &&
-    Number.isSafeInteger(payload.target_version) && payload.target_version > 0) {
-    const target = `${payload.target_claim_id}@${payload.target_version}`;
-    return {
-      targetClaim: payload.target_claim_id, noticeType: "object_critique",
-      targetId: target, createdAt,
-      title: `Review recorded for ${target}`,
-      detail: `Review ${job.object_id} addresses ${target} on ${job.problem_id}. Read the public review and current claim state. This notice does not certify the claim or assert a disposition change.`,
-    };
-  }
-  return null;
+  const fields = payload as Record<string, unknown>;
+  const isReview = job.type === "review.created" && job.object_kind === "review";
+  const isEvidence = job.type === "evidence.created" && job.object_kind === "evidence" &&
+    fields.bears_on_kind === "claim";
+  if ((!isReview && !isEvidence) || job.actor_fellow_id === null ||
+    !ID.test(job.actor_fellow_id)) return null;
+  const claimId = isReview ? fields.target_claim_id : fields.bears_on_id;
+  const version = isReview ? fields.target_version : fields.bears_on_version;
+  if (typeof claimId !== "string" || !/^C-[1-9][0-9]*$/.test(claimId) ||
+    !Number.isSafeInteger(Number(claimId.slice(2))) || typeof version !== "number" ||
+    !Number.isSafeInteger(version) || version < 1) return null;
+  if (isEvidence && fields.direction !== "supports" && fields.direction !== "refutes" &&
+    fields.direction !== "informs") return null;
+  const target = `${claimId}@${version}`;
+  return {
+    targetClaim: claimId, noticeType: "object_critique", targetId: target, createdAt,
+    title: `${isReview ? "Review" : "Evidence"} recorded for ${target}`,
+    detail: isReview
+      ? `Review ${job.object_id} addresses ${target} on ${job.problem_id}. Read the public review and current claim state. This notice does not certify the claim or assert a disposition change.`
+      : `Evidence ${job.object_id} addresses ${target} on ${job.problem_id}; its author labels the direction '${fields.direction}'. Inspect the recorded evidence and current claim state. This notice does not certify the claim or assert a disposition change.`,
+  };
 }
 
 /** These SQL statements all run in ONE D1 batch. A fresh token elects the
@@ -219,7 +225,7 @@ export async function deliverInboxEvents(
             ON author.problem_id = e.problem_id AND author.type = 'claim.created'
               AND author.object_kind = 'claim' AND author.object_version = 1
               AND author.object_id = ? AND author.seq < e.seq
-          WHERE e.type = 'review.created' AND author.actor_fellow_id <> e.actor_fellow_id
+          WHERE e.type IN ('review.created', 'evidence.created') AND author.actor_fellow_id <> e.actor_fellow_id
           UNION
           SELECT pf.principal_id FROM source e JOIN problem_follows pf ON pf.problem_id = e.problem_id
           WHERE e.type = 'problem.statement-revised'

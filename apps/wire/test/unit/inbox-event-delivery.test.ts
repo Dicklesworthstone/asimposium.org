@@ -37,6 +37,7 @@ function fixture() {
     author_fellow_id TEXT, superseded_by TEXT, PRIMARY KEY (problem_id, dead_end_id));`);
   sql.exec(migration("0055_dead_end_retry_triggers.sql"));
   sql.exec(migration("0067_dead_end_retry_notices.sql"));
+  sql.exec(migration("0068_claim_evidence_inbox.sql"));
   let beforeBatch: (() => void) | undefined;
   let failAt = -1;
   function prepare(text: string) {
@@ -76,7 +77,8 @@ function fixture() {
       .get(problem) as { n: number }).n;
     const kind = type === "problem.statement-revised" ? "problem"
       : type === "review.created" ? "review"
-      : type === "dead_end.recorded" ? "dead_end" : "claim";
+      : type === "dead_end.recorded" ? "dead_end"
+      : type === "evidence.created" ? "evidence" : "claim";
     sql.query(`INSERT INTO events
       (id, problem_id, seq, type, object_kind, object_id, object_version,
        payload_sha256, created_at, actor_fellow_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -87,6 +89,9 @@ function fixture() {
   const review = (id = "E-review", problem = "P-DEMO") =>
     append(id, "review.created", `R-${id}`, { target_claim_id: "C-1", target_version: 1,
       body_md: "PRIVATE-CONTENT-SENTINEL not copied into notices" }, "fellow-b", problem);
+  const evidence = (id = "E-evidence", extra = {}, actor = "fellow-b", problem = "P-DEMO") =>
+    append(id, "evidence.created", `E-object-${id}`, { bears_on_kind: "claim", bears_on_id: "C-1",
+      bears_on_version: 1, direction: "refutes", body_md: "EVIDENCE-BODY-SENTINEL", ...extra }, actor, problem);
   const statement = (id = "E-statement") => append(id, "problem.statement-revised", "P-DEMO");
   const follow = (fellow: string, offset = -5000, problem = "P-DEMO") =>
     sql.query("INSERT INTO problem_follows VALUES (?, ?, ?)").run(fellow, problem, NOW + offset);
@@ -108,7 +113,7 @@ function fixture() {
   const fire = (id = "DE-one", event = "E-statement", kind = "statement-revised") =>
     sql.query(`INSERT INTO dead_end_fired_triggers VALUES ('P-DEMO', ?, ?, ?, 'PRIVATE-REASON-SENTINEL', ?)
       ON CONFLICT (problem_id, dead_end_id) DO NOTHING`).run(id, kind, event, iso(-1000));
-  return { sql, db, append, review, statement, follow, notices, jobs, deadEnd, fire,
+  return { sql, db, append, review, statement, follow, notices, jobs, deadEnd, fire, evidence,
     before: (hook: () => void) => { beforeBatch = hook; },
     fail: (index: number) => { failAt = index; },
   };
@@ -420,6 +425,79 @@ describe("delivered notifications complete the inbox read-and-ack loop", () => {
       expect(ledgerNoticeActions("object_critique", "P-QUANTUM-1", "C-1@2", null)[0]?.url)
         .toBe("/p/P-QUANTUM-1/claims/C-1@2.json");
       expect(ledgerNoticeActions("object_critique", "P-DEMO", "C-1@99999999999999999999", null)).toEqual([]);
+    });
+  });
+});
+
+
+describe("claim evidence participates in the durable feedback loop", () => {
+  test("delivers supporting, refuting and informational evidence as notices, not verdicts", async () => {
+    await using(async (f) => {
+      for (const direction of ["supports", "refutes", "informs"]) f.evidence(`E-${direction}`, { direction });
+      expect((await drain(f)).notices).toBe(3);
+      const read = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
+      expect(read.items.map((n) => n.target_id)).toEqual(["C-1@1", "C-1@1", "C-1@1"]);
+      expect(read.items.every((n) => n.next_actions?.[0]?.url === "/p/P-DEMO/claims/C-1@1.json")).toBe(true);
+      expect(read.items.every((n) => n.detail?.includes("does not certify"))).toBe(true);
+      expect(JSON.stringify(read)).not.toContain("EVIDENCE-BODY-SENTINEL");
+    });
+  });
+  test("keeps evidence and review causes distinct while overlapping consumers deliver each only once", async () => {
+    await using(async (f) => {
+      f.evidence(); f.review();
+      const passes = await Promise.all(Array.from({ length: 20 }, () => drain(f)));
+      expect(passes.reduce((n, pass) => n + pass.notices, 0)).toBe(2);
+      expect(f.notices().length).toBe(2);
+      await ackInboxNotices(f.db, "fellow-a", { until_seq: 2 }, NOW);
+      const before = f.notices(); await drain(f, 1); expect(f.notices()).toEqual(before);
+    });
+  });
+  test("rolls evidence, its content and queued delivery back together", async () => {
+    await using(async (f) => {
+      f.sql.exec("BEGIN"); f.evidence(); expect(f.jobs().length).toBe(1); f.sql.exec("ROLLBACK");
+      expect(f.jobs()).toEqual([]); expect(f.notices()).toEqual([]);
+      f.evidence(); expect((await drain(f)).notices).toBe(1);
+    });
+  });
+  test("hypothesis evidence and private-draft evidence do not create claim delivery jobs", async () => {
+    await using(async (f) => {
+      f.evidence("E-hypothesis", { bears_on_kind: "hypothesis", bears_on_id: "H-1", bears_on_version: null });
+      f.sql.exec("UPDATE problems SET status = 'private-draft' WHERE id = 'P-DEMO'");
+      f.evidence("E-private"); expect(f.jobs()).toEqual([]);
+      expect((await drain(f)).quarantined).toBe(0); expect(f.notices()).toEqual([]);
+    });
+  });
+  test("does not notify an author about their own evidence submission", async () => {
+    await using(async (f) => {
+      f.evidence("E-own", {}, "fellow-a");
+      const pass = await drain(f); expect(pass.notices).toBe(0); expect(pass.completed).toBe(1);
+    });
+  });
+  test("routes evidence by problem-local immutable claim authorship", async () => {
+    await using(async (f) => {
+      f.append("E-other-author", "claim.created", "C-1", {}, "fellow-c", "P-OTHER");
+      f.evidence("E-other-evidence", {}, "fellow-b", "P-OTHER");
+      expect((await drain(f)).notices).toBe(1);
+      expect(f.notices().map((n) => n.fellow_id)).toEqual(["fellow-c"]);
+    });
+  });
+  test("quarantines malformed evidence routing without sending invented claim pins", async () => {
+    await using(async (f) => {
+      f.evidence("E-version", { bears_on_version: -1 });
+      f.evidence("E-target", { bears_on_id: "https://evil.test" });
+      f.evidence("E-direction", { direction: "proved" });
+      f.evidence("E-large-id", { bears_on_id: "C-99999999999999999999" });
+      f.evidence("E-valid");
+      const pass = await drain(f); expect(pass.quarantined).toBe(4); expect(pass.notices).toBe(1);
+    });
+  });
+  test("redaction and interrupted evidence delivery cannot leak a notice or lose retry progress", async () => {
+    await using(async (f) => {
+      f.evidence(); f.fail(2); expect((await drain(f)).failed).toBe(1);
+      expect(f.notices()).toEqual([]); expect(f.jobs()[0]?.after_fellow_id).toBe("");
+      f.before(() => { f.sql.exec("UPDATE event_content SET redacted_at = 'redacted' WHERE event_id = 'E-evidence'"); });
+      expect((await drain(f, 1)).notices).toBe(0);
+      expect((await drain(f, 2)).suppressed).toBe(1); expect(f.notices()).toEqual([]);
     });
   });
 });
