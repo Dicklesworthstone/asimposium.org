@@ -18,6 +18,7 @@ import {
   type ScientificEvidence,
   ScientificInputError,
 } from "./scientific-checks.ts";
+import { isNegativeReview, scientificWithdrawalEffects } from "./scientific-withdrawal-effects.ts";
 
 export interface ScientificRow {
   claim_id: string;
@@ -37,6 +38,9 @@ export interface ScientificRow {
   claim_kind?: string | null;
   reduced_to_claim_id?: string | null;
   weighted_refutation?: number;
+  withdrawn_event_id?: string | null;
+  withdrawn_kind?: string | null;
+  withdrawn_sha256?: string | null;
 }
 
 export type ScientificDisposition = CurrentClaimDispositionFold & {
@@ -96,6 +100,7 @@ export function prepareScientificDispositions(
     SELECT s.id AS claim_id, e.id AS event_id, e.seq, e.type, e.object_id, e.object_version,
       CASE WHEN e.object_kind = 'claim' THEN e.object_version
         WHEN e.object_kind = 'review' THEN r.target_version
+        WHEN e.object_kind = 'retraction' AND w.source_event_id IS NOT NULL THEN w.claim_version
         WHEN e.object_kind = 'retraction' THEN (
           CASE WHEN instr(ret.target_object, '@') > 0
             THEN CAST(substr(ret.target_object, instr(ret.target_object, '@') + 1) AS INTEGER)
@@ -119,7 +124,8 @@ export function prepareScientificDispositions(
       END AS target_version,
       e.payload_sha256, c.payload_json, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
-      v.kind AS claim_kind,
+      v.kind AS claim_kind, w.source_event_id AS withdrawn_event_id,
+      w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
       (SELECT cd.depends_on_claim_id FROM claim_deps cd WHERE cd.problem_id = e.problem_id AND cd.claim_id = s.id LIMIT 1) AS reduced_to_claim_id,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
         AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation
@@ -133,9 +139,14 @@ export function prepareScientificDispositions(
       AND ret.retraction_id = e.object_id
       AND ret.seq = e.seq AND ret.author_fellow_id = e.actor_fellow_id
       AND e.object_kind = 'retraction' AND e.type = 'object.retracted'
+    LEFT JOIN scientific_withdrawals w ON w.event_id = e.id
+      AND w.event_sha256 = e.payload_sha256 AND w.problem_id = e.problem_id
+      AND w.retraction_id = ret.retraction_id AND w.target_object = ret.target_object
+      AND w.fellow_id = e.actor_fellow_id AND w.seq = e.seq
     JOIN selected_claims s ON s.id = CASE
       WHEN e.object_kind = 'claim' THEN e.object_id
       WHEN e.object_kind = 'review' THEN r.target_claim_id
+      WHEN e.object_kind = 'retraction' AND w.source_event_id IS NOT NULL THEN w.claim_id
       WHEN e.object_kind = 'retraction' THEN (
         CASE WHEN instr(ret.target_object, '@') > 0
           THEN substr(ret.target_object, 1, instr(ret.target_object, '@') - 1)
@@ -227,6 +238,8 @@ export async function foldScientificRows(
       });
     }
   }
+  const withdrawn = scientificWithdrawalEffects(rows, contents);
+  for (const id of withdrawn.invalidatedEvidence) evidence.delete(id);
   const resolve = (reference: { evidence_id: string; digest: string }, row: ScientificRow) => {
     const item = evidence.get(reference.evidence_id);
     return item &&
@@ -245,6 +258,20 @@ export async function foldScientificRows(
   };
   for (const row of rows) {
     const payload = contents.get(row.event_id);
+    if (row.withdrawn_event_id) {
+      markStale(row);
+      // This is a withdrawal of an input, never of its author's target claim.
+      continue;
+    }
+    if (withdrawn.withdrawnEvents.has(row.event_id) ||
+      (row.type === "evidence.created" && withdrawn.invalidatedEvidence.has(row.object_id))) {
+      markStale(row);
+      const adverseEvidence = row.type === "evidence.created" &&
+        (row.direction === "refutes" || row.direction === "fails-to-reproduce");
+      const adverseReview = row.type === "review.created" &&
+        (isNegativeReview(payload) || (!payload && row.weighted_refutation === 1));
+      if (!adverseEvidence && !adverseReview) continue;
+    }
     if (row.type === "claim.created" || row.type === "claim.revised") {
       const targetClaimId =
         row.reduced_to_claim_id ??

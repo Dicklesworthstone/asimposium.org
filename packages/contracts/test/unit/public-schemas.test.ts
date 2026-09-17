@@ -3,6 +3,8 @@ import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
+import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
+import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
@@ -18,6 +20,8 @@ import { generateReviewRequestsSchema } from "../../src/review-requests-artifact
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
+  "artifact-publications",
+  "artifact-uploads",
   "citations",
   "conflicts",
   "dead-ends",
@@ -134,6 +138,8 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     generatedArtifacts().map((artifact) => [artifact.relativePath, artifact.content]),
   );
   const inline = new Map([
+    ["artifact-publications", generateArtifactPublicationsSchema()],
+    ["artifact-uploads", generateArtifactUploadsSchema()],
     ["formalization-friction", generateFrictionSchema()],
     ["hypotheses", generateHypothesesSchema()],
     ["proof-gaps", generateProofGapsSchema()],
@@ -161,6 +167,8 @@ test("the public schema registry serves exact artifact or canonical inline-gener
 test("the public schema classification is pinned to approved served ids and exclusions", () => {
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
   expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
+    "artifact-publications",
+    "artifact-uploads",
     "formalization-friction",
     "hypotheses",
     "proof-gaps",

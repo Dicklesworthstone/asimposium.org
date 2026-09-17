@@ -7,6 +7,8 @@
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-publications": "./src/artifact-publications.ts",
+    "./artifact-uploads": "./src/artifact-uploads.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
     "./event-tail": "./src/event-tail.ts",
     "./formal-records": "./src/formal-records.ts",

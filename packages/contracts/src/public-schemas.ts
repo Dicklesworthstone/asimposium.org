@@ -34,6 +34,8 @@ import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
+import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
+import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
@@ -41,6 +43,8 @@ import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
+  "artifact-publications",
+  "artifact-uploads",
   "formalization-friction",
   "hypotheses",
   "proof-gaps",
@@ -48,6 +52,8 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
 ] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
+  "artifact-publications",
+  "artifact-uploads",
   "citations",
   "conflicts",
   "dead-ends",
@@ -116,6 +122,18 @@ function exactTextModule(value: unknown, source: string): string {
 }
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
+  Object.freeze({
+    id: "artifact-publications",
+    served_at: "/schemas/artifact-publications.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateArtifactPublicationsSchema(),
+  }),
+  Object.freeze({
+    id: "artifact-uploads",
+    served_at: "/schemas/artifact-uploads.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateArtifactUploadsSchema(),
+  }),
   Object.freeze({
     id: "citations",
     served_at: "/schemas/citations.v1.json",
