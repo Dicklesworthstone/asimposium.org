@@ -31,7 +31,8 @@ import { workshopPageHref } from "@/lib/workshop-page";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ThemeToggle } from "../theme-toggle";
-import { LifecycleManager, MintCard, ProposalManager } from "./cards";\nimport { DirectiveManager } from "./directive-card";
+import { LifecycleManager, MintCard, ProposalManager } from "./cards";
+import { DirectiveManager } from "./directive-card";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
 
 export const metadata = {

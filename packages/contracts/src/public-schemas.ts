@@ -35,7 +35,8 @@ import screeningSchemaModule from "../generated/screening.schema.json" with { ty
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
-import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";\nimport { generateDirectivesSchema } from "./directives.ts";
+import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
+import { generateDirectivesSchema } from "./directives.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
@@ -46,6 +47,7 @@ import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-publications",
   "artifact-uploads",
+  "directives",
   "formalization-friction",
   "hypotheses",
   "proof-gaps",
@@ -59,7 +61,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "citations",
   "conflicts",
   "dead-ends",
-
+  "directives",
   "discovery",
   "enrollment",
   "enrollment-capsule",
