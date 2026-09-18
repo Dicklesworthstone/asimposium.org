@@ -197,6 +197,7 @@ export async function readScientificEvidence(
       AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
     WHERE e.problem_id = ? AND e.object_id = ? AND e.object_kind = 'evidence'
       AND e.type = 'evidence.created' AND e.object_version = 1
+      AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals w WHERE w.source_event_id = e.id)
     ORDER BY e.seq ASC LIMIT 1
   `)
     .bind(problemId, reference.evidence_id)
@@ -396,6 +397,7 @@ export function scientificContentGuards(
       SELECT 1 FROM event_content c JOIN events e ON e.id = c.event_id
       WHERE c.event_id = ? AND c.payload_sha256 = ? AND e.payload_sha256 = c.payload_sha256
         AND c.redacted_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals w WHERE w.source_event_id = e.id)
     ) THEN 1 ELSE json_extract('[]', '$[SCIENTIFIC_REFERENCE_CHANGED') END`)
         .bind(identity.eventId, identity.payloadDigest),
   );
