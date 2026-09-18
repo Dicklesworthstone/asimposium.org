@@ -338,9 +338,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(listMd.includes(cit1Id));
   assert.ok(listMd.includes(cit2Id));
   assert.ok(listMd.includes(cit3Id));
-  assert.ok(
-    listMd.includes(correctPayload.title.replace(/\(/g, "\\(").replace(/\)/g, "\\)")),
-  );
+  assert.ok(listMd.includes(correctPayload.title.replace(/\(/g, "\\(").replace(/\)/g, "\\)")));
 
   // List face: .html
   const listHtmlRes = await worker.fetch(`${origin}/p/${problemId}/citations.html`);

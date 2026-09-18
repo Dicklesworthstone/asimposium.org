@@ -24,12 +24,7 @@ export function DirectiveManager({
   const [text, setText] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  let router: ReturnType<typeof useRouter> | null = null;
-  try {
-    router = useRouter();
-  } catch {
-    router = null;
-  }
+  const router = useRouter();
 
   if (!configured) {
     return <p className="quiet">Directive delivery is unavailable on this deployment.</p>;
@@ -101,7 +96,7 @@ export function DirectiveManager({
               }
               setMessage("Directive delivered to the Fellow inbox.");
               if (verb !== "unfocus") setText("");
-              router?.refresh();
+              router.refresh();
             });
           }}
         >

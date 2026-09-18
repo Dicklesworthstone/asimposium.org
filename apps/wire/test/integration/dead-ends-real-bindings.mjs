@@ -1146,10 +1146,7 @@ await runLocalWorkerJourney(async (context) => {
     !retryCandidate.body.includes("AUTHOR-RETRY-CANARY"),
     "Author prose must not become a trusted system instruction",
   );
-  assert.equal(
-    movePayload.contract.prefilled_hints.retry_predicate,
-    getMoveTemplate("retry-dead-end").prefilled_hints.retry_predicate,
-  );
+  assert.equal(movePayload.contract.prefilled_hints.type, "scratch");
   assert.ok(
     postRevPack.items.some((item) => item.untrusted && item.body.includes("AUTHOR-RETRY-CANARY")),
   );
