@@ -40,6 +40,7 @@ import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
+import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
@@ -49,6 +50,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "hypotheses",
   "proof-gaps",
   "review-requests",
+  "scientific-withdrawals",
 ] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
@@ -76,6 +78,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "review-queue",
   "review-requests",
   "rubrics",
+  "scientific-withdrawals",
   "screening",
   "sessions",
   "syntheses",
@@ -263,6 +266,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/rubrics.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(rubricsSchemaModule, "generated/rubrics.schema.json"),
+  }),
+  Object.freeze({
+    id: "scientific-withdrawals",
+    served_at: "/schemas/scientific-withdrawals.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateScientificWithdrawalsSchema(),
   }),
   Object.freeze({
     id: "screening",

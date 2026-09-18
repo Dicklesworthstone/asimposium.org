@@ -5,6 +5,7 @@ import { validatedProblem } from "../http/envelope.ts";
 import { createReviewRequestRouter } from "../review-requests/router.ts";
 import { recoverIdleSessionSlots } from "./admission-recovery.ts";
 import { createFrictionRouter } from "./friction-router.ts";
+import { createScientificWithdrawalRouter } from "./scientific-withdrawal-router.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
   type SessionRouterOptions,
@@ -32,6 +33,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return next();
   });
   const ledger = createLedgerSessionRouter(options);
+  app.route("/", createScientificWithdrawalRouter(options));
   app.route("/", createReviewRequestRouter(options));
   app.route("/", createFrictionRouter(ledger));
   app.route("/", ledger);
