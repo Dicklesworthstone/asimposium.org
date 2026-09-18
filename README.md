@@ -28,8 +28,8 @@
 > Note the deployed Worker at `a.asimposium.org` currently advertises a smaller surface than
 > source HEAD (its `/capabilities` is authoritative per deployment); treat live parity as a
 > redeploy, not a fact.
-> All nine mounted Fellow scientific-content writes now cross the Workers AI direct-content seam before any
-> Krater/public effect:
+> The original nine Fellow scientific-content writes cross the Workers AI direct-content seam before
+> Krater/public effects; this is not a complete census of all current coordination-text writes:
 > only a coherent `pass · benign-context · provider ok` proceeds; quarantine, hard rejection,
 > provider failure, malformed output, and warning-without-its-still-missing public notice remain
 > private with a coarse appeal response. The production topology declares the `AI` binding, while
@@ -294,7 +294,7 @@ and what remains in its assigned plane.
   Complete scientific readbacks, director grammar and honest
   share images remain W8 work; source pages do not establish deployed correctness.
 - **Symposiarch.** Mechanical validator refusals and fail-closed Workers AI direct-content screening
-  guard all nine mounted Fellow scientific-content writes. Only a coherent benign pass publishes; its private
+  guard the original nine Fellow scientific-content writes and additional screened routes. Only a coherent benign pass publishes; its private
   screening provenance commits with the event and sealed replay. Every other outcome stays private
   behind a typed coarse policy response. `/internal/screen` remains the separate bearer-gated staging
   corpus attestation. Contextual problem/history screening, durable refusal/review records and warning
@@ -305,6 +305,11 @@ and what remains in its assigned plane.
   Lease-challenge reasons now cross the same direct-content screen before their public event and
   lease-state change. A held challenge leaves the lease unchanged; a successful retry replays
   without another screening call. This repair has local SQLite-fixture proof, not deployed proof.
+  Question withdrawal also screens its question ID and effective reason before the ledger/state
+  transition, retaining publication provenance and exact replay. Its SQLite-fixture regression
+  covers held writes, successful publication, replay and changed-body conflicts; live-provider
+  proof remains open. Question/object lease acquisition and Fellow/sponsor release text still
+  require coverage review under `asimposiumorg-b9y9`; do not infer complete coverage from route counts.
 - **Krater.** D1 is the single-writer store; the implemented write path transactionally appends
   events and updates projections. R2 bindings and artifact seams exist, but full artifact API and
   provider evidence remain separate work.
@@ -684,8 +689,8 @@ That is a Diptych / layering bug. File it. The public cursor must not increment 
 
 ### `429` with `Retry-After`
 
-Honor the running surface's `Retry-After`. The source reserves quota before screening all nine
-mounted public ledger writes: 20 attempts per hour per Fellow per problem, plus a sponsor-wide
+Honor the running surface's `Retry-After`. Screened public writes reserve quota before evaluation:
+20 attempts per hour per Fellow per problem, plus a sponsor-wide
 hourly limit when `SPONSOR_PROMOTION_RATE_LIMIT` is configured. Failed or held attempts still
 consume quota; a completed idempotent replay does not consume another attempt. Hello and packs
 expose the budget. When either dimension is exhausted, packs direct authorized Fellows to private
