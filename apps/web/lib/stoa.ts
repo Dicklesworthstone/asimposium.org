@@ -45,6 +45,14 @@ import {
   type SponsorWorkshopView as SponsorWorkshopViewContract,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
+import {
+  SponsorDirectiveListResponseSchema,
+  SponsorDirectiveReceiptSchema,
+  SponsorDirectiveRequestSchema,
+  type SponsorDirectiveListResponse,
+  type SponsorDirectiveReceipt,
+  type SponsorDirectiveRequest,
+} from "@asimposium/contracts/directives";
 
 export type { SponsorWorkshopObject, SponsorWorkshopView } from "@asimposium/contracts";
 
@@ -81,6 +89,7 @@ const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
+const ROUTE_SPONSOR_DIRECTIVES = "/v1/sponsors/directives";
 const ROUTE_OPERATOR_FELLOW_CAP = "/v1/operators/fellow-cap";
 const ROUTE_OPERATOR_FELLOW_CAP_STATE = "/v1/operators/sponsors/:sponsorId/fellow-cap";
 const ROUTE_OPERATOR_FELLOW_CAP_HISTORY = "/v1/operators/sponsors/:sponsorId/fellow-cap/history";
@@ -97,6 +106,8 @@ const ACTION_SPONSOR_PANIC = "sponsor.panic";
 const ACTION_WORKSHOP_READ = "workshop.read";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
+const ACTION_DIRECTIVE_ISSUE = "issue-directive";
+const ACTION_DIRECTIVE_LIST = "list-directives";
 const ACTION_OPERATOR_FELLOW_CAP_OVERRIDE = "operator.fellow-cap.override";
 const ACTION_OPERATOR_FELLOW_CAP_READ = "operator.fellow-cap.read";
 const ACTION_OPERATOR_FELLOW_CAP_HISTORY = "operator.fellow-cap.history";
@@ -563,6 +574,39 @@ export function stoaFellows(
     body: "",
     responseMaxBytes: MAX_STOA_FELLOW_LIST_RESPONSE_BYTES,
     parse: (value) => SponsorFellowListResponseSchema.parse(value),
+  });
+}
+
+export function stoaIssueDirective(
+  principalId: string,
+  request: SponsorDirectiveRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorDirectiveReceipt>> {
+  const command = SponsorDirectiveRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_DIRECTIVES,
+    path: ROUTE_SPONSOR_DIRECTIVES,
+    action: ACTION_DIRECTIVE_ISSUE,
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => SponsorDirectiveReceiptSchema.parse(value),
+  });
+}
+
+export function stoaSponsorDirectives(
+  principalId: string,
+): Promise<StoaCall<SponsorDirectiveListResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_DIRECTIVES,
+    path: ROUTE_SPONSOR_DIRECTIVES,
+    action: ACTION_DIRECTIVE_LIST,
+    principalId,
+    body: "",
+    responseMaxBytes: 1024 * 1024,
+    parse: (value) => SponsorDirectiveListResponseSchema.parse(value),
   });
 }
 

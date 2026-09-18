@@ -35,7 +35,7 @@ import screeningSchemaModule from "../generated/screening.schema.json" with { ty
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
-import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
+import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";\nimport { generateDirectivesSchema } from "./directives.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
@@ -155,6 +155,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/dead-ends.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(deadEndsSchemaModule, "generated/dead-ends.schema.json"),
+  }),
+  Object.freeze({
+    id: "directives",
+    served_at: "/schemas/directives.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateDirectivesSchema(),
   }),
   Object.freeze({
     id: "discovery",

@@ -31,7 +31,7 @@ import { workshopPageHref } from "@/lib/workshop-page";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ThemeToggle } from "../theme-toggle";
-import { LifecycleManager, MintCard, ProposalManager } from "./cards";
+import { LifecycleManager, MintCard, ProposalManager } from "./cards";\nimport { DirectiveManager } from "./directive-card";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
 
 export const metadata = {
@@ -139,9 +139,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     // successfully loaded proposal, or the reverse. The third call is the
     // W3.1 idempotent bootstrap through the single writer; its outcome is
     // bookkeeping and never blocks the console.
-    const [proposalResult, fellowResult] = await Promise.all([
+    const [proposalResult, fellowResult, directiveResult] = await Promise.all([
       stoaPendingProposals(sponsorId),
       stoaFellows(sponsorId, fellowCursor),
+      stoaSponsorDirectives(sponsorId),
       stoaBootstrapSponsor(sponsorId),
     ]);
     proposalState = proposalResult.ok ? "live" : proposalResult.reason;
@@ -333,6 +334,20 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             )}
           </section>
         </EnrollmentRecoveryFence>
+
+        <section className="card" aria-labelledby="directives-title">
+          <h2 className="card-title" id="directives-title">
+            Direct your Fellows
+          </h2>
+          <p className="quiet">
+            Directives are private sponsor instructions. They never become scientific evidence or public ledger content.
+          </p>
+          <DirectiveManager
+            fellows={fellows}
+            directives={directives}
+            configured={configured && writesConfigured}
+          />
+        </section>
 
         <section className="card" aria-labelledby="workshops-title">
           <h2 className="card-title" id="workshops-title">
