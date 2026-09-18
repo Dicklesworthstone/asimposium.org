@@ -162,9 +162,15 @@ export async function declareArtifact(
 
 /** Bound both the storage promise and stream, retiring a late response body.
  * No error includes a bucket key, uploaded content, URL or credential. */
+type StreamReader = {
+  read(): Promise<{ done: boolean; value?: any }>;
+  cancel(reason?: unknown): Promise<unknown>;
+  releaseLock(): void;
+};
+
 async function readBytes(bucket: R2Bucket, key: string, expectedSize: number): Promise<Uint8Array> {
   if (!Number.isSafeInteger(expectedSize) || expectedSize < 1 || expectedSize > 20 * 1024 * 1024) return fail("UNAVAILABLE");
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let reader: StreamReader | undefined;
   let expired = false;
   let rejectDeadline: (error: Error) => void = () => undefined;
   const deadline = new Promise<never>((_, reject) => { rejectDeadline = reject; });
@@ -182,11 +188,12 @@ async function readBytes(bucket: R2Bucket, key: string, expectedSize: number): P
       void object.body.cancel().catch(() => undefined);
       return fail("MISMATCH");
     }
-    reader = object.body.getReader();
+    const activeReader = object.body.getReader();
+    reader = activeReader;
     const bytes = new Uint8Array(expectedSize);
     let offset = 0;
     for (;;) {
-      const next = await Promise.race([reader.read(), deadline]);
+      const next = await Promise.race([activeReader.read(), deadline]);
       if (next.done) break;
       if (offset + next.value.byteLength > expectedSize) return fail("MISMATCH");
       bytes.set(next.value, offset); offset += next.value.byteLength;

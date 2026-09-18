@@ -29,12 +29,18 @@ export function artifactPublicationOrigin(stoaOrigin: string | undefined): strin
   return undefined;
 }
 
+type StreamReader = {
+  read(): Promise<{ done: boolean; value?: any }>;
+  cancel(reason?: unknown): Promise<unknown>;
+  releaseLock(): void;
+};
+
 async function readExact(
   bucket: R2Bucket, key: string, size: number, timeoutMs: number,
 ): Promise<{ bytes: Uint8Array; object: R2ObjectBody }> {
   if (!Number.isSafeInteger(size) || size < 1 || size > 20 * 1024 * 1024 ||
     !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > PUBLIC_ARTIFACT_STORAGE_TIMEOUT_MS) return unavailable();
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let reader: StreamReader | undefined;
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -55,11 +61,12 @@ async function readExact(
       void object.body.cancel().catch(() => undefined);
       return unavailable();
     }
-    reader = object.body.getReader();
+    const activeReader = object.body.getReader();
+    reader = activeReader;
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (;;) {
-      const next = await Promise.race([reader.read(), deadline]);
+      const next = await Promise.race([activeReader.read(), deadline]);
       if (next.done) break;
       if (!(next.value instanceof Uint8Array) || next.value.length > size - offset) return unavailable();
       bytes.set(next.value, offset);

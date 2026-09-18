@@ -477,7 +477,7 @@ test("router claims only its canonical private paths", () => {
     assert.equal(artifactRoute(path),undefined);
 });
 
-function manifestRequest(body: BodyInit, headers: Record<string, string> = {}): Request {
+function manifestRequest(body: RequestInit["body"], headers: Record<string, string> = {}): Request {
   return new Request("https://a.asimposium.org/v1/artifacts", {
     method: "POST", body, duplex: "half",
     headers: {authorization:"Bearer valid-test-token","content-type":"application/json",
@@ -504,7 +504,7 @@ test("oversized and rejected manifest streams are cancelled rather than left upl
       const stream=new ReadableStream<Uint8Array>({start(controller) {
         if(mode==="oversize")controller.enqueue(new Uint8Array(8193));
       },cancel(){cancelled++;}});
-      const headers=mode==="unauthorized"?{authorization:"Bearer wrong"}:
+      const headers: Record<string, string> = mode==="unauthorized"?{authorization:"Bearer wrong"}:
         mode==="declared-large"?{"content-length":"999999"}:
         mode==="compressed"?{"content-encoding":"gzip"}:{};
       const response=await h.raw(manifestRequest(stream,headers));

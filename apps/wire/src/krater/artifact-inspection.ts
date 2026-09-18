@@ -92,11 +92,11 @@ function path(name: string, directory: boolean): string {
 /** Bounded streaming reader: keep one decompressor chunk plus one source
  * member, not a second 64 MiB copy of the entire expanded archive. */
 class ExpandedReader {
-  private chunk = new Uint8Array(0);
+  private chunk: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   private position = 0;
   received = 0;
   consumed = 0;
-  constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>,
+  constructor(private readonly reader: { read(): Promise<{ done: boolean; value?: Uint8Array<ArrayBufferLike> | undefined }> },
     private readonly cap: number) {}
 
   async take(size: number): Promise<Uint8Array | undefined> {
@@ -105,7 +105,7 @@ class ExpandedReader {
     while (written < size) {
       if (this.position === this.chunk.length) {
         const next = await this.reader.read();
-        if (next.done) {
+        if (next.done || !next.value) {
           if (written !== 0) return badArchive();
           return undefined;
         }
@@ -218,7 +218,7 @@ async function inspectGzip(bytes: Uint8Array, collect?: TextCollector): Promise<
   const source = new ReadableStream<Uint8Array>({ start(controller) {
     controller.enqueue(bytes); controller.close();
   } });
-  const reader = source.pipeThrough(new DecompressionStream("gzip")).getReader();
+  const reader = (source.pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream) as unknown as ReadableStream<Uint8Array<ArrayBufferLike>>).getReader();
   const input = new ExpandedReader(reader, cap);
   try {
     const members = await inspectTar(input, collect);

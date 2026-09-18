@@ -82,7 +82,7 @@ test("publication limits do not reduce private upload admission", async () => {
 test("no document is returned after a late bad archive member or trailer", async () => {
   const invalid = archive([{name:"ok.txt",text:"fine"},{name:"secret.txt",text:"person@example.org"}]);
   await assert.rejects(inspect(invalid, "lake-archive"), failure("ARTIFACT_SECRET_SHAPED"));
-  const badCrc = Uint8Array.from(archive([{name:"good.txt",text:"fine"}])); badCrc[badCrc.length - 8] ^= 1;
+  const badCrc = Uint8Array.from(archive([{name:"good.txt",text:"fine"}])); badCrc[badCrc.length - 8]! ^= 1;
   await assert.rejects(inspect(badCrc, "lake-archive"), failure("ARTIFACT_ARCHIVE_INVALID"));
 });
 test("a later gzip member cannot escape publication screening", async () => {
@@ -158,7 +158,7 @@ test("pre-existing corruption and unsafe metadata fail closed without repair ove
   }
 });
 test("mutating inspected bytes does not publish under the old digest", async () => {
-  const f=await stored(); f.content.bytes[0]^=1;
+  const f=await stored(); f.content.bytes[0]!^=1;
   await assert.rejects(putPublicArtifact(f.publicStore.bucket,f.content),ArtifactPublicationStorageError);
   assert.equal(f.publicStore.writes(),0);
 });

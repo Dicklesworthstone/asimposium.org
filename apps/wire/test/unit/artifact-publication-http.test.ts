@@ -54,10 +54,11 @@ test("every private request freshly authenticates, including status and replays"
   const {result}=await response(request(statusPath,{headers:{authorization:"Bearer TEST-TOKEN"}}),f);
   assert.equal(result.status,200); assert.equal(f.calls.filter(c=>c[0]==="auth").length,3);
 });
-for (const headers of [{}, {cookie:"sponsor=sentinel"}, {"x-sponsor-id":"sponsor-sentinel"},
+const nonFellowHeaders: Array<Record<string, string>> = [{}, {cookie:"sponsor=sentinel"}, {"x-sponsor-id":"sponsor-sentinel"},
   {authorization:"Bearer bad, Bearer other"}, {authorization:"Bearer x y"},
   {authorization:`Bearer ${"x".repeat(257)}`}, {authorization:"Basic dGVzdA=="},
-  {authorization:"Bearer TEST-TOKEN","asimp-service-envelope":"sentinel"}]) {
+  {authorization:"Bearer TEST-TOKEN","asimp-service-envelope":"sentinel"}];
+for (const headers of nonFellowHeaders) {
   test(`refuses non-Fellow identity ${JSON.stringify(headers).slice(0,65)}`,async()=>{
     const {result,calls}=await response(request(statusPath,{headers}));
     assert.equal(result.status,401); assert.equal(calls.some(c=>c[0]==="auth"||c[0]==="status"),false);
@@ -174,7 +175,8 @@ test("abort interrupts a pending read and cannot accept cancellation as EOF",asy
   controller.abort(); await assert.rejects(()=>reading);assert.equal(cancelled,true);
 });
 test("declared length and compressed JSON are refused exactly",async()=>{
-  for(const headers of [{"content-length":"01"},{"content-length":"100"},{"content-length":"999999999999999999999"},{"content-encoding":"gzip"}]){
+  const badHeaders: Array<Record<string, string>> = [{"content-length":"01"},{"content-length":"100"},{"content-length":"999999999999999999999"},{"content-encoding":"gzip"}];
+  for(const headers of badHeaders){
     await assert.rejects(()=>readPublicationRequestBody(request(publishPath,{method:"POST",body:"{}",headers})));
   }
   assert.deepEqual(await readPublicationRequestBody(request(publishPath,{method:"POST",body:"{}",headers:{"content-length":"2"}})),{});

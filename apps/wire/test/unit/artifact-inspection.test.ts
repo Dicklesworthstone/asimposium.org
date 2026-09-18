@@ -106,9 +106,9 @@ test("secrets cannot hide in a compressed member", async () => {
 
 test("corrupt gzip, tar checksums and truncation are refused", async () => {
   const damaged = archive([{ name: "x", body: "hello" }]);
-  damaged[damaged.length - 8] ^= 1;
+  damaged[damaged.length - 8]! ^= 1;
   await refuses(damaged, "ARTIFACT_ARCHIVE_INVALID", true);
-  const bad = tar([{ name: "x", body: "hello" }]); bad[0] ^= 1;
+  const bad = tar([{ name: "x", body: "hello" }]); bad[0]! ^= 1;
   await refuses(gzipSync(bad), "ARTIFACT_ARCHIVE_INVALID", true);
   await refuses(gzipSync(tar([{ name: "x", body: "hi" }]).subarray(0, 1024)), "ARTIFACT_ARCHIVE_INVALID", true);
 });
