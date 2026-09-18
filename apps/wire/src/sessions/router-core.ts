@@ -14823,6 +14823,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    if (parsed.data.members.length > 1) {
+      return validatedProblem({
+        status: 503,
+        code: "BATCH_ATOMICITY_UNAVAILABLE",
+        title: "Multi-event atomic batch execution is temporarily unavailable",
+        detail:
+          "The current event handlers cannot guarantee rollback of earlier public events when a later batch member fails, so the Worker refuses multi-member batches instead of exposing partial commits as atomic.",
+        fixHint:
+          "Do not emulate an atomic batch with sequential writes. Submit one member only, or retry after the atomic batch writer is deployed.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/batch.v1.json",
+          example: { members: [parsed.data.members[0]] },
+        },
+      });
+    }
+
     const plan = planBatchCommit(
       parsed.data.members.map((m) => ({
         tempId: m.tempId,
