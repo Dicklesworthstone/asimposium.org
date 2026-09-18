@@ -10,6 +10,7 @@
     "./artifact-publications": "./src/artifact-publications.ts",
     "./artifact-uploads": "./src/artifact-uploads.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
+    "./directives": "./src/directives.ts",
     "./event-tail": "./src/event-tail.ts",
     "./formal-records": "./src/formal-records.ts",
     "./formalization-friction": "./src/formalization-friction.ts",

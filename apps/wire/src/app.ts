@@ -455,6 +455,7 @@ function isEnrollmentPath(pathname: string): boolean {
 }
 
 function isProblemPath(pathname: string): boolean {
+  if (pathname === "/v1/sponsors/directives") return true;
   if (pathname === "/v1/problems" || pathname.startsWith("/v1/problems/")) return true;
   if (
     pathname === "/v1/sponsors/problem-briefs" ||
