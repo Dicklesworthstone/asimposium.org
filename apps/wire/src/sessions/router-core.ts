@@ -200,6 +200,11 @@ import {
   workingReviewMove,
 } from "./ledger-pack";
 import {
+  isSessionCloseWorkshopChanged,
+  prepareSessionCloseWorkshopActions,
+  SessionCloseWorkshopError,
+} from "./session-close-workshop";
+import {
   checkAndReserveQuota,
   getRemainingBudget,
   parseSponsorLimit,
@@ -2594,6 +2599,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return privateNoStore(c.json(result.value, 200));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      if (isSessionCloseWorkshopChanged(error)) {
+        return validatedProblem({
+          status: 409,
+          code: "WORKSHOP_VERSION_CONFLICT",
+          title: "A workshop object changed during session close",
+          detail: "No keep, discard, lease release, handback, or session close was committed.",
+          fixHint:
+            "Refetch the current workshop heads and retry the close with a new Idempotency-Key.",
+          rule: "A5",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
       if (error instanceof SessionRouteRefusalError) return error.response;
       if (error instanceof SessionProblemMissingError) return writeRefusedProblem();
       if (error instanceof ReplayClaimNotCommittedError) {
@@ -2660,6 +2677,41 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
+      const closedAt = new Date().toISOString();
+      let closeWorkshopPlan: Awaited<ReturnType<typeof prepareSessionCloseWorkshopActions>>;
+      try {
+        closeWorkshopPlan = await prepareSessionCloseWorkshopActions(db, {
+          sessionId: authorizationSession.session_id,
+          problemId: authorizationSession.problem_id,
+          fellowId: auth.binding.fellowId,
+          keep: parsed.data.keep,
+          discard: parsed.data.discard,
+          closedAt,
+        });
+      } catch (error) {
+        if (error instanceof SessionCloseWorkshopError) {
+          return validatedProblem({
+            status: error.code === "NOT_FOUND" ? 404 : 422,
+            code:
+              error.code === "NOT_FOUND"
+                ? "WORKSHOP_OBJECT_NOT_FOUND"
+                : "SESSION_CLOSE_BODY_INVALID",
+            title:
+              error.code === "NOT_FOUND"
+                ? "A close-time workshop object is unavailable"
+                : "Close-time workshop actions are invalid",
+            detail:
+              error.code === "NOT_FOUND"
+                ? "Every keep/discard id must name a workshop object owned by this Fellow and session."
+                : "Keep and discard selections must be disjoint, unique, and based on a current workshop state.",
+            fixHint:
+              "Refetch your workshop heads, remove duplicate or foreign ids, then retry the unchanged close intent with a new Idempotency-Key.",
+            rule: "A5",
+            extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+          });
+        }
+        throw error;
+      }
       const result = await replayOrCommit(
         db,
         "session_open",
@@ -13660,26 +13712,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    if (
-      parsed.data.promote.length > 0 ||
-      parsed.data.keep.length > 0 ||
-      parsed.data.discard.length > 0
-    ) {
+    if (parsed.data.promote.length > 0) {
       return validatedProblem({
         status: 422,
         code: "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
-        title: "Session close actions are unavailable",
+        title: "Close-time promotion needs publication-ready workshop data",
         detail:
-          "Session close records a handback only; send promotion requests to POST /v1/sessions/:id/promote before closing.",
+          "The close contract names workshop ids, but this workshop record does not yet carry the complete structured claim fields needed to run the promotion validator without inferring science from prose.",
         fixHint:
-          "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
-        rule: "A5",
+          "Promote each publication-ready object through POST /v1/sessions/:id/promote first. Keep and discard may be supplied directly to close.",
+        rule: "A2/P2/P4",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
             handback: "The next session should examine the boundary case.",
             promote: [],
-            keep: [],
+            keep: ["W-00000000000000000000000000"],
             discard: [],
           },
         },
@@ -13745,7 +13793,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           // still returns its stored response instead of SESSION_CLOSED.
           const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
           if (session instanceof Response) throw new SessionRouteRefusalError(session);
-          const closedAt = new Date().toISOString();
           const value = SessionCloseResponseSchema.parse({
             session_id: session.session_id,
             closed_at: closedAt,
@@ -13782,6 +13829,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   auth.binding.fellowId,
                   auth.binding.credentialId,
                 ),
+              ...closeWorkshopPlan.statements,
               db
                 .prepare(
                   `UPDATE sessions
